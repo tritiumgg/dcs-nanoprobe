@@ -22,6 +22,9 @@ authors = ["tritiumgg"]
 # DCS"), which needs unwinding. Do not switch this profile to abort.
 [profile.release]
 panic = "unwind"
+# Line tables let a crash record's module offsets be turned into source lines
+# with the build's PDB (`cargo xtask symbolize`). They do not change the code.
+debug = "line-tables-only"
 
 # The agent is a DLL in DCS's process doing raw FFI into Lua.
 [workspace.lints.rust]

@@ -403,6 +403,11 @@ function M.new(o)
   -- global set in one is absent from the other (LIVE).
   local gui = new_state('gui')
   gui.log = make_log('gui')
+  gui.lfs = namespace('gui', 'lfs', {
+    writedir = function()
+      return host.writedir
+    end,
+  })
   gui.DCS = namespace('gui', 'DCS', {
     getRealTime = real_time,
     getModelTime = function()

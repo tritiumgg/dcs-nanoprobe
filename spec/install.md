@@ -8,7 +8,7 @@ folder `lfs.writedir()` returns. Nothing goes into the DCS install.
 <profile>/nanoprobe/manifest.txt             which version is active
 <profile>/nanoprobe/install.txt              folders the install created
 <profile>/nanoprobe/disable                  kill switch, created by hand or by a tool
-<profile>/nanoprobe/logs/                    JSON-lines logs (spec/log.md)
+<profile>/nanoprobe/logs/                    JSON-lines logs (spec/log.md), and crash.log
 <profile>/nanoprobe/versions/<build>/
     nanoprobe_agent_<build>.dll              the agent DLL
     lua/hook.lua                             the hook body the loader runs
@@ -43,6 +43,20 @@ previous=<build>
   `install.txt`, deepest first, if it is empty. `install.txt` lists, one per line and
   relative to `<profile>`, the folders on the loader's path that did not exist before
   the first deploy. After undeploy the profile is as it was before the first deploy.
+
+## Agent
+
+The hook opens the DLL in its own state with `package.loadlib` and the absolute path,
+checks that its ABI is the one the hook was written for, and calls `configure` with
+`<profile>/nanoprobe/`. The first open in the process pins the DLL, so it stays loaded
+until DCS exits. Opening again in the same state returns the same table.
+
+`configure` opens `logs/agent.log` and registers a handler that appends one JSON line to
+`logs/crash.log` for each native exception raised inside the DLL, or anywhere while an
+agent call runs, eight at most per process. The handler records and passes the
+exception on. Its `data` holds the exception code and address, `module+offset` for the
+address and for each frame of the stack, the breadcrumb, and `pdb`: the GUID and age of
+the PDB that symbolizes this build.
 
 ## Kill switch
 

@@ -70,6 +70,10 @@ jobs:
       - name: Check the DLL
         run: sh tools/checkdll.sh
 
+      - name: Check that no entry point owns a value
+        if: runner.os == 'Linux'
+        run: sh tools/raiseshape.sh
+
       - name: Secret scan of the history
         if: runner.os == 'Linux'
         run: gitleaks git --redact --no-banner .

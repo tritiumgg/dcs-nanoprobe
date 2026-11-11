@@ -225,6 +225,9 @@ pub struct ProbeOptions {
     pub keep: bool,
     /// Run although players are connected.
     pub with_players: bool,
+    /// The folder of probe files, relative to the repository. `lua/probes`
+    /// when not given.
+    pub dir: Option<String>,
 }
 
 impl ProbeOptions {
@@ -240,6 +243,10 @@ impl ProbeOptions {
                     let text = words.next().ok_or("--only needs a text")?;
                     options.only = Some((*text).to_owned());
                 }
+                "--dir" => {
+                    let dir = words.next().ok_or("--dir needs a folder")?;
+                    options.dir = Some((*dir).to_owned());
+                }
                 other => return Err(format!("unknown option: {other}")),
             }
         }
@@ -254,9 +261,10 @@ struct Probe {
     header: Header,
 }
 
-/// The probes in `lua/probes/`, by file name, filtered by `only`.
-fn load_probes(only: Option<&str>) -> Result<Vec<Probe>, String> {
-    let folder = crate::repository().join("lua/probes");
+/// The probes in `dir` (default `lua/probes/`), by file name, filtered by
+/// `only`. Files in subfolders are not probes.
+fn load_probes(dir: Option<&str>, only: Option<&str>) -> Result<Vec<Probe>, String> {
+    let folder = crate::repository().join(dir.unwrap_or("lua/probes"));
     let entries = std::fs::read_dir(&folder)
         .map_err(|e| format!("could not read {}: {e}", folder.display()))?;
     let mut paths = Vec::new();
@@ -298,7 +306,7 @@ pub fn run_probes(
     options: &ProbeOptions,
 ) -> Result<ExitCode, String> {
     let wine = facts.kind == "docker-wine";
-    let probes = load_probes(options.only.as_deref())?;
+    let probes = load_probes(options.dir.as_deref(), options.only.as_deref())?;
     if probes.is_empty() {
         return Err("no probes match".into());
     }

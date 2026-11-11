@@ -61,9 +61,9 @@ run = "cargo xwin build --release -p nanoprobe-agent --target x86_64-pc-windows-
 run_windows = "cargo build --release -p nanoprobe-agent --target x86_64-pc-windows-msvc"
 
 [tasks.dll]
-description = "Check the cross-built DLL's Lua imports, opener export and ABI marker"
+description = "Check the cross-built DLL's imports, exports and ABI marker, and that no entry point owns a value"
 depends = ["windows"]
-run = "sh tools/checkdll.sh"
+run = ["sh tools/checkdll.sh", "sh tools/raiseshape.sh"]
 
 [tasks.secrets]
 description = "Check that the pre-commit hook blocks a planted secret"

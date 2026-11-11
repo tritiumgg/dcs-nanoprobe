@@ -75,6 +75,69 @@ awk '
             .map_err(|_| format!("could not count players: {text:?}"))
     }
 
+    /// Run a Python 3 program in the container as the profile's owner, with
+    /// `args`, and return its exit code, standard output and standard error.
+    pub fn python(&self, program: &str, args: &[&str]) -> Result<ssh::Output, String> {
+        let mut remote = format!(
+            "docker exec -i -u {} {} python3 -",
+            quote(&self.owner),
+            quote(&self.container),
+        );
+        for arg in args {
+            remote.push(' ');
+            remote.push_str(&quote(arg));
+        }
+        ssh::run(&self.ssh, &remote, program.as_bytes())
+    }
+
+    /// Add `block` to `Config/autoexec.cfg` between marker lines, creating the
+    /// file if needed, or remove the marked block again. The file's other
+    /// lines are never read out or changed. `on` refuses when a block is
+    /// already there; removing a block the install created removes the file
+    /// once nothing else is in it.
+    pub fn autoexec_block(&self, block: Option<&str>) -> Result<String, String> {
+        let script = match block {
+            Some(_) => {
+                r#"f=$1
+mkdir -p "$(dirname "$f")"
+if [ -f "$f" ]; then
+    grep -q '^-- nanoprobe-gates begin' "$f" && { echo 'a nanoprobe block is already there'; exit 4; }
+    created=0
+    [ -s "$f" ] && [ -n "$(tail -c 1 "$f")" ] && printf '
+' >> "$f"
+else
+    : > "$f"
+    created=1
+fi
+{ printf -- '-- nanoprobe-gates begin created=%s
+' "$created"; cat; printf -- '-- nanoprobe-gates end
+'; } >> "$f"
+echo "added (created=$created)""#
+            }
+            None => {
+                r#"f=$1
+[ -f "$f" ] || { echo 'no autoexec.cfg'; exit 0; }
+grep -q '^-- nanoprobe-gates begin' "$f" || { echo 'no nanoprobe block'; exit 0; }
+created=$(sed -n 's/^-- nanoprobe-gates begin created=\([01]\)$/\1/p' "$f" | head -n 1)
+awk '/^-- nanoprobe-gates begin/ { skip = 1 } !skip { print } /^-- nanoprobe-gates end/ { skip = 0 }' "$f" > "$f.np" && cat "$f.np" > "$f" && rm -f "$f.np"
+if [ "$created" = 1 ] && ! grep -q '[^[:space:]]' "$f"; then rm -f "$f"; echo 'removed the block and the file'; else echo 'removed the block'; fi"#
+            }
+        };
+        let output = self.exec(
+            script,
+            "Config/autoexec.cfg",
+            block.unwrap_or("").as_bytes(),
+        )?;
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        match output.code {
+            Some(0) => Ok(text),
+            code => Err(format!(
+                "autoexec.cfg: exit {code:?}: {text} {}",
+                output.stderr
+            )),
+        }
+    }
+
     /// Run `script` as the profile's owner with `$1` set to `path` under the
     /// profile, feeding `input`.
     fn exec(&self, script: &str, path: &str, input: &[u8]) -> Result<ssh::Output, String> {

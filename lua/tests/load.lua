@@ -40,15 +40,12 @@ assert(
 assert(type(agent.abi) == 'string' and agent.abi ~= '', 'abi is missing')
 assert(agent.opens == 1, 'the first open reads ' .. tostring(agent.opens))
 
--- More than one DCS state can load the agent. Each open returns its own table,
--- and every table reads one process-wide counter.
+-- Opening is idempotent: a state that opens the agent again gets its first
+-- table back, and the process-wide count of states does not move.
 local second = (open(path))()
-assert(second ~= agent, 'a second open returned the same table')
-assert(
-  second.opens == 2,
-  'the second open reads ' .. tostring(second.opens) .. ', so it did not share'
-)
+assert(second == agent, 'a second open in the same state returned another table')
+assert(second.opens == 1, 'the second open reads ' .. tostring(second.opens))
 
 print('ok  opened ' .. path)
 print('ok  ' .. symbol .. ' returns a table, version ' .. agent.version .. ', abi ' .. agent.abi)
-print('ok  a second open returns a distinct table over one process-wide count')
+print('ok  a second open in the same state returns the same table')

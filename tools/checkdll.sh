@@ -1,6 +1,7 @@
 #!/bin/sh
-# Check the cross-built agent DLL: it imports DCS's Lua from lua.dll, exports
-# luaopen_nanoprobe, and carries the ABI marker.
+# Check the cross-built agent DLL: it imports DCS's Lua from lua.dll, links
+# the C runtime statically, exports luaopen_nanoprobe, and carries the ABI
+# marker.
 #
 # A DLL that links against the wrong Lua, or lacks the opener, builds without
 # complaint and fails only inside DCS. This catches both on the build host.
@@ -33,6 +34,12 @@ esac
 
 case "$IMPORTS" in
     *"Name: lua51.dll"* | *"Name: lua5.1.dll"*) fail "the DLL imports a Lua that DCS does not ship" ;;
+esac
+
+case "$IMPORTS" in
+    *"Name: VCRUNTIME"* | *"Name: api-ms-win-crt-"* | *"Name: ucrtbase"*)
+        fail "the DLL imports the dynamic C runtime; it must link it statically" ;;
+    *) printf 'ok  links the C runtime statically\n' ;;
 esac
 
 case "$EXPORTS" in

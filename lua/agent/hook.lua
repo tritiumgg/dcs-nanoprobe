@@ -1,10 +1,11 @@
 -- The hook, version 0, run in the gui state by the loader with the install
 -- root and the active build hash.
 --
--- It writes a session marker to dcs.log, logs the mission lifecycle as JSON
--- lines (spec/log.md), and honours the kill switch: once a second it looks for
--- <root>/disable, and from then on does nothing. Later steps add the agent
--- DLL and the frame pump.
+-- It writes a session marker to dcs.log, loads the agent DLL into this state,
+-- logs the mission lifecycle as JSON lines (spec/log.md), and honours the kill
+-- switch: once a second it looks for <root>/disable, and from then on does
+-- nothing. Later steps add the bootstrap into the server state and the frame
+-- pump.
 --
 -- No callback returns a value: a value returned from an onPlayerTry*
 -- callback ends the hook chain for later scripts (ED-CODE,
@@ -46,6 +47,44 @@ local file = logmodule.open({
 local session = string.format('%08x%06x', os.time(), math.floor(os.clock() * 1e6) % 0x1000000)
 dcslog(log.INFO, 'session ' .. session .. ' build ' .. build)
 file.write('info', 'hook loaded', { session = session })
+
+-- The agent DLL, opened in this state. Opening pins it, and configuring it
+-- opens logs/agent.log and the crash record logs/crash.log. A failure is one
+-- record, and the hook carries on without the agent.
+local ABI = '1'
+local agent
+do
+  local loaded, result = pcall(function()
+    local loader, err = package.loadlib(dir .. 'nanoprobe_agent_' .. build .. '.dll', 'luaopen_nanoprobe')
+    if not loader then
+      error(err, 0)
+    end
+    local opened = loader()
+    if type(opened) ~= 'table' then
+      error('the opener returned a ' .. type(opened), 0)
+    end
+    if opened.abi ~= ABI then
+      error('the DLL has ABI ' .. tostring(opened.abi) .. '; this hook needs ' .. ABI, 0)
+    end
+    local configured, why = opened.configure(root)
+    if not configured then
+      error(why, 0)
+    end
+    return opened
+  end)
+  if loaded then
+    agent = result
+    local status = agent.status()
+    file.write('info', 'agent loaded', {
+      abi = agent.abi,
+      pinned = status.pinned,
+      pdb = status.pdb,
+      thread = status.thread,
+    })
+  else
+    file.write('error', 'agent not loaded', { error = tostring(result) })
+  end
+end
 
 local function exists(path)
   local f = io.open(path, 'rb')

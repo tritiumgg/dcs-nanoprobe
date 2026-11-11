@@ -13,6 +13,7 @@ mod probes;
 mod profile;
 mod remote;
 mod ssh;
+mod symbols;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -42,7 +43,7 @@ commands:
                             when no player is connected, and wait for the hook
   load <name> <miz>         Load a mission through the development mission loader,
                             and wait until it starts
-  run <name> <test> [--dll P] [--template T]
+  run <name> <test> [--dll P] [--template T] [--dir D]
                             Deploy with --dev, restart DCS, load a fresh shell
                             mission from T (default templates/caucasus.miz), run
                             the test, and collect a bundle. <test> is `suite` for
@@ -52,10 +53,20 @@ commands:
                             Run a Lua file in a state of the running DCS through the
                             eval channel, and print the result as JSON
   reset <name>              Run every eval cleanup in every state that holds the prelude
-  probes <name> [--only TEXT] [--keep] [--with-players]
-                            Run lua/probes/*.lua in their states, print each verdict,
-                            clean up, and write bundles/probes-<name>-<time>.json.
-                            Refuses a server with players unless --with-players.
+  probes <name> [--dir D] [--only TEXT] [--keep] [--with-players]
+                            Run the probes in D (default lua/probes) in their states,
+                            print each verdict, clean up, and write
+                            bundles/probes-<name>-<time>.json. Refuses a server with
+                            players unless --with-players.
+  mapped <name>             Experiment E24: run tools/mapped-peer.py in the container
+                            and lua/experiments/e24-mapped.lua in DCS together, and
+                            write bundles/mapped-<name>-<time>.json
+  gates <name> on|off       Add or remove the net.allow_unsafe_api and
+                            net.allow_dostring_in keys of experiment E2 in the
+                            profile's Config/autoexec.cfg, between marker lines.
+                            Restart DCS afterwards for them to apply.
+  symbolize <file>          Resolve the frames of each record in a crash.log, or in a
+                            bundle's logs/crash.log, with the kept PDB of its build
   api-dump <name>           Write lua/mock/api/<state>.txt from each state's globals
   snapshot <name>           List the profile's tree, outside Logs/
   miz <template> <out> [--start-time S]
@@ -88,6 +99,10 @@ fn main() -> ExitCode {
         ["snapshot", name] => snapshot_command(name),
         ["miz", template, out, rest @ ..] => miz(template, out, rest),
         ["bundle", name] => bundle(name),
+        ["mapped", name] => mapped(name),
+        ["gates", name, "on"] => gates(name, true),
+        ["gates", name, "off"] => gates(name, false),
+        ["symbolize", file] => symbols::symbolize(Path::new(file)),
         ["help" | "-h" | "--help"] | [] => {
             println!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -192,6 +207,11 @@ fn payload(dll: Option<PathBuf>, dev: bool) -> Result<install::Payload, String> 
         Some(path) => path,
         None => build_dll()?,
     };
+    // Keep the DLL and its PDB, so a crash record from this build can be
+    // symbolized later.
+    if let Some(kept) = symbols::keep(&dll)? {
+        println!("kept symbols in {}", kept.display());
+    }
     install::Payload::from_repository(&repository(), &dll, dev)
 }
 
@@ -365,6 +385,7 @@ fn load(name: &str, miz: &str) -> Result<ExitCode, String> {
 /// the next starts; the bundle is collected whatever the test's verdict.
 fn run(name: &str, test: &str, rest: &[&str]) -> Result<ExitCode, String> {
     let mut dll = None;
+    let mut dir = None;
     let mut template = repository().join("templates/caucasus.miz");
     let mut words = rest.iter();
     while let Some(word) = words.next() {
@@ -374,6 +395,7 @@ fn run(name: &str, test: &str, rest: &[&str]) -> Result<ExitCode, String> {
         match *word {
             "--dll" => dll = Some(PathBuf::from(value)),
             "--template" => template = PathBuf::from(value),
+            "--dir" => dir = Some((*value).to_owned()),
             other => return Err(format!("unknown option: {other}")),
         }
     }
@@ -400,6 +422,7 @@ fn run(name: &str, test: &str, rest: &[&str]) -> Result<ExitCode, String> {
     println!("== test {test}");
     let options = probes::ProbeOptions {
         only,
+        dir,
         ..Default::default()
     };
     let facts = facts(&target(name)?)?;
@@ -478,6 +501,94 @@ fn bundle(name: &str) -> Result<ExitCode, String> {
     let path = folder.join(format!("{name}-{}.zip", bundle::stamp()));
     std::fs::write(&path, &bytes).map_err(|e| format!("{}: {e}", path.display()))?;
     println!("wrote {} ({} bytes)", path.display(), bytes.len());
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The file both sides of E24 map: `/dev/shm` in the container, which Wine
+/// reaches as `Z:\dev\shm`. `lua/experiments/e24-mapped.lua` names it too.
+const MAPPED_PATH: &str = "/dev/shm/nanoprobe-e24.map";
+/// How long the peer reads, from when it sees the agent's magic.
+const MAPPED_SECONDS: &str = "20";
+
+/// `mapped <name>`: experiment E24.
+fn mapped(name: &str) -> Result<ExitCode, String> {
+    let (remote, _, _) = remote(name)?;
+    let players = remote.players()?;
+    if players > 0 {
+        return Err(format!("{players} player(s) connected; not running."));
+    }
+    let repo = repository();
+    let program = std::fs::read_to_string(repo.join("tools/mapped-peer.py"))
+        .map_err(|e| format!("tools/mapped-peer.py: {e}"))?;
+    let snippet = std::fs::read(repo.join("lua/experiments/e24-mapped.lua"))
+        .map_err(|e| format!("lua/experiments/e24-mapped.lua: {e}"))?;
+    // The peer waits for the agent's magic, so it starts first.
+    let peer = std::thread::spawn(move || {
+        let output = remote.python(&program, &[MAPPED_PATH, MAPPED_SECONDS]);
+        let cleanup = remote.python(
+            "import os, sys\ntry:\n    os.remove(sys.argv[1])\nexcept FileNotFoundError:\n    pass\n",
+            &[MAPPED_PATH],
+        );
+        (output, cleanup)
+    });
+    let profile = open(name)?;
+    let result = eval::run(
+        profile.as_ref(),
+        "hook",
+        "e24-mapped",
+        &snippet,
+        std::time::Duration::from_secs(60),
+    );
+    let (output, cleanup) = peer.join().map_err(|_| "the peer thread panicked")?;
+    let output = output?;
+    if let Err(e) = cleanup {
+        println!("could not remove {MAPPED_PATH}: {e}");
+    }
+    let peer_report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
+            serde_json::json!({
+                "error": "the peer printed no JSON",
+                "stdout": String::from_utf8_lossy(&output.stdout),
+                "stderr": output.stderr,
+            })
+        });
+    let facts = facts(&target(name)?)?;
+    let report = serde_json::json!({
+        "target": name,
+        "kind": facts.kind,
+        "dcs": facts.dcs,
+        "wine": facts.wine,
+        "time": bundle::utc_now(),
+        "peer": peer_report,
+        "agent": match &result { Ok(r) => r.clone(), Err(e) => serde_json::json!({ "error": e }) },
+    });
+    let text = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
+    println!("{text}");
+    let folder = bundle::folder();
+    std::fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
+    let path = folder.join(format!("mapped-{name}-{}.json", bundle::stamp()));
+    std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+    println!("wrote {}", path.display());
+    Ok(if result.is_ok() && peer_report.get("error").is_none() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
+/// The autoexec.cfg keys of experiment E2: hooks may call
+/// `net.dostring_in`; the mission scripting state may not; the states the
+/// agent and the eval channel reach are allowed as targets.
+const GATES: &str = "\
+net.allow_unsafe_api = { 'userhooks' }
+net.allow_dostring_in = { 'server', 'mission', 'gui', 'export', 'config' }
+";
+
+/// `gates <name> on|off`.
+fn gates(name: &str, on: bool) -> Result<ExitCode, String> {
+    let (remote, _, _) = remote(name)?;
+    let text = remote.autoexec_block(on.then_some(GATES))?;
+    println!("{name}: {text}");
     Ok(ExitCode::SUCCESS)
 }
 

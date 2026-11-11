@@ -7,6 +7,10 @@ local mock = dofile(root .. 'lua/mock/dcs.lua')
 
 local BUILD = '0123456789abcdef'
 
+-- The host-native agent, which luatest.sh passes in. It is installed under
+-- the DLL's name, and the hook opens it as DCS would open the DLL.
+local MODULE = assert(..., 'usage: lua lua/tests/hook.lua <module path>')
+
 -- A profile with the version installed, as deploy leaves it.
 local function install()
   local profile = S.scratch()
@@ -17,6 +21,7 @@ local function install()
   S.copy(root .. 'lua/hook/nanoprobe-hook.lua', profile .. 'Scripts/Hooks/nanoprobe-hook.lua')
   S.copy(root .. 'lua/agent/hook.lua', version .. 'lua/hook.lua')
   S.copy(root .. 'lua/agent/log.lua', version .. 'lua/log.lua')
+  S.copy(MODULE, version .. 'nanoprobe_agent_' .. BUILD .. '.dll')
   S.write(profile .. 'nanoprobe/manifest.txt', 'active=' .. BUILD .. '\n')
   return profile
 end
@@ -42,14 +47,20 @@ assert(#host.callbacks == 1, 'the hook registered ' .. #host.callbacks .. ' call
 host:load_mission('test mission')
 host:frame()
 local lines = records(profile)
-assert(#lines == 3, 'expected 3 records, found ' .. #lines .. ':\n' .. table.concat(lines, '\n'))
+assert(#lines == 4, 'expected 4 records, found ' .. #lines .. ':\n' .. table.concat(lines, '\n'))
 assert(lines[1]:find('"target":"hook","msg":"hook loaded"', 1, true), lines[1])
 assert(lines[1]:find('"gen":0,"build":"' .. BUILD .. '"', 1, true), lines[1])
-assert(lines[2]:find('"msg":"mission load begin"', 1, true), lines[2])
-assert(lines[2]:find('"gen":1', 1, true), lines[2])
-assert(lines[2]:find('"mission":"test mission"', 1, true), lines[2])
-assert(lines[3]:find('"msg":"simulation start"', 1, true), lines[3])
+assert(lines[2]:find('"msg":"agent loaded"', 1, true), lines[2])
+assert(lines[2]:find('"abi":"1"', 1, true), lines[2])
+assert(lines[3]:find('"msg":"mission load begin"', 1, true), lines[3])
+assert(lines[3]:find('"gen":1', 1, true), lines[3])
+assert(lines[3]:find('"mission":"test mission"', 1, true), lines[3])
+assert(lines[4]:find('"msg":"simulation start"', 1, true), lines[4])
 S.ok('the hook marks the session in dcs.log and logs the lifecycle as JSON lines')
+
+local agent_log = S.read(profile .. 'nanoprobe/logs/agent.log')
+assert(agent_log and agent_log:find('"msg":"agent configured"', 1, true), 'no agent.log from the DLL')
+S.ok('the hook opens the agent and points it at the install root')
 
 -- The kill switch, created while running, is seen within a second.
 S.write(profile .. 'nanoprobe/disable', '')
@@ -71,6 +82,17 @@ host = start(profile)
 assert(#host.callbacks == 0, 'a disabled install registered callbacks')
 assert(host.dcslog[1].message:find('disabled by', 1, true), host.dcslog[1].message)
 S.ok('a kill switch present at start loads nothing and says so in dcs.log')
+S.remove(profile)
+
+-- A version without its DLL is one error record, and the hook carries on.
+profile = install()
+os.remove(profile .. 'nanoprobe/versions/' .. BUILD .. '/nanoprobe_agent_' .. BUILD .. '.dll')
+host = start(profile)
+assert(#host.callbacks == 1, 'the hook stopped without its DLL')
+lines = records(profile)
+assert(lines[2] and lines[2]:find('"level":"error"', 1, true) and lines[2]:find('"msg":"agent not loaded"', 1, true),
+  tostring(lines[2]))
+S.ok('a missing DLL is one error record and the hook carries on')
 S.remove(profile)
 
 -- A missing manifest is one error line in dcs.log, and does not raise.
