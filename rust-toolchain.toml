@@ -1,0 +1,12 @@
+# The only file that names the Rust toolchain. mise reads it (see mise.toml).
+#
+# The channel is pinned so that clippy gives the same result on every host and in
+# CI. Change the toolchain by editing `channel`, then run `mise install`. Do not
+# run `mise use rust@<version>`: that writes a version into mise.toml, and mise
+# stops reading this file.
+
+[toolchain]
+channel = "1.99.1"
+# rust-analyzer is the language server. It reads the standard library from rust-src.
+components = ["rustfmt", "clippy", "rust-analyzer", "rust-src"]
+targets = ["x86_64-pc-windows-msvc"]

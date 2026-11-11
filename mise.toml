@@ -1,0 +1,63 @@
+# Every development tool for this project comes from here. Nothing is installed
+# globally. Run `mise install` in the repository root.
+#
+# The Rust version is pinned in rust-toolchain.toml, not here. mise's rust tool sets
+# RUSTUP_TOOLCHAIN, which overrides rust-toolchain.toml and discards its
+# `components` and `targets`. Clearing the variable and enabling the idiomatic
+# version file for rust puts rust-toolchain.toml in charge, and mise still
+# installs the channel it names.
+
+[settings]
+idiomatic_version_file_enable_tools = ["rust"]
+
+[env]
+RUSTUP_TOOLCHAIN = ""
+
+[tools]
+# Stock Lua 5.1 for the host tests. The plugin builds it from source with make,
+# which a Windows host lacks, and the host Lua test is skipped on Windows.
+lua = { version = "5.1.5", os = ["linux", "macos"] }
+lua-language-server = "3.19.2"
+buf = "1.75.0"
+gitleaks = "8.30.1"
+gh = "2.97.0"
+
+# Cross-build of the agent DLL for x86_64-pc-windows-msvc on macOS and Linux.
+# cargo-xwin fetches the MSVC CRT and SDK; accept Microsoft's licence on its
+# first run. LLVM supplies clang, lld and llvm-dlltool, which turns
+# vendor/lua/lua.def into the import library for lua.dll. A rustup llvm-tools
+# component is not enough. A Windows host uses the Visual Studio Build Tools.
+"cargo:cargo-xwin" = { version = "0.23.1", os = ["linux", "macos"] }
+"github:llvm/llvm-project" = { version = "23.1.5", version_prefix = "llvmorg-", os = ["linux", "macos"] }
+
+# Host builds pass --no-default-features: it turns off the agent's dcs-lua
+# feature, which links DCS's lua.dll. A machine without DCS has none.
+
+[tasks.setup]
+description = "Point git at the repository's hooks, which run the secret scanner"
+run = "git config core.hooksPath .githooks"
+
+[tasks.build]
+description = "Build every crate for the host"
+run = "cargo build --workspace --all-targets --no-default-features"
+
+[tasks.test]
+description = "Run the workspace tests on the host"
+run = "cargo test --workspace --no-default-features"
+
+[tasks.fmt]
+description = "Format every crate"
+run = "cargo fmt --all"
+
+[tasks.secrets]
+description = "Check that the pre-commit hook blocks a planted secret"
+run = "sh tools/secretscan-test.sh"
+
+[tasks.check]
+description = "What CI checks on the host"
+run = [
+  "cargo fmt --all --check",
+  "cargo clippy --workspace --all-targets --no-default-features -- -D warnings",
+  "cargo test --workspace --no-default-features",
+  "sh tools/secretscan-test.sh",
+]

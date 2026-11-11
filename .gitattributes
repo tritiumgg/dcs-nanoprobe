@@ -1,0 +1,10 @@
+# One line ending on every host, so a checkout on Windows matches the bytes
+# committed from macOS or Linux. Golden files compare bytes.
+* text=auto eol=lf
+
+*.sh text eol=lf
+*.def text eol=lf
+
+*.miz binary
+*.dll binary
+*.pdb binary

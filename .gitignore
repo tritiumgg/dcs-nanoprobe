@@ -1,0 +1,20 @@
+# Cargo build output, and the staged release artifacts.
+/target/
+/dist/
+
+# Session bundles and recordings hold server logs. They never enter the
+# repository (CLAUDE.md, "Rules that are not negotiable").
+/bundles/
+/recordings/
+
+# Missions are not committed, except the empty shells under templates/.
+*.miz
+!/templates/*.miz
+
+# Target profiles live outside the repository, in ~/.config/nanoprobe/.
+targets.toml
+
+# Personal settings.
+CLAUDE.local.md
+.claude/settings.local.json
+.DS_Store

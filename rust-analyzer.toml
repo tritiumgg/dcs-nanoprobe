@@ -1,0 +1,8 @@
+# rust-analyzer reads this at the workspace root. The host-native build turns
+# the agent's dcs-lua feature off, as mise.toml's tasks do. With it on, the
+# analyzer tries to link DCS's lua.dll, which a machine without DCS lacks.
+[cargo]
+noDefaultFeatures = true
+
+[check]
+command = "clippy"

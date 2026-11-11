@@ -1,0 +1,17 @@
+#!/bin/sh
+# Refuse a commit whose staged changes contain a secret.
+#
+# `mise run setup` points git at this folder. CI runs the same scanner over the
+# whole history. tools/secretscan-test.sh checks that this hook blocks a key.
+#
+# GITLEAKS names the scanner. It defaults to the gitleaks that mise.toml pins.
+set -eu
+
+GITLEAKS=${GITLEAKS:-gitleaks}
+
+command -v "$GITLEAKS" >/dev/null 2>&1 || {
+    printf 'pre-commit: %s not found. Run `mise install` in the repository.\n' "$GITLEAKS" >&2
+    exit 1
+}
+
+exec "$GITLEAKS" git --pre-commit --staged --redact --no-banner .
