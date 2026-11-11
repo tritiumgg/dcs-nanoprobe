@@ -32,6 +32,9 @@ local file = logmodule.open({
     return generation
   end,
   build = build,
+  size = function(path)
+    return lfs.attributes(path, 'size')
+  end,
   fallback = function(message)
     dcslog(log.ERROR, message)
   end,

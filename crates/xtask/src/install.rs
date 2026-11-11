@@ -12,6 +12,10 @@ use sha2::{Digest, Sha256};
 
 /// The loader's path in the profile.
 pub const LOADER: &str = "Scripts/Hooks/nanoprobe-hook.lua";
+/// The development mission loader's path. Only `deploy --dev` installs it.
+pub const DEV_LOADER: &str = "Scripts/Hooks/nanoprobe-dev.lua";
+/// The development folder: mission requests and the missions they name.
+pub const DEV: &str = "nanoprobe/dev";
 /// The platform's folder in the profile.
 pub const ROOT: &str = "nanoprobe";
 const MANIFEST: &str = "nanoprobe/manifest.txt";
@@ -71,11 +75,14 @@ pub struct Payload {
     pub dll: Vec<u8>,
     /// Files under the version folder other than the DLL, by relative path.
     pub files: Vec<(String, Vec<u8>)>,
+    /// The development mission loader, for `deploy --dev`. It is not part of
+    /// the version, so it does not change the build.
+    pub dev: Option<Vec<u8>>,
 }
 
 impl Payload {
     /// The payload from this repository's Lua files and a built DLL.
-    pub fn from_repository(repo: &Path, dll: &Path) -> Result<Payload, String> {
+    pub fn from_repository(repo: &Path, dll: &Path, dev: bool) -> Result<Payload, String> {
         let read = |path: PathBuf| {
             std::fs::read(&path).map_err(|e| format!("could not read {}: {e}", path.display()))
         };
@@ -89,6 +96,11 @@ impl Payload {
                 ),
                 ("lua/log.lua".into(), read(repo.join("lua/agent/log.lua"))?),
             ],
+            dev: if dev {
+                Some(read(repo.join("lua/dev/mission-loader.lua"))?)
+            } else {
+                None
+            },
         })
     }
 
@@ -223,6 +235,18 @@ pub fn deploy(profile: &dyn Profile, payload: &Payload) -> Result<Deployed, Stri
     if profile.read(LOADER)?.as_deref() != Some(&payload.loader[..]) {
         profile.write(LOADER, &payload.loader)?;
     }
+    match &payload.dev {
+        Some(dev) => {
+            profile.create_dir(&format!("{DEV}/missions"))?;
+            if profile.read(DEV_LOADER)?.as_deref() != Some(&dev[..]) {
+                profile.write(DEV_LOADER, dev)?;
+            }
+        }
+        None => {
+            profile.remove_file(DEV_LOADER)?;
+            profile.remove_tree(DEV)?;
+        }
+    }
 
     let old = manifest(profile)?;
     let switched = old.active.as_deref() != Some(&build);
@@ -302,6 +326,7 @@ pub fn undeploy(profile: &dyn Profile) -> Result<bool, String> {
     let installed = record.is_some() || profile.is_dir(ROOT)? || profile.read(LOADER)?.is_some();
 
     profile.remove_file(LOADER)?;
+    profile.remove_file(DEV_LOADER)?;
     profile.remove_tree(ROOT)?;
 
     let record = record.map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
@@ -512,7 +537,37 @@ mod tests {
                 ("lua/hook.lua".into(), b"-- hook\n".to_vec()),
                 ("lua/log.lua".into(), b"-- log\n".to_vec()),
             ],
+            dev: None,
         }
+    }
+
+    #[test]
+    fn only_a_dev_deploy_carries_the_dev_loader() {
+        let scratch = Scratch::new("dev");
+        let local = profile(&scratch, false);
+        let before = snapshot_local(&scratch.0).unwrap();
+
+        let mut dev = payload("one");
+        dev.dev = Some(b"-- dev\n".to_vec());
+        let with = deploy(&local, &dev).unwrap();
+        assert_eq!(
+            with.build,
+            payload("one").build(),
+            "the dev loader changed the build"
+        );
+        assert!(local.read(DEV_LOADER).unwrap().is_some());
+        assert!(local.is_dir(&format!("{DEV}/missions")).unwrap());
+
+        deploy(&local, &payload("one")).unwrap();
+        assert!(
+            local.read(DEV_LOADER).unwrap().is_none(),
+            "a plain deploy kept it"
+        );
+        assert!(!local.is_dir(DEV).unwrap());
+
+        deploy(&local, &dev).unwrap();
+        undeploy(&local).unwrap();
+        assert_eq!(snapshot_local(&scratch.0).unwrap(), before);
     }
 
     /// A profile with things in it that are not the platform's.

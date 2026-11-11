@@ -11,6 +11,7 @@
 //! wine_prefix = "/config/.wine" # the Wine prefix inside the container
 //! # The Saved Games profile to install into, as `target check` prints it.
 //! profile = "/config/.wine/drive_c/users/u/Saved Games/DCS.server"
+//! restart = "docker restart dcs" # run on the host to restart DCS
 //!
 //! [targets.this-machine]
 //! kind = "local"                # a profile on this machine's file system
@@ -37,6 +38,10 @@ pub enum Target {
         /// The Saved Games profile inside the container. Deploy needs it.
         #[serde(default)]
         profile: Option<String>,
+        /// The command, run on the host, that restarts DCS, such as
+        /// `docker restart dcs`. `cargo xtask restart` needs it.
+        #[serde(default)]
+        restart: Option<String>,
     },
     /// A Saved Games profile on this machine.
     Local {
@@ -132,6 +137,7 @@ mod tests {
                 container: "dcs".into(),
                 wine_prefix: "/config/.wine".into(),
                 profile: None,
+                restart: None,
             }
         );
     }

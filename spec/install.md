@@ -49,3 +49,9 @@ previous=<build>
 If `<profile>/nanoprobe/disable` exists when DCS starts, the loader runs nothing. The
 hook looks for it once a second of real time; once it appears, the hook stops all work
 until DCS restarts.
+
+## Development only
+
+`cargo xtask deploy --dev` also installs `<profile>/Scripts/Hooks/nanoprobe-dev.lua`,
+the development mission loader, and `<profile>/nanoprobe/dev/missions/`. A deploy
+without `--dev` removes both, and undeploy removes them. A release never carries them.

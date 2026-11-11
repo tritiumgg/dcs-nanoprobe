@@ -6,6 +6,7 @@
 mod bundle;
 mod check;
 mod install;
+mod live;
 mod miz;
 mod profile;
 mod remote;
@@ -24,8 +25,10 @@ commands:
   target list               List the target profiles
   target check <name>       Read a target's DCS version, Wine version, install and
                             Saved Games profile. Changes nothing on the target.
-  deploy <name> [--dll P]   Build the agent DLL (or take P), and install it with the
-                            hook into the target's profile as the active version
+  deploy <name> [--dll P] [--dev]
+                            Build the agent DLL (or take P), and install it with the
+                            hook into the target's profile as the active version.
+                            --dev adds the development mission loader.
   rollback <name>           Make the previous version active again
   undeploy <name>           Remove everything deploy installed
   roundtrip <name> [--dll P]
@@ -33,6 +36,10 @@ commands:
                             tree, outside Logs/, is as it was before
   bundle <name>             Collect the session's logs from the target, redact them,
                             and write a zip under bundles/
+  restart <name>            Restart DCS with the target's `restart` command, only
+                            when no player is connected, and wait for the hook
+  load <name> <miz>         Load a mission through the development mission loader,
+                            and wait until it starts
   miz <template> <out> [--start-time S]
                             Write a shell mission from an empty Mission Editor
                             template, optionally starting S seconds after midnight
@@ -47,7 +54,11 @@ fn main() -> ExitCode {
     let result = match args.as_slice() {
         ["target", "list"] => target_list(),
         ["target", "check", name] => target_check(name),
-        ["deploy", name, rest @ ..] => dll_option(rest).and_then(|dll| deploy(name, dll)),
+        ["deploy", name, rest @ ..] => {
+            deploy_options(rest).and_then(|(dll, dev)| deploy(name, dll, dev))
+        }
+        ["restart", name] => restart(name),
+        ["load", name, miz] => load(name, miz),
         ["rollback", name] => rollback(name),
         ["undeploy", name] => undeploy(name),
         ["roundtrip", name, rest @ ..] => dll_option(rest).and_then(|dll| roundtrip(name, dll)),
@@ -67,6 +78,12 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+fn deploy_options(rest: &[&str]) -> Result<(Option<PathBuf>, bool), String> {
+    let dev = rest.contains(&"--dev");
+    let rest: Vec<&str> = rest.iter().copied().filter(|a| *a != "--dev").collect();
+    Ok((dll_option(&rest)?, dev))
 }
 
 fn dll_option(rest: &[&str]) -> Result<Option<PathBuf>, String> {
@@ -146,16 +163,16 @@ fn build_dll() -> Result<PathBuf, String> {
     Ok(repo.join("target/x86_64-pc-windows-msvc/release/nanoprobe.dll"))
 }
 
-fn payload(dll: Option<PathBuf>) -> Result<install::Payload, String> {
+fn payload(dll: Option<PathBuf>, dev: bool) -> Result<install::Payload, String> {
     let dll = match dll {
         Some(path) => path,
         None => build_dll()?,
     };
-    install::Payload::from_repository(&repository(), &dll)
+    install::Payload::from_repository(&repository(), &dll, dev)
 }
 
-fn deploy(name: &str, dll: Option<PathBuf>) -> Result<ExitCode, String> {
-    let payload = payload(dll)?;
+fn deploy(name: &str, dll: Option<PathBuf>, dev: bool) -> Result<ExitCode, String> {
+    let payload = payload(dll, dev)?;
     let profile = open(name)?;
     let done = install::deploy(profile.as_ref(), &payload)?;
     println!(
@@ -200,7 +217,7 @@ fn undeploy(name: &str) -> Result<ExitCode, String> {
 /// The exit test for deploy: deploy twice, undeploy, compare trees. `Logs/`
 /// is left out, because DCS writes it while running.
 fn roundtrip(name: &str, dll: Option<PathBuf>) -> Result<ExitCode, String> {
-    let payload = payload(dll)?;
+    let payload = payload(dll, false)?;
     let target = target(name)?;
     let profile = open(name)?;
     let snapshot = || -> Result<Vec<String>, String> {
@@ -269,6 +286,44 @@ fn roundtrip(name: &str, dll: Option<PathBuf>) -> Result<ExitCode, String> {
         }
         Ok(ExitCode::FAILURE)
     }
+}
+
+/// The target as a remote docker-wine profile, with its SSH destination and
+/// restart command.
+fn remote(name: &str) -> Result<(remote::Remote, String, Option<String>), String> {
+    match target(name)? {
+        Target::DockerWine {
+            ssh,
+            container,
+            profile: Some(profile),
+            restart,
+            ..
+        } => Ok((
+            remote::Remote::connect(&ssh, &container, &profile)?,
+            ssh,
+            restart,
+        )),
+        Target::DockerWine { .. } => Err(format!("target {name:?} has no `profile` key")),
+        Target::Local { .. } => Err("this command needs a docker-wine target".into()),
+    }
+}
+
+fn restart(name: &str) -> Result<ExitCode, String> {
+    let (remote, ssh, command) = remote(name)?;
+    let command = command.ok_or_else(|| format!("target {name:?} has no `restart` key"))?;
+    live::restart(&ssh, &command, &remote)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+fn load(name: &str, miz: &str) -> Result<ExitCode, String> {
+    let (remote, _, _) = remote(name)?;
+    let bytes = std::fs::read(miz).map_err(|e| format!("could not read {miz}: {e}"))?;
+    let file = Path::new(miz)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    live::load(&remote, &file, &bytes)?;
+    Ok(ExitCode::SUCCESS)
 }
 
 fn bundle(name: &str) -> Result<ExitCode, String> {

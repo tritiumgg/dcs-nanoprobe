@@ -34,6 +34,13 @@ local function number(n)
   if n == math.floor(n) and math.abs(n) < 2 ^ 53 then
     return string.format('%d', n)
   end
+  -- The shortest of 15, 16 or 17 digits that reads back as the same number.
+  for digits = 15, 16 do
+    local s = string.format('%.' .. digits .. 'g', n)
+    if tonumber(s) == n then
+      return s
+    end
+  end
   return string.format('%.17g', n)
 end
 
@@ -82,6 +89,34 @@ function M.encode(r)
   return '{' .. table.concat(parts, ',') .. '}\n'
 end
 
+-- Call a method on a file handle under pcall. A handle in DCS's gui state
+-- lacks `seek` (LIVE, DCS 2.9.31.29434 dedicated server under Wine 10.0), so
+-- no method is assumed. Returns ok, then the method's results or the error.
+local function call(file, method, ...)
+  local args = { n = select('#', ...), ... }
+  return pcall(function()
+    return file[method](file, unpack(args, 1, args.n))
+  end)
+end
+
+-- The size of an existing file in bytes, without seek: `size` when the caller
+-- gives one (DCS has lfs.attributes), else by reading the file.
+local function file_size(path, size)
+  if size then
+    local ok, n = pcall(size, path)
+    if ok and type(n) == 'number' then
+      return n
+    end
+  end
+  local file = io.open(path, 'rb')
+  if not file then
+    return 0
+  end
+  local ok, data = call(file, 'read', '*a')
+  call(file, 'close')
+  return ok and type(data) == 'string' and #data or 0
+end
+
 -- Open a log. `o` holds:
 --   path      the file to append to
 --   target    the writer's name, for every record
@@ -90,6 +125,7 @@ end
 --   model     function returning model time, or nil
 --   gen       function returning the mission generation, or nil
 --   build     the build hash, or nil
+--   size      function(path) returning a file's size in bytes, or nil
 --   fallback  function(message) called once if the file cannot be written
 function M.open(o)
   local self = {
@@ -98,15 +134,20 @@ function M.open(o)
     cap = o.cap or M.DEFAULT_CAP,
     clocks = { real = o.real, model = o.model, gen = o.gen },
     build = o.build,
+    size_of = o.size,
     fallback = o.fallback,
     failed = false,
   }
 
-  local function fail(message)
+  local function close()
     if self.file then
-      pcall(self.file.close, self.file)
+      call(self.file, 'close')
       self.file = nil
     end
+  end
+
+  local function fail(message)
+    close()
     if not self.failed then
       self.failed = true
       if self.fallback then
@@ -116,19 +157,18 @@ function M.open(o)
   end
 
   local function reopen()
+    self.size = file_size(self.path, self.size_of)
     local file, err = io.open(self.path, 'ab')
     if not file then
       fail(err)
       return false
     end
     self.file = file
-    self.size = file:seek('end') or 0
     return true
   end
 
   local function rotate()
-    self.file:close()
-    self.file = nil
+    close()
     local old = self.path .. '.1'
     os.remove(old)
     local ok, err = os.rename(self.path, old)
@@ -154,7 +194,7 @@ function M.open(o)
     if self.failed or not (self.file or reopen()) then
       return
     end
-    local line = M.encode({
+    local encoded, line = pcall(M.encode, {
       wall = os.date('!%Y-%m-%dT%H:%M:%SZ'),
       level = level,
       target = self.target,
@@ -165,24 +205,24 @@ function M.open(o)
       build = self.build,
       data = data,
     })
+    if not encoded then
+      return
+    end
     if self.size > 0 and self.size + #line > self.cap and not rotate() then
       return
     end
-    local ok, err = self.file:write(line)
-    if not ok then
-      fail(err)
+    -- Stock Lua returns true, or nil and a message. DCS's gui state returns
+    -- nil on success (LIVE), so only a raise or a message is a failure.
+    local ok, written, err = call(self.file, 'write', line)
+    if not ok or (written == nil and err ~= nil) then
+      fail(ok and err or written)
       return
     end
-    self.file:flush()
+    call(self.file, 'flush')
     self.size = self.size + #line
   end
 
-  function self.close()
-    if self.file then
-      pcall(self.file.close, self.file)
-      self.file = nil
-    end
-  end
+  self.close = close
 
   return self
 end

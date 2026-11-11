@@ -105,6 +105,16 @@ S.raises('first handler fails', host2.event, host2, { id = 1 })
 assert(later == 0, 'a later handler saw the event')
 S.ok('a raising event handler stops later handlers and reaches the caller')
 
+-- A gui-state file handle has no seek, and its other methods work.
+local scratch = os.tmpname()
+local handle = assert(gui.io.open(scratch, 'wb'))
+assert(handle.seek == nil, 'a gui file handle has seek')
+assert(handle:write('abc') == nil, 'a gui write returned a value on success')
+handle:close()
+assert(gui.lfs.attributes(scratch, 'size') == 3)
+os.remove(scratch)
+S.ok('a gui-state file handle has no seek and write returns nil; lfs.attributes gives the size')
+
 -- log.write is recorded.
 gui.log.write('TEST', gui.log.INFO, 'hello')
 local last = host.dcslog[#host.dcslog]

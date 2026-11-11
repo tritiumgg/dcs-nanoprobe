@@ -53,6 +53,28 @@ impl Remote {
         format!("{}/{path}", self.profile.trim_end_matches('/'))
     }
 
+    /// How many players the current `dcs.log` shows connected. A player is a
+    /// client with a name: `added client[N] name=...` (LOG), and leaves with
+    /// `disconnecting client[N]` or `remove: client[N]` (LOG). Unnamed
+    /// connection attempts are not players. Prints no name.
+    pub fn players(&self) -> Result<usize, String> {
+        let script = r#"[ -f "$1" ] || { echo 0; exit 0; }
+awk '
+    function id(   s) { match($0, /client\[[0-9]+\]/); return substr($0, RSTART + 7, RLENGTH - 8) }
+    /added client\[[0-9]+\] name=/ { on[id()] = 1; next }
+    /disconnecting client\[[0-9]+\]/ || /remove: client\[[0-9]+\]/ { delete on[id()] }
+    END { n = 0; for (k in on) n++; print n }
+' "$1""#;
+        let output = self.exec(script, "Logs/dcs.log", b"")?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        if output.code != Some(0) {
+            return Err(format!("could not count players: {}", output.stderr));
+        }
+        text.trim()
+            .parse()
+            .map_err(|_| format!("could not count players: {text:?}"))
+    }
+
     /// Run `script` as the profile's owner with `$1` set to `path` under the
     /// profile, feeding `input`.
     fn exec(&self, script: &str, path: &str, input: &[u8]) -> Result<ssh::Output, String> {

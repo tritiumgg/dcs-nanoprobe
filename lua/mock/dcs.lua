@@ -13,6 +13,7 @@
 --   - An unknown state name returns nil; `userhooks` is not a state (LIVE).
 --   - `server` and `scripting` are the same state (LIVE).
 --   - DCS.setUserCallbacks is additive (LIVE).
+--   - A file handle from io.open in the gui state has no `seek` (LIVE).
 --   - Timers run once per frame at most, on a 1 ms model-time quantum (LIVE).
 --   - Timers do not run and model time stands still while paused (LIVE).
 --   - A mission load clears timers and keeps event handlers, and model time
@@ -81,6 +82,9 @@ function M.new(o)
     callbacks = {},
     -- Errors raised by timer functions, in order.
     timer_errors = {},
+    -- Each path given to net.load_mission, in order.
+    loads = {},
+    pending_load = nil,
     timers = {},
     next_timer = 1,
     handlers = {},
@@ -179,7 +183,46 @@ function M.new(o)
       end
       return nil, 'File exists'
     end,
+    -- Only `mode` and `size`. UNVERIFIED: DCS's other fields.
+    attributes = function(path, field)
+      local f = io.open(path, 'rb')
+      if not f then
+        return nil
+      end
+      local attributes = { mode = 'file', size = f:seek('end') }
+      f:close()
+      if field then
+        return attributes[field]
+      end
+      return attributes
+    end,
   })
+  -- A file handle in the gui state has no `seek`, and its `write` returns
+  -- nil on success (LIVE, DCS 2.9.31.29434 dedicated server under Wine
+  -- 10.0). Its other methods, and what `write` returns on an error, are
+  -- UNVERIFIED; the mock keeps stock behaviour for them.
+  gui.io = setmetatable({
+    open = function(path, mode)
+      local file, err = io.open(path, mode)
+      if not file then
+        return nil, err
+      end
+      local handle = {}
+      for _, method in ipairs({ 'read', 'write', 'lines', 'flush', 'close', 'setvbuf' }) do
+        handle[method] = function(_, ...)
+          local results = { file[method](file, ...) }
+          if method == 'write' and results[1] then
+            return nil
+          end
+          if results[1] == file then
+            results[1] = handle
+          end
+          return unpack(results)
+        end
+      end
+      return handle
+    end,
+  }, { __index = io })
   gui.DCS = strict('gui', 'DCS', listing.gui.DCS, {
     getRealTime = function()
       return host.real
@@ -202,6 +245,18 @@ function M.new(o)
   })
   gui.net = strict('gui', 'net', listing.gui.net, {
     dostring_in = dostring_in,
+    -- The load happens at the start of the next frame, not inside the call.
+    -- It returned 0 for a mission that then loaded, and the load began within
+    -- the same second (LIVE, dedicated server). The return for a failed load
+    -- is UNVERIFIED.
+    load_mission = function(path)
+      if type(path) ~= 'string' then
+        error('mock: net.load_mission(string) called with ' .. type(path), 2)
+      end
+      host.loads[#host.loads + 1] = path
+      host.pending_load = path
+      return 0
+    end,
     log = function(message)
       gui.log.write('NET', gui.log.INFO, message)
     end,
@@ -329,6 +384,12 @@ function M.new(o)
   function host:frame(dt)
     dt = dt or (1 / 60)
     self.real = self.real + dt
+    if self.pending_load then
+      local path = self.pending_load
+      self.pending_load = nil
+      self:load_mission(path)
+      return
+    end
     if self.loading then
       return
     end
