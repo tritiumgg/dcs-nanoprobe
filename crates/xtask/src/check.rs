@@ -6,10 +6,9 @@
 //! `autoupdate.cfg`. It reads no environment variable and no server settings.
 
 use std::fmt;
-use std::io::Write;
-use std::process::{Command, Stdio};
 
 use crate::profile::Target;
+use crate::ssh::{quote, script as ssh_script};
 
 /// Runs on the host, with the container and the Wine prefix as `$1` and `$2`.
 /// Prints `key=value` lines.
@@ -129,50 +128,14 @@ pub fn run(target: &Target) -> Result<Report, String> {
             ssh,
             container,
             wine_prefix,
+            ..
         } => {
             let remote = format!("sh -s -- {} {}", quote(container), quote(wine_prefix));
             let output = ssh_script(ssh, &remote, SCRIPT)?;
             Ok(Report::parse(&output))
         }
+        Target::Local { .. } => Err("target check reads docker-wine targets only".to_owned()),
     }
-}
-
-/// Run `script` on `destination` through `remote`, feeding it on stdin.
-/// BatchMode keeps SSH from asking for a password: keys come from the user's
-/// own agent and config.
-fn ssh_script(destination: &str, remote: &str, script: &str) -> Result<String, String> {
-    let mut child = Command::new("ssh")
-        .args(["-o", "BatchMode=yes", "--", destination, remote])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("could not run ssh: {e}"))?;
-
-    child
-        .stdin
-        .take()
-        .expect("stdin is piped")
-        .write_all(script.as_bytes())
-        .map_err(|e| format!("could not send the script to ssh: {e}"))?;
-
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("ssh failed: {e}"))?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "ssh {destination} failed ({}): {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-/// Quote `value` as one word for a POSIX shell.
-fn quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', r"'\''"))
 }
 
 #[cfg(test)]
@@ -211,10 +174,5 @@ mod tests {
         let report = Report::parse("wine=w\nprofile=p\ninstall=i\n");
         assert!(!report.is_complete());
         assert!(report.to_string().contains("NOT FOUND"));
-    }
-
-    #[test]
-    fn quotes_a_single_quote() {
-        assert_eq!(quote("a'b c"), r"'a'\''b c'");
     }
 }

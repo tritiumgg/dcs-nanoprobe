@@ -9,6 +9,12 @@
 //! ssh = "my-host"               # ssh destination; ~/.ssh/config does the rest
 //! container = "dcs"             # the container DCS runs in
 //! wine_prefix = "/config/.wine" # the Wine prefix inside the container
+//! # The Saved Games profile to install into, as `target check` prints it.
+//! profile = "/config/.wine/drive_c/users/u/Saved Games/DCS.server"
+//!
+//! [targets.this-machine]
+//! kind = "local"                # a profile on this machine's file system
+//! profile = "/path/to/Saved Games/DCS"
 //! ```
 
 use std::collections::BTreeMap;
@@ -28,6 +34,14 @@ pub enum Target {
         container: String,
         /// The Wine prefix inside the container.
         wine_prefix: String,
+        /// The Saved Games profile inside the container. Deploy needs it.
+        #[serde(default)]
+        profile: Option<String>,
+    },
+    /// A Saved Games profile on this machine.
+    Local {
+        /// The profile folder.
+        profile: String,
     },
 }
 
@@ -38,6 +52,7 @@ impl Target {
             Target::DockerWine { ssh, container, .. } => {
                 format!("docker-wine, container {container} on {ssh}")
             }
+            Target::Local { profile } => format!("local, {profile}"),
         }
     }
 }
@@ -75,7 +90,12 @@ fn path() -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("NANOPROBE_TARGETS") {
         return Ok(PathBuf::from(path));
     }
+    Ok(config_dir()?.join("targets.toml"))
+}
 
+/// The per-user config folder: `~/.config/nanoprobe`, or
+/// `%APPDATA%\nanoprobe` on Windows. It holds what stays off the repository.
+pub fn config_dir() -> Result<PathBuf, String> {
     let base = if cfg!(windows) {
         std::env::var_os("APPDATA").map(PathBuf::from)
     } else {
@@ -84,8 +104,8 @@ fn path() -> Result<PathBuf, String> {
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
     };
 
-    base.map(|dir| dir.join("nanoprobe").join("targets.toml"))
-        .ok_or_else(|| "no config folder: set NANOPROBE_TARGETS".to_owned())
+    base.map(|dir| dir.join("nanoprobe"))
+        .ok_or_else(|| "no config folder: set HOME, or APPDATA on Windows".to_owned())
 }
 
 #[cfg(test)]
@@ -111,6 +131,18 @@ mod tests {
                 ssh: "host".into(),
                 container: "dcs".into(),
                 wine_prefix: "/config/.wine".into(),
+                profile: None,
+            }
+        );
+    }
+
+    #[test]
+    fn reads_a_local_target() {
+        let targets = parse("[targets.here]\nkind = \"local\"\nprofile = \"/p\"\n").unwrap();
+        assert_eq!(
+            targets["here"],
+            Target::Local {
+                profile: "/p".into()
             }
         );
     }

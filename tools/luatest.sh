@@ -65,8 +65,10 @@ VERSION=$(awk '
     exit 1
 }
 
-# Every script under lua/tests, in name order. The first failure stops the run.
+# Every script under lua/tests, in name order, except the support files. The
+# first failure stops the run.
 for script in "$ROOT"/lua/tests/*.lua; do
+    case ${script##*/} in support*) continue ;; esac
     printf '%s\n' "--- ${script#"$ROOT"/}"
     "$LUA" "$script" "$MODULE" "$VERSION"
 done
