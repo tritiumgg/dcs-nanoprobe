@@ -1,0 +1,3 @@
+[alias]
+# Development and test tooling, built from source and never released.
+xtask = "run --quiet -p xtask --"

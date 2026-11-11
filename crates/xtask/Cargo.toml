@@ -1,0 +1,22 @@
+# Development and test tooling: `cargo xtask <command>`.
+#
+# It is built from source in this repository and never released. Every target
+# it acts on is described in a profile outside the repository.
+
+[package]
+name = "xtask"
+description = "Development and test tooling for nanoprobe. Not released."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.2.1"
+
+[lints]
+workspace = true
