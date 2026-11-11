@@ -5,9 +5,11 @@
 
 mod bundle;
 mod check;
+mod eval;
 mod install;
 mod live;
 mod miz;
+mod probes;
 mod profile;
 mod remote;
 mod ssh;
@@ -40,6 +42,16 @@ commands:
                             when no player is connected, and wait for the hook
   load <name> <miz>         Load a mission through the development mission loader,
                             and wait until it starts
+  eval <name> <state> <file> [--timeout S]
+                            Run a Lua file in a state of the running DCS through the
+                            eval channel, and print the result as JSON
+  reset <name>              Run every eval cleanup in every state that holds the prelude
+  probes <name> [--only TEXT] [--keep] [--with-players]
+                            Run lua/probes/*.lua in their states, print each verdict,
+                            clean up, and write bundles/probes-<name>-<time>.json.
+                            Refuses a server with players unless --with-players.
+  api-dump <name>           Write lua/mock/api/<state>.txt from each state's globals
+  snapshot <name>           List the profile's tree, outside Logs/
   miz <template> <out> [--start-time S]
                             Write a shell mission from an empty Mission Editor
                             template, optionally starting S seconds after midnight
@@ -62,6 +74,11 @@ fn main() -> ExitCode {
         ["rollback", name] => rollback(name),
         ["undeploy", name] => undeploy(name),
         ["roundtrip", name, rest @ ..] => dll_option(rest).and_then(|dll| roundtrip(name, dll)),
+        ["eval", name, state, file, rest @ ..] => eval_command(name, state, file, rest),
+        ["reset", name] => open(name).and_then(|profile| probes::reset(profile.as_ref())),
+        ["probes", name, rest @ ..] => probes_command(name, rest),
+        ["api-dump", name] => api_dump(name),
+        ["snapshot", name] => snapshot_command(name),
         ["miz", template, out, rest @ ..] => miz(template, out, rest),
         ["bundle", name] => bundle(name),
         ["help" | "-h" | "--help"] | [] => {
@@ -214,31 +231,42 @@ fn undeploy(name: &str) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// The target's tree listing, without `Logs/`, which DCS writes while running.
+fn snapshot(target: &Target) -> Result<Vec<String>, String> {
+    let lines = match target {
+        Target::Local { profile } => install::snapshot_local(Path::new(profile))?,
+        Target::DockerWine {
+            ssh,
+            container,
+            profile,
+            ..
+        } => {
+            remote::Remote::connect(ssh, container, profile.as_deref().unwrap_or(""))?.snapshot()?
+        }
+    };
+    Ok(lines
+        .into_iter()
+        .filter(|line| {
+            let path = line.rsplit_once(' ').map_or("", |(_, p)| p);
+            path != "Logs" && !path.starts_with("Logs/")
+        })
+        .collect())
+}
+
+fn snapshot_command(name: &str) -> Result<ExitCode, String> {
+    for line in snapshot(&target(name)?)? {
+        println!("{line}");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 /// The exit test for deploy: deploy twice, undeploy, compare trees. `Logs/`
 /// is left out, because DCS writes it while running.
 fn roundtrip(name: &str, dll: Option<PathBuf>) -> Result<ExitCode, String> {
     let payload = payload(dll, false)?;
     let target = target(name)?;
     let profile = open(name)?;
-    let snapshot = || -> Result<Vec<String>, String> {
-        let lines = match &target {
-            Target::Local { profile } => install::snapshot_local(Path::new(profile))?,
-            Target::DockerWine {
-                ssh,
-                container,
-                profile,
-                ..
-            } => remote::Remote::connect(ssh, container, profile.as_deref().unwrap_or(""))?
-                .snapshot()?,
-        };
-        Ok(lines
-            .into_iter()
-            .filter(|line| {
-                let path = line.rsplit_once(' ').map_or("", |(_, p)| p);
-                path != "Logs" && !path.starts_with("Logs/")
-            })
-            .collect())
-    };
+    let snapshot = || snapshot(&target);
 
     if install::manifest(profile.as_ref())?.active.is_some() {
         return Err(format!(
@@ -326,15 +354,15 @@ fn load(name: &str, miz: &str) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn bundle(name: &str) -> Result<ExitCode, String> {
-    let target = target(name)?;
-    let facts = match &target {
+/// What the target runs: its kind, and for docker-wine its Wine and DCS versions.
+fn facts(target: &Target) -> Result<bundle::Facts, String> {
+    Ok(match target {
         Target::Local { .. } => bundle::Facts {
             kind: "local".into(),
             ..Default::default()
         },
         Target::DockerWine { .. } => {
-            let report = check::run(&target)?;
+            let report = check::run(target)?;
             bundle::Facts {
                 kind: "docker-wine".into(),
                 wine: report.wine.clone(),
@@ -347,7 +375,48 @@ fn bundle(name: &str) -> Result<ExitCode, String> {
                 }),
             }
         }
+    })
+}
+
+fn eval_command(name: &str, state: &str, file: &str, rest: &[&str]) -> Result<ExitCode, String> {
+    let timeout = match rest {
+        [] => 30,
+        ["--timeout", seconds] => seconds
+            .parse()
+            .map_err(|_| format!("--timeout {seconds:?} is not a number of seconds"))?,
+        _ => return Err(format!("unknown options: {}", rest.join(" "))),
     };
+    probes::eval_file(
+        open(name)?.as_ref(),
+        state,
+        file,
+        std::time::Duration::from_secs(timeout),
+    )
+}
+
+fn probes_command(name: &str, rest: &[&str]) -> Result<ExitCode, String> {
+    let options = probes::ProbeOptions::parse(rest)?;
+    let target = target(name)?;
+    if matches!(target, Target::DockerWine { .. }) && !options.with_players {
+        let players = remote(name)?.0.players()?;
+        if players > 0 {
+            return Err(format!(
+                "{players} player(s) connected; not running probes. Use --with-players to run anyway."
+            ));
+        }
+    }
+    let facts = facts(&target)?;
+    probes::run_probes(open(name)?.as_ref(), &facts, name, &options)
+}
+
+fn api_dump(name: &str) -> Result<ExitCode, String> {
+    let facts = facts(&target(name)?)?;
+    probes::api_dump(open(name)?.as_ref(), &facts)
+}
+
+fn bundle(name: &str) -> Result<ExitCode, String> {
+    let target = target(name)?;
+    let facts = facts(&target)?;
     let bytes = bundle::build(open(name)?.as_ref(), &facts, &bundle::key()?)?;
     let folder = bundle::folder();
     std::fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;

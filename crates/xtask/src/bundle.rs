@@ -262,7 +262,8 @@ pub fn stamp() -> String {
     utc_now().replace(['-', ':'], "")
 }
 
-fn utc_now() -> String {
+/// UTC now as `YYYY-MM-DDTHH:MM:SSZ`.
+pub fn utc_now() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());

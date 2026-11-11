@@ -1,0 +1,316 @@
+# state export
+# dcs 2.9.31.29434 (dcs_server.release)
+# platform wine-10.0 (Debian 10.0~repack-6)
+# date 2026-11-11
+# script lua/probes/tools/api-dump.lua
+ED_FINAL_VERSION : boolean = true
+ED_PUBLIC_AVAILABLE : boolean = true
+GetClickableElements : function
+GetDevice : function
+GetIndicator : function
+LoCreateCameraRequest : function
+LoCreateCoroutineActivity : function
+LoCreateUserBookmarkRequest : function
+LoForceCamera : function
+LoGeoCoordinatesToLoCoordinates : function
+LoGetADIPitchBankYaw : function
+LoGetAccelerationUnits : function
+LoGetAircraftDrawArgumentValue : function
+LoGetAltitude : function
+LoGetAltitudeAboveGroundLevel : function
+LoGetAltitudeAboveSeaLevel : function
+LoGetAngleOfAttack : function
+LoGetAngleOfSideSlip : function
+LoGetAngularVelocity : function
+LoGetBasicAtmospherePressure : function
+LoGetCameraPosition : function
+LoGetControlPanel_HSI : function
+LoGetEngineInfo : function
+LoGetF15_TWS_Contacts : function
+LoGetFMData : function
+LoGetGlideDeviation : function
+LoGetHeightWithObjects : function
+LoGetHelicopterFMData : function
+LoGetInAir : function
+LoGetIndicatedAirSpeed : function
+LoGetLocalPlayer : function
+LoGetLockedTargetInformation : function
+LoGetMCPState : function
+LoGetMachNumber : function
+LoGetMagneticYaw : function
+LoGetMechInfo : function
+LoGetMissionStartTime : function
+LoGetModelTime : function
+LoGetModelTimeAcceleration : function
+LoGetNameByType : function
+LoGetNavigationInfo : function
+LoGetNetIsRunning : function
+LoGetObjectById : function
+LoGetPayloadInfo : function
+LoGetPilotName : function
+LoGetPlayerPlaneId : function
+LoGetPlayerSeat : function
+LoGetPlayerUnitId : function
+LoGetPlayers : function
+LoGetRadarAltimeter : function
+LoGetRadioBeaconsStatus : function
+LoGetRoute : function
+LoGetSelfData : function
+LoGetShakeAmplitude : function
+LoGetSideDeviation : function
+LoGetSightingSystemInfo : function
+LoGetSlipBallPosition : function
+LoGetSnares : function
+LoGetTWSInfo : function
+LoGetTargetInformation : function
+LoGetTrackIsReading : function
+LoGetTrueAirSpeed : function
+LoGetUserBookmarks : function
+LoGetVectorVelocity : function
+LoGetVectorWindVelocity : function
+LoGetVersionInfo : function
+LoGetVerticalVelocity : function
+LoGetWindAtPoint : function
+LoGetWingInfo : function
+LoGetWingTargets : function
+LoGetWorldObjects : function
+LoIsObjectExportAllowed : function
+LoIsOwnshipExportAllowed : function
+LoIsSensorExportAllowed : function
+LoLoCoordinatesToGeoCoordinates : function
+LoRemoveSharedTexture : function
+LoSendForceCamera : function
+LoSetAllowRemoteForceCameraRequests : function
+LoSetCameraPosition : function
+LoSetCommand : function
+LoSetSharedTexture : function
+LoSimulationOnActivePause : function
+LoSimulationOnPause : function
+LoUpdateSharedTexture : function
+_APP_VERSION : string
+_ARCHITECTURE : string
+_G : table -> _G
+_VERSION : string
+a_cockpit_highlight : function
+a_cockpit_highlight_indication : function
+a_cockpit_highlight_position : function
+a_cockpit_lock_player_seat : function
+a_cockpit_param_save_as : function
+a_cockpit_perform_clickable_action : function
+a_cockpit_pop_actor : function
+a_cockpit_push_actor : function
+a_cockpit_remove_highlight : function
+a_cockpit_unlock_player_seat : function
+a_start_listen_command : function
+a_start_listen_event : function
+assert : function
+c_argument_in_range : function
+c_cockpit_highlight_visible : function
+c_cockpit_param_equal_to : function
+c_cockpit_param_in_range : function
+c_cockpit_param_is_equal_to_another : function
+c_indication_txt_equal_to : function
+c_start_wait_for_user : function
+c_stop_wait_for_user : function
+collectgarbage : function
+coroutine : table
+coroutine.create : function
+coroutine.resume : function
+coroutine.running : function
+coroutine.status : function
+coroutine.wrap : function
+coroutine.yield : function
+dbg_print : function
+debug : table
+debug.debug : function
+debug.getfenv : function
+debug.gethook : function
+debug.getinfo : function
+debug.getlocal : function
+debug.getmetatable : function
+debug.setfenv : function
+debug.sethook : function
+debug.setlocal : function
+debug.setmetatable : function
+debug.traceback : function
+dofile : function
+error : function
+gcinfo : function
+get_param_handle : function
+getfenv : function
+getmetatable : function
+io : table
+io.__gc : function
+io.close : function
+io.flush : function
+io.lines : function
+io.open : function
+io.read : function
+io.write : function
+ipairs : function
+lfs : table
+lfs.add_location : function
+lfs.attributes : function
+lfs.chdir : function
+lfs.create_lockfile : function
+lfs.currentdir : function
+lfs.del_location : function
+lfs.dir : function
+lfs.locations : function
+lfs.md5sum : function
+lfs.mkdir : function
+lfs.normpath : function
+lfs.realpath : function
+lfs.rmdir : function
+lfs.tempdir : function
+lfs.writedir : function
+list_cockpit_params : function
+list_indication : function
+load : function
+loadfile : function
+loadstring : function
+log : table
+log.ALERT : number = 2
+log.ALL : number = 255
+log.ALL_LEVELS : number = 255
+log.ASYNC : number = 0
+log.BACKUP : number = 32768
+log.DEBUG : number = 128
+log.ERROR : number = 8
+log.EXTRA_INFO : number = 512
+log.FULL : number = 271
+log.IMMEDIATE : number = 1
+log.INFO : number = 64
+log.LEVEL : number = 2
+log.MESSAGE : number = 0
+log.MODELTIME : number = 512
+log.MODULE : number = 4
+log.NO_HEADER_FOOTER : number = 16384
+log.RELIABLE : number = 32768
+log.THREAD : number = 8
+log.TIME : number = 1
+log.TIME_LOCAL : number = 129
+log.TIME_RELATIVE : number = 128
+log.TIME_UTC : number = 1
+log.TRACE : number = 256
+log.WARNING : number = 16
+log.alert : function
+log.backup : function
+log.debug : function
+log.error : function
+log.info : function
+log.set_output : function
+log.set_output_rules : function
+log.warning : function
+log.write : function
+log_G_effect : function
+math : table
+math.abs : function
+math.acos : function
+math.asin : function
+math.atan : function
+math.atan2 : function
+math.ceil : function
+math.cos : function
+math.cosh : function
+math.deg : function
+math.exp : function
+math.floor : function
+math.fmod : function
+math.frexp : function
+math.huge : number = inf
+math.ldexp : function
+math.log : function
+math.log10 : function
+math.max : function
+math.min : function
+math.mod : function
+math.modf : function
+math.pi : number = 3.1415926535898
+math.pow : function
+math.rad : function
+math.random : function
+math.randomseed : function
+math.sin : function
+math.sinh : function
+math.sqrt : function
+math.tan : function
+math.tanh : function
+module : function
+newproxy : function
+next : function
+os : table
+os.clock : function
+os.date : function
+os.difftime : function
+os.execute : function
+os.getenv : function
+os.getpid : function
+os.open_uri : function
+os.remove : function
+os.rename : function
+os.time : function
+package : table
+package.config : string
+package.cpath : string
+package.loaded : table
+package.loaded._G : table -> _G
+package.loaded.coroutine : table -> coroutine
+package.loaded.debug : table -> debug
+package.loaded.io : table -> io
+package.loaded.lfs : table -> lfs
+package.loaded.log : table -> log
+package.loaded.math : table -> math
+package.loaded.os : table -> os
+package.loaded.package : table -> package
+package.loaded.string : table -> string
+package.loaded.table : table -> table
+package.loaders : table
+package.loaders. : 5 other keys
+package.loadlib : function
+package.path : string
+package.preload : table
+package.seeall : function
+pairs : function
+pcall : function
+print : function
+rawequal : function
+rawget : function
+rawset : function
+require : function
+safe_require : function
+select : function
+setfenv : function
+setmetatable : function
+show_param_handles_list : function
+string : table
+string.byte : function
+string.char : function
+string.dump : function
+string.find : function
+string.format : function
+string.gfind : function
+string.gmatch : function
+string.gsub : function
+string.len : function
+string.lower : function
+string.match : function
+string.rep : function
+string.reverse : function
+string.sub : function
+string.upper : function
+table : table
+table.concat : function
+table.foreach : function
+table.foreachi : function
+table.getn : function
+table.insert : function
+table.maxn : function
+table.remove : function
+table.setn : function
+table.sort : function
+tonumber : function
+tostring : function
+type : function
+unpack : function
+xpcall : function

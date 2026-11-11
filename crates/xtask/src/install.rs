@@ -14,8 +14,15 @@ use sha2::{Digest, Sha256};
 pub const LOADER: &str = "Scripts/Hooks/nanoprobe-hook.lua";
 /// The development mission loader's path. Only `deploy --dev` installs it.
 pub const DEV_LOADER: &str = "Scripts/Hooks/nanoprobe-dev.lua";
-/// The development folder: mission requests and the missions they name.
+/// The eval hook's path. Only `deploy --dev` installs it.
+pub const EVAL_HOOK: &str = "Scripts/Hooks/nanoprobe-eval.lua";
+/// The development folder: mission requests, the missions they name, the eval
+/// channel and the Lua it loads.
 pub const DEV: &str = "nanoprobe/dev";
+/// The eval channel's folder: `in/`, `taken/` and `out/`.
+pub const EVAL: &str = "nanoprobe/dev/eval";
+/// The folder of Lua the eval prelude and snippets load.
+const DEV_LUA: &str = "nanoprobe/dev/lua";
 /// The platform's folder in the profile.
 pub const ROOT: &str = "nanoprobe";
 const MANIFEST: &str = "nanoprobe/manifest.txt";
@@ -75,9 +82,9 @@ pub struct Payload {
     pub dll: Vec<u8>,
     /// Files under the version folder other than the DLL, by relative path.
     pub files: Vec<(String, Vec<u8>)>,
-    /// The development mission loader, for `deploy --dev`. It is not part of
-    /// the version, so it does not change the build.
-    pub dev: Option<Vec<u8>>,
+    /// The development files, for `deploy --dev`, by profile-relative path.
+    /// They are not part of the version, so they do not change the build.
+    pub dev: Option<Vec<(String, Vec<u8>)>>,
 }
 
 impl Payload {
@@ -96,11 +103,7 @@ impl Payload {
                 ),
                 ("lua/log.lua".into(), read(repo.join("lua/agent/log.lua"))?),
             ],
-            dev: if dev {
-                Some(read(repo.join("lua/dev/mission-loader.lua"))?)
-            } else {
-                None
-            },
+            dev: if dev { Some(dev_files(repo)?) } else { None },
         })
     }
 
@@ -140,6 +143,47 @@ impl Payload {
         }
         out
     }
+}
+
+/// The development files: the two hooks, the prelude, and every Lua file
+/// directly in `lua/dev/lib/` and `lua/scenarios/`, sorted by path.
+fn dev_files(repo: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let read = |path: &Path| {
+        std::fs::read(path).map_err(|e| format!("could not read {}: {e}", path.display()))
+    };
+    let mut files = vec![
+        (
+            DEV_LOADER.to_owned(),
+            read(&repo.join("lua/dev/mission-loader.lua"))?,
+        ),
+        (
+            EVAL_HOOK.to_owned(),
+            read(&repo.join("lua/dev/eval-hook.lua"))?,
+        ),
+        (
+            format!("{DEV_LUA}/prelude.lua"),
+            read(&repo.join("lua/dev/eval-prelude.lua"))?,
+        ),
+    ];
+    let mut libraries = Vec::new();
+    for folder in ["lua/dev/lib", "lua/scenarios"] {
+        let folder = repo.join(folder);
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries {
+            let path = entry.map_err(|e| io_error(&folder, e))?.path();
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+            if let Some(name) = name.filter(|n| n.ends_with(".lua"))
+                && path.is_file()
+            {
+                libraries.push((format!("{DEV_LUA}/{name}"), read(&path)?));
+            }
+        }
+    }
+    libraries.sort();
+    files.extend(libraries);
+    Ok(files)
 }
 
 /// The manifest's two keys.
@@ -237,13 +281,24 @@ pub fn deploy(profile: &dyn Profile, payload: &Payload) -> Result<Deployed, Stri
     }
     match &payload.dev {
         Some(dev) => {
-            profile.create_dir(&format!("{DEV}/missions"))?;
-            if profile.read(DEV_LOADER)?.as_deref() != Some(&dev[..]) {
-                profile.write(DEV_LOADER, dev)?;
+            for folder in ["missions", "eval/in", "eval/taken", "eval/out"] {
+                profile.create_dir(&format!("{DEV}/{folder}"))?;
+            }
+            for (path, bytes) in dev {
+                if profile.read(path)?.as_deref() != Some(&bytes[..]) {
+                    profile.write(path, bytes)?;
+                }
+            }
+            for name in profile.list(DEV_LUA)? {
+                let path = format!("{DEV_LUA}/{name}");
+                if !dev.iter().any(|(held, _)| *held == path) {
+                    profile.remove_file(&path)?;
+                }
             }
         }
         None => {
             profile.remove_file(DEV_LOADER)?;
+            profile.remove_file(EVAL_HOOK)?;
             profile.remove_tree(DEV)?;
         }
     }
@@ -327,6 +382,7 @@ pub fn undeploy(profile: &dyn Profile) -> Result<bool, String> {
 
     profile.remove_file(LOADER)?;
     profile.remove_file(DEV_LOADER)?;
+    profile.remove_file(EVAL_HOOK)?;
     profile.remove_tree(ROOT)?;
 
     let record = record.map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
@@ -541,14 +597,28 @@ mod tests {
         }
     }
 
+    /// Development files as a payload holds them: the two hooks, the prelude
+    /// and the given libraries.
+    fn dev_payload(libraries: &[(&str, &str)]) -> Vec<(String, Vec<u8>)> {
+        let mut files = vec![
+            (DEV_LOADER.to_owned(), b"-- dev\n".to_vec()),
+            (EVAL_HOOK.to_owned(), b"-- eval\n".to_vec()),
+            (format!("{DEV_LUA}/prelude.lua"), b"-- prelude\n".to_vec()),
+        ];
+        for (name, text) in libraries {
+            files.push((format!("{DEV_LUA}/{name}"), text.as_bytes().to_vec()));
+        }
+        files
+    }
+
     #[test]
-    fn only_a_dev_deploy_carries_the_dev_loader() {
+    fn only_a_dev_deploy_carries_the_dev_files() {
         let scratch = Scratch::new("dev");
         let local = profile(&scratch, false);
         let before = snapshot_local(&scratch.0).unwrap();
 
         let mut dev = payload("one");
-        dev.dev = Some(b"-- dev\n".to_vec());
+        dev.dev = Some(dev_payload(&[("a.lua", "-- a\n")]));
         let with = deploy(&local, &dev).unwrap();
         assert_eq!(
             with.build,
@@ -556,12 +626,39 @@ mod tests {
             "the dev loader changed the build"
         );
         assert!(local.read(DEV_LOADER).unwrap().is_some());
-        assert!(local.is_dir(&format!("{DEV}/missions")).unwrap());
+        assert!(local.read(EVAL_HOOK).unwrap().is_some());
+        assert_eq!(
+            local
+                .read("nanoprobe/dev/lua/prelude.lua")
+                .unwrap()
+                .unwrap(),
+            b"-- prelude\n"
+        );
+        for folder in ["missions", "eval/in", "eval/taken", "eval/out"] {
+            assert!(
+                local.is_dir(&format!("{DEV}/{folder}")).unwrap(),
+                "{folder}"
+            );
+        }
+
+        // A library the payload no longer holds is removed; changed bytes are
+        // rewritten.
+        let mut changed = payload("one");
+        changed.dev = Some(dev_payload(&[("b.lua", "-- b\n")]));
+        deploy(&local, &changed).unwrap();
+        assert_eq!(
+            local.list("nanoprobe/dev/lua").unwrap(),
+            vec!["b.lua", "prelude.lua"]
+        );
 
         deploy(&local, &payload("one")).unwrap();
         assert!(
             local.read(DEV_LOADER).unwrap().is_none(),
-            "a plain deploy kept it"
+            "a plain deploy kept the loader"
+        );
+        assert!(
+            local.read(EVAL_HOOK).unwrap().is_none(),
+            "a plain deploy kept the eval hook"
         );
         assert!(!local.is_dir(DEV).unwrap());
 

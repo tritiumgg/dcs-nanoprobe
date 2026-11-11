@@ -1,0 +1,1370 @@
+# state sse
+# dcs 2.9.31.29434 (dcs_server.release)
+# platform wine-10.0 (Debian 10.0~repack-6)
+# date 2026-11-11
+# script lua/probes/tools/api-dump.lua
+AI : table
+AI.Option : table
+AI.Option.Air : table
+AI.Option.Ground : table
+AI.Option.Naval : table
+AI.Skill : table
+AI.Skill.AVERAGE : string
+AI.Skill.CLIENT : string
+AI.Skill.EXCELLENT : string
+AI.Skill.GOOD : string
+AI.Skill.HIGH : string
+AI.Skill.PLAYER : string
+AI.Task : table
+AI.Task.AltitudeType : table
+AI.Task.Designation : table
+AI.Task.OrbitPattern : table
+AI.Task.TurnMethod : table
+AI.Task.VehicleFormation : table
+AI.Task.WaypointType : table
+AI.Task.WeaponExpend : table
+Airbase : table
+Airbase.Category : table
+Airbase.Category.AIRDROME : number = 0
+Airbase.Category.HELIPAD : number = 1
+Airbase.Category.SHIP : number = 2
+Airbase.__eq : function
+Airbase.__index : table -> Airbase
+Airbase.__le : function
+Airbase.__lt : function
+Airbase.__newindex : function
+Airbase.__tonumber : function
+Airbase.autoCapture : function
+Airbase.autoCaptureIsOn : function
+Airbase.className_ : string
+Airbase.getByName : function
+Airbase.getCallsign : function
+Airbase.getCategory : function
+Airbase.getCategoryEx : function
+Airbase.getCoalition : function
+Airbase.getCommunicator : function
+Airbase.getCountry : function
+Airbase.getDesc : function
+Airbase.getDescByName : function
+Airbase.getDispatcherTowerPos : function
+Airbase.getForcesName : function
+Airbase.getID : function
+Airbase.getLife : function
+Airbase.getName : function
+Airbase.getNearest : function
+Airbase.getParking : function
+Airbase.getRadioSilentMode : function
+Airbase.getRunways : function
+Airbase.getTypeName : function
+Airbase.getUnit : function
+Airbase.getWarehouse : function
+Airbase.getWorldID : function
+Airbase.parentClass_ : table -> Object
+Airbase.setCoalition : function
+Airbase.setRadioSilentMode : function
+Airbase.tonumber : function
+CAP_packages : table
+CAP_packages.blue : table
+CAP_packages.last_idx : number = 1
+CAP_packages.red : table
+Controller : table
+Controller.Detection : table
+Controller.Detection.DLINK : number = 32
+Controller.Detection.IRST : number = 8
+Controller.Detection.OPTIC : number = 2
+Controller.Detection.RADAR : number = 4
+Controller.Detection.RWR : number = 16
+Controller.Detection.VISUAL : number = 1
+Controller.__eq : function
+Controller.__index : table -> Controller
+Controller.__le : function
+Controller.__lt : function
+Controller.__newindex : function
+Controller.__tonumber : function
+Controller.className_ : string
+Controller.getDetectedTargets : function
+Controller.hasTask : function
+Controller.isTargetDetected : function
+Controller.knowTarget : function
+Controller.parentClass_ : table
+Controller.parentClass_.className_ : string
+Controller.popTask : function
+Controller.pushTask : function
+Controller.resetTask : function
+Controller.setAltitude : function
+Controller.setCommand : function
+Controller.setOnOff : function
+Controller.setOption : function
+Controller.setSpeed : function
+Controller.setTask : function
+Controller.tonumber : function
+Disposition : table
+Disposition.DriftRoute : function
+Disposition.className_ : string
+Disposition.getElipsSideZones : function
+Disposition.getPointHeight : function
+Disposition.getPointWater : function
+Disposition.getRandom : function
+Disposition.getRandomIn : function
+Disposition.getRandomSort : function
+Disposition.getRouteAwayWater : function
+Disposition.getRunwayPerimetr : function
+Disposition.getSimpleZones : function
+Disposition.getThresholdFourZones : function
+Disposition.setMarkerPoint : function
+ED_FINAL_VERSION : boolean = true
+ED_PUBLIC_AVAILABLE : boolean = true
+Group : table
+Group.Category : table
+Group.Category.AIRPLANE : number = 0
+Group.Category.GROUND : number = 2
+Group.Category.HELICOPTER : number = 1
+Group.Category.SHIP : number = 3
+Group.Category.TRAIN : number = 4
+Group.__eq : function
+Group.__index : table -> Group
+Group.__le : function
+Group.__lt : function
+Group.__newindex : function
+Group.__tonumber : function
+Group.activate : function
+Group.className_ : string
+Group.destroy : function
+Group.embarking : function
+Group.enableEmission : function
+Group.getByName : function
+Group.getCategory : function
+Group.getCategoryEx : function
+Group.getCoalition : function
+Group.getController : function
+Group.getID : function
+Group.getInitialSize : function
+Group.getName : function
+Group.getSize : function
+Group.getUnit : function
+Group.getUnits : function
+Group.isExist : function
+Group.markGroup : function
+Group.parentClass_ : table -> Controller.parentClass_
+Group.tonumber : function
+Object : table
+Object.Category : table
+Object.Category.BASE : number = 4
+Object.Category.CARGO : number = 6
+Object.Category.SCENERY : number = 5
+Object.Category.STATIC : number = 3
+Object.Category.UNIT : number = 1
+Object.Category.VOID : number = 0
+Object.Category.WEAPON : number = 2
+Object.__eq : function
+Object.__index : table -> Object
+Object.__le : function
+Object.__lt : function
+Object.__newindex : function
+Object.__tonumber : function
+Object.cancelChoosingCargo : function
+Object.className_ : string
+Object.database_ : table
+Object.database_.getCategoryEx : function
+Object.destroy : function
+Object.getAttributes : function
+Object.getCategory : function
+Object.getName : function
+Object.getPoint : function
+Object.getPosition : function
+Object.getTypeName : function
+Object.getVelocity : function
+Object.hasAttribute : function
+Object.inAir : function
+Object.isExist : function
+Object.parentClass_ : table -> Controller.parentClass_
+Object.tonumber : function
+SceneryObject : table
+SceneryObject.__eq : function
+SceneryObject.__index : table -> SceneryObject
+SceneryObject.__le : function
+SceneryObject.__lt : function
+SceneryObject.__newindex : function
+SceneryObject.__tonumber : function
+SceneryObject.className_ : string
+SceneryObject.getDesc : function
+SceneryObject.getDescByName : function
+SceneryObject.getLife : function
+SceneryObject.parentClass_ : table -> Object
+SceneryObject.tonumber : function
+Spot : table
+Spot.Category : table
+Spot.Category.INFRA_RED : number = 0
+Spot.Category.LASER : number = 1
+Spot.__eq : function
+Spot.__index : table -> Spot
+Spot.__le : function
+Spot.__lt : function
+Spot.__newindex : function
+Spot.__tonumber : function
+Spot.className_ : string
+Spot.createInfraRed : function
+Spot.createLaser : function
+Spot.destroy : function
+Spot.getCategory : function
+Spot.getCategoryEx : function
+Spot.getCode : function
+Spot.getPoint : function
+Spot.parentClass_ : table -> Controller.parentClass_
+Spot.setCode : function
+Spot.setPoint : function
+Spot.tonumber : function
+StaticObject : table
+StaticObject.__eq : function
+StaticObject.__index : table -> StaticObject
+StaticObject.__le : function
+StaticObject.__lt : function
+StaticObject.__newindex : function
+StaticObject.__tonumber : function
+StaticObject.chooseCargo : function
+StaticObject.className_ : string
+StaticObject.getByName : function
+StaticObject.getCargoDisplayName : function
+StaticObject.getCargoWeight : function
+StaticObject.getCoalition : function
+StaticObject.getCountry : function
+StaticObject.getDesc : function
+StaticObject.getDescByName : function
+StaticObject.getDrawArgumentValue : function
+StaticObject.getForcesName : function
+StaticObject.getID : function
+StaticObject.getLife : function
+StaticObject.getName : function
+StaticObject.getTypeName : function
+StaticObject.parentClass_ : table -> Object
+StaticObject.tonumber : function
+Unit : table
+Unit.Category : table
+Unit.Category.AIRPLANE : number = 0
+Unit.Category.GROUND_UNIT : number = 2
+Unit.Category.HELICOPTER : number = 1
+Unit.Category.SHIP : number = 3
+Unit.Category.STRUCTURE : number = 4
+Unit.LoadOnBoard : function
+Unit.OldCarrierMenuShow : function
+Unit.OpticType : table
+Unit.OpticType.IR : number = 2
+Unit.OpticType.LLTV : number = 1
+Unit.OpticType.TV : number = 0
+Unit.RadarType : table
+Unit.RadarType.AS : number = 0
+Unit.RadarType.SS : number = 1
+Unit.RefuelingSystem : table
+Unit.RefuelingSystem.BOOM_AND_RECEPTACLE : number = 0
+Unit.RefuelingSystem.PROBE_AND_DROGUE : number = 1
+Unit.SensorType : table
+Unit.SensorType.IRST : number = 2
+Unit.SensorType.OPTIC : number = 0
+Unit.SensorType.RADAR : number = 1
+Unit.SensorType.RWR : number = 3
+Unit.UnloadCargo : function
+Unit.__eq : function
+Unit.__index : table -> Unit
+Unit.__le : function
+Unit.__lt : function
+Unit.__newindex : function
+Unit.__tonumber : function
+Unit.canShipLanding : function
+Unit.checkOpenRamp : function
+Unit.className_ : string
+Unit.disembarking : function
+Unit.enableEmission : function
+Unit.getAirbase : function
+Unit.getAmmo : function
+Unit.getByName : function
+Unit.getCallsign : function
+Unit.getCargosOnBoard : function
+Unit.getCategory : function
+Unit.getCategoryEx : function
+Unit.getCoalition : function
+Unit.getCommunicator : function
+Unit.getController : function
+Unit.getCountry : function
+Unit.getDesc : function
+Unit.getDescByName : function
+Unit.getDescentCapacity : function
+Unit.getDescentOnBoard : function
+Unit.getDrawArgumentValue : function
+Unit.getForcesName : function
+Unit.getFuel : function
+Unit.getFuelLowState : function
+Unit.getGroup : function
+Unit.getID : function
+Unit.getLife : function
+Unit.getLife0 : function
+Unit.getName : function
+Unit.getNearestCargos : function
+Unit.getNearestCargosForAircraft : function
+Unit.getNumber : function
+Unit.getObjectID : function
+Unit.getPlayerName : function
+Unit.getRadar : function
+Unit.getSeats : function
+Unit.getSensors : function
+Unit.getTypeName : function
+Unit.hasCarrier : function
+Unit.hasSensors : function
+Unit.isActive : function
+Unit.isAlive : function
+Unit.isBroken : function
+Unit.isDead : function
+Unit.isEffective : function
+Unit.markDisembarkingTask : function
+Unit.openRamp : function
+Unit.parentClass_ : table -> Object
+Unit.tonumber : function
+Unit.vtolableLA : function
+VoiceChat : table
+VoiceChat.RadioHandlers : table
+VoiceChat.RadioHandlers.CHANNEL : number = 3
+VoiceChat.RadioHandlers.CRYPTO_KEY : number = 7
+VoiceChat.RadioHandlers.CURRENT_RECEIVING_RADIO : number = 13
+VoiceChat.RadioHandlers.ENCRYPTION_STATUS : number = 6
+VoiceChat.RadioHandlers.EXTERNALLY_CONTROLLED : number = 12
+VoiceChat.RadioHandlers.FREQUENCY : number = 1
+VoiceChat.RadioHandlers.GUARD_STATUS : number = 5
+VoiceChat.RadioHandlers.IS_TRANSMITTING : number = 10
+VoiceChat.RadioHandlers.MODULATION : number = 4
+VoiceChat.RadioHandlers.ON_OFF_STATUS : number = 0
+VoiceChat.RadioHandlers.SOUND_VOLUME : number = 2
+VoiceChat.RadioHandlers.SQUELCH_STATUS : number = 8
+VoiceChat.RadioHandlers.TRANSMISSION_ENABLED : number = 11
+VoiceChat.RadioHandlers.TRANSMITTER_PWR : number = 9
+VoiceChat.RadioHandlersSingletons : table
+VoiceChat.RadioHandlersSingletons.INITIALIZATION_COMPLETE : number = 3
+VoiceChat.RadioHandlersSingletons.INTERCOM_HOT_MIKE_STATUS : number = 1
+VoiceChat.RadioHandlersSingletons.INTERCOM_SOUND_VOLUME : number = 0
+VoiceChat.RoomType : table
+VoiceChat.RoomType.MANAGEABLE : number = 2
+VoiceChat.RoomType.MULTICREW : number = 1
+VoiceChat.RoomType.PERSISTENT : number = 0
+VoiceChat.Side : table
+VoiceChat.Side.ALL : number = 3
+VoiceChat.Side.BLUE : number = 2
+VoiceChat.Side.NEUTRAL : number = 0
+VoiceChat.Side.RED : number = 1
+VoiceChat.addUser : function
+VoiceChat.changeSlot : function
+VoiceChat.changeVoiceChatOption : function
+VoiceChat.createRoom : function
+VoiceChat.deleteRoom : function
+VoiceChat.getAccessPeersList : function
+VoiceChat.getActiveRoom : function
+VoiceChat.getCurrentTransmittingRadio : function
+VoiceChat.getEncryptionEnabled : function
+VoiceChat.getIntercomData : function
+VoiceChat.getIntercomIndication : function
+VoiceChat.getIntercomMicMode : function
+VoiceChat.getIntercomVolume : function
+VoiceChat.getIsExternallyControlled : function
+VoiceChat.getIsRadioListRequest : function
+VoiceChat.getLastTransmittingRadio : function
+VoiceChat.getMicMode : function
+VoiceChat.getOptions : function
+VoiceChat.getPeerAudioState : function
+VoiceChat.getPeersList : function
+VoiceChat.getRadioChannel : function
+VoiceChat.getRadioEncryptionKey : function
+VoiceChat.getRadioFrequency : function
+VoiceChat.getRadioFrequencyByUnits : function
+VoiceChat.getRadioGuardReceiverFrequency : function
+VoiceChat.getRadioGuardReceiverModulation : function
+VoiceChat.getRadioGuardReceiverOnOff : function
+VoiceChat.getRadioIndication : function
+VoiceChat.getRadioList : function
+VoiceChat.getRadioModulation : function
+VoiceChat.getRadioOnOff : function
+VoiceChat.getRadioPower : function
+VoiceChat.getRadioSquelchOnOff : function
+VoiceChat.getRadioVolume : function
+VoiceChat.getRooms : function
+VoiceChat.getSide : function
+VoiceChat.getVoiceChatMode : function
+VoiceChat.isInUnit : function
+VoiceChat.isIntercom : function
+VoiceChat.isRadioAvailableForTransmission : function
+VoiceChat.leaveRoom : function
+VoiceChat.onPeerConnect : function
+VoiceChat.onPeerDisconnect : function
+VoiceChat.onProcessState : function
+VoiceChat.onRtcConnectionChange : function
+VoiceChat.onRtcFailure : function
+VoiceChat.onRtcSignalingChange : function
+VoiceChat.peerVoiceEnable : function
+VoiceChat.radioEncryptionOnOff : function
+VoiceChat.reconnect : function
+VoiceChat.removeUser : function
+VoiceChat.setActiveRoom : function
+VoiceChat.setEncryptionEnabled : function
+VoiceChat.setIntercomMicMode : function
+VoiceChat.setIsExternallyControlled : function
+VoiceChat.setMicMode : function
+VoiceChat.setOptions : function
+VoiceChat.setRadioChannel : function
+VoiceChat.setRadioEncryptionKey : function
+VoiceChat.setRadioFrequency : function
+VoiceChat.setRadioGuardReceiverFrequency : function
+VoiceChat.setRadioGuardReceiverModulation : function
+VoiceChat.setRadioGuardReceiverOnOff : function
+VoiceChat.setRadioListRequest : function
+VoiceChat.setRadioModulation : function
+VoiceChat.setRadioOnOff : function
+VoiceChat.setRadioPower : function
+VoiceChat.setRadioSquelchOnOff : function
+VoiceChat.setRadioVolume : function
+VoiceChat.setTrackAudioVolume : function
+VoiceChat.setVoiceChatMode : function
+VoiceChat.startStopTestSoundFilterOptions : function
+VoiceChat.startStream : function
+VoiceChat.startTestPeekMeter : function
+VoiceChat.stopStream : function
+VoiceChat.stopTestPeekMeter : function
+VoiceChat.testCallPeekMeterFunc : function
+VoiceChat.updateCrewVolume : function
+VoiceChat.updateSoundFilterParameters : function
+Warehouse : table
+Warehouse.__eq : function
+Warehouse.__index : table -> Warehouse
+Warehouse.__le : function
+Warehouse.__lt : function
+Warehouse.__newindex : function
+Warehouse.__tonumber : function
+Warehouse.addItem : function
+Warehouse.addLiquid : function
+Warehouse.className_ : string
+Warehouse.getByName : function
+Warehouse.getCargoAsWarehouse : function
+Warehouse.getInventory : function
+Warehouse.getItemCount : function
+Warehouse.getLiquidAmount : function
+Warehouse.getOwner : function
+Warehouse.getResourceMap : function
+Warehouse.parentClass_ : table -> Controller.parentClass_
+Warehouse.removeItem : function
+Warehouse.removeLiquid : function
+Warehouse.setItem : function
+Warehouse.setLiquidAmount : function
+Warehouse.tonumber : function
+Weapon : table
+Weapon.Category : table
+Weapon.Category.BOMB : number = 3
+Weapon.Category.MISSILE : number = 1
+Weapon.Category.ROCKET : number = 2
+Weapon.Category.SHELL : number = 0
+Weapon.Category.TORPEDO : number = 4
+Weapon.GuidanceType : table
+Weapon.GuidanceType.INS : number = 1
+Weapon.GuidanceType.IR : number = 2
+Weapon.GuidanceType.LASER : number = 7
+Weapon.GuidanceType.RADAR_ACTIVE : number = 3
+Weapon.GuidanceType.RADAR_PASSIVE : number = 5
+Weapon.GuidanceType.RADAR_SEMI_ACTIVE : number = 4
+Weapon.GuidanceType.TELE : number = 8
+Weapon.GuidanceType.TV : number = 6
+Weapon.MissileCategory : table
+Weapon.MissileCategory.AAM : number = 1
+Weapon.MissileCategory.ANTI_SHIP : number = 4
+Weapon.MissileCategory.BM : number = 3
+Weapon.MissileCategory.CRUISE : number = 5
+Weapon.MissileCategory.OTHER : number = 6
+Weapon.MissileCategory.SAM : number = 2
+Weapon.WarheadType : table
+Weapon.WarheadType.AP : number = 0
+Weapon.WarheadType.HE : number = 1
+Weapon.WarheadType.SHAPED_EXPLOSIVE : number = 2
+Weapon.__eq : function
+Weapon.__index : table -> Weapon
+Weapon.__le : function
+Weapon.__lt : function
+Weapon.__newindex : function
+Weapon.__tonumber : function
+Weapon.className_ : string
+Weapon.flag : table
+Weapon.flag.AR_AAM : number = 134217728
+Weapon.flag.AllWeapon : number = -1
+Weapon.flag.AntiRadarMissile : number = 32768
+Weapon.flag.AntiRadarMissile2 : number = 1073741824
+Weapon.flag.AntiShipMissile : number = 65536
+Weapon.flag.AntiTankMissile : number = 131072
+Weapon.flag.AnyAAM : number = 264241152
+Weapon.flag.AnyAAWeapon : number = 1069547520
+Weapon.flag.AnyAGWeapon : number = 2956984318
+Weapon.flag.AnyASM : number = 4161536
+Weapon.flag.AnyAutonomousMissile : number = 36012032
+Weapon.flag.AnyBomb : number = 2147485694
+Weapon.flag.AnyMissile : number = 268402688
+Weapon.flag.AnyRocket : number = 30720
+Weapon.flag.AnyShell : number = 258503344128
+Weapon.flag.AnyTorpedo : number = 4294967296
+Weapon.flag.AnyUnguidedBomb : number = 2147485680
+Weapon.flag.AnyWeapon : number = 265214230526
+Weapon.flag.ArmWeapon : number = 213674609662
+Weapon.flag.BuiltInCannon : number = 536870912
+Weapon.flag.CandleBomb : number = 1024
+Weapon.flag.CandleRocket : number = 8192
+Weapon.flag.Cannons : number = 805306368
+Weapon.flag.ClusterBomb : number = 256
+Weapon.flag.ConventionalShell : number = 206963736576
+Weapon.flag.CruiseMissile : number = 2097152
+Weapon.flag.Decoys : number = 8589934592
+Weapon.flag.Dispencer : number = 512
+Weapon.flag.FAEBomb : number = 128
+Weapon.flag.FireAndForgetASM : number = 262144
+Weapon.flag.GUN_POD : number = 268435456
+Weapon.flag.GuidedASM : number = 1572864
+Weapon.flag.GuidedBomb : number = 14
+Weapon.flag.GuidedShell : number = 137438953472
+Weapon.flag.GuidedWeapon : number = 137707356174
+Weapon.flag.HEBomb : number = 16
+Weapon.flag.HeavyRocket : number = 16384
+Weapon.flag.IR_AAM : number = 33554432
+Weapon.flag.IlluminationShell : number = 34359738368
+Weapon.flag.LGB : number = 2
+Weapon.flag.LRAAM : number = 16777216
+Weapon.flag.LaserASM : number = 524288
+Weapon.flag.LightRocket : number = 2048
+Weapon.flag.MRAAM : number = 8388608
+Weapon.flag.MarkerRocket : number = 4096
+Weapon.flag.MarkerShell : number = 51539607552
+Weapon.flag.MarkerWeapon : number = 51539620864
+Weapon.flag.NapalmBomb : number = 64
+Weapon.flag.NoWeapon : number = 0
+Weapon.flag.ParachuteBomb : number = 2147483648
+Weapon.flag.Penetrator : number = 32
+Weapon.flag.SAR_AAM : number = 67108864
+Weapon.flag.SNSGB : number = 8
+Weapon.flag.SRAAM : number = 4194304
+Weapon.flag.SmokeShell : number = 17179869184
+Weapon.flag.SubmunitionDispenserShell : number = 68719476736
+Weapon.flag.TacticASM : number = 1835008
+Weapon.flag.TeleASM : number = 1048576
+Weapon.flag.Torpedo : number = 4294967296
+Weapon.flag.TvGB : number = 4
+Weapon.flag.UnguidedWeapon : number = 2952822768
+Weapon.getCategory : function
+Weapon.getCategoryEx : function
+Weapon.getCoalition : function
+Weapon.getCountry : function
+Weapon.getDesc : function
+Weapon.getForcesName : function
+Weapon.getLauncher : function
+Weapon.getTarget : function
+Weapon.parentClass_ : table -> Object
+Weapon.tonumber : function
+_APP_VERSION : string
+_ARCHITECTURE : string
+_G : table -> _G
+_VERSION : string
+addPackage : function
+assert : function
+atmosphere : table
+atmosphere.getTemperatureAndPressure : function
+atmosphere.getWind : function
+atmosphere.getWindWithTurbulence : function
+cache : table
+checkCAPSync : function
+class : function
+coalition : table
+coalition.addGroup : function
+coalition.addRefPoint : function
+coalition.addStaticObject : function
+coalition.add_dyn_group : function
+coalition.checkChooseCargo : function
+coalition.checkDescent : function
+coalition.getAirbases : function
+coalition.getAllDescents : function
+coalition.getCountryCoalition : function
+coalition.getDescentsOnBoard : function
+coalition.getGroups : function
+coalition.getMainRefPoint : function
+coalition.getPlayers : function
+coalition.getRefPoints : function
+coalition.getServiceProviders : function
+coalition.getStaticObjects : function
+coalition.remove_dyn_group : function
+coalition.service : table
+coalition.service.ATC : number = 0
+coalition.service.AWACS : number = 1
+coalition.service.FAC : number = 3
+coalition.service.MAX : number = 4
+coalition.service.TANKER : number = 2
+coalition.side : table
+coalition.side.BLUE : number = 2
+coalition.side.NEUTRAL : number = 0
+coalition.side.RED : number = 1
+collectgarbage : function
+console : table
+console.Env : table
+console.Env.MAIN : number = 0
+console.Env.MISSION : number = 1
+console.clear : function
+console.clearHistory : function
+console.in : function
+console.out : function
+console.setEnv : function
+console.setPos : function
+console.toggle : function
+coord : table
+coord.LLtoLO : function
+coord.LLtoMGRS : function
+coord.LOtoLL : function
+coord.MGRStoLL : function
+coroutine : table
+coroutine.create : function
+coroutine.resume : function
+coroutine.running : function
+coroutine.status : function
+coroutine.wrap : function
+coroutine.yield : function
+country : table
+country. : 1 other keys
+country.ABKHAZIA : number = 18
+country.AFGHANISTAN : number = 91
+country.AGGRESSORS : number = 7
+country.ALGERIA : number = 70
+country.ARGENTINA : number = 83
+country.AUSTRALIA : number = 21
+country.AUSTRIA : number = 23
+country.BAHRAIN : number = 65
+country.BELARUS : number = 24
+country.BELGIUM : number = 11
+country.BOLIVIA : number = 86
+country.BRAZIL : number = 64
+country.BULGARIA : number = 25
+country.CANADA : number = 8
+country.CHEZH_REPUBLIC : number = 26
+country.CHILE : number = 63
+country.CHINA : number = 27
+country.CJTF_BLUE : number = 80
+country.CJTF_RED : number = 81
+country.CROATIA : number = 28
+country.CUBA : number = 76
+country.CYPRUS : number = 84
+country.DENMARK : number = 13
+country.ECUADOR : number = 90
+country.EGYPT : number = 29
+country.ETHIOPIA : number = 62
+country.FINLAND : number = 30
+country.FRANCE : number = 5
+country.GDR : number = 78
+country.GEORGIA : number = 16
+country.GERMANY : number = 6
+country.GHANA : number = 87
+country.GREECE : number = 31
+country.HONDURAS : number = 61
+country.HUNGARY : number = 32
+country.INDIA : number = 33
+country.INDONESIA : number = 60
+country.INSURGENTS : number = 17
+country.IRAN : number = 34
+country.IRAQ : number = 35
+country.ISRAEL : number = 15
+country.ITALIAN_SOCIAL_REPUBLIC : number = 69
+country.ITALY : number = 20
+country.JAPAN : number = 36
+country.JORDAN : number = 59
+country.KAZAKHSTAN : number = 37
+country.KUWAIT : number = 71
+country.LEBANON : number = 79
+country.LIBYA : number = 58
+country.MALAYSIA : number = 57
+country.MEXICO : number = 56
+country.MOROCCO : number = 55
+country.NIGERIA : number = 88
+country.NORTH_KOREA : number = 38
+country.NORWAY : number = 12
+country.OMAN : number = 73
+country.PAKISTAN : number = 39
+country.PERU : number = 89
+country.PHILIPPINES : number = 54
+country.POLAND : number = 40
+country.PORTUGAL : number = 77
+country.QATAR : number = 72
+country.ROMANIA : number = 41
+country.RUSSIA : number = 0
+country.SAUDI_ARABIA : number = 42
+country.SERBIA : number = 43
+country.SLOVAKIA : number = 44
+country.SLOVENIA : number = 85
+country.SOUTH_AFRICA : number = 75
+country.SOUTH_KOREA : number = 45
+country.SOUTH_OSETIA : number = 19
+country.SPAIN : number = 9
+country.SUDAN : number = 53
+country.SWEDEN : number = 46
+country.SWITZERLAND : number = 22
+country.SYRIA : number = 47
+country.THAILAND : number = 52
+country.THE_NETHERLANDS : number = 10
+country.THIRDREICH : number = 66
+country.TUNISIA : number = 51
+country.TURKEY : number = 3
+country.UK : number = 4
+country.UKRAINE : number = 1
+country.UNITED_ARAB_EMIRATES : number = 74
+country.UN_PEACEKEEPERS : number = 82
+country.USA : number = 2
+country.USSR : number = 68
+country.VENEZUELA : number = 50
+country.VIETNAM : number = 49
+country.YEMEN : number = 48
+country.YUGOSLAVIA : number = 67
+country.add : function
+country.by_country : table
+country.by_country. : 1 other keys
+country.by_country.ABKHAZIA : table
+country.by_country.AFGHANISTAN : table
+country.by_country.AGGRESSORS : table
+country.by_country.ALGERIA : table
+country.by_country.ARGENTINA : table
+country.by_country.AUSTRALIA : table
+country.by_country.AUSTRIA : table
+country.by_country.BAHRAIN : table
+country.by_country.BELARUS : table
+country.by_country.BELGIUM : table
+country.by_country.BOLIVIA : table
+country.by_country.BRAZIL : table
+country.by_country.BULGARIA : table
+country.by_country.CANADA : table
+country.by_country.CHEZH_REPUBLIC : table
+country.by_country.CHILE : table
+country.by_country.CHINA : table
+country.by_country.CJTF_BLUE : table
+country.by_country.CJTF_RED : table
+country.by_country.CROATIA : table
+country.by_country.CUBA : table
+country.by_country.CYPRUS : table
+country.by_country.DENMARK : table
+country.by_country.ECUADOR : table
+country.by_country.EGYPT : table
+country.by_country.ETHIOPIA : table
+country.by_country.FINLAND : table
+country.by_country.FRANCE : table
+country.by_country.GDR : table
+country.by_country.GEORGIA : table
+country.by_country.GERMANY : table
+country.by_country.GHANA : table
+country.by_country.GREECE : table
+country.by_country.HONDURAS : table
+country.by_country.HUNGARY : table
+country.by_country.INDIA : table
+country.by_country.INDONESIA : table
+country.by_country.INSURGENTS : table
+country.by_country.IRAN : table
+country.by_country.IRAQ : table
+country.by_country.ISRAEL : table
+country.by_country.ITALIAN_SOCIAL_REPUBLIC : table
+country.by_country.ITALY : table
+country.by_country.JAPAN : table
+country.by_country.JORDAN : table
+country.by_country.KAZAKHSTAN : table
+country.by_country.KUWAIT : table
+country.by_country.LEBANON : table
+country.by_country.LIBYA : table
+country.by_country.MALAYSIA : table
+country.by_country.MEXICO : table
+country.by_country.MOROCCO : table
+country.by_country.NIGERIA : table
+country.by_country.NORTH_KOREA : table
+country.by_country.NORWAY : table
+country.by_country.OMAN : table
+country.by_country.PAKISTAN : table
+country.by_country.PERU : table
+country.by_country.PHILIPPINES : table
+country.by_country.POLAND : table
+country.by_country.PORTUGAL : table
+country.by_country.QATAR : table
+country.by_country.ROMANIA : table
+country.by_country.RUSSIA : table
+country.by_country.SAUDI_ARABIA : table
+country.by_country.SERBIA : table
+country.by_country.SLOVAKIA : table
+country.by_country.SLOVENIA : table
+country.by_country.SOUTH_AFRICA : table
+country.by_country.SOUTH_KOREA : table
+country.by_country.SOUTH_OSETIA : table
+country.by_country.SPAIN : table
+country.by_country.SUDAN : table
+country.by_country.SWEDEN : table
+country.by_country.SWITZERLAND : table
+country.by_country.SYRIA : table
+country.by_country.THAILAND : table
+country.by_country.THE_NETHERLANDS : table
+country.by_country.THIRDREICH : table
+country.by_country.TUNISIA : table
+country.by_country.TURKEY : table
+country.by_country.UK : table
+country.by_country.UKRAINE : table
+country.by_country.UNITED_ARAB_EMIRATES : table
+country.by_country.UN_PEACEKEEPERS : table
+country.by_country.USA : table
+country.by_country.USSR : table
+country.by_country.VENEZUELA : table
+country.by_country.VIETNAM : table
+country.by_country.YEMEN : table
+country.by_country.YUGOSLAVIA : table
+country.by_idx : table
+country.by_idx. : 92 other keys
+country.get : function
+country.id : table
+country.id. : 1 other keys
+country.id.ABKHAZIA : number = 18
+country.id.AFGHANISTAN : number = 91
+country.id.AGGRESSORS : number = 7
+country.id.ALGERIA : number = 70
+country.id.ARGENTINA : number = 83
+country.id.AUSTRALIA : number = 21
+country.id.AUSTRIA : number = 23
+country.id.BAHRAIN : number = 65
+country.id.BELARUS : number = 24
+country.id.BELGIUM : number = 11
+country.id.BOLIVIA : number = 86
+country.id.BRAZIL : number = 64
+country.id.BULGARIA : number = 25
+country.id.CANADA : number = 8
+country.id.CHEZH_REPUBLIC : number = 26
+country.id.CHILE : number = 63
+country.id.CHINA : number = 27
+country.id.CJTF_BLUE : number = 80
+country.id.CJTF_RED : number = 81
+country.id.CROATIA : number = 28
+country.id.CUBA : number = 76
+country.id.CYPRUS : number = 84
+country.id.DENMARK : number = 13
+country.id.ECUADOR : number = 90
+country.id.EGYPT : number = 29
+country.id.ETHIOPIA : number = 62
+country.id.FINLAND : number = 30
+country.id.FRANCE : number = 5
+country.id.GDR : number = 78
+country.id.GEORGIA : number = 16
+country.id.GERMANY : number = 6
+country.id.GHANA : number = 87
+country.id.GREECE : number = 31
+country.id.HONDURAS : number = 61
+country.id.HUNGARY : number = 32
+country.id.INDIA : number = 33
+country.id.INDONESIA : number = 60
+country.id.INSURGENTS : number = 17
+country.id.IRAN : number = 34
+country.id.IRAQ : number = 35
+country.id.ISRAEL : number = 15
+country.id.ITALIAN_SOCIAL_REPUBLIC : number = 69
+country.id.ITALY : number = 20
+country.id.JAPAN : number = 36
+country.id.JORDAN : number = 59
+country.id.KAZAKHSTAN : number = 37
+country.id.KUWAIT : number = 71
+country.id.LEBANON : number = 79
+country.id.LIBYA : number = 58
+country.id.MALAYSIA : number = 57
+country.id.MEXICO : number = 56
+country.id.MOROCCO : number = 55
+country.id.NIGERIA : number = 88
+country.id.NORTH_KOREA : number = 38
+country.id.NORWAY : number = 12
+country.id.OMAN : number = 73
+country.id.PAKISTAN : number = 39
+country.id.PERU : number = 89
+country.id.PHILIPPINES : number = 54
+country.id.POLAND : number = 40
+country.id.PORTUGAL : number = 77
+country.id.QATAR : number = 72
+country.id.ROMANIA : number = 41
+country.id.RUSSIA : number = 0
+country.id.SAUDI_ARABIA : number = 42
+country.id.SERBIA : number = 43
+country.id.SLOVAKIA : number = 44
+country.id.SLOVENIA : number = 85
+country.id.SOUTH_AFRICA : number = 75
+country.id.SOUTH_KOREA : number = 45
+country.id.SOUTH_OSETIA : number = 19
+country.id.SPAIN : number = 9
+country.id.SUDAN : number = 53
+country.id.SWEDEN : number = 46
+country.id.SWITZERLAND : number = 22
+country.id.SYRIA : number = 47
+country.id.THAILAND : number = 52
+country.id.THE_NETHERLANDS : number = 10
+country.id.THIRDREICH : number = 66
+country.id.TUNISIA : number = 51
+country.id.TURKEY : number = 3
+country.id.UK : number = 4
+country.id.UKRAINE : number = 1
+country.id.UNITED_ARAB_EMIRATES : number = 74
+country.id.UN_PEACEKEEPERS : number = 82
+country.id.USA : number = 2
+country.id.USSR : number = 68
+country.id.VENEZUELA : number = 50
+country.id.VIETNAM : number = 49
+country.id.YEMEN : number = 48
+country.id.YUGOSLAVIA : number = 67
+country.maxIndex : number = 92
+country.name : table
+country.name. : 92 other keys
+country.names : table
+country.names. : 92 other keys
+country.next : function
+country.next_index : number = 93
+db_path : string
+debug : table
+debug.debug : function
+debug.getfenv : function
+debug.gethook : function
+debug.getinfo : function
+debug.getlocal : function
+debug.getmetatable : function
+debug.setfenv : function
+debug.sethook : function
+debug.setlocal : function
+debug.setmetatable : function
+debug.traceback : function
+doZipFile : function
+dofile : function
+env : table
+env.Mode : table
+env.Mode.FINISH : number = 6
+env.Mode.INIT : number = 0
+env.Mode.SIMULATION : number = 4
+env.Mode.START : number = 2
+env.Mode.STOP : number = 5
+env.Mode.USER : number = 1
+env.crash : function
+env.error : function
+env.getMissionName : function
+env.getMode : function
+env.getValueDictByKey : function
+env.info : function
+env.mission : table
+env.mission.coalition : table
+env.mission.coalitions : table
+env.mission.currentKey : number = 10
+env.mission.date : table
+env.mission.descriptionBlueTask : string
+env.mission.descriptionNeutralsTask : string
+env.mission.descriptionRedTask : string
+env.mission.descriptionText : string
+env.mission.failures : table
+env.mission.forcedOptions : table
+env.mission.goals : table
+env.mission.groundControl : table
+env.mission.map : table
+env.mission.maxDictId : number = 5
+env.mission.pictureFileNameB : table
+env.mission.pictureFileNameN : table
+env.mission.pictureFileNameR : table
+env.mission.pictureFileNameServer : table
+env.mission.requiredModules : table
+env.mission.result : table
+env.mission.sortie : string
+env.mission.start_time : number = 43200
+env.mission.theatre : string
+env.mission.trig : table
+env.mission.triggers : table
+env.mission.trigrules : table
+env.mission.version : number = 23
+env.mission.weather : table
+env.setErrorMessageBoxEnabled : function
+env.showTraining : function
+env.warehouses : table
+env.warehouses.airports : table
+env.warehouses.warehouses : table
+env.warning : function
+error : function
+forceAttackGroup : function
+gcinfo : function
+getfenv : function
+getmetatable : function
+ipairs : function
+land : table
+land.SurfaceType : table
+land.SurfaceType.LAND : number = 1
+land.SurfaceType.ROAD : number = 4
+land.SurfaceType.RUNWAY : number = 5
+land.SurfaceType.SHALLOW_WATER : number = 2
+land.SurfaceType.WATER : number = 3
+land.findPathOnRoads : function
+land.getClosestPointOnRoads : function
+land.getHeight : function
+land.getIP : function
+land.getSurfaceHeightWithSeabed : function
+land.getSurfaceType : function
+land.isVisible : function
+land.profile : function
+load : function
+loadfile : function
+loadstring : function
+log : table
+log.ALERT : number = 2
+log.ALL : number = 255
+log.ALL_LEVELS : number = 255
+log.ASYNC : number = 0
+log.BACKUP : number = 32768
+log.DEBUG : number = 128
+log.ERROR : number = 8
+log.EXTRA_INFO : number = 512
+log.FULL : number = 271
+log.IMMEDIATE : number = 1
+log.INFO : number = 64
+log.LEVEL : number = 2
+log.MESSAGE : number = 0
+log.MODELTIME : number = 512
+log.MODULE : number = 4
+log.NO_HEADER_FOOTER : number = 16384
+log.RELIABLE : number = 32768
+log.THREAD : number = 8
+log.TIME : number = 1
+log.TIME_LOCAL : number = 129
+log.TIME_RELATIVE : number = 128
+log.TIME_UTC : number = 1
+log.TRACE : number = 256
+log.WARNING : number = 16
+log.alert : function
+log.backup : function
+log.debug : function
+log.error : function
+log.info : function
+log.set_output : function
+log.set_output_rules : function
+log.warning : function
+log.write : function
+math : table
+math.abs : function
+math.acos : function
+math.asin : function
+math.atan : function
+math.atan2 : function
+math.ceil : function
+math.cos : function
+math.cosh : function
+math.deg : function
+math.exp : function
+math.floor : function
+math.fmod : function
+math.frexp : function
+math.huge : number = inf
+math.ldexp : function
+math.log : function
+math.log10 : function
+math.max : function
+math.min : function
+math.mod : function
+math.modf : function
+math.pi : number = 3.1415926535898
+math.pow : function
+math.rad : function
+math.random : function
+math.sin : function
+math.sinh : function
+math.sqrt : function
+math.tan : function
+math.tanh : function
+merge_all_units_to_AGGRESSORS : function
+missionCommands : table
+missionCommands.addCommand : function
+missionCommands.addCommandForCoalition : function
+missionCommands.addCommandForGroup : function
+missionCommands.addSubMenu : function
+missionCommands.addSubMenuForCoalition : function
+missionCommands.addSubMenuForGroup : function
+missionCommands.doAction : function
+missionCommands.removeItem : function
+missionCommands.removeItemForCoalition : function
+missionCommands.removeItemForGroup : function
+module : function
+net : table
+net.CHAT_ALL : number = -1
+net.CHAT_TEAM : number = -2
+net.ERR_BAD_CALLSIGN : number = 102
+net.ERR_BANNED : number = 101
+net.ERR_CONNECT_FAILED : number = 2
+net.ERR_DENIED_TRIAL_ONLY : number = 106
+net.ERR_INVALID_ADDRESS : number = 1
+net.ERR_INVALID_PASSWORD : number = 100
+net.ERR_KICKED : number = 104
+net.ERR_NOT_ALLOWED : number = 107
+net.ERR_PROTOCOL_ERROR : number = 4
+net.ERR_REFUSED : number = 105
+net.ERR_SERVER_FULL : number = 108
+net.ERR_TAINTED_CLIENT : number = 103
+net.ERR_THATS_OKAY : number = 0
+net.ERR_TIMEOUT : number = 5
+net.ERR_WRONG_VERSION : number = 3
+net.GAME_MODE_CONQUEST : number = 2
+net.GAME_MODE_LAST_MAN_STANDING : number = 1
+net.GAME_MODE_MISSION : number = 0
+net.GAME_MODE_TEAM_DEATH_MATCH : number = 3
+net.PS_CAR : number = 2
+net.PS_CRASH : number = 1
+net.PS_EJECT : number = 7
+net.PS_LAND : number = 6
+net.PS_PING : number = 0
+net.PS_PLANE : number = 3
+net.PS_SCORE : number = 5
+net.PS_SHIP : number = 4
+net.RESUME_MANUAL : number = 0
+net.RESUME_ON_LOAD : number = 1
+net.RESUME_WITH_CLIENTS : number = 2
+net.dostring_in : function
+net.force_player_slot : function
+net.get_coalition : function
+net.get_my_player_id : function
+net.get_name : function
+net.get_player_info : function
+net.get_player_list : function
+net.get_server_host : function
+net.get_server_id : function
+net.get_slot : function
+net.get_stat : function
+net.is_loopback_address : function
+net.is_private_address : function
+net.json2lua : function
+net.kick : function
+net.log : function
+net.lua2json : function
+net.recv_chat : function
+net.resetJoinCooldownEndForAll : function
+net.resetJoinCooldownEndForPlayer : function
+net.send_chat : function
+net.send_chat_to : function
+net.set_coalition : function
+net.set_name : function
+net.set_slot : function
+net.trace : function
+newproxy : function
+next : function
+pairs : function
+pcall : function
+print : function
+radio : table
+radio.modulation : table
+radio.modulation.AM : number = 0
+radio.modulation.FM : number = 1
+rawequal : function
+rawget : function
+rawset : function
+safe_require : function
+scorelist : table
+select : function
+setFlightCurrentWP : function
+setfenv : function
+setmetatable : function
+string : table
+string.byte : function
+string.char : function
+string.dump : function
+string.find : function
+string.format : function
+string.gfind : function
+string.gmatch : function
+string.gsub : function
+string.len : function
+string.lower : function
+string.match : function
+string.rep : function
+string.reverse : function
+string.sub : function
+string.upper : function
+table : table
+table.concat : function
+table.foreach : function
+table.foreachi : function
+table.getn : function
+table.insert : function
+table.maxn : function
+table.remove : function
+table.setn : function
+table.sort : function
+timer : table
+timer.getAbsTime : function
+timer.getPause : function
+timer.getTime : function
+timer.getTime0 : function
+timer.removeFunction : function
+timer.scheduleFunction : function
+timer.setFunctionTime : function
+tonumber : function
+tostring : function
+trigger : table
+trigger.action : table
+trigger.action.activateGroup : function
+trigger.action.addOtherCommand : function
+trigger.action.addOtherCommandForCoalition : function
+trigger.action.addOtherCommandForGroup : function
+trigger.action.arrowToAll : function
+trigger.action.circleToAll : function
+trigger.action.ctfColorTag : function
+trigger.action.deactivateGroup : function
+trigger.action.effectSmokeBig : function
+trigger.action.effectSmokeStop : function
+trigger.action.explosion : function
+trigger.action.groupContinueMoving : function
+trigger.action.groupStopMoving : function
+trigger.action.illuminationBomb : function
+trigger.action.lineToAll : function
+trigger.action.markToAll : function
+trigger.action.markToCoalition : function
+trigger.action.markToGroup : function
+trigger.action.markupToAll : function
+trigger.action.outSound : function
+trigger.action.outSoundForCoalition : function
+trigger.action.outSoundForCountry : function
+trigger.action.outSoundForGroup : function
+trigger.action.outSoundForUnit : function
+trigger.action.outSoundStop : function
+trigger.action.outText : function
+trigger.action.outTextForCoalition : function
+trigger.action.outTextForCountry : function
+trigger.action.outTextForGroup : function
+trigger.action.outTextForUnit : function
+trigger.action.pushAITask : function
+trigger.action.quadToAll : function
+trigger.action.radioTransmission : function
+trigger.action.rectToAll : function
+trigger.action.removeMark : function
+trigger.action.removeOtherCommand : function
+trigger.action.removeOtherCommandForCoalition : function
+trigger.action.removeOtherCommandForGroup : function
+trigger.action.setAITask : function
+trigger.action.setGroupAIOff : function
+trigger.action.setGroupAIOn : function
+trigger.action.setMarkupColor : function
+trigger.action.setMarkupColorFill : function
+trigger.action.setMarkupFontSize : function
+trigger.action.setMarkupPositionEnd : function
+trigger.action.setMarkupPositionStart : function
+trigger.action.setMarkupRadius : function
+trigger.action.setMarkupText : function
+trigger.action.setMarkupTypeLine : function
+trigger.action.setUnitInternalCargo : function
+trigger.action.setUserFlag : function
+trigger.action.signalFlare : function
+trigger.action.smoke : function
+trigger.action.stopRadioTransmission : function
+trigger.action.textToAll : function
+trigger.action.userEvent : function
+trigger.className_ : string
+trigger.flareColor : table
+trigger.flareColor.Green : number = 0
+trigger.flareColor.Red : number = 1
+trigger.flareColor.White : number = 2
+trigger.flareColor.Yellow : number = 3
+trigger.misc : table
+trigger.misc.addTrigger : function
+trigger.misc.addZone : function
+trigger.misc.getUserFlag : function
+trigger.misc.getZone : function
+trigger.smokeColor : table
+trigger.smokeColor.Blue : number = 4
+trigger.smokeColor.Green : number = 0
+trigger.smokeColor.Orange : number = 3
+trigger.smokeColor.Red : number = 1
+trigger.smokeColor.White : number = 2
+troopsPath : string
+type : function
+unpack : function
+world : table
+world.BirthPlace : table
+world.BirthPlace.wsBirthPlace_Air : number = 1
+world.BirthPlace.wsBirthPlace_Heliport_Cold : number = 11
+world.BirthPlace.wsBirthPlace_Heliport_Hot : number = 10
+world.BirthPlace.wsBirthPlace_Park : number = 5
+world.BirthPlace.wsBirthPlace_RunWay : number = 4
+world.BirthPlace.wsBirthPlace_Ship : number = 3
+world.BirthPlace.wsBirthPlace_Ship_Cold : number = 12
+world.BirthPlace.wsBirthPlace_Ship_Hot : number = 13
+world.VolumeType : table
+world.VolumeType.BOX : number = 1
+world.VolumeType.PYRAMID : number = 3
+world.VolumeType.SEGMENT : number = 0
+world.VolumeType.SPHERE : number = 2
+world.addEventHandler : function
+world.event : table
+world.event.S_EVENT_AI_ABORT_MISSION : number = 38
+world.event.S_EVENT_BASE_CAPTURED : number = 10
+world.event.S_EVENT_BDA : number = 37
+world.event.S_EVENT_BIRTH : number = 15
+world.event.S_EVENT_CRASH : number = 5
+world.event.S_EVENT_DAYNIGHT : number = 39
+world.event.S_EVENT_DEAD : number = 8
+world.event.S_EVENT_DETAILED_FAILURE : number = 17
+world.event.S_EVENT_DISCARD_CHAIR_AFTER_EJECTION : number = 33
+world.event.S_EVENT_EJECTION : number = 6
+world.event.S_EVENT_EMERGENCY_LANDING : number = 43
+world.event.S_EVENT_ENGINE_SHUTDOWN : number = 19
+world.event.S_EVENT_ENGINE_STARTUP : number = 18
+world.event.S_EVENT_FLIGHT_TIME : number = 40
+world.event.S_EVENT_GROUP_CHANGE_OPTION : number = 61
+world.event.S_EVENT_HIT : number = 2
+world.event.S_EVENT_HUMAN_AIRCRAFT_REPAIR_FINISH : number = 60
+world.event.S_EVENT_HUMAN_AIRCRAFT_REPAIR_START : number = 59
+world.event.S_EVENT_HUMAN_FAILURE : number = 16
+world.event.S_EVENT_INVALID : number = 0
+world.event.S_EVENT_KILL : number = 28
+world.event.S_EVENT_LAND : number = 4
+world.event.S_EVENT_LANDING_AFTER_EJECTION : number = 31
+world.event.S_EVENT_LANDING_QUALITY_MARK : number = 36
+world.event.S_EVENT_MAC_EXTRA_SCORE : number = 51
+world.event.S_EVENT_MAC_LMS_RESTART : number = 56
+world.event.S_EVENT_MARK_ADDED : number = 25
+world.event.S_EVENT_MARK_CHANGE : number = 26
+world.event.S_EVENT_MARK_REMOVED : number = 27
+world.event.S_EVENT_MAX : number = 62
+world.event.S_EVENT_MISSION_END : number = 12
+world.event.S_EVENT_MISSION_RESTART : number = 52
+world.event.S_EVENT_MISSION_START : number = 11
+world.event.S_EVENT_MISSION_WINNER : number = 53
+world.event.S_EVENT_PARATROOPER_LENDING : number = 32
+world.event.S_EVENT_PILOT_DEAD : number = 9
+world.event.S_EVENT_PLAYER_CAPTURE_AIRFIELD : number = 42
+world.event.S_EVENT_PLAYER_COMMENT : number = 22
+world.event.S_EVENT_PLAYER_ENTER_UNIT : number = 20
+world.event.S_EVENT_PLAYER_LEAVE_UNIT : number = 21
+world.event.S_EVENT_PLAYER_SELF_KILL_PILOT : number = 41
+world.event.S_EVENT_REFUELING : number = 7
+world.event.S_EVENT_REFUELING_STOP : number = 14
+world.event.S_EVENT_RUNWAY_TAKEOFF : number = 54
+world.event.S_EVENT_RUNWAY_TOUCH : number = 55
+world.event.S_EVENT_SCORE : number = 29
+world.event.S_EVENT_SHOOTING_END : number = 24
+world.event.S_EVENT_SHOOTING_START : number = 23
+world.event.S_EVENT_SHOT : number = 1
+world.event.S_EVENT_SIMULATION_FREEZE : number = 57
+world.event.S_EVENT_SIMULATION_START : number = 46
+world.event.S_EVENT_SIMULATION_UNFREEZE : number = 58
+world.event.S_EVENT_TAKEOFF : number = 3
+world.event.S_EVENT_TOOK_CONTROL : number = 13
+world.event.S_EVENT_TRIGGER_ZONE : number = 35
+world.event.S_EVENT_UNIT_CREATE_TASK : number = 44
+world.event.S_EVENT_UNIT_DELETE_TASK : number = 45
+world.event.S_EVENT_UNIT_LOST : number = 30
+world.event.S_EVENT_UNIT_TASK_COMPLETE : number = 49
+world.event.S_EVENT_UNIT_TASK_STAGE : number = 50
+world.event.S_EVENT_WEAPON_ADD : number = 34
+world.event.S_EVENT_WEAPON_DROP : number = 48
+world.event.S_EVENT_WEAPON_REARM : number = 47
+world.eventHandlers : table
+world.getAirbases : function
+world.getMarkPanels : function
+world.getPersistenceData : function
+world.getPlayer : function
+world.onEvent : function
+world.persistenceHandlers : table
+world.removeEventHandler : function
+world.removeJunk : function
+world.runPersistenceHandlers : function
+world.searchObjects : function
+world.setPersistenceHandler : function
+world.setPersistencePassthrough : function
+world.weather : table
+world.weather.getFogThickness : function
+world.weather.getFogVisibilityDistance : function
+world.weather.setFogAnimation : function
+world.weather.setFogThickness : function
+world.weather.setFogVisibilityDistance : function
+xpcall : function

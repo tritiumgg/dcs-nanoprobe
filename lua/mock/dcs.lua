@@ -1,62 +1,72 @@
--- Strict mock DCS host, version 0, for stock Lua 5.1 with no DCS present.
+-- Strict mock DCS host for stock Lua 5.1 with no DCS present.
 --
--- It gives a test two Lua states, `gui` (where hooks run) and `server`, as
--- separate global tables that read through to the real base library. Each
--- DCS namespace in a state is strict: reading a name that is not in
--- lua/mock/listing.lua raises, and reading a listed name the mock does not
--- implement raises a different error.
+-- It gives a test DCS's Lua states as separate global tables: `hook` (where
+-- DCS runs the files in Scripts/Hooks), `gui`, `server`, `mission`, `config`,
+-- and, while a mission is loaded, `export` and `sse` (the sandboxed mission
+-- scripting environment). `hook` and `sse` have no name in DCS. A state holds exactly the globals its listing in
+-- lua/mock/api/ names, so `io` is absent where DCS removes it. Every DCS
+-- table is strict: reading a name that is not in the listing raises, and
+-- calling a listed function the mock does not implement raises a different
+-- error. lua/mock/world.lua adds a small simulated world to the states that
+-- have the scripting API.
 --
 -- Quirks it reproduces, each with its evidence tag:
---   - net.dostring_in takes exactly a state name and a string (ED-CODE).
---   - A chunk that fails to compile or raises returns its error text as an
---     ordinary string (PRIOR, from dcs-bridge; probed in S2).
+--   - net.dostring_in takes exactly a state name and a string (ED-CODE). It
+--     returns two values: a string, and whether the chunk ran. The string is
+--     the chunk's first value when that is a string or a number, and empty
+--     for any other value. A chunk that fails to compile or raises gives its
+--     error text and false; an error value that is not a string gives an
+--     empty string (LIVE).
+--   - A hook's globals are not the `gui` state's (LIVE, dedicated server).
 --   - An unknown state name returns nil; `userhooks` is not a state (LIVE).
 --   - `server` and `scripting` are the same state (LIVE).
 --   - DCS.setUserCallbacks is additive (LIVE).
---   - A file handle from io.open in the gui state has no `seek` (LIVE).
---   - Timers run once per frame at most, on a 1 ms model-time quantum (LIVE).
+--   - A file handle from io.open in the hook state has no `seek`, and its
+--     `write` returns nil on success (LIVE).
+--   - A timer runs at most once per millisecond of model time, and a frame
+--     runs every timer that came due in it, so a timer that asks for less
+--     runs in bursts (LIVE).
 --   - Timers do not run and model time stands still while paused (LIVE).
 --   - A mission load clears timers and keeps event handlers, and model time
 --     returns to 0 (LIVE).
 --   - No onSimulationFrame arrives during a mission load (LOG).
 --   - A mission can start paused with no pause callback, and a resume can
 --     arrive with no pause before it (LOG).
+--   - DCS.setPause takes effect on a later frame (LIVE).
 --   - Event dispatch has no pcall: a handler that raises stops every later
 --     handler from seeing that event, and the error reaches the caller
---     (ED-CODE, Scripts/World/EventHandlers.lua).
+--     (ED-CODE, Scripts/World/EventHandlers.lua). DCS walks the handlers
+--     with pairs, in no stated order; the mock walks them in the order they
+--     were added, so a test is repeatable.
+--   - a_do_script exists only while a mission is loaded (PRIOR), and hands
+--     back what the chunk returned shifted by one (LIVE).
 -- Unmeasured behaviour is marked UNVERIFIED where the mock picks one.
 --
 -- Usage:
 --   local mock = dofile('lua/mock/dcs.lua')
 --   local host = mock.new({ writedir = '/tmp/x/' })
---   host:run('gui', 'path/to/hook.lua')
+--   host:run('hook', 'path/to/hook.lua')
 --   host:load_mission('m')
 --   host:frame(1 / 60)
 
 local here = debug.getinfo(1, 'S').source:match('^@(.*[/\\])') or './'
 local listing = dofile(here .. 'listing.lua')
+local world = dofile(here .. 'world.lua')
 
 local M = {}
 
 M.listing = listing
 
--- A namespace table that raises on a read of a missing name. `impl` holds the
--- mocked members; `names` the listed ones; `extra` constants that are always
--- present. Writes are allowed, as DCS allows them.
-local function strict(state, namespace, names, impl)
-  local listed = {}
-  for _, name in ipairs(names) do
-    listed[name] = true
-  end
-  return setmetatable(impl, {
-    __index = function(_, key)
-      local where = state .. ' ' .. namespace .. '.' .. tostring(key)
-      if listed[key] then
-        error('mock: ' .. where .. ' is in the DCS API but not mocked', 2)
-      end
-      error('mock: ' .. where .. ' is not in the listing for DCS ' .. listing.build, 2)
-    end,
-  })
+-- The globals of stock Lua 5.1. A state gets the real one for each of these
+-- that its listing names.
+local BASE = {}
+for _, name in ipairs({
+  '_VERSION', 'assert', 'collectgarbage', 'coroutine', 'debug', 'dofile', 'error', 'gcinfo', 'getfenv',
+  'getmetatable', 'io', 'ipairs', 'load', 'loadfile', 'loadstring', 'math', 'module', 'newproxy', 'next',
+  'os', 'package', 'pairs', 'pcall', 'print', 'rawequal', 'rawget', 'rawset', 'require', 'select',
+  'setfenv', 'setmetatable', 'string', 'table', 'tonumber', 'tostring', 'type', 'unpack', 'xpcall',
+}) do
+  BASE[name] = true
 end
 
 local function quote(path)
@@ -66,11 +76,13 @@ end
 -- Create a host. `o` holds:
 --   writedir    the Saved Games profile, with a trailing slash
 --   start_time  mission start, seconds after midnight (default 43200)
+--   theatre     the map's name (default Caucasus)
 function M.new(o)
   o = o or {}
   local host = {
     writedir = o.writedir or './',
     start_time = o.start_time or 43200,
+    theatre = o.theatre or 'Caucasus',
     real = 0,
     model = 0,
     paused = false,
@@ -87,44 +99,132 @@ function M.new(o)
     pending_load = nil,
     timers = {},
     next_timer = 1,
+    -- The server state's event handlers, in the order they were added.
     handlers = {},
     states = {},
+    listing = listing,
+    -- Listed globals a state lacks for now. a_do_script exists only while
+    -- a mission is loaded (PRIOR).
+    absent = { mission = { a_do_script = true } },
   }
 
+  -- A strict table for the DCS table at `path` in `state`. `impl` holds the
+  -- mocked members; a table in it whose members the listing names becomes
+  -- strict too. A listed number or boolean reads as its listed value.
+  local function namespace(state, path, impl)
+    local names = listing.states[state]
+    impl = impl or {}
+    -- Listed numbers and booleans are real members, so pairs finds them.
+    for _, key in ipairs(names.members[path] or {}) do
+      local value = names.values[path .. '.' .. key]
+      if value ~= nil and rawget(impl, key) == nil then
+        rawset(impl, key, value)
+      end
+    end
+    for key, value in pairs(impl) do
+      if type(value) == 'table' and getmetatable(value) == nil and names.members[path .. '.' .. key] then
+        namespace(state, path .. '.' .. key, value)
+      end
+    end
+    return setmetatable(impl, {
+      __index = function(t, key)
+        local full = path .. '.' .. tostring(key)
+        local where = state .. ' ' .. full
+        local kind = names.kinds[full]
+        if kind == 'function' then
+          -- Present, so a test of its type passes; calling it raises.
+          local stub = function()
+            error('mock: ' .. where .. ' is in the DCS API but not mocked', 2)
+          end
+          rawset(t, key, stub)
+          return stub
+        elseif kind == 'table' then
+          local alias = names.alias[full]
+          local nested = alias and host.states[state][alias] or namespace(state, full, {})
+          rawset(t, key, nested)
+          return nested
+        elseif kind == 'number' or kind == 'boolean' then
+          return names.values[full]
+        elseif kind then
+          error('mock: ' .. where .. ' is a ' .. kind .. ' the mock does not hold', 2)
+        end
+        error('mock: ' .. where .. ' is not in the listing for DCS ' .. listing.build, 2)
+      end,
+    })
+  end
+  host.namespace = namespace
+
+  -- A state: a global table holding what its listing names. A base-library
+  -- name reads through to the real one. A DCS table is strict, and empty
+  -- until the mock gives it members.
   local function new_state(name)
-    local state = setmetatable({}, { __index = _G })
+    local names = listing.states[name]
+    local state
+    state = setmetatable({}, {
+      __index = function(_, key)
+        local kind = names.globals[key]
+        if kind == nil or (host.absent[name] and host.absent[name][key]) then
+          return nil
+        end
+        if BASE[key] then
+          return _G[key]
+        end
+        -- A second name for a table follows the first, whatever the mock
+        -- puts there, so it is never stored.
+        if names.alias[key] then
+          return state[names.alias[key]]
+        end
+        local value
+        if kind == 'table' then
+          value = namespace(name, key, {})
+        elseif kind == 'function' then
+          value = function()
+            error('mock: ' .. name .. ' ' .. key .. ' is in the DCS API but not mocked', 2)
+          end
+        elseif kind == 'number' or kind == 'boolean' then
+          value = names.values[key]
+        else
+          value = '<' .. kind .. '>'
+        end
+        rawset(state, key, value)
+        return value
+      end,
+    })
     state._G = state
     -- Stock dofile and loadfile compile against the real globals, so a file
     -- they ran would set its globals outside the state.
-    state.loadfile = function(path)
-      local chunk, err = loadfile(path)
-      if chunk then
-        setfenv(chunk, state)
+    if names.globals.loadfile then
+      state.loadfile = function(path)
+        local chunk, err = loadfile(path)
+        if chunk then
+          setfenv(chunk, state)
+        end
+        return chunk, err
       end
-      return chunk, err
-    end
-    state.dofile = function(path)
-      return assert(state.loadfile(path))()
-    end
-    state.loadstring = function(s, chunkname)
-      local chunk, err = loadstring(s, chunkname)
-      if chunk then
-        setfenv(chunk, state)
+      state.dofile = function(path)
+        return assert(state.loadfile(path))()
       end
-      return chunk, err
+    end
+    if names.globals.loadstring then
+      state.loadstring = function(s, chunkname)
+        local chunk, err = loadstring(s, chunkname)
+        if chunk then
+          setfenv(chunk, state)
+        end
+        return chunk, err
+      end
     end
     host.states[name] = state
+    -- Make every listed global a real member now, so pairs over the state
+    -- finds the same names before and after code has read them.
+    for key in pairs(names.globals) do
+      local _ = state[key]
+    end
     return state
   end
 
   local function make_log(state)
-    return strict(state, 'log', listing[state].log, {
-      -- PRIOR values from the listing.
-      ALERT = 2,
-      ERROR = 8,
-      WARNING = 16,
-      INFO = 64,
-      DEBUG = 128,
+    return namespace(state, 'log', {
       write = function(subsystem, level, message)
         host.dcslog[#host.dcslog + 1] = {
           state = state,
@@ -136,6 +236,7 @@ function M.new(o)
     })
   end
 
+  -- net.dostring_in returns a string and whether the chunk ran (LIVE).
   local function dostring_in(target, chunk, ...)
     if select('#', ...) > 0 then
       error('mock: net.dostring_in takes a state name and a string, and no more', 2)
@@ -147,33 +248,33 @@ function M.new(o)
     if target == 'scripting' then
       target = 'server'
     end
-    local state = host.states[target]
+    -- Neither the hook state nor the sandboxed mission scripting
+    -- environment has a name here (LIVE).
+    local state = target ~= 'sse' and target ~= 'hook' and host.states[target] or nil
     if not state then
-      if target == 'mission' or target == 'export' or target == 'config' then
-        error('mock: the ' .. target .. ' state is not mocked', 2)
-      end
       return nil
     end
     local fn, err = loadstring(chunk)
     if not fn then
-      return err
+      return err, false
     end
     setfenv(fn, state)
     local ok, result = pcall(fn)
-    if not ok then
-      return tostring(result)
-    end
-    -- UNVERIFIED: the return of a non-string, and of nil. S2 probes both.
-    if result == nil then
-      return nil
-    end
-    return tostring(result)
+    local text = (type(result) == 'string' or type(result) == 'number') and tostring(result) or ''
+    return text, ok
   end
 
-  -- The gui state.
-  local gui = new_state('gui')
-  gui.log = make_log('gui')
-  gui.lfs = strict('gui', 'lfs', listing.gui.lfs, {
+  -- Real time moves 100 ns on every read, so code that waits for the clock
+  -- to change ends.
+  local function real_time()
+    host.real = host.real + 1e-7
+    return host.real
+  end
+
+  -- The hook state: where DCS runs the files in Scripts/Hooks.
+  local hook = new_state('hook')
+  hook.log = make_log('hook')
+  hook.lfs = namespace('hook', 'lfs', {
     writedir = function()
       return host.writedir
     end,
@@ -182,6 +283,22 @@ function M.new(o)
         return true
       end
       return nil, 'File exists'
+    end,
+    dir = function(path)
+      local names = {}
+      local pipe = io.popen('ls -a ' .. quote(path) .. ' 2>/dev/null')
+      for name in pipe:lines() do
+        names[#names + 1] = name
+      end
+      pipe:close()
+      if #names == 0 then
+        error('cannot open ' .. path, 2)
+      end
+      local i = 0
+      return function()
+        i = i + 1
+        return names[i]
+      end
     end,
     -- Only `mode` and `size`. UNVERIFIED: DCS's other fields.
     attributes = function(path, field)
@@ -197,11 +314,11 @@ function M.new(o)
       return attributes
     end,
   })
-  -- A file handle in the gui state has no `seek`, and its `write` returns
+  -- A file handle in the hook state has no `seek`, and its `write` returns
   -- nil on success (LIVE, DCS 2.9.31.29434 dedicated server under Wine
   -- 10.0). Its other methods, and what `write` returns on an error, are
   -- UNVERIFIED; the mock keeps stock behaviour for them.
-  gui.io = setmetatable({
+  hook.io = setmetatable({
     open = function(path, mode)
       local file, err = io.open(path, mode)
       if not file then
@@ -223,27 +340,47 @@ function M.new(o)
       return handle
     end,
   }, { __index = io })
-  gui.DCS = strict('gui', 'DCS', listing.gui.DCS, {
-    getRealTime = function()
-      return host.real
-    end,
+  hook.DCS = namespace('hook', 'DCS', {
+    getRealTime = real_time,
     getModelTime = function()
       return host.model
     end,
     getPause = function()
       return host.paused
     end,
+    -- Takes effect at the next frame (LIVE). UNVERIFIED: whether the pause
+    -- or resume callback follows; the mock sends it.
+    setPause = function(paused)
+      host.pending_pause = paused and true or false
+    end,
     getMissionName = function()
       return host.mission
     end,
+    getMissionFilename = function()
+      return host.mission_file
+    end,
+    -- Nil while onSimulationStop runs (PRIOR).
+    getMissionTheatre = function()
+      if host.stopping or not host.mission then
+        return nil
+      end
+      return host.theatre
+    end,
     isServer = function()
       return true
+    end,
+    isMultiplayer = function()
+      return true
+    end,
+    -- UNVERIFIED: the mock answers nil for an install with nothing tainted.
+    getTaintedFiles = function()
+      return nil
     end,
     setUserCallbacks = function(callbacks)
       host.callbacks[#host.callbacks + 1] = callbacks
     end,
   })
-  gui.net = strict('gui', 'net', listing.gui.net, {
+  hook.net = namespace('hook', 'net', {
     dostring_in = dostring_in,
     -- The load happens at the start of the next frame, not inside the call.
     -- It returned 0 for a mission that then loaded, and the load began within
@@ -258,17 +395,16 @@ function M.new(o)
       return 0
     end,
     log = function(message)
-      gui.log.write('NET', gui.log.INFO, message)
+      hook.log.write('NET', hook.log.INFO, message)
     end,
   })
 
-  -- The server state.
-  local server = new_state('server')
-  server.log = make_log('server')
-  server.DCS = strict('server', 'DCS', listing.server.DCS, {
-    getRealTime = function()
-      return host.real
-    end,
+  -- The gui state. On a dedicated server its globals are not the hook's: a
+  -- global set in one is absent from the other (LIVE).
+  local gui = new_state('gui')
+  gui.log = make_log('gui')
+  gui.DCS = namespace('gui', 'DCS', {
+    getRealTime = real_time,
     getModelTime = function()
       return host.model
     end,
@@ -276,7 +412,25 @@ function M.new(o)
       return host.paused
     end,
   })
-  server.timer = strict('server', 'timer', listing.server.timer, {
+
+  -- The server state.
+  local server = new_state('server')
+  server.log = make_log('server')
+  server.lfs = namespace('server', 'lfs', {
+    writedir = function()
+      return host.writedir
+    end,
+  })
+  server.DCS = namespace('server', 'DCS', {
+    getRealTime = real_time,
+    getModelTime = function()
+      return host.model
+    end,
+    getPause = function()
+      return host.paused
+    end,
+  })
+  server.timer = namespace('server', 'timer', {
     getTime = function()
       return host.model
     end,
@@ -295,7 +449,11 @@ function M.new(o)
       host.timers[id] = { fn = fn, arg = arg, time = time }
       return id
     end,
+    -- Removing a timer that has run, or was never scheduled, raises (LIVE).
     removeFunction = function(id)
+      if not host.timers[id] then
+        error('Parameter #1 (function reference number) is invalid', 2)
+      end
       host.timers[id] = nil
     end,
     setFunctionTime = function(id, time)
@@ -304,11 +462,19 @@ function M.new(o)
       end
     end,
   })
-  server.world = strict('server', 'world', listing.server.world, {
+  -- ED's own Lua, Scripts/World/EventHandlers.lua, defines these three and
+  -- the table (ED-CODE).
+  local eventHandlers = {}
+  server.world = namespace('server', 'world', {
+    eventHandlers = eventHandlers,
     addEventHandler = function(handler)
-      host.handlers[#host.handlers + 1] = handler
+      if not eventHandlers[handler] then
+        host.handlers[#host.handlers + 1] = handler
+      end
+      eventHandlers[handler] = handler
     end,
     removeEventHandler = function(handler)
+      eventHandlers[handler] = nil
       for i, h in ipairs(host.handlers) do
         if h == handler then
           table.remove(host.handlers, i)
@@ -316,8 +482,13 @@ function M.new(o)
         end
       end
     end,
+    onEvent = function(event)
+      for _, handler in ipairs({ unpack(host.handlers) }) do
+        handler:onEvent(event)
+      end
+    end,
   })
-  server.env = strict('server', 'env', listing.server.env, {
+  server.env = namespace('server', 'env', {
     info = function(message)
       server.log.write('SCRIPTING', server.log.INFO, message)
     end,
@@ -331,8 +502,41 @@ function M.new(o)
       return host.mission
     end,
   })
-  -- `net` is nil in the server state (PRIOR, listing).
 
+  -- The mission state. `a_do_script` runs a chunk in the sandboxed mission
+  -- scripting environment and passes its other arguments to the chunk.
+  local mission = new_state('mission')
+  local function a_do_script(source, ...)
+    local fn, err = loadstring(source)
+    if not fn then
+      error(err, 2)
+    end
+    setfenv(fn, host.states.sse)
+    local function shift(...)
+      local results = { ... }
+      return nil, unpack(results, 1, math.max(select('#', ...) - 1, 0))
+    end
+    return shift(fn(...))
+  end
+
+  -- The config state. Neither gate key is set (LIVE on an unconfigured
+  -- install), so `net` holds only what the listing names.
+  new_state('config')
+
+  world.install(host, 'hook')
+  world.install(host, 'server')
+  world.install(host, 'mission')
+
+  -- The sandboxed mission scripting environment and the export state are
+  -- made again at every mission load (LIVE). net.dostring_in is a function
+  -- in the sandbox (LIVE).
+  local function new_mission_states()
+    local sse = new_state('sse')
+    sse.net = namespace('sse', 'net', { dostring_in = dostring_in })
+    world.install(host, 'sse')
+    new_state('export')
+    rawset(mission, 'a_do_script', a_do_script)
+  end
   -- Run a file in a state, with arguments. Returns what it returns.
   function host:run(state, path, ...)
     local chunk = assert(self.states[state].loadfile(path))
@@ -351,22 +555,40 @@ function M.new(o)
     end
   end
 
-  -- Load a mission. `options.paused` starts it paused with no pause
-  -- callback, as a server with pause_on_load does.
+  -- Load a mission. `name` is a mission name or the path of a .miz.
+  -- `options.paused` starts it paused with no pause callback, as a server
+  -- with no client does. The callbacks come in the order a dedicated server
+  -- made them (LIVE): the server's own player stops and starts with the
+  -- mission.
   function host:load_mission(name, options)
     options = options or {}
     if self.mission then
+      -- A handler added before the load sees the mission end and the next
+      -- one start (LIVE).
+      self:event({ id = server.world.event.S_EVENT_MISSION_END, time = self.model })
+      self.stopping = true
       self:callback('onSimulationStop')
+      self:callback('onPlayerStop', 1)
+      self.stopping = false
     end
     self.loading = true
-    self.mission = name
+    self.mission_file = name:match('%.miz$') and name or (self.writedir .. 'Missions/' .. name .. '.miz')
+    self.mission = name:match('([^/\\]+)%.miz$') or name
+    self:callback('onNetMissionChanged', self.mission)
     self:callback('onMissionLoadBegin')
     self.timers = {}
+    -- UNVERIFIED: whether DCS gives a timer an ID that a cleared timer had.
+    -- The mock does, because that is the case code must survive.
+    self.next_timer = 1
     self.model = 0
+    self.sim:clear()
+    new_mission_states()
+    self:callback('onPlayerStart', 1)
     self:callback('onMissionLoadEnd')
     self.loading = false
     self.paused = options.paused and true or false
     self:callback('onSimulationStart')
+    self:event({ id = server.world.event.S_EVENT_MISSION_START, time = 0 })
   end
 
   -- Pause or resume. `options.silent` skips the callback.
@@ -377,10 +599,39 @@ function M.new(o)
     end
   end
 
+  -- Run every timer that is due, earliest first. A timer that returns a
+  -- number runs again at that time, and no sooner than a millisecond after
+  -- the time it was due.
+  local function run_timers(self)
+    for _ = 1, 100000 do
+      local next_id
+      for id, t in pairs(self.timers) do
+        if t.time <= self.model + 1e-9 and (not next_id or t.time < self.timers[next_id].time
+          or (t.time == self.timers[next_id].time and id < next_id)) then
+          next_id = id
+        end
+      end
+      if not next_id then
+        return
+      end
+      local t = self.timers[next_id]
+      self.timers[next_id] = nil
+      local due = math.max(t.time, 0)
+      -- UNVERIFIED: what DCS does with a raising timer function. The mock
+      -- records the error and drops the timer.
+      local ok, next_time = pcall(t.fn, t.arg, due)
+      if not ok then
+        self.timer_errors[#self.timer_errors + 1] = next_time
+      elseif type(next_time) == 'number' and self.timers[next_id] == nil then
+        t.time = math.max(next_time, due + 0.001)
+        self.timers[next_id] = t
+      end
+    end
+    error('mock: a timer ran 100,000 times in one frame')
+  end
+
   -- Advance one frame of `dt` seconds of real time. Model time moves only
-  -- when a mission runs and is not paused. Due timers run once each, in
-  -- schedule order; a timer that returns a number is rescheduled for that
-  -- time, at the earliest the next frame.
+  -- when a mission runs and is not paused.
   function host:frame(dt)
     dt = dt or (1 / 60)
     self.real = self.real + dt
@@ -393,38 +644,33 @@ function M.new(o)
     if self.loading then
       return
     end
+    if self.pending_pause ~= nil then
+      local paused = self.pending_pause
+      self.pending_pause = nil
+      if paused ~= self.paused then
+        self:set_pause(paused)
+      end
+    end
     if self.mission and not self.paused then
       self.model = self.model + dt
-      local due = {}
-      for id, t in pairs(self.timers) do
-        if t.time <= self.model + 0.0005 then
-          due[#due + 1] = id
-        end
-      end
-      table.sort(due)
-      for _, id in ipairs(due) do
-        local t = self.timers[id]
-        if t then
-          self.timers[id] = nil
-          -- UNVERIFIED: what DCS does with a raising timer function. The
-          -- mock records the error and drops the timer.
-          local ok, next_time = pcall(t.fn, t.arg, self.model)
-          if not ok then
-            self.timer_errors[#self.timer_errors + 1] = next_time
-          elseif type(next_time) == 'number' then
-            t.time = math.max(next_time, self.model + 0.001)
-            self.timers[id] = t
-          end
-        end
-      end
+      self.sim:step(dt)
+    end
+    if self.mission then
+      self.sim:flush()
+    end
+    if self.mission and not self.paused then
+      run_timers(self)
     end
     self:callback('onSimulationFrame')
   end
 
-  -- Dispatch an event to the server state's handlers, with no pcall.
+  -- Dispatch an event to the server state's handlers and then the
+  -- sandbox's, with no pcall.
   function host:event(event)
-    for _, handler in ipairs(self.handlers) do
-      handler:onEvent(event)
+    server.world.onEvent(event)
+    local sse = self.states.sse
+    if sse then
+      sse.world.onEvent(event)
     end
   end
 

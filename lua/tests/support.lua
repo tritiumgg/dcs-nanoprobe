@@ -69,6 +69,133 @@ function S.raises(needle, fn, ...)
   return err
 end
 
+-- Decode JSON text into Lua values. `null` becomes S.null, so an array keeps
+-- its length. Raises on text that is not JSON, which makes it the check that
+-- an encoder wrote JSON at all.
+S.null = setmetatable({}, { __tostring = function() return 'null' end })
+
+function S.json(text)
+  local pos = 1
+  local value
+
+  local function fail(what)
+    error('json: ' .. what .. ' at byte ' .. pos .. ': ' .. text:sub(pos, pos + 20), 0)
+  end
+
+  local function space()
+    pos = text:find('[^ \t\r\n]', pos) or #text + 1
+  end
+
+  local unescape = { b = '\b', f = '\f', n = '\n', r = '\r', t = '\t', ['"'] = '"', ['\\'] = '\\', ['/'] = '/' }
+
+  local function str()
+    local out = {}
+    pos = pos + 1
+    while true do
+      local c = text:sub(pos, pos)
+      if c == '' then
+        fail('unterminated string')
+      elseif c == '"' then
+        pos = pos + 1
+        return table.concat(out)
+      elseif c == '\\' then
+        local e = text:sub(pos + 1, pos + 1)
+        if e == 'u' then
+          local code = tonumber(text:sub(pos + 2, pos + 5), 16) or fail('bad \\u escape')
+          out[#out + 1] = code < 256 and string.char(code) or '?'
+          pos = pos + 6
+        else
+          out[#out + 1] = unescape[e] or fail('bad escape')
+          pos = pos + 2
+        end
+      elseif c:byte() < 32 then
+        fail('control character in a string')
+      else
+        out[#out + 1] = c
+        pos = pos + 1
+      end
+    end
+  end
+
+  function value()
+    space()
+    local c = text:sub(pos, pos)
+    if c == '{' then
+      local object = {}
+      pos = pos + 1
+      space()
+      if text:sub(pos, pos) == '}' then
+        pos = pos + 1
+        return object
+      end
+      while true do
+        space()
+        if text:sub(pos, pos) ~= '"' then
+          fail('expected a key')
+        end
+        local key = str()
+        space()
+        if text:sub(pos, pos) ~= ':' then
+          fail('expected a colon')
+        end
+        pos = pos + 1
+        object[key] = value()
+        space()
+        local d = text:sub(pos, pos)
+        pos = pos + 1
+        if d == '}' then
+          return object
+        elseif d ~= ',' then
+          fail('expected a comma or a closing brace')
+        end
+      end
+    elseif c == '[' then
+      local array = {}
+      pos = pos + 1
+      space()
+      if text:sub(pos, pos) == ']' then
+        pos = pos + 1
+        return array
+      end
+      while true do
+        array[#array + 1] = value()
+        space()
+        local d = text:sub(pos, pos)
+        pos = pos + 1
+        if d == ']' then
+          return array
+        elseif d ~= ',' then
+          fail('expected a comma or a closing bracket')
+        end
+      end
+    elseif c == '"' then
+      return str()
+    elseif text:sub(pos, pos + 3) == 'true' then
+      pos = pos + 4
+      return true
+    elseif text:sub(pos, pos + 4) == 'false' then
+      pos = pos + 5
+      return false
+    elseif text:sub(pos, pos + 3) == 'null' then
+      pos = pos + 4
+      return S.null
+    end
+    local number = text:match('^-?%d+%.?%d*[eE]?[+-]?%d*', pos)
+    if not number or not tonumber(number) then
+      fail('unexpected text')
+    end
+    pos = pos + #number
+    return tonumber(number)
+  end
+
+  local result = value()
+  space()
+  if pos <= #text then
+    fail('text after the value')
+  end
+  return result
+end
+
 function S.ok(message)
   print('ok  ' .. message)
 end

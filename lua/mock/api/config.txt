@@ -1,0 +1,495 @@
+# state config
+# dcs 2.9.31.29434 (dcs_server.release)
+# platform wine-10.0 (Debian 10.0~repack-6)
+# date 2026-11-11
+# script lua/probes/tools/api-dump.lua
+ConfigHelper : table
+ConfigHelper._M : table -> ConfigHelper
+ConfigHelper._NAME : string
+ConfigHelper._PACKAGE : string
+ConfigHelper.chooseFilePath : function
+ConfigHelper.getConfigReadPath : function
+ConfigHelper.getConfigWritePath : function
+ConfigHelper.getSysFilePath : function
+ConfigHelper.getUnitPayloadsSysPath : function
+ConfigHelper.getUnitPayloadsVSysPath : function
+ConfigHelper.getUnitPayloadsVWritePath : function
+ConfigHelper.getUnitPayloadsWritePath : function
+ConfigHelper.getUserFilePath : function
+ConfigHelper.getUserOptionsPathRaw : function
+ConfigHelper.getUserOptionsPathRead : function
+ConfigHelper.getUserOptionsPathWrite : function
+ConfigHelper.getWriteDirUnitPayloads : function
+ConfigHelper.getWriteDirUnitPayloadsV : function
+ED_FINAL_VERSION : boolean = true
+ED_PUBLIC_AVAILABLE : boolean = true
+Factory : table
+Factory._M : table -> Factory
+Factory._NAME : string
+Factory._PACKAGE : string
+Factory.clone : function
+Factory.create : function
+Factory.createClass : function
+Factory.registerWidget : function
+Factory.setBaseClass : function
+MAC : boolean = false
+Serializer : table
+Serializer._M : table -> Serializer
+Serializer._NAME : string
+Serializer._PACKAGE : string
+Serializer.add_to_string : function
+Serializer.basicSerialize : function
+Serializer.construct : function
+Serializer.do_serialize_to_func : function
+Serializer.failed_to_serialize : function
+Serializer.getSortedPairs : function
+Serializer.mtab : table
+Serializer.mtab.__index : table -> Serializer
+Serializer.new : function
+Serializer.serialize : function
+Serializer.serialize_compact : function
+Serializer.serialize_compact_iter : function
+Serializer.serialize_failure_message : function
+Serializer.serialize_simple : function
+Serializer.serialize_simple2 : function
+Serializer.serialize_sorted : function
+Serializer.serialize_sortedX : function
+Serializer.serialize_sorted_noTabl : function
+Serializer.serialize_to_func : function
+Serializer.serialize_to_string : function
+Serializer.serialize_to_string_noCR : function
+Serializer.serialize_to_string_simple : function
+Serializer.serialize_to_string_simple_noCR : function
+_APP_VERSION : string
+_ARCHITECTURE : string
+_G : table -> _G
+_VERSION : string
+ambientSound : table
+ambientSound.fadeOutHeight : number = 100
+ambientSound.resampleDistance : number = 10
+ambientSound.resampleTime : number = 0.5
+ambientSound.sampleRadius : number = 30
+ambientSound.surfaceSamples : number = 12
+app_localization_domains : table
+app_localization_domains. : 3 other keys
+assert : function
+bkg_load_plugins : boolean = false
+bkg_load_plugins_override : table
+bkg_load_plugins_override. : 1 other keys
+bkg_load_signed_plugins : boolean = true
+bkg_load_unsigned_plugins : boolean = false
+build_number : string
+collectgarbage : function
+coroutine : table
+coroutine.create : function
+coroutine.resume : function
+coroutine.running : function
+coroutine.status : function
+coroutine.wrap : function
+coroutine.yield : function
+dcs_revision : string
+debug : table
+debug.debug : function
+debug.getfenv : function
+debug.gethook : function
+debug.getinfo : function
+debug.getlocal : function
+debug.getmetatable : function
+debug.setfenv : function
+debug.sethook : function
+debug.setlocal : function
+debug.setmetatable : function
+debug.traceback : function
+doZipFile : function
+dofile : function
+dont_bind_modules : boolean = true
+dx11backend : table
+dx11backend.HMDsupport : boolean = true
+dx11backend.NGXsupport : boolean = true
+dx11backend.commonPoolSize : number = 80
+dx11backend.constantBufferPoolSize : number = 10
+dx11backend.samplerPoolSize : number = 11
+editor : boolean = false
+env_dofile : function
+error : function
+force_VR : boolean = false
+gcinfo : function
+getAutoLogin : function
+getPermissionToCollectStatistics : function
+getfenv : function
+getmetatable : function
+guiDebugDraw : boolean = false
+ignore_monitors_preset : number = 0
+input : table
+input.enable_log : boolean = false
+input.ffb_log : boolean = false
+input.helper_window : boolean = false
+input.joystick_log : boolean = false
+input.keyboard_log : boolean = false
+input.mouse_log : boolean = false
+io : table
+io.__gc : function
+io.close : function
+io.flush : function
+io.lines : function
+io.open : function
+io.read : function
+io.write : function
+ipairs : function
+lfs : table
+lfs.add_location : function
+lfs.attributes : function
+lfs.chdir : function
+lfs.create_lockfile : function
+lfs.currentdir : function
+lfs.del_location : function
+lfs.dir : function
+lfs.locations : function
+lfs.md5sum : function
+lfs.mkdir : function
+lfs.normpath : function
+lfs.realpath : function
+lfs.rmdir : function
+lfs.tempdir : function
+lfs.writedir : function
+load : function
+loadfile : function
+loadstring : function
+log : table
+log.ALERT : number = 2
+log.ALL : number = 255
+log.ALL_LEVELS : number = 255
+log.ASYNC : number = 0
+log.BACKUP : number = 32768
+log.DEBUG : number = 128
+log.ERROR : number = 8
+log.EXTRA_INFO : number = 512
+log.FULL : number = 271
+log.IMMEDIATE : number = 1
+log.INFO : number = 64
+log.LEVEL : number = 2
+log.MESSAGE : number = 0
+log.MODELTIME : number = 512
+log.MODULE : number = 4
+log.NO_HEADER_FOOTER : number = 16384
+log.RELIABLE : number = 32768
+log.THREAD : number = 8
+log.TIME : number = 1
+log.TIME_LOCAL : number = 129
+log.TIME_RELATIVE : number = 128
+log.TIME_UTC : number = 1
+log.TRACE : number = 256
+log.WARNING : number = 16
+log.alert : function
+log.backup : function
+log.debug : function
+log.error : function
+log.info : function
+log.set_output : function
+log.set_output_rules : function
+log.warning : function
+log.write : function
+login_type : number = 2
+main_dll_preload : table
+main_dll_preload. : 26 other keys
+math : table
+math.abs : function
+math.acos : function
+math.asin : function
+math.atan : function
+math.atan2 : function
+math.ceil : function
+math.cos : function
+math.cosh : function
+math.deg : function
+math.exp : function
+math.floor : function
+math.fmod : function
+math.frexp : function
+math.huge : number = inf
+math.ldexp : function
+math.log : function
+math.log10 : function
+math.max : function
+math.min : function
+math.mod : function
+math.modf : function
+math.pi : number = 3.1415926535898
+math.pow : function
+math.rad : function
+math.random : function
+math.randomseed : function
+math.sin : function
+math.sinh : function
+math.sqrt : function
+math.tan : function
+math.tanh : function
+mission_scripting_sandbox_level : number = 0
+module : function
+net : table
+newproxy : function
+next : function
+norender : number = 1
+options : table
+options.VR : table
+options.VR.bloom : boolean = true
+options.VR.box_mouse_cursor : boolean = true
+options.VR.enable : boolean = false
+options.VR.mirror_crop : boolean = false
+options.VR.mirror_source : number = 0
+options.VR.mirror_use_DCS_resolution : boolean = false
+options.VR.msaaMaskSize : number = 0.42
+options.VR.pixel_density : number = 1
+options.VR.use_mouse : boolean = true
+options.difficulty : table
+options.difficulty.RBDAI : boolean = true
+options.difficulty.autoTrimmer : boolean = false
+options.difficulty.avionicsLanguage : string
+options.difficulty.birds : number = 0
+options.difficulty.cockpitStatusBarAllowed : boolean = false
+options.difficulty.cockpitVisualRM : boolean = false
+options.difficulty.controlsIndicator : boolean = true
+options.difficulty.easyCommunication : boolean = true
+options.difficulty.easyFlight : boolean = false
+options.difficulty.externalViews : boolean = true
+options.difficulty.fuel : boolean = false
+options.difficulty.gWarmUp : boolean = false
+options.difficulty.geffect : string
+options.difficulty.hideStick : boolean = false
+options.difficulty.iconsTheme : string
+options.difficulty.immortal : boolean = false
+options.difficulty.labels : number = 1
+options.difficulty.map : boolean = true
+options.difficulty.miniHUD : boolean = false
+options.difficulty.optionsView : string
+options.difficulty.padlock : boolean = true
+options.difficulty.permitCrash : boolean = true
+options.difficulty.radio : boolean = false
+options.difficulty.reports : boolean = true
+options.difficulty.setGlobal : boolean = true
+options.difficulty.spectatorExternalViews : boolean = true
+options.difficulty.spottingDot : number = 3
+options.difficulty.tips : boolean = true
+options.difficulty.units : string
+options.difficulty.unrestrictedSATNAV : boolean = false
+options.difficulty.userMarks : boolean = true
+options.difficulty.userSnapView : boolean = true
+options.difficulty.wakeTurbulence : boolean = false
+options.difficulty.weapons : boolean = false
+options.format : number = 1
+options.graphics : table
+options.graphics.AA : string
+options.graphics.BlurFlatShadows : number = 0
+options.graphics.DLSS_PerfQuality : number = 0
+options.graphics.DOF : number = 0
+options.graphics.LensEffects : number = 3
+options.graphics.MSAA : number = 1
+options.graphics.SSAO : number = 0
+options.graphics.SSLR : number = 0
+options.graphics.SSS : number = 0
+options.graphics.Scaling : number = 0.66
+options.graphics.ScreenshotExt : string
+options.graphics.Sharpening : number = 0
+options.graphics.Upscaling : string
+options.graphics.anisotropy : number = 4
+options.graphics.canopyReflections : number = 1
+options.graphics.chimneySmokeDensity : number = 4
+options.graphics.civTraffic : string
+options.graphics.clouds : number = 1
+options.graphics.clutterMaxDistance : number = 0
+options.graphics.cockpitGI : number = 1
+options.graphics.defaultFOV : number = 78
+options.graphics.effects : number = 3
+options.graphics.flatTerrainShadows : number = 0
+options.graphics.forestDetailsFactor : number = 1
+options.graphics.forestDistanceFactor : number = 0.5
+options.graphics.fullScreen : boolean = false
+options.graphics.heatBlr : number = 0
+options.graphics.lights : number = 2
+options.graphics.messagesFontScale : number = 1
+options.graphics.motionBlur : number = 0
+options.graphics.motionBlurAmount : number = 1
+options.graphics.multiMonitorSetup : string
+options.graphics.outputGamma : number = 2.2
+options.graphics.preloadRadius : number = 150000
+options.graphics.rainDroplets : number = 0
+options.graphics.scaleGui : number = 1
+options.graphics.sceneryDetailsFactor : number = 1
+options.graphics.secondaryShadows : number = 0
+options.graphics.shadowTree : boolean = false
+options.graphics.shadows : number = 2
+options.graphics.sync : boolean = false
+options.graphics.terrain : table
+options.graphics.terrainTextures : string
+options.graphics.textures : number = 0
+options.graphics.useDeferredShading : number = 1
+options.graphics.visibRange : string
+options.graphics.volumetricLights : number = 1
+options.graphics.water : number = 2
+options.miscellaneous : table
+options.miscellaneous.Coordinate_Display : string
+options.miscellaneous.F2_view_effects : number = 1
+options.miscellaneous.TrackIR_external_views : boolean = true
+options.miscellaneous.accidental_failures : boolean = false
+options.miscellaneous.allow_server_screenshots : boolean = false
+options.miscellaneous.autologin : boolean = true
+options.miscellaneous.chat_window_at_start : boolean = true
+options.miscellaneous.collect_stat : boolean = false
+options.miscellaneous.collect_stat_defined : boolean = false
+options.miscellaneous.f10_awacs : boolean = true
+options.miscellaneous.f11_free_camera : boolean = true
+options.miscellaneous.f5_nearest_ac : boolean = true
+options.miscellaneous.force_feedback_enabled : boolean = true
+options.miscellaneous.force_feedback_enabled_custom_pedals : boolean = false
+options.miscellaneous.force_feedback_enabled_custom_stick : boolean = false
+options.miscellaneous.geo_grid_visible : boolean = false
+options.miscellaneous.headmove : boolean = false
+options.miscellaneous.launcher : boolean = true
+options.miscellaneous.mgrs_grid_visible : boolean = true
+options.miscellaneous.push_starthere : boolean = true
+options.miscellaneous.show_pilot_body : boolean = false
+options.miscellaneous.synchronize_controls : boolean = false
+options.plugins : table
+options.sound : table
+options.sound.FakeAfterburner : boolean = false
+options.sound.GBreathEffect : boolean = true
+options.sound.cockpit : number = 100
+options.sound.gui : number = 100
+options.sound.headphones : number = 100
+options.sound.headphones_on_external_views : boolean = true
+options.sound.hear_in_helmet : boolean = false
+options.sound.hp_output : string
+options.sound.main_layout : string
+options.sound.main_output : string
+options.sound.microphone_use : number = 2
+options.sound.music : number = 60
+options.sound.play_audio_while_minimized : boolean = false
+options.sound.radioSpeech : boolean = true
+options.sound.subtitles : boolean = true
+options.sound.switches : number = 100
+options.sound.voiceChatInSensitivity : number = -50
+options.sound.voiceChatInVolume : number = 50
+options.sound.voice_chat : boolean = true
+options.sound.voice_chat_input : string
+options.sound.voice_chat_output : string
+options.sound.volume : number = 80
+options.sound.world : number = 100
+options.views : table
+options.views.cockpit : table
+optionsEditor : table
+optionsEditor._M : table -> optionsEditor
+optionsEditor._NAME : string
+optionsEditor._PACKAGE : string
+optionsEditor.getOption : function
+optionsEditor.loadOptions : function
+optionsEditor.saveOptions : function
+optionsEditor.setOption : function
+os : table
+os.clock : function
+os.date : function
+os.difftime : function
+os.execute : function
+os.getenv : function
+os.getpid : function
+os.open_uri : function
+os.remove : function
+os.rename : function
+os.time : function
+package : table
+package.config : string
+package.cpath : string
+package.loaded : table
+package.loaded.ConfigHelper : table -> ConfigHelper
+package.loaded.Factory : table -> Factory
+package.loaded.Serializer : table -> Serializer
+package.loaded.TableUtils : table
+package.loaded._G : table -> _G
+package.loaded.coroutine : table -> coroutine
+package.loaded.debug : table -> debug
+package.loaded.io : table -> io
+package.loaded.lfs : table -> lfs
+package.loaded.log : table -> log
+package.loaded.math : table -> math
+package.loaded.optionsEditor : table -> optionsEditor
+package.loaded.os : table -> os
+package.loaded.package : table -> package
+package.loaded.string : table -> string
+package.loaded.table : table -> table
+package.loaders : table
+package.loaders. : 5 other keys
+package.loadlib : function
+package.path : string
+package.preload : table
+package.seeall : function
+pairs : function
+pcall : function
+print : function
+rawequal : function
+rawget : function
+rawset : function
+reloadOptions : function
+renderer_revision : string
+require : function
+safeDoFileWithRequire : function
+safe_require : function
+select : function
+servermode : number = 1
+setAutoLogin : function
+setfenv : function
+setmetatable : function
+show_debug_output_console : boolean = false
+sound : table
+sound.cockpit_spatial_crosstalk : table
+sound.cockpit_spatial_crosstalk. : 2 other keys
+sound.cockpit_world : table
+sound.cockpit_world. : 27 other keys
+sound.cockpit_world.MosquitoFBMkVI : table
+sound.cockpit_world.SpitfireLFMkIX : table
+sound.doppler_warp : number = 1
+sound.limiter : table
+sound.limiter.release : number = 0.8
+sound.world_fadein_time : number = 4
+sound.world_spatial_crosstalk : table
+sound.world_spatial_crosstalk. : 2 other keys
+startProfiler : boolean = false
+string : table
+string.byte : function
+string.char : function
+string.dump : function
+string.find : function
+string.format : function
+string.gfind : function
+string.gmatch : function
+string.gsub : function
+string.len : function
+string.lower : function
+string.match : function
+string.rep : function
+string.reverse : function
+string.sub : function
+string.upper : function
+table : table
+table.concat : function
+table.foreach : function
+table.foreachi : function
+table.getn : function
+table.insert : function
+table.maxn : function
+table.remove : function
+table.setn : function
+table.sort : function
+terrain_revision : string
+theatre : string
+tonumber : function
+tostring : function
+track_file : string
+type : function
+unit_database_sandbox_level : number = 0
+unpack : function
+updateLocalUserOptions : function
+user_hooks_sandbox_level : number = 0
+value2code : function
+value2string : function
+was_restarted : number = 0
+webgui : number = 1
+xpcall : function

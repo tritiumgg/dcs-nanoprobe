@@ -52,6 +52,20 @@ until DCS restarts.
 
 ## Development only
 
-`cargo xtask deploy --dev` also installs `<profile>/Scripts/Hooks/nanoprobe-dev.lua`,
-the development mission loader, and `<profile>/nanoprobe/dev/missions/`. A deploy
-without `--dev` removes both, and undeploy removes them. A release never carries them.
+`cargo xtask deploy --dev` also installs these files in `<profile>`:
+
+```
+Scripts/Hooks/nanoprobe-dev.lua    the development mission loader
+Scripts/Hooks/nanoprobe-eval.lua   the eval hook (spec/eval.md)
+nanoprobe/dev/lua/prelude.lua      the prelude the eval hook sends to each state
+nanoprobe/dev/lua/<name>.lua       every Lua file in lua/dev/lib/ and lua/scenarios/
+nanoprobe/dev/missions/            missions the mission loader loads
+nanoprobe/dev/eval/in/             eval requests
+nanoprobe/dev/eval/taken/          eval requests the hook has taken
+nanoprobe/dev/eval/out/            eval results
+```
+
+A file is written only when its content differs, and a file in `nanoprobe/dev/lua/`
+that the install does not hold is removed. The files are not part of the version and
+do not change the build. A deploy without `--dev` removes both hooks and the
+`nanoprobe/dev` folder, and undeploy removes both hooks. A release never carries them.

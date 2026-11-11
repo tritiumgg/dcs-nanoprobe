@@ -1,0 +1,659 @@
+# state mission
+# dcs 2.9.31.29434 (dcs_server.release)
+# platform wine-10.0 (Debian 10.0~repack-6)
+# date 2026-11-11
+# script lua/probes/tools/api-dump.lua
+ED_FINAL_VERSION : boolean = true
+ED_MULTI_THREAD : boolean = true
+ED_PUBLIC_AVAILABLE : boolean = true
+GetClickableElements : function
+GetDevice : function
+GetIndicator : function
+Miz : table
+Miz.decomposeSlotId : function
+Miz.getChunkFilename : function
+USE_TERRAIN4 : boolean = true
+_APP_VERSION : string
+_ARCHITECTURE : string
+_G : table -> _G
+_IsAuthorized : function
+_VERSION : string
+__DCS_VERSION__ : string
+__FINAL_VERSION__ : boolean = true
+__PRODUCT_ID__ : number = 0
+__PROTECTED_VERSION__ : boolean = true
+_l10n_dict_default : table
+_l10n_dict_default.dictionary : table
+_l10n_dict_default.dictionary.DictKey_descriptionBlueTask_3 : string
+_l10n_dict_default.dictionary.DictKey_descriptionNeutralsTask_4 : string
+_l10n_dict_default.dictionary.DictKey_descriptionRedTask_2 : string
+_l10n_dict_default.dictionary.DictKey_descriptionText_1 : string
+_l10n_dict_default.dictionary.DictKey_sortie_5 : string
+_l10n_res_default : table
+_l10n_res_default.curDict : string
+_l10n_res_default.mapResource : table
+a_activate_group : function
+a_add_match_zone : function
+a_add_radio_item : function
+a_add_radio_item_for_coalition : function
+a_add_radio_item_for_group : function
+a_add_safety_zone : function
+a_ai_task : function
+a_aircraft_ctf_color_tag : function
+a_circle_to_all : function
+a_clear_flag : function
+a_cockpit_highlight : function
+a_cockpit_highlight_indication : function
+a_cockpit_highlight_position : function
+a_cockpit_lock_player_seat : function
+a_cockpit_param_save_as : function
+a_cockpit_perform_clickable_action : function
+a_cockpit_pop_actor : function
+a_cockpit_push_actor : function
+a_cockpit_remove_highlight : function
+a_cockpit_unlock_player_seat : function
+a_deactivate_group : function
+a_dec_flag : function
+a_do_script : function
+a_do_script_file : function
+a_effect_smoke : function
+a_effect_smoke_stop : function
+a_end_mission : function
+a_explosion : function
+a_explosion_marker : function
+a_explosion_marker_unit : function
+a_explosion_unit : function
+a_fall_in_template : function
+a_group_controllable_off : function
+a_group_controllable_on : function
+a_group_off : function
+a_group_on : function
+a_group_resume : function
+a_group_stop : function
+a_illumination_bomb : function
+a_inc_flag : function
+a_line_to_all : function
+a_load_mission : function
+a_mark_to_all : function
+a_mark_to_coalition : function
+a_mark_to_group : function
+a_mission_pause : function
+a_mission_restart : function
+a_mission_resume : function
+a_out_picture : function
+a_out_picture_c : function
+a_out_picture_g : function
+a_out_picture_s : function
+a_out_picture_stop : function
+a_out_picture_u : function
+a_out_sound : function
+a_out_sound_c : function
+a_out_sound_g : function
+a_out_sound_s : function
+a_out_sound_stop : function
+a_out_sound_u : function
+a_out_text : function
+a_out_text_delay : function
+a_out_text_delay_c : function
+a_out_text_delay_g : function
+a_out_text_delay_s : function
+a_out_text_delay_u : function
+a_play_argument : function
+a_prevent_controls_synchronization : function
+a_qmg_end_mission : function
+a_radio_transmission : function
+a_rect_to_all : function
+a_remove_mark : function
+a_remove_match_zone : function
+a_remove_radio_item : function
+a_remove_radio_item_for_coalition : function
+a_remove_radio_item_for_group : function
+a_remove_safety_zone : function
+a_remove_scene_objects : function
+a_route_gates_set_current_point : function
+a_scenery_destruction_zone : function
+a_set_ATC_silent_mode : function
+a_set_ai_task : function
+a_set_altitude : function
+a_set_briefing : function
+a_set_carrier_illumination_mode : function
+a_set_command : function
+a_set_command_with_value : function
+a_set_failure : function
+a_set_flag : function
+a_set_flag_random : function
+a_set_flag_value : function
+a_set_internal_cargo : function
+a_set_internal_cargo_unit : function
+a_set_mission_result : function
+a_set_visible_draw : function
+a_shelling_zone : function
+a_show_helper_gate : function
+a_show_route_gates_for_unit : function
+a_signal_flare : function
+a_signal_flare_unit : function
+a_start_listen_command : function
+a_start_listen_event : function
+a_start_world_game_pattern : function
+a_stop_radio_transmission : function
+a_unit_emission_off : function
+a_unit_emission_on : function
+a_unit_highlight : function
+a_unit_off : function
+a_unit_on : function
+a_unit_set_life_percentage : function
+a_user_draw_hide : function
+a_user_draw_show : function
+a_user_event : function
+a_zone_increment_resize : function
+addTblStartData : function
+addThreatsAllies : function
+add_dynamic_group : function
+add_group : function
+add_player : function
+ag : string
+assert : function
+bg : string
+c_absolute_time : function
+c_absolute_time_after : function
+c_absolute_time_before : function
+c_all_of_coalition_in_zone : function
+c_all_of_coalition_out_zone : function
+c_all_of_group_in_zone : function
+c_all_of_group_out_zone : function
+c_argument_in_range : function
+c_bomb_in_zone : function
+c_cargo_unhooked_in_zone : function
+c_coalition_has_airdrome : function
+c_coalition_has_helipad : function
+c_cockpit_highlight_visible : function
+c_cockpit_param_equal_to : function
+c_cockpit_param_in_range : function
+c_cockpit_param_is_equal_to_another : function
+c_dead_zone : function
+c_expression : function
+c_flag_equals : function
+c_flag_equals_flag : function
+c_flag_is_false : function
+c_flag_is_true : function
+c_flag_less : function
+c_flag_less_flag : function
+c_flag_more : function
+c_group_alive : function
+c_group_dead : function
+c_group_life_less : function
+c_group_member_fuel_higher : function
+c_group_member_fuel_less : function
+c_indication_txt_equal_to : function
+c_missile_in_zone : function
+c_mission_score_higher : function
+c_mission_score_lower : function
+c_mlrs_in_zone : function
+c_part_of_coalition_in_zone : function
+c_part_of_coalition_out_zone : function
+c_part_of_group_in_zone : function
+c_part_of_group_out_zone : function
+c_player_coalition : function
+c_player_score_less : function
+c_player_score_more : function
+c_player_unit_argument_in_range : function
+c_predicate : function
+c_random_less : function
+c_signal_flare_in_zone : function
+c_start_wait_for_user : function
+c_stop_wait_for_user : function
+c_time : function
+c_time_after : function
+c_time_before : function
+c_time_since_flag : function
+c_unit_alive : function
+c_unit_altitude_higher : function
+c_unit_altitude_higher_AGL : function
+c_unit_altitude_lower : function
+c_unit_altitude_lower_AGL : function
+c_unit_argument_in_range : function
+c_unit_bank : function
+c_unit_broken : function
+c_unit_damaged : function
+c_unit_dead : function
+c_unit_fuel_higher : function
+c_unit_fuel_less : function
+c_unit_heading : function
+c_unit_hit : function
+c_unit_in_zone : function
+c_unit_in_zone_unit : function
+c_unit_life_less : function
+c_unit_out_zone : function
+c_unit_out_zone_unit : function
+c_unit_pitch : function
+c_unit_speed_higher : function
+c_unit_speed_lower : function
+c_unit_vertical_speed : function
+check_register : function
+collectgarbage : function
+compile_mission : function
+composeWeaponsString : function
+copyTable : function
+coroutine : table
+coroutine.create : function
+coroutine.resume : function
+coroutine.running : function
+coroutine.status : function
+coroutine.wrap : function
+coroutine.yield : function
+db : table
+db.clients : table
+db.clients.blue : table
+db.clients.neutrals : table
+db.clients.red : table
+db.coalitions_by_group : table
+db.coalitions_by_u : table
+db.groups_by_u : table
+db.human_briefing : table
+db.human_briefing.bHuman : boolean = false
+db.human_briefing.clouds_base : number = 2500
+db.human_briefing.descText : string
+db.human_briefing.images : table
+db.human_briefing.missionImages : table
+db.human_briefing.mission_date : table -> mission.date
+db.human_briefing.mission_goal : string
+db.human_briefing.mission_start_time : number = 43200
+db.human_briefing.qnh : number = 760
+db.human_briefing.sortie : string
+db.human_briefing.startTime : number = 43200
+db.human_briefing.tblStartData : table
+db.human_briefing.temperature : number = 20
+db.human_briefing.weather : table
+db.slots : table
+db.slots.blue : table
+db.slots.neutrals : table
+db.slots.red : table
+db.units : table
+db.units_by_ID : table
+db.units_by_name : table
+del_player : function
+doZipFile : function
+error : function
+gcinfo : function
+getAlliesString : function
+getThreatsAllies : function
+getValueDictByKey : function
+getValueResourceByKey : function
+get_param_handle : function
+get_server_info : function
+get_unit_possible_player_role_categories : function
+get_unit_possible_player_roles : function
+get_welcome_info : function
+getfenv : function
+getmetatable : function
+ipairs : function
+isSeveralClients : function
+list_cockpit_params : function
+list_indication : function
+load : function
+loadstring : function
+local_player_id : number = 1
+log : table
+log.ALERT : number = 2
+log.ALL : number = 255
+log.ALL_LEVELS : number = 255
+log.ASYNC : number = 0
+log.BACKUP : number = 32768
+log.DEBUG : number = 128
+log.ERROR : number = 8
+log.EXTRA_INFO : number = 512
+log.FULL : number = 271
+log.IMMEDIATE : number = 1
+log.INFO : number = 64
+log.LEVEL : number = 2
+log.MESSAGE : number = 0
+log.MODELTIME : number = 512
+log.MODULE : number = 4
+log.NO_HEADER_FOOTER : number = 16384
+log.RELIABLE : number = 32768
+log.THREAD : number = 8
+log.TIME : number = 1
+log.TIME_LOCAL : number = 129
+log.TIME_RELATIVE : number = 128
+log.TIME_UTC : number = 1
+log.TRACE : number = 256
+log.WARNING : number = 16
+log.alert : function
+log.backup : function
+log.debug : function
+log.error : function
+log.info : function
+log.set_output : function
+log.set_output_rules : function
+log.warning : function
+log.write : function
+make_briefing : function
+math : table
+math.abs : function
+math.acos : function
+math.asin : function
+math.atan : function
+math.atan2 : function
+math.ceil : function
+math.cos : function
+math.cosh : function
+math.deg : function
+math.exp : function
+math.floor : function
+math.fmod : function
+math.frexp : function
+math.huge : number = inf
+math.ldexp : function
+math.log : function
+math.log10 : function
+math.max : function
+math.min : function
+math.mod : function
+math.modf : function
+math.pi : number = 3.1415926535898
+math.pow : function
+math.rad : function
+math.random : function
+math.randomseed : function
+math.sin : function
+math.sinh : function
+math.sqrt : function
+math.tan : function
+math.tanh : function
+mission : table
+mission.coalition : table
+mission.coalition.blue : table
+mission.coalition.neutrals : table
+mission.coalition.red : table
+mission.coalitions : table
+mission.coalitions.blue : table
+mission.coalitions.neutrals : table
+mission.coalitions.red : table
+mission.currentKey : number = 10
+mission.date : table
+mission.date.Day : number = 21
+mission.date.Month : number = 6
+mission.date.Year : number = 2016
+mission.descriptionBlueTask : string
+mission.descriptionNeutralsTask : string
+mission.descriptionRedTask : string
+mission.descriptionText : string
+mission.failures : table
+mission.forcedOptions : table
+mission.goals : table
+mission.groundControl : table
+mission.groundControl.isPilotControlVehicles : boolean = false
+mission.groundControl.passwords : table
+mission.groundControl.roles : table
+mission.map : table
+mission.map.centerX : number = -355000
+mission.map.centerY : number = 618000
+mission.map.zoom : number = 1000000
+mission.maxDictId : number = 5
+mission.options : table
+mission.options.difficulty : table
+mission.options.format : number = 1
+mission.pictureFileNameB : table
+mission.pictureFileNameN : table
+mission.pictureFileNameR : table
+mission.pictureFileNameServer : table
+mission.requiredModules : table
+mission.result : table
+mission.result.blue : table
+mission.result.offline : table
+mission.result.red : table
+mission.result.total : number = 0
+mission.sortie : string
+mission.start_time : number = 43200
+mission.theatre : string
+mission.trig : table
+mission.trig.actions : table
+mission.trig.conditions : table
+mission.trig.custom : table
+mission.trig.customStartup : table
+mission.trig.events : table
+mission.trig.flag : table
+mission.trig.func : table
+mission.trig.funcStartup : table
+mission.triggers : table
+mission.triggers.zones : table
+mission.trigrules : table
+mission.version : number = 23
+mission.weather : table
+mission.weather.atmosphere_type : number = 0
+mission.weather.clouds : table
+mission.weather.cyclones : table
+mission.weather.dust_density : number = 0
+mission.weather.enable_dust : boolean = false
+mission.weather.groundTurbulence : number = 0
+mission.weather.halo : table
+mission.weather.modifiedTime : boolean = false
+mission.weather.name : string
+mission.weather.qnh : number = 760
+mission.weather.season : table
+mission.weather.type_weather : number = 0
+mission.weather.visibility : table
+mission.weather.wind : table
+netIsRunning : boolean = true
+newproxy : function
+next : function
+occupy_player_slot : function
+options : table
+options.VR : table
+options.VR.bloom : boolean = true
+options.VR.box_mouse_cursor : boolean = true
+options.VR.enable : boolean = false
+options.VR.mirror_crop : boolean = false
+options.VR.mirror_source : number = 0
+options.VR.mirror_use_DCS_resolution : boolean = false
+options.VR.msaaMaskSize : number = 0.42
+options.VR.pixel_density : number = 1
+options.VR.use_mouse : boolean = true
+options.difficulty : table
+options.difficulty.RBDAI : boolean = true
+options.difficulty.autoTrimmer : boolean = false
+options.difficulty.avionicsLanguage : string
+options.difficulty.birds : number = 0
+options.difficulty.cockpitStatusBarAllowed : boolean = false
+options.difficulty.cockpitVisualRM : boolean = false
+options.difficulty.controlsIndicator : boolean = true
+options.difficulty.easyCommunication : boolean = true
+options.difficulty.easyFlight : boolean = false
+options.difficulty.externalViews : boolean = true
+options.difficulty.fuel : boolean = false
+options.difficulty.gWarmUp : boolean = false
+options.difficulty.geffect : string
+options.difficulty.hideStick : boolean = false
+options.difficulty.iconsTheme : string
+options.difficulty.immortal : boolean = false
+options.difficulty.labels : number = 1
+options.difficulty.map : boolean = true
+options.difficulty.miniHUD : boolean = false
+options.difficulty.optionsView : string
+options.difficulty.padlock : boolean = true
+options.difficulty.permitCrash : boolean = true
+options.difficulty.radio : boolean = false
+options.difficulty.reports : boolean = true
+options.difficulty.setGlobal : boolean = true
+options.difficulty.spectatorExternalViews : boolean = true
+options.difficulty.spottingDot : number = 3
+options.difficulty.tips : boolean = true
+options.difficulty.units : string
+options.difficulty.unrestrictedSATNAV : boolean = false
+options.difficulty.userMarks : boolean = true
+options.difficulty.userSnapView : boolean = true
+options.difficulty.wakeTurbulence : boolean = false
+options.difficulty.weapons : boolean = false
+options.format : number = 1
+options.graphics : table
+options.graphics.AA : string
+options.graphics.BlurFlatShadows : number = 0
+options.graphics.DLSS_PerfQuality : number = 0
+options.graphics.DOF : number = 0
+options.graphics.LensEffects : number = 3
+options.graphics.MSAA : number = 1
+options.graphics.SSAO : number = 0
+options.graphics.SSLR : number = 0
+options.graphics.SSS : number = 0
+options.graphics.Scaling : number = 0.66
+options.graphics.ScreenshotExt : string
+options.graphics.Sharpening : number = 0
+options.graphics.Upscaling : string
+options.graphics.anisotropy : number = 4
+options.graphics.canopyReflections : number = 1
+options.graphics.chimneySmokeDensity : number = 4
+options.graphics.civTraffic : string
+options.graphics.clouds : number = 1
+options.graphics.clutterMaxDistance : number = 0
+options.graphics.cockpitGI : number = 1
+options.graphics.defaultFOV : number = 78
+options.graphics.effects : number = 3
+options.graphics.flatTerrainShadows : number = 0
+options.graphics.forestDetailsFactor : number = 1
+options.graphics.forestDistanceFactor : number = 0.5
+options.graphics.fullScreen : boolean = false
+options.graphics.heatBlr : number = 0
+options.graphics.lights : number = 2
+options.graphics.messagesFontScale : number = 1
+options.graphics.motionBlur : number = 0
+options.graphics.motionBlurAmount : number = 1
+options.graphics.multiMonitorSetup : string
+options.graphics.outputGamma : number = 2.2
+options.graphics.preloadRadius : number = 150000
+options.graphics.rainDroplets : number = 0
+options.graphics.scaleGui : number = 1
+options.graphics.sceneryDetailsFactor : number = 1
+options.graphics.secondaryShadows : number = 0
+options.graphics.shadowTree : boolean = false
+options.graphics.shadows : number = 2
+options.graphics.sync : boolean = false
+options.graphics.terrainTextures : string
+options.graphics.textures : number = 0
+options.graphics.useDeferredShading : number = 1
+options.graphics.visibRange : string
+options.graphics.volumetricLights : number = 1
+options.graphics.water : number = 2
+options.miscellaneous : table
+options.miscellaneous.Coordinate_Display : string
+options.miscellaneous.F2_view_effects : number = 1
+options.miscellaneous.TrackIR_external_views : boolean = true
+options.miscellaneous.accidental_failures : boolean = false
+options.miscellaneous.allow_server_screenshots : boolean = false
+options.miscellaneous.autologin : boolean = true
+options.miscellaneous.chat_window_at_start : boolean = true
+options.miscellaneous.collect_stat : boolean = false
+options.miscellaneous.collect_stat_defined : boolean = false
+options.miscellaneous.f10_awacs : boolean = true
+options.miscellaneous.f11_free_camera : boolean = true
+options.miscellaneous.f5_nearest_ac : boolean = true
+options.miscellaneous.force_feedback_enabled : boolean = true
+options.miscellaneous.force_feedback_enabled_custom_pedals : boolean = false
+options.miscellaneous.force_feedback_enabled_custom_stick : boolean = false
+options.miscellaneous.geo_grid_visible : boolean = false
+options.miscellaneous.headmove : boolean = false
+options.miscellaneous.launcher : boolean = true
+options.miscellaneous.mgrs_grid_visible : boolean = true
+options.miscellaneous.push_starthere : boolean = true
+options.miscellaneous.show_pilot_body : boolean = false
+options.miscellaneous.synchronize_controls : boolean = false
+options.plugins : table
+options.sound : table
+options.sound.FakeAfterburner : boolean = false
+options.sound.GBreathEffect : boolean = true
+options.sound.cockpit : number = 100
+options.sound.gui : number = 100
+options.sound.headphones : number = 100
+options.sound.headphones_on_external_views : boolean = true
+options.sound.hear_in_helmet : boolean = false
+options.sound.hp_output : string
+options.sound.main_layout : string
+options.sound.main_output : string
+options.sound.microphone_use : number = 2
+options.sound.music : number = 60
+options.sound.play_audio_while_minimized : boolean = false
+options.sound.radioSpeech : boolean = true
+options.sound.subtitles : boolean = true
+options.sound.switches : number = 100
+options.sound.voiceChatInSensitivity : number = -50
+options.sound.voiceChatInVolume : number = 50
+options.sound.voice_chat : boolean = true
+options.sound.voice_chat_input : string
+options.sound.voice_chat_output : string
+options.sound.volume : number = 80
+options.sound.world : number = 100
+options.views : table
+options.views.cockpit : table
+pairs : function
+pcall : function
+player_names : table
+player_names. : 1 other keys
+player_slots : table
+print : function
+rawequal : function
+rawget : function
+rawset : function
+register_unit : function
+release_player_slot : function
+remove_dynamic_group : function
+reset_players : function
+reset_slots : function
+select : function
+serveroptions : table
+serveroptions.multicrew_UH1H_test_november_2020_allow : boolean = true
+serveroptions.netfm_enable_coeff_switching : boolean = true
+setUnitInvisible : function
+set_human : function
+set_player_name : function
+set_welcome_info : function
+setfenv : function
+setmetatable : function
+show_param_handles_list : function
+string : table
+string.byte : function
+string.char : function
+string.dump : function
+string.find : function
+string.format : function
+string.gfind : function
+string.gmatch : function
+string.gsub : function
+string.len : function
+string.lower : function
+string.match : function
+string.rep : function
+string.reverse : function
+string.sub : function
+string.upper : function
+tabComanders : table
+tabComanders.artillery_commander : string
+tabComanders.forward_observer : string
+tabComanders.instructor : string
+tabComanders.observer : string
+tabRoles : table
+tabRoles.airboss : string
+tabRoles.lso : string
+table : table
+table.concat : function
+table.foreach : function
+table.foreachi : function
+table.getn : function
+table.insert : function
+table.maxn : function
+table.remove : function
+table.setn : function
+table.sort : function
+tonumber : function
+tostring : function
+traverseTable : function
+type : function
+unpack : function
+unset_human : function
+update_briefing : function
+value2code : function
+value2json : function
+value2string : function
+warehouses : table
+warehouses.airports : table
+warehouses.airports. : 21 other keys
+warehouses.warehouses : table
+xpcall : function

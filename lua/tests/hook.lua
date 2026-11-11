@@ -1,5 +1,5 @@
 -- The loader and the hook body, installed as spec/install.md lays out and
--- run in the strict mock's gui state.
+-- run in the strict mock's hook state.
 
 local S = dofile((arg[0]:match('^(.*/)') or './') .. 'support.lua')
 local root = S.root()
@@ -23,7 +23,7 @@ end
 
 local function start(profile)
   local host = mock.new({ writedir = profile })
-  host:run('gui', profile .. 'Scripts/Hooks/nanoprobe-hook.lua')
+  host:run('hook', profile .. 'Scripts/Hooks/nanoprobe-hook.lua')
   return host
 end
 
