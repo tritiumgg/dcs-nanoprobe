@@ -1,0 +1,34 @@
+# The agent: the DLL DCS loads, and the .so or .dylib the host tests load.
+#
+# cdylib and no rlib. A host-native module leaves its Lua symbols undefined and
+# resolves them from the interpreter that opens it, which a shared object
+# permits and an executable does not.
+#
+# The dcs-lua feature picks where the Lua symbols come from: DCS's lua.dll
+# through vendor/lua/lua.def (on, the default), or the interpreter that opens
+# the module (off, the host-native build).
+
+[package]
+name = "nanoprobe-agent"
+description = "The agent: the DLL loaded inside DCS."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+name = "nanoprobe"
+crate-type = ["cdylib"]
+
+# On by default, because the product is the Windows DLL, and a build that
+# quietly omits the Lua binding is the failure to rule out. Host builds pass
+# --no-default-features.
+[features]
+default = ["dcs-lua"]
+dcs-lua = []
+
+[lints]
+workspace = true

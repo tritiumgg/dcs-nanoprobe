@@ -3,6 +3,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/agent",
     "crates/sidecar",
     "crates/sim-fake",
     "crates/transport",

@@ -49,6 +49,17 @@ run = "cargo test --workspace --no-default-features"
 description = "Format every crate"
 run = "cargo fmt --all"
 
+[tasks.lua]
+description = "Open the host-native agent with a stock Lua 5.1"
+run = "sh tools/luatest.sh"
+
+# cargo-xwin fetches the MSVC CRT and SDK. A Windows host has them in the
+# Visual Studio Build Tools, so plain cargo builds the same target there.
+[tasks.windows]
+description = "Cross-build the agent DLL, linking DCS's Lua"
+run = "cargo xwin build --release -p nanoprobe-agent --target x86_64-pc-windows-msvc"
+run_windows = "cargo build --release -p nanoprobe-agent --target x86_64-pc-windows-msvc"
+
 [tasks.secrets]
 description = "Check that the pre-commit hook blocks a planted secret"
 run = "sh tools/secretscan-test.sh"
@@ -59,5 +70,6 @@ run = [
   "cargo fmt --all --check",
   "cargo clippy --workspace --all-targets --no-default-features -- -D warnings",
   "cargo test --workspace --no-default-features",
+  "sh tools/luatest.sh",
   "sh tools/secretscan-test.sh",
 ]
