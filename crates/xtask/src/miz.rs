@@ -230,4 +230,54 @@ mod tests {
         assert!(set_start_time(b"x = 1\n", 5).is_err());
         assert!(generate(b"not a zip", &Changes::default()).is_err());
     }
+
+    /// Every committed template yields a shell, and carries only the options
+    /// templates/README.md allows, so no player name or machine setting.
+    #[test]
+    fn the_committed_templates_generate_and_hold_nothing_personal() {
+        let folder = crate::repository().join("templates");
+        let mut seen = 0;
+        for entry in std::fs::read_dir(&folder).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "miz") {
+                continue;
+            }
+            seen += 1;
+            let bytes = std::fs::read(&path).unwrap();
+            let shell = generate(
+                &bytes,
+                &Changes {
+                    start_time: Some(43_200),
+                },
+            )
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let names: Vec<String> = read(&shell).unwrap().into_iter().map(|(n, _)| n).collect();
+            assert_eq!(
+                names,
+                [&LEADING[..], &[THEATRE]].concat(),
+                "{}",
+                path.display()
+            );
+
+            let members = read(&bytes).unwrap();
+            let options = &members.iter().find(|(n, _)| n == "options").unwrap().1;
+            let options = String::from_utf8_lossy(options);
+            for key in [
+                "playerName",
+                "graphics",
+                "VR",
+                "sound",
+                "plugins",
+                "views",
+                "miscellaneous",
+            ] {
+                assert!(
+                    !options.contains(&format!("[\"{key}\"]")),
+                    "{} keeps options.{key}",
+                    path.display()
+                );
+            }
+        }
+        assert!(seen > 0, "no templates in {}", folder.display());
+    }
 }
