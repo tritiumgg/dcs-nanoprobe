@@ -1,0 +1,118 @@
+# Build, lint and host tests on Linux, macOS and Windows, the agent DLL
+# cross-built on Linux and macOS, and the release DLL built on Windows.
+#
+# Every tool comes from mise.toml through mise-action, so CI runs the versions a
+# developer runs. Actions are pinned to commit SHAs; the comment names the tag.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  unix:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+          - name: macOS
+            os: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The secret scan reads the whole history.
+          fetch-depth: 0
+
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+        with:
+          cache: true
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      # cargo-xwin downloads the MSVC CRT and Windows SDK once per cache.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/cargo-xwin
+          key: xwin-${{ runner.os }}-${{ hashFiles('mise.toml') }}
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --no-default-features
+
+      - name: Open the host build with Lua 5.1
+        run: sh tools/luatest.sh
+
+      - name: Cross-build the agent DLL
+        run: cargo xwin build --release -p nanoprobe-agent --target x86_64-pc-windows-msvc
+
+      - name: Check the DLL
+        run: sh tools/checkdll.sh
+
+      - name: Secret scan of the history
+        if: runner.os == 'Linux'
+        run: gitleaks git --redact --no-banner .
+
+      - name: Secret hook blocks a planted token
+        if: runner.os == 'Linux'
+        run: sh tools/secretscan-test.sh
+
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+        with:
+          cache: true
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --no-default-features
+
+      # build.rs makes the lua.dll import library with llvm-dlltool or llvm-lib,
+      # from the LLVM the runner image ships.
+      - name: Put LLVM on PATH
+        shell: bash
+        run: echo 'C:\Program Files\LLVM\bin' >> "$GITHUB_PATH"
+
+      - name: Build the agent DLL
+        run: cargo build --release -p nanoprobe-agent --target x86_64-pc-windows-msvc
+
+      - name: Check the DLL
+        shell: bash
+        run: sh tools/checkdll.sh
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: agent-windows
+          path: |
+            target/x86_64-pc-windows-msvc/release/nanoprobe.dll
+            target/x86_64-pc-windows-msvc/release/nanoprobe.pdb
+          if-no-files-found: error

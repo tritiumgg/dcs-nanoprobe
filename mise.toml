@@ -60,6 +60,11 @@ description = "Cross-build the agent DLL, linking DCS's Lua"
 run = "cargo xwin build --release -p nanoprobe-agent --target x86_64-pc-windows-msvc"
 run_windows = "cargo build --release -p nanoprobe-agent --target x86_64-pc-windows-msvc"
 
+[tasks.dll]
+description = "Check the cross-built DLL's Lua imports, opener export and ABI marker"
+depends = ["windows"]
+run = "sh tools/checkdll.sh"
+
 [tasks.secrets]
 description = "Check that the pre-commit hook blocks a planted secret"
 run = "sh tools/secretscan-test.sh"
