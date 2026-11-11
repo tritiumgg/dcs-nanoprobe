@@ -42,6 +42,12 @@ commands:
                             when no player is connected, and wait for the hook
   load <name> <miz>         Load a mission through the development mission loader,
                             and wait until it starts
+  run <name> <test> [--dll P] [--template T]
+                            Deploy with --dev, restart DCS, load a fresh shell
+                            mission from T (default templates/caucasus.miz), run
+                            the test, and collect a bundle. <test> is `suite` for
+                            every probe, or a text that picks probes by file name
+                            as `probes --only` does. Refuses a server with players.
   eval <name> <state> <file> [--timeout S]
                             Run a Lua file in a state of the running DCS through the
                             eval channel, and print the result as JSON
@@ -71,6 +77,7 @@ fn main() -> ExitCode {
         }
         ["restart", name] => restart(name),
         ["load", name, miz] => load(name, miz),
+        ["run", name, test, rest @ ..] => run(name, test, rest),
         ["rollback", name] => rollback(name),
         ["undeploy", name] => undeploy(name),
         ["roundtrip", name, rest @ ..] => dll_option(rest).and_then(|dll| roundtrip(name, dll)),
@@ -352,6 +359,54 @@ fn load(name: &str, miz: &str) -> Result<ExitCode, String> {
         .unwrap_or_default();
     live::load(&remote, &file, &bytes)?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// `run <name> <test>`: the remote runner. Every step must succeed before
+/// the next starts; the bundle is collected whatever the test's verdict.
+fn run(name: &str, test: &str, rest: &[&str]) -> Result<ExitCode, String> {
+    let mut dll = None;
+    let mut template = repository().join("templates/caucasus.miz");
+    let mut words = rest.iter();
+    while let Some(word) = words.next() {
+        let value = words
+            .next()
+            .ok_or_else(|| format!("{word} needs a value"))?;
+        match *word {
+            "--dll" => dll = Some(PathBuf::from(value)),
+            "--template" => template = PathBuf::from(value),
+            other => return Err(format!("unknown option: {other}")),
+        }
+    }
+    let only = (test != "suite").then(|| test.to_owned());
+    // Build the shell first, so a bad template stops the run before DCS is
+    // touched.
+    let bytes = std::fs::read(&template)
+        .map_err(|e| format!("could not read {}: {e}", template.display()))?;
+    let shell = miz::generate(&bytes, &miz::Changes::default())?;
+
+    let players = remote(name)?.0.players()?;
+    if players > 0 {
+        return Err(format!(
+            "{players} player(s) connected; not running. Try again when the server is empty."
+        ));
+    }
+    println!("== deploy");
+    deploy(name, dll, true)?;
+    println!("== restart");
+    restart(name)?;
+    println!("== load a fresh shell mission");
+    let (remote, _, _) = remote(name)?;
+    live::load(&remote, "np-shell.miz", &shell)?;
+    println!("== test {test}");
+    let options = probes::ProbeOptions {
+        only,
+        ..Default::default()
+    };
+    let facts = facts(&target(name)?)?;
+    let verdict = probes::run_probes(open(name)?.as_ref(), &facts, name, &options);
+    println!("== bundle");
+    bundle(name)?;
+    verdict
 }
 
 /// What the target runs: its kind, and for docker-wine its Wine and DCS versions.

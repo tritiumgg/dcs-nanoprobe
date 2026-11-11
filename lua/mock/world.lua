@@ -8,7 +8,10 @@
 --   - Adding a group under an existing name replaces it. The units get new
 --     object IDs and keep their mission IDs (LIVE).
 --   - Group:destroy() is deferred: the group still exists within the same
---     call (LIVE), and its removal emits no event (LIVE).
+--     call (LIVE), and its removal emits no event (LIVE). While the
+--     simulation is paused the removal waits, and it finishes after a resume
+--     (LIVE under Wine). Births still reach handlers while paused (LIVE
+--     under Wine).
 --   - Every added unit emits S_EVENT_BIRTH (LIVE). A unit killed by an
 --     explosion emits S_EVENT_UNIT_LOST and S_EVENT_DEAD, and no
 --     S_EVENT_KILL (LIVE).
@@ -196,22 +199,26 @@ function Sim:explode(point)
 end
 
 -- Deliver queued events and carry out deferred removals. Runs every frame,
--- paused or not.
-function Sim:flush()
+-- paused or not; a group's removal waits while `paused`.
+function Sim:flush(paused)
   local queue = self.queue
   self.queue = {}
   for _, item in ipairs(queue) do
-    if item.event then
-      self.host:unit_event(item.event, item.unit)
-    end
-    if item.remove then
-      self:remove_unit(item.unit)
-    elseif item.destroy_group then
-      self:remove_group(item.destroy_group)
-    elseif item.destroy_static then
-      item.destroy_static.alive = false
-      if self.statics[item.destroy_static.name] == item.destroy_static then
-        self.statics[item.destroy_static.name] = nil
+    if paused and item.destroy_group then
+      self.queue[#self.queue + 1] = item
+    else
+      if item.event then
+        self.host:unit_event(item.event, item.unit)
+      end
+      if item.remove then
+        self:remove_unit(item.unit)
+      elseif item.destroy_group then
+        self:remove_group(item.destroy_group)
+      elseif item.destroy_static then
+        item.destroy_static.alive = false
+        if self.statics[item.destroy_static.name] == item.destroy_static then
+          self.statics[item.destroy_static.name] = nil
+        end
       end
     end
   end

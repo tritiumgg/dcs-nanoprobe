@@ -16,6 +16,7 @@ S.copy(root .. 'lua/dev/eval-hook.lua', profile .. 'Scripts/Hooks/nanoprobe-eval
 S.copy(root .. 'lua/dev/eval-prelude.lua', profile .. 'nanoprobe/dev/lua/prelude.lua')
 S.copy(root .. 'lua/scenarios/scenario.lua', profile .. 'nanoprobe/dev/lua/scenario.lua')
 S.copy(root .. 'lua/dev/lib/recorder.lua', profile .. 'nanoprobe/dev/lua/recorder.lua')
+S.copy(root .. 'lua/dev/lib/pause.lua', profile .. 'nanoprobe/dev/lua/pause.lua')
 
 local base = profile .. 'nanoprobe/dev/eval/'
 local host = mock.new({ writedir = profile })

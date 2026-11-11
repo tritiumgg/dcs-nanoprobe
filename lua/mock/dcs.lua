@@ -656,7 +656,7 @@ function M.new(o)
       self.sim:step(dt)
     end
     if self.mission then
-      self.sim:flush()
+      self.sim:flush(self.paused)
     end
     if self.mission and not self.paused then
       run_timers(self)
