@@ -55,6 +55,9 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
+      - name: Check each crate for Windows
+        run: sh tools/windowscheck.sh
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
 
@@ -112,6 +115,10 @@ jobs:
       - name: Put LLVM on PATH
         shell: bash
         run: echo 'C:\Program Files\LLVM\bin' >> "$GITHUB_PATH"
+
+      - name: Check each crate for Windows
+        shell: bash
+        run: sh tools/windowscheck.sh
 
       - name: Build the agent DLL
         run: cargo build --release -p nanoprobe-agent --target x86_64-pc-windows-msvc

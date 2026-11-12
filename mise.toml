@@ -109,8 +109,13 @@ run = ["buf lint", "sh tools/protobreak.sh"]
 description = "Check that the pre-commit hook blocks a planted secret"
 run = "sh tools/secretscan-test.sh"
 
+[tasks.windows-check]
+description = "Check every crate for x86_64-pc-windows-msvc with clippy, one crate at a time"
+run = "sh tools/windowscheck.sh"
+
 [tasks.check]
-description = "What CI checks on the host"
+description = "What CI checks on the host, and each crate checked for Windows"
+depends = ["windows-check"]
 run = [
   "cargo fmt --all --check",
   "cargo clippy --workspace --all-targets --no-default-features -- -D warnings",
