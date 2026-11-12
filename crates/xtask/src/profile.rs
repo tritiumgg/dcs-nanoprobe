@@ -12,6 +12,9 @@
 //! # The Saved Games profile to install into, as `target check` prints it.
 //! profile = "/config/.wine/drive_c/users/u/Saved Games/DCS.server"
 //! restart = "docker restart dcs" # run on the host to restart DCS
+//! # The agent's mapped file as DCS opens it; deploy writes it to agent.toml.
+//! # Z: is the container's root under Wine, so the sidecar side is /dev/shm.
+//! map_path = 'Z:\dev\shm\nanoprobe.map'
 //!
 //! [targets.this-machine]
 //! kind = "local"                # a profile on this machine's file system
@@ -50,6 +53,11 @@ pub enum Target {
         /// `docker restart dcs`. `cargo xtask restart` needs it.
         #[serde(default)]
         restart: Option<String>,
+        /// The agent's mapped file as DCS opens it, such as
+        /// `Z:\dev\shm\nanoprobe.map`. Deploy writes it to `agent.toml`;
+        /// `cargo xtask link` needs it.
+        #[serde(default)]
+        map_path: Option<String>,
     },
     /// DCS on a Windows machine reached over SSH. DCS runs in the desktop
     /// user's session, started and ended by two scheduled tasks the SSH
@@ -163,6 +171,7 @@ mod tests {
                 wine_prefix: "/config/.wine".into(),
                 profile: None,
                 restart: None,
+                map_path: None,
             }
         );
     }

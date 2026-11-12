@@ -15,6 +15,7 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+nanoprobe-agent-link = { path = "../agent-link" }
 nanoprobe-fake-agent = { path = "../fake-agent" }
 nanoprobe-transport = { path = "../transport" }
 getrandom = "0.3"

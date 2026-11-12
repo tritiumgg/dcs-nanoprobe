@@ -34,6 +34,7 @@ dcs-lua = []
 workspace = true
 
 [dependencies]
+nanoprobe-agent-link = { path = "../agent-link" }
 nanoprobe-transport = { path = "../transport" }
 
 [target.'cfg(unix)'.dependencies]
@@ -48,7 +49,6 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_IO",
     "Win32_System_Kernel",
     "Win32_System_LibraryLoader",
-    "Win32_System_Memory",
     "Win32_System_Performance",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",

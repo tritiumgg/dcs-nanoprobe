@@ -246,17 +246,29 @@ impl FileSink {
     /// Write one record and flush it. When the record would take the file
     /// past its cap, and the file is not empty, rotate first.
     pub fn write(&mut self, record: &Record<'_>) -> io::Result<()> {
-        let line = record.encode();
-        if self.size > 0 && self.size + line.len() as u64 > self.cap {
-            self.rotate()?;
+        self.write_lines([record.encode().as_str()])
+    }
+
+    /// Write records already encoded by [`Record::encode`], each a JSON line
+    /// with its newline, and flush once after the last. Each line rotates the
+    /// file as [`FileSink::write`] does.
+    pub fn write_lines<'l>(&mut self, lines: impl IntoIterator<Item = &'l str>) -> io::Result<()> {
+        let mut wrote = false;
+        for line in lines {
+            if self.size > 0 && self.size + line.len() as u64 > self.cap {
+                self.rotate()?;
+            }
+            let file = match &mut self.file {
+                Some(file) => file,
+                None => self.file.insert(append(&self.path)?),
+            };
+            file.write_all(line.as_bytes())?;
+            self.size += line.len() as u64;
+            wrote = true;
         }
-        let file = match &mut self.file {
-            Some(file) => file,
-            None => self.file.insert(append(&self.path)?),
-        };
-        file.write_all(line.as_bytes())?;
-        file.flush()?;
-        self.size += line.len() as u64;
+        if wrote && let Some(file) = &mut self.file {
+            file.flush()?;
+        }
         Ok(())
     }
 

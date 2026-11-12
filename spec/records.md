@@ -25,6 +25,10 @@ it was made, not the time it arrived. The difference is measured once the sideca
 attaches, so for records made before that the wall time is an estimate, good to the
 drift of the two clocks.
 
+A record made in a callback outside a frame (`onMissionLoadBegin`, `onSimulationStart`,
+`onSimulationStop`) carries the frame number of the last frame and the real and model
+time of the callback.
+
 A record the agent held in its queue is written after a `FRAME` that repeats the stamps
 of the frame it was recorded in, with `replay` set. After the replayed records the
 agent writes a `FRAME` for the current frame before any current record. The sidecar
@@ -413,6 +417,15 @@ was shown to: for a group-scoped item, the occupants of that group.
 | + | lv | data | The record's `data` table, or nil |
 
 The writer also appends the line to its own log file (spec/log.md).
+
+### Capabilities
+
+The hook and the shim each write one `LOG` record at `info` with the message
+`capabilities` when they start (spec/install.md, "Capabilities"): the hook once per
+process, the shim once per load or reload. Its `data` has one key per DCS name the
+platform calls in that state, such as `DCS.getPause` or `world.addEventHandler`, and
+the value `true` when the name is present or `false` when it is absent. The `target`
+says which state: `hook` or `shim` (the server state).
 
 ## Samples
 

@@ -7,12 +7,12 @@ local E = ...
 local agent = E.lib('agent').open()
 local status = agent.status()
 E.observe('loaded', type(agent) == 'table', { windows = true })
-E.observe('abi', agent.abi, { windows = '1' })
--- The host-native build under the mock neither pins nor carries the DLL's
--- name.
+E.observe('abi', agent.abi, { windows = '2' })
+-- The host-native build under the mock does not pin itself. It carries the
+-- name of the file it was opened from, as the DLL does.
 E.observe('pinned', status.pinned, { windows = true, mock = false })
 E.observe('module_matches_build', status.module == 'nanoprobe_agent_' .. agent.build .. '.dll',
-  { windows = true, mock = false })
+  { windows = true, mock = true })
 E.observe('pdb', status.pdb, { info = true })
 E.observe('opens', status.opens, { info = true })
 E.observe('disabled', status.disabled, { windows = false })

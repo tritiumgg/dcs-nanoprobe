@@ -2,10 +2,9 @@
 
 use core::ffi::c_void;
 use core::fmt::Write as _;
-use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, FILETIME, HANDLE, HMODULE, INVALID_HANDLE_VALUE,
@@ -20,10 +19,6 @@ use windows_sys::Win32::System::Diagnostics::Debug::{
 use windows_sys::Win32::System::LibraryLoader::{
     GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_PIN,
     GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, GetModuleFileNameW, GetModuleHandleExW,
-};
-use windows_sys::Win32::System::Memory::{
-    CreateFileMappingW, FILE_MAP_ALL_ACCESS, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile,
-    PAGE_READWRITE, UnmapViewOfFile,
 };
 use windows_sys::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows_sys::Win32::System::SystemInformation::GetSystemTimeAsFileTime;
@@ -427,71 +422,4 @@ impl core::fmt::Write for Buffer {
 pub fn fault() {
     // SAFETY: deliberately not safe; this is the fault the test needs.
     unsafe { core::ptr::write_volatile(core::ptr::null_mut::<u64>(), 1) }
-}
-
-/// A file mapped into memory, shared with every other process that maps it.
-pub struct Mapping {
-    view: MEMORY_MAPPED_VIEW_ADDRESS,
-    mapping: HANDLE,
-    len: usize,
-}
-
-// SAFETY: the view is plain shared memory; access goes through atomics.
-unsafe impl Send for Mapping {}
-
-impl Mapping {
-    /// Map `path`, creating it and growing it to `len` bytes as needed.
-    pub fn open(path: &Path, len: usize) -> Result<Mapping, String> {
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-        // SAFETY: a valid file handle; a mapping of `len` bytes grows the file.
-        let mapping = unsafe {
-            CreateFileMappingW(
-                file.as_raw_handle() as HANDLE,
-                core::ptr::null(),
-                PAGE_READWRITE,
-                0,
-                len as u32,
-                core::ptr::null(),
-            )
-        };
-        if mapping.is_null() {
-            return Err(format!(
-                "CreateFileMapping {}: {}",
-                path.display(),
-                std::io::Error::last_os_error()
-            ));
-        }
-        // SAFETY: a valid mapping of at least `len` bytes.
-        let view = unsafe { MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, len) };
-        if view.Value.is_null() {
-            let error = std::io::Error::last_os_error();
-            // SAFETY: the handle from above.
-            unsafe { CloseHandle(mapping) };
-            return Err(format!("MapViewOfFile {}: {error}", path.display()));
-        }
-        Ok(Mapping { view, mapping, len })
-    }
-
-    /// The mapping as 64-bit words.
-    pub fn words(&self) -> &[AtomicU64] {
-        // SAFETY: the view is page-aligned, `len` bytes long and lives as
-        // long as `self`; AtomicU64 has the layout of u64.
-        unsafe { core::slice::from_raw_parts(self.view.Value.cast::<AtomicU64>(), self.len / 8) }
-    }
-}
-
-impl Drop for Mapping {
-    fn drop(&mut self) {
-        // SAFETY: releases exactly what `open` created.
-        unsafe {
-            UnmapViewOfFile(self.view);
-            CloseHandle(self.mapping);
-        }
-    }
 }

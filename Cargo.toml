@@ -4,6 +4,7 @@
 resolver = "3"
 members = [
     "crates/agent",
+    "crates/agent-link",
     "crates/cli",
     "crates/fake-agent",
     "crates/sidecar",

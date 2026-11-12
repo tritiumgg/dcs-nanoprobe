@@ -127,6 +127,8 @@ end
 --   build     the build hash, or nil
 --   size      function(path) returning a file's size in bytes, or nil
 --   fallback  function(message) called once if the file cannot be written
+--   forward   function(level, msg, data) also given every record, or nil; it
+--             may be set on the returned log later, as `forward`
 function M.open(o)
   local self = {
     path = o.path,
@@ -136,6 +138,7 @@ function M.open(o)
     build = o.build,
     size_of = o.size,
     fallback = o.fallback,
+    forward = o.forward,
     failed = false,
   }
 
@@ -191,6 +194,9 @@ function M.open(o)
 
   -- Write one record. Never raises.
   function self.write(level, msg, data)
+    if self.forward then
+      pcall(self.forward, level, msg, data)
+    end
     if self.failed or not (self.file or reopen()) then
       return
     end

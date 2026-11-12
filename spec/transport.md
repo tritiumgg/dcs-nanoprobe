@@ -129,8 +129,11 @@ records that are consumed.
 | 0x0580 | u64[32] | hist_event | agent | Agent time per event handled |
 | 0x0680 | pad[2432] | reserved4 | agent | |
 
-A period is 0 until the tier completes its first sweep. `crumb` codes are listed in the
-agent's source; 0 means no risky call is in progress.
+A period is 0 until the tier completes its first sweep.
+
+**Breadcrumbs.** `crumb` 0 means no risky call is in progress. `crumb` 0x10000 plus an
+opcode means that command's handler runs, and `crumb_arg` is its `seq`. The agent
+adds codes for later risky calls here.
 
 ### Codes: lifecycle
 
@@ -213,10 +216,10 @@ together. The sidecar stores `in_tail` once per batch of commands.
 The agent also acts outside the pump, in two callbacks that run when no frame will
 follow: `onMissionLoadBegin` and `onSimulationStop`. In each it stores `lifecycle` and
 `mission_gen` in the status block, so the block reads `LOADING` for the whole of a
-load. It then publishes a batch like a pump's: a `FRAME` with the stamps of the last
-pump call and the new lifecycle state and generation, then the `LIFECYCLE` record,
-then `out_tail`. If it is detached, or its queues are not empty, it queues the
-`LIFECYCLE` in order and writes nothing to the ring.
+load. It then publishes a batch like a pump's: what its queues hold, in order, ending
+with the `LIFECYCLE` record, each behind a `FRAME` with its stamps, then `out_tail`. If
+it is detached or owes a `HELLO`, it writes nothing; what the ring has no room for
+waits in the queue for the next frame.
 
 ### Consuming
 
@@ -319,9 +322,11 @@ waits.
 more than a whole frame's slice, so a frame with a system call exceeds the slice. What
 a file call costs under Wine is UNVERIFIED and assumed to be as much. The agent
 therefore makes at most one socket call on a frame, on few frames, and on that same
-frame checks the kill switch and flushes its log file (spec/log.md). It makes no
-system call on any other frame. Outside a handshake such a frame comes once a second,
-so the kill switch is seen within a second (spec/install.md).
+frame checks the kill switch and the shim reload request and flushes its log file
+(spec/install.md, spec/log.md). It makes no system call on any other frame, except the
+one that finds the kill switch, which also closes the connection and the listener.
+Outside a handshake such a frame comes once a second, so the kill switch is seen
+within a second (spec/install.md).
 
 | State | Socket call | At most |
 |---|---|---|
@@ -353,7 +358,7 @@ fields separated by one space. Numbers are lower-case hex without a prefix.
 |---|---|---|
 | sidecar | `HELLO 1 <token> <sidecar_boot>` | Protocol version 1, the token from the token file, the sidecar's boot |
 | agent | `OK <layout_hash> <agent_boot> <attach_id> <path>` | The layout hash, the agent's boot, a random non-zero number for this attach, and the file's path as the agent opened it. `<path>` is the rest of the line and may hold spaces. |
-| agent | `ERR <reason>` | Refused. Reasons: `version`, `token`, `disabled`, `no_file`. The agent closes the connection. A line that is not a well-formed `HELLO`, or one with a zero boot, is answered `ERR version`. |
+| agent | `ERR <reason>` | Refused. Reasons: `version`, `token`, `disabled`, `no_file`. The agent closes the connection. A line that is not a well-formed `HELLO`, or one with a zero boot, is answered `ERR version`. The agent never sends `disabled` or `no_file`: a disabled agent has closed its listener, and an agent without its file does not listen. A sidecar then meets a refused connect, and a disabled agent's file shows `DISABLED`. |
 
 After `OK` neither side sends anything. The open connection is the session: closing it
 ends the session. The sidecar's heartbeat in the file shows that it is alive.
@@ -427,7 +432,11 @@ calls. The agent then:
 
 A sidecar stops writing to the file when its connection closes, when `sidecar_boot` or
 `attach_seen` in the file is not its own, or when `sidecar_boot_seen` changes from its
-own boot to anything else, 0 included. It then starts again from the handshake. It
+own boot to anything else, 0 included. It then starts again from the handshake. When the
+connection closed or `sidecar_boot_seen` changed while `sidecar_boot` and `attach_seen`
+were still its own, it first reads the outbound ring once more, to its tail, and stores
+nothing: the agent publishes its last records, such as the kill switch's `LIFECYCLE`,
+before it closes the connection. It
 checks these:
 
 - on every poll, before it writes;

@@ -29,6 +29,12 @@ pub const REGISTRYINDEX: c_int = -10000;
 /// `lua_pcall`'s request for every result.
 pub const MULTRET: c_int = -1;
 
+/// The type tag `lua_type` returns for an index past the top.
+pub const TNONE: c_int = -1;
+/// nil.
+pub const TNIL: c_int = 0;
+/// A boolean.
+pub const TBOOLEAN: c_int = 1;
 /// The type tag `lua_type` returns for a number.
 pub const TNUMBER: c_int = 3;
 /// A string.
@@ -85,6 +91,12 @@ unsafe extern "C" {
     /// The type tag of the value at `index`, or -1 for an index past the top.
     pub unsafe fn lua_type(state: *mut State, index: c_int) -> c_int;
 
+    /// Whether the value at `index` is neither nil nor false.
+    pub unsafe fn lua_toboolean(state: *mut State, index: c_int) -> c_int;
+
+    /// The name of a type tag. A static string; never raises.
+    pub unsafe fn lua_typename(state: *mut State, tag: c_int) -> *const c_char;
+
     /// The value at `index` as a number, or 0 when it is not one.
     pub unsafe fn lua_tonumber(state: *mut State, index: c_int) -> f64;
 
@@ -138,4 +150,22 @@ pub unsafe fn to_string(state: *mut State, index: c_int) -> Option<String> {
     // SAFETY: as above.
     let bytes = unsafe { core::slice::from_raw_parts(p.cast::<u8>(), len) };
     Some(String::from_utf8_lossy(bytes).into_owned())
+}
+
+/// The name of a type tag, copied.
+///
+/// # Safety
+///
+/// `state` must be live.
+pub unsafe fn type_name(state: *mut State, tag: c_int) -> String {
+    // SAFETY: the caller guarantees a live state; Lua returns a static
+    // NUL-terminated string for any tag.
+    let p = unsafe { lua_typename(state, tag) };
+    if p.is_null() {
+        return String::new();
+    }
+    // SAFETY: as above.
+    unsafe { core::ffi::CStr::from_ptr(p) }
+        .to_string_lossy()
+        .into_owned()
 }

@@ -66,7 +66,10 @@ pub trait Sink {
     /// running.
     fn attached(&mut self, agent_boot: u64, sidecar_boot: u64);
     /// The highest record number already journalled for `agent_boot`, 0 for
-    /// none. Records at or below it are dropped.
+    /// none. Records at or below it are dropped. The sink must keep this
+    /// current: the final read after a session ends stores no head, so a
+    /// later session of the same boot reads those records again, and only
+    /// this number keeps them from being journalled twice.
     fn last_number(&self, agent_boot: u64) -> u64;
     /// A record at or below [`Sink::last_number`], read again after a restart
     /// and not journalled again. The sink may check it against its journal.
@@ -242,6 +245,8 @@ impl Session<'_> {
                 in_head: 0,
                 payload: Vec::new(),
                 corrupt: false,
+                may_drain: false,
+                draining: false,
             };
             let end = polls.run(sink, stop, poll);
             (end, polls.corrupt)
@@ -415,6 +420,12 @@ struct Polls<'a, M: Memory> {
     payload: Vec<u8>,
     /// The session ended on a failed check of an outbound record.
     corrupt: bool,
+    /// The last failed check was the agent closing the connection or
+    /// detaching while the file was still this sidecar's: what it published
+    /// before is read once more (spec/transport.md, "Detaching").
+    may_drain: bool,
+    /// Reading that last time: records go to the sink and nothing is stored.
+    draining: bool,
 }
 
 /// Why reading the outbound ring stopped.
@@ -447,32 +458,51 @@ impl<M: Memory> Polls<'_, M> {
             }
             last = Instant::now();
             if let Err(why) = self.check() {
-                return End::Retry(why);
+                return self.end(why, sink);
             }
             if let Err(why) = self.read(sink) {
-                return End::Retry(why);
+                return self.end(why, sink);
             }
             if let Err(why) = self.check() {
-                return End::Retry(why);
+                return self.end(why, sink);
             }
             if self.hello
                 && let Err(why) = self.write(sink)
             {
-                return End::Retry(why);
+                return self.end(why, sink);
             }
         }
+    }
+
+    /// End the session. When the agent closed the connection or detached
+    /// while the file was still this sidecar's, first read what it published
+    /// before, such as the kill switch's last `LIFECYCLE`, storing nothing.
+    fn end(&mut self, why: String, sink: &mut impl Sink) -> End {
+        if self.may_drain && !self.corrupt {
+            self.draining = true;
+            if let Err(e) = self.read(sink) {
+                sink.report(&format!("after the session ended: {e}"));
+            }
+        }
+        End::Retry(why)
     }
 
     /// The checks of "Detaching": the connection, the sidecar's own fields,
     /// the agent's `sidecar_boot_seen`, and the agent's boot.
     fn check(&mut self) -> Result<(), String> {
-        let mut b = [0u8; 64];
-        match self.stream.read(&mut b) {
-            Ok(0) => return Err("the agent closed the connection".into()),
-            Ok(_) => return Err("the agent sent bytes after OK".into()),
-            Err(e) if e.kind() == ErrorKind::WouldBlock => {}
-            Err(e) => return Err(format!("the connection: {e}")),
+        if self.draining {
+            return Ok(());
         }
+        // Set again below for the two failures that leave the file this
+        // sidecar's.
+        self.may_drain = false;
+        let mut b = [0u8; 64];
+        let closed = match self.stream.read(&mut b) {
+            Ok(0) => Some("the agent closed the connection".to_owned()),
+            Ok(_) => return Err("the agent sent bytes after OK".into()),
+            Err(e) if e.kind() == ErrorKind::WouldBlock => None,
+            Err(e) => return Err(format!("the connection: {e}")),
+        };
         let m = self.map;
         if m.load(s::SIDECAR_BOOT, Ordering::Acquire) != self.sidecar_boot
             || m.load(s::ATTACH_SEEN, Ordering::Acquire) != self.attach_id
@@ -485,10 +515,15 @@ impl<M: Memory> Polls<'_, M> {
         if snap.u64(s::AGENT_BOOT) != self.geometry.agent_boot {
             return Err("the agent restarted".into());
         }
+        if let Some(why) = closed {
+            self.may_drain = true;
+            return Err(why);
+        }
         let seen = snap.u64(s::SIDECAR_BOOT_SEEN);
         if seen == self.sidecar_boot {
             self.seen_own_boot = true;
         } else if self.seen_own_boot {
+            self.may_drain = true;
             return Err(format!("the agent detached (sidecar_boot_seen {seen:x})"));
         }
         let in_head = snap.u64(s::IN_HEAD);
@@ -523,7 +558,8 @@ impl<M: Memory> Polls<'_, M> {
         let last = sink.last_number(boot);
         let mut n = 0;
         let mut frame_at = None;
-        while n < RECORDS_PER_POLL {
+        // The final read after a session ended goes to the tail.
+        while self.draining || n < RECORDS_PER_POLL {
             let Some(r) = self
                 .out
                 .next(self.map, &mut self.payload)
@@ -593,6 +629,10 @@ impl<M: Memory> Polls<'_, M> {
         }
         if n > 0 {
             sink.durable().map_err(Other)?;
+            if self.draining {
+                // The session is over: the head is not stored.
+                return Ok(());
+            }
             self.check().map_err(Other)?;
             // Every record up to the private head is durable. The head is
             // stored only at the tail or at a FRAME, so a sidecar that starts
@@ -650,6 +690,7 @@ mod tests {
     struct Taken {
         hellos: Vec<u64>,
         reports: Vec<String>,
+        kinds: Vec<u16>,
     }
 
     impl Sink for Taken {
@@ -658,7 +699,8 @@ mod tests {
             0
         }
         fn reread(&mut self, _: u64, _: u64, _: u16, _: &[u8]) {}
-        fn record(&mut self, _: u64, _: u64, _: u16, _: &[u8]) -> Result<(), String> {
+        fn record(&mut self, _: u64, _: u64, kind: u16, _: &[u8]) -> Result<(), String> {
+            self.kinds.push(kind);
             Ok(())
         }
         fn durable(&mut self) -> Result<(), String> {
@@ -734,6 +776,8 @@ mod tests {
             in_head: 0,
             payload: Vec::new(),
             corrupt: false,
+            may_drain: false,
+            draining: false,
         };
         let mut sink = Taken::default();
         polls.read(&mut sink).expect("read");
@@ -743,5 +787,110 @@ mod tests {
             "{:?}",
             sink.reports
         );
+    }
+
+    const DRAIN_BOOT: u64 = 0xd7a1;
+    const DRAIN_SIDECAR: u64 = 0x51de;
+
+    /// A file holding a FRAME, `logs` records and a LIFECYCLE, published, with
+    /// this sidecar attached; and its header.
+    fn attached_file(logs: usize) -> (Heap, Header) {
+        let header = Header {
+            interface: 1,
+            agent_boot: DRAIN_BOOT,
+            build: 1,
+            created_ms: 1,
+            clock_hz: 1,
+            out_capacity: 256 << 10,
+            in_capacity: 256 << 10,
+        };
+        let m = Heap::new(header.file_size() as usize);
+        status::start(&m, &header, 3);
+        let mut out = Producer::new(Ring::outbound(header.out_capacity), 0);
+        let f = Frame {
+            number: 2,
+            ..Frame::default()
+        };
+        assert_eq!(out.push(&m, kind::FRAME as u16, &[&f.encode()]), Ok(true));
+        for _ in 0..logs {
+            assert_eq!(out.push(&m, kind::LOG as u16, &[&[0u8; 8]]), Ok(true));
+        }
+        assert_eq!(
+            out.push(&m, kind::LIFECYCLE as u16, &[&[6, 0, 0, 0]]),
+            Ok(true)
+        );
+        out.publish(&m);
+        m.store(s::SIDECAR_BOOT, DRAIN_SIDECAR, Ordering::Relaxed);
+        m.store(s::ATTACH_SEEN, 7, Ordering::Relaxed);
+        m.store(s::SIDECAR_BOOT_SEEN, DRAIN_SIDECAR, Ordering::Relaxed);
+        (m, header)
+    }
+
+    /// Run the poll loop until the session ends, with the agent's end of the
+    /// connection held open.
+    fn session(m: &Heap, header: &Header, sink: &mut Taken, change: impl FnOnce(&Heap)) -> End {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listen");
+        let client = TcpStream::connect(listener.local_addr().expect("addr")).expect("connect");
+        let _server = listener.accept().expect("accept");
+        let geometry = status::check(m, header.file_size()).expect("a good header");
+        let mut polls = Polls {
+            map: m,
+            geometry,
+            sidecar_boot: DRAIN_SIDECAR,
+            attach_id: 7,
+            attach_tail: 0,
+            stream: client,
+            out: Consumer::new(Ring::outbound(header.out_capacity), 0),
+            inbound: Producer::new(Ring::inbound(header.out_capacity, header.in_capacity), 0),
+            expected: None,
+            seen_own_boot: true,
+            hello: false,
+            held: None,
+            in_head: 0,
+            payload: Vec::new(),
+            corrupt: false,
+            may_drain: false,
+            draining: false,
+        };
+        change(m);
+        polls.run(sink, &AtomicBool::new(false), Duration::from_millis(1))
+    }
+
+    /// The agent detached with more than a poll's worth of records unread:
+    /// the final read takes them all, the last LIFECYCLE included, and stores
+    /// no head.
+    #[test]
+    fn after_a_detach_the_final_read_reaches_the_tail_and_stores_nothing() {
+        let (m, header) = attached_file(RECORDS_PER_POLL + 100);
+        let mut sink = Taken::default();
+        let end = session(&m, &header, &mut sink, |m| {
+            m.store(s::SIDECAR_BOOT_SEEN, 0, Ordering::Release);
+        });
+        assert!(
+            matches!(end, End::Retry(ref why) if why.contains("detached")),
+            "{end:?}"
+        );
+        assert_eq!(sink.kinds.len(), RECORDS_PER_POLL + 102, "every record");
+        assert_eq!(sink.kinds.last(), Some(&(kind::LIFECYCLE as u16)));
+        assert_eq!(
+            m.load(s::OUT_HEAD, Ordering::Acquire),
+            0,
+            "a head was stored"
+        );
+    }
+
+    /// Another sidecar holds the file: nothing is read.
+    #[test]
+    fn when_another_sidecar_holds_the_file_nothing_is_read() {
+        let (m, header) = attached_file(3);
+        let mut sink = Taken::default();
+        let end = session(&m, &header, &mut sink, |m| {
+            m.store(s::SIDECAR_BOOT, 0x0123, Ordering::Release);
+        });
+        assert!(
+            matches!(end, End::Retry(ref why) if why.contains("another sidecar")),
+            "{end:?}"
+        );
+        assert!(sink.kinds.is_empty(), "read {:?}", sink.kinds);
     }
 }

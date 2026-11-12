@@ -17,6 +17,10 @@ offsets from the end of the header.
 | 0x0028 | u32 | mission_gen | The mission generation the command was written for |
 | 0x002C | pad[4] | reserved | |
 
+A payload shorter than the command header is a failed consuming check: the agent
+writes no `RESULT`, logs it, and detaches (spec/transport.md, "Consuming"). The command
+was taken, so after the next `HELLO` the sidecar counts it `unknown`.
+
 DCS call names in this document are PRIOR unless tagged; steps S15 and S16 check each
 against a running DCS.
 
@@ -135,6 +139,11 @@ command runs, so a command that was running when DCS died, and may be why it die
 reports it as the command DCS died in. If the sidecar was not running when DCS died
 and finds a new `agent_boot`, every unanswered command is `unknown`.
 
+**After the kill switch** the agent writes no further `HELLO`, so the sidecar resolves
+its commands as after DCS dies, by the largest `in_head` it read for that
+`agent_boot`. `CONTROL_LOST` stays set in the status block if a control record was
+lost.
+
 What the sidecar does about `unknown` is in spec/errors.md. After a DCS restart the
 agent's memory is empty, and the sidecar starts a new epoch and materializes from the
 store (spec/world.md).
@@ -149,7 +158,8 @@ is waiting. Commands it did not reach stay in the ring, a control command among 
 While the restore burst is on (`BURST`) and the lifecycle state is `PAUSED`, the budget
 does not apply.
 
-Each handler runs inside `pcall`, with the breadcrumb set to the opcode and entity.
+Each handler runs inside `pcall`, with `crumb` set to 0x10000 plus the opcode and
+`crumb_arg` to the command's `seq` (spec/transport.md, "Breadcrumbs").
 `cost_us` in the result is the time around the handler. A command over the budget is
 counted in `commands_over_budget`.
 

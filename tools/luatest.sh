@@ -38,6 +38,10 @@ case "$("$LUA" -v 2>&1)" in
 esac
 
 (cd "$ROOT" && cargo build -p nanoprobe-agent --no-default-features)
+# The sidecar side of the link rehearsal, lua/tests/link.lua.
+(cd "$ROOT" && cargo build -p nanoprobe-fake-agent --bin link-probe -p nanoprobe-cli --bin nanoprobe)
+PROBE="$ROOT/target/debug/link-probe"
+INSPECT="$ROOT/target/debug/nanoprobe"
 
 MODULE=
 for candidate in \
@@ -70,5 +74,5 @@ VERSION=$(awk '
 for script in "$ROOT"/lua/tests/*.lua; do
     case ${script##*/} in support*) continue ;; esac
     printf '%s\n' "--- ${script#"$ROOT"/}"
-    "$LUA" "$script" "$MODULE" "$VERSION"
+    "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT"
 done

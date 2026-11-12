@@ -35,3 +35,7 @@ and starts a new file. A writer therefore keeps at most twice its cap on disk.
 
 In an install, the files live in `<profile>/nanoprobe/logs/`: `hook.log`, `shim.log`,
 `agent.log`. The default cap is 4 MiB.
+
+Once the agent's link is open, every record the hook and the shim write, and every
+record the agent writes, also goes to the sidecar as a `LOG` record (spec/records.md),
+with the writer as its `target`.

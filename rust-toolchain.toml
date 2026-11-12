@@ -9,4 +9,6 @@
 channel = "1.99.1"
 # rust-analyzer is the language server. It reads the standard library from rust-src.
 components = ["rustfmt", "clippy", "rust-analyzer", "rust-src"]
-targets = ["x86_64-pc-windows-msvc"]
+# The Windows target builds the agent DLL. The Linux one builds the test
+# peers that `cargo xtask link` runs inside a Linux game container.
+targets = ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-musl"]

@@ -9,3 +9,8 @@ xtask = "run --quiet -p xtask --"
 # Microsoft ships the static CRT without its PDBs, so lld-link warns once per
 # object (LNK4099). The agent's own PDB is complete without them.
 rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=/IGNORE:4099"]
+
+# Test peers for a Linux game container (`cargo xtask link`): static musl
+# binaries, linked by the lld that rustup ships, so no C toolchain is needed.
+[target.x86_64-unknown-linux-musl]
+linker = "rust-lld"

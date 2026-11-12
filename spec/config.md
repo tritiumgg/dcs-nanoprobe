@@ -38,13 +38,14 @@ raw = false            # allow extensions, EVAL and emit
 |---|---|
 | `map_path` | A path as DCS opens it. Default: `nanoprobe-<port>.map` in the folder `GetTempPathW` returns. Under Wine, set it to a path on a memory-backed volume the sidecar also mounts, such as `Z:\dev\shm\nanoprobe.map`. |
 | `port` | The agent listens on `127.0.0.1` only, so the sidecar runs in the same network namespace as DCS. A sidecar container that joins the game container's network is restarted whenever the game container is (spec/transport.md). |
-| `overhead_share`, `commanded_ms` | The two budget settings. The slice of a frame is `overhead_share` times the running average frame interval, and never more than 250 µs, which is fixed. |
+| `overhead_share`, `commanded_ms` | The two budget settings. The slice of a frame is `overhead_share` times the running average frame interval, and never more than 250 µs, which is fixed. `overhead_share` is above 0 and at most 1; `commanded_ms` is above 0 and at most 1,000. |
 | `[sampling]` | Defaults for the tiers. The sidecar may ask for other targets with `RATES` (spec/commands.md); the budget still holds. |
 | `raw` | Off by default. Only this file turns it on. |
 
 ### Token
 
-`<profile>/nanoprobe/token` holds 64 lower-case hex digits and nothing else. The
+`<profile>/nanoprobe/token` holds 64 lower-case hex digits and nothing else; a reader
+accepts one line ending after them. The
 installer creates it from 32 random bytes, readable only by the account DCS runs as and
 the sidecar's. The agent reads it at start. The sidecar presents it in the handshake
 (spec/transport.md). It never leaves the server, and no log or bundle holds it.
@@ -52,7 +53,9 @@ the sidecar's. The agent reads it at start. The sidecar presents it in the hands
 ### Kill switch
 
 `<profile>/nanoprobe/disable` (spec/install.md). When it appears the agent sets the
-lifecycle state to `DISABLED` within 2 s and does no more work until DCS restarts.
+lifecycle state to `DISABLED` within 2 s of the first frame after it, and does no more
+work until DCS restarts. No frame runs during a mission load (spec/install.md, "Kill
+switch").
 
 ## Sidecar: `sidecar.toml`
 

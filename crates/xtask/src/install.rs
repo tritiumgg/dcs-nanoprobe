@@ -29,6 +29,12 @@ const MANIFEST: &str = "nanoprobe/manifest.txt";
 const RECORD: &str = "nanoprobe/install.txt";
 const LOGS: &str = "nanoprobe/logs";
 const VERSIONS: &str = "nanoprobe/versions";
+/// The build the running hook loaded, which the hook writes at start.
+pub const RUNNING: &str = "nanoprobe/running.txt";
+/// The agent's settings (spec/config.md).
+pub const AGENT_TOML: &str = "nanoprobe/agent.toml";
+/// The handshake token (spec/config.md).
+pub const TOKEN: &str = "nanoprobe/token";
 /// The loader's parent folders, outermost first.
 const LOADER_DIRS: [&str; 2] = ["Scripts", "Scripts/Hooks"];
 
@@ -39,6 +45,12 @@ pub trait Profile {
     /// Write a file whole, creating its parent folders. Readers see the old
     /// file or the new one, never a part.
     fn write(&self, path: &str, bytes: &[u8]) -> Result<(), String>;
+    /// [`Profile::write`], for a file only the profile's owner may read: on
+    /// Unix and in a container, mode 0600. On Windows the folder's access
+    /// list decides, as it does for every file in the profile.
+    fn write_private(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
+        self.write(path, bytes)
+    }
     /// Create a folder and its parents.
     fn create_dir(&self, path: &str) -> Result<(), String>;
     /// Whether a folder exists.
@@ -102,6 +114,10 @@ impl Payload {
                     read(repo.join("lua/agent/hook.lua"))?,
                 ),
                 ("lua/log.lua".into(), read(repo.join("lua/agent/log.lua"))?),
+                (
+                    "lua/shim.lua".into(),
+                    read(repo.join("lua/agent/shim.lua"))?,
+                ),
             ],
             dev: if dev { Some(dev_files(repo)?) } else { None },
         })
@@ -326,6 +342,83 @@ pub fn deploy(profile: &dyn Profile, payload: &Payload) -> Result<Deployed, Stri
     })
 }
 
+/// What [`configure`] did.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Configured {
+    /// A token was created, because there was none.
+    pub token_created: bool,
+    /// `agent.toml` was written.
+    pub agent_toml_written: bool,
+}
+
+/// The agent's settings for a target: create the token when there is none,
+/// from 32 random bytes, and with `map_path`, write an `agent.toml` naming
+/// it. The token's value is never printed or kept on this machine. Without
+/// `map_path`, `agent.toml` is left as it is.
+pub fn configure(profile: &dyn Profile, map_path: Option<&str>) -> Result<Configured, String> {
+    let token_created = profile.read(TOKEN)?.is_none();
+    if token_created {
+        let mut bytes = [0u8; 32];
+        getrandom::fill(&mut bytes).map_err(|e| format!("no random bytes for the token: {e}"))?;
+        profile.write_private(TOKEN, hex(&bytes).as_bytes())?;
+    }
+    let mut agent_toml_written = false;
+    if let Some(path) = map_path {
+        let old = profile.read(AGENT_TOML)?;
+        let old = old.map(|b| String::from_utf8_lossy(&b).into_owned());
+        if let Some(text) = agent_toml(old.as_deref(), path)? {
+            profile.write(AGENT_TOML, text.as_bytes())?;
+            agent_toml_written = true;
+        }
+    }
+    Ok(Configured {
+        token_created,
+        agent_toml_written,
+    })
+}
+
+/// The `agent.toml` to write so that it names `map_path`, or None when
+/// `old` already does. Without an old file, the new one holds only
+/// `map_path`. With one, every other key is kept; the file is written again
+/// without its comments.
+pub fn agent_toml(old: Option<&str>, map_path: &str) -> Result<Option<String>, String> {
+    use nanoprobe_agent_link::config::AgentToml;
+    let text = match old {
+        None => {
+            if map_path.contains(['\'', '\n', '\r']) {
+                return Err(format!(
+                    "map_path {map_path:?} holds a quote or a line break"
+                ));
+            }
+            format!(
+                "# Written by `cargo xtask deploy` from the target profile.\n[transport]\nmap_path = '{map_path}'\n"
+            )
+        }
+        Some(old) => {
+            let parsed =
+                AgentToml::parse(old).map_err(|e| format!("agent.toml on the target: {e}"))?;
+            if parsed.transport.map_path == map_path {
+                return Ok(None);
+            }
+            let mut table: toml::Table =
+                toml::from_str(old).map_err(|e| format!("agent.toml on the target: {e}"))?;
+            let transport = table
+                .entry("transport")
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+            let Some(transport) = transport.as_table_mut() else {
+                return Err("agent.toml on the target: transport is not a table".into());
+            };
+            transport.insert("map_path".into(), toml::Value::String(map_path.into()));
+            toml::to_string(&table).map_err(|e| e.to_string())?
+        }
+    };
+    let parsed = AgentToml::parse(&text)?;
+    if parsed.transport.map_path != map_path {
+        return Err(format!("map_path {map_path:?} does not read back"));
+    }
+    Ok(Some(text))
+}
+
 /// Whether `version` holds exactly the files `sums` lists, with those sums.
 fn version_intact(profile: &dyn Profile, version: &str, sums: &str) -> Result<bool, String> {
     if profile.read(&format!("{version}/SHA256SUMS"))?.as_deref() != Some(sums.as_bytes()) {
@@ -344,10 +437,21 @@ fn version_intact(profile: &dyn Profile, version: &str, sums: &str) -> Result<bo
 
 /// Remove every version folder the manifest does not name.
 fn prune(profile: &dyn Profile, manifest: &Manifest) -> Result<Vec<String>, String> {
-    let keep: BTreeSet<&str> = [manifest.active.as_deref(), manifest.previous.as_deref()]
-        .into_iter()
-        .flatten()
-        .collect();
+    // The running hook's build may be neither, after shim reloads of later
+    // deploys; its DLL is still loaded.
+    let running = profile.read(RUNNING)?.and_then(|b| {
+        String::from_utf8_lossy(&b)
+            .lines()
+            .find_map(|l| l.strip_prefix("build=").map(str::to_owned))
+    });
+    let keep: BTreeSet<&str> = [
+        manifest.active.as_deref(),
+        manifest.previous.as_deref(),
+        running.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     let mut pruned = Vec::new();
     for name in profile.list(VERSIONS)? {
         if !keep.contains(name.as_str()) {
@@ -474,6 +578,27 @@ impl Profile for Local {
         temp.push(".partial");
         let temp = PathBuf::from(temp);
         std::fs::write(&temp, bytes).map_err(|e| io_error(&temp, e))?;
+        std::fs::rename(&temp, &path).map_err(|e| io_error(&path, e))
+    }
+
+    fn write_private(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
+        use std::io::Write as _;
+        let path = self.path(path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| io_error(parent, e))?;
+        }
+        let mut temp = path.clone().into_os_string();
+        temp.push(".partial");
+        let temp = PathBuf::from(temp);
+        let _ = std::fs::remove_file(&temp);
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // Created private, so no moment exists when others may read it.
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options.open(&temp).map_err(|e| io_error(&temp, e))?;
+        file.write_all(bytes).map_err(|e| io_error(&temp, e))?;
+        drop(file);
         std::fs::rename(&temp, &path).map_err(|e| io_error(&path, e))
     }
 
@@ -788,5 +913,85 @@ mod tests {
         assert!(refuse_install_path("/c/Program Files/Eagle Dynamics/DCS World").is_err());
         assert!(refuse_install_path(r"C:\Program Files\Eagle Dynamics\DCS World").is_err());
         assert!(refuse_install_path("/c/users/u/Saved Games/DCS").is_ok());
+    }
+
+    #[test]
+    fn configure_creates_a_private_token_once_and_keeps_it() {
+        let scratch = Scratch::new("token");
+        let profile = Local::new(&scratch.0).unwrap();
+        let done = configure(&profile, None).unwrap();
+        assert!(done.token_created && !done.agent_toml_written);
+        let token = profile.read(TOKEN).unwrap().unwrap();
+        assert_eq!(token.len(), 64);
+        assert!(
+            token
+                .iter()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(scratch.0.join(TOKEN))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        assert!(!configure(&profile, None).unwrap().token_created);
+        assert_eq!(profile.read(TOKEN).unwrap().unwrap(), token);
+        assert!(profile.read(AGENT_TOML).unwrap().is_none());
+    }
+
+    #[test]
+    fn configure_sets_map_path_and_keeps_the_other_keys() {
+        let scratch = Scratch::new("agenttoml");
+        let profile = Local::new(&scratch.0).unwrap();
+        let path = r"Z:\dev\shm\n.map";
+        assert!(configure(&profile, Some(path)).unwrap().agent_toml_written);
+        assert!(!configure(&profile, Some(path)).unwrap().agent_toml_written);
+        let read = |p: &Local| {
+            let text = p.read(AGENT_TOML).unwrap().unwrap();
+            nanoprobe_agent_link::config::AgentToml::parse(&String::from_utf8_lossy(&text)).unwrap()
+        };
+        assert_eq!(read(&profile).transport.map_path, path);
+        profile
+            .write(
+                AGENT_TOML,
+                b"[transport]\nport = 5000\nmap_path = 'old'\n[lua]\nraw = true\n",
+            )
+            .unwrap();
+        assert!(configure(&profile, Some(path)).unwrap().agent_toml_written);
+        let t = read(&profile);
+        assert_eq!(t.transport.map_path, path);
+        assert_eq!(t.transport.port, 5000);
+        assert!(t.lua.raw);
+    }
+
+    #[test]
+    fn agent_toml_refuses_a_path_it_cannot_write() {
+        assert!(agent_toml(None, "a'b").is_err());
+        assert!(agent_toml(None, "a\nb").is_err());
+        assert!(agent_toml(Some("[nonsense]\n"), "x").is_err());
+    }
+
+    #[test]
+    fn deploy_keeps_the_folder_of_the_running_build() {
+        let scratch = Scratch::new("running");
+        let profile = Local::new(&scratch.0).unwrap();
+        let first = deploy(&profile, &payload("one")).unwrap();
+        profile
+            .write(RUNNING, format!("build={}\n", first.build).as_bytes())
+            .unwrap();
+        deploy(&profile, &payload("two")).unwrap();
+        let third = deploy(&profile, &payload("three")).unwrap();
+        assert!(third.pruned.is_empty(), "pruned {:?}", third.pruned);
+        assert!(
+            profile
+                .is_dir(&format!("{VERSIONS}/{}", first.build))
+                .unwrap()
+        );
+        profile.remove_file(RUNNING).unwrap();
+        let fourth = deploy(&profile, &payload("four")).unwrap();
+        assert_eq!(fourth.pruned.len(), 2);
     }
 }

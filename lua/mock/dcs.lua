@@ -562,7 +562,9 @@ function M.new(o)
 
   -- Load a mission. `name` is a mission name or the path of a .miz.
   -- `options.paused` starts it paused with no pause callback, as a server
-  -- with no client does. The callbacks come in the order a dedicated server
+  -- with no client does. `options.during`, a function, runs after
+  -- onMissionLoadBegin and before the rest of the load, with no frame: a
+  -- test spends the load's time there. The callbacks come in the order a dedicated server
   -- made them (LIVE): the server's own player stops and starts with the
   -- mission.
   function host:load_mission(name, options)
@@ -581,6 +583,9 @@ function M.new(o)
     self.mission = name:match('([^/\\]+)%.miz$') or name
     self:callback('onNetMissionChanged', self.mission)
     self:callback('onMissionLoadBegin')
+    if options.during then
+      options.during()
+    end
     self.timers = {}
     -- UNVERIFIED: whether DCS gives a timer an ID that a cleared timer had.
     -- The mock does, because that is the case code must survive.

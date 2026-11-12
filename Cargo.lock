@@ -264,8 +264,18 @@ name = "nanoprobe-agent"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "nanoprobe-agent-link",
  "nanoprobe-transport",
  "windows-sys",
+]
+
+[[package]]
+name = "nanoprobe-agent-link"
+version = "0.1.0"
+dependencies = [
+ "nanoprobe-transport",
+ "serde",
+ "toml",
 ]
 
 [[package]]
@@ -279,6 +289,7 @@ dependencies = [
 name = "nanoprobe-fake-agent"
 version = "0.1.0"
 dependencies = [
+ "nanoprobe-agent-link",
  "nanoprobe-sidecar",
  "nanoprobe-transport",
 ]
@@ -797,6 +808,7 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.3.4",
  "hmac",
+ "nanoprobe-agent-link",
  "nanoprobe-fake-agent",
  "nanoprobe-transport",
  "regex",

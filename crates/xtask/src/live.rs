@@ -83,6 +83,39 @@ fn wait<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> Result<(T, Durat
     }
 }
 
+/// Ask the running hook to reload the shim (spec/install.md, "Shim"), and
+/// wait until `hook.log` says whether it did. Returns that record.
+pub fn reload(profile: &dyn Profile) -> Result<String, String> {
+    if profile.read("nanoprobe/manifest.txt")?.is_none() {
+        return Err("nothing is deployed".into());
+    }
+    let after = hook_lines(profile);
+    profile.write("nanoprobe/reload", b"")?;
+    println!("requested a shim reload");
+    let (line, t) = wait("the hook's reload record", || {
+        let text = profile.read(HOOK_LOG).ok()??;
+        String::from_utf8_lossy(&text)
+            .lines()
+            .skip(after)
+            .find(|l| {
+                l.contains("\"msg\":\"shim reloaded\"")
+                    || l.contains("\"msg\":\"shim not reloaded\"")
+            })
+            .map(str::to_owned)
+    })?;
+    println!("answered {}s after the request", t.as_secs());
+    if line.contains("shim not reloaded") {
+        if line.contains("ABI") {
+            return Err(format!(
+                "{line}\nThe active version's shim needs another agent ABI: a new DLL needs a DCS restart \
+                 (`cargo xtask restart <name>`)."
+            ));
+        }
+        return Err(line);
+    }
+    Ok(line)
+}
+
 /// How many players the session's part of `dcs.log` shows connected. A
 /// player is a client with a name: `added client[N] name=...` (LOG), and
 /// leaves with `disconnecting client[N]` or `remove: client[N]` (LOG). Unnamed

@@ -1,0 +1,28 @@
+# The agent's side of the transport, in plain Rust: the handshake, attaching
+# and detaching, the queues and the frame's batch (spec/transport.md). The DLL
+# drives it from DCS's frames; the fake agent drives it from a timer.
+
+[package]
+name = "nanoprobe-agent-link"
+description = "The agent's side of the transport, shared by the agent DLL and the fake agent."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# `faults` lets the fake agent break the link on purpose. The DLL never
+# enables it: a release builds the agent alone, so no other crate's features
+# reach it.
+[features]
+faults = []
+
+[dependencies]
+nanoprobe-transport = { path = "../transport" }
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.2.1"

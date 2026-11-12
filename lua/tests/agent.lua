@@ -24,7 +24,7 @@ end
 
 local agent = open(path)
 assert(type(agent) == 'table', 'the opener returned a ' .. type(agent))
-assert(agent.abi == '1', 'abi reads ' .. tostring(agent.abi))
+assert(agent.abi == '2', 'abi reads ' .. tostring(agent.abi))
 assert(type(agent.build) == 'string' and agent.build ~= '', 'build is missing')
 
 -- status works before configure.
@@ -39,8 +39,15 @@ local root = S.scratch()
 assert(agent.configure(root) == true, 'configure failed')
 assert(agent.configure(root) == true, 'a second configure failed')
 assert(agent.status().root == root, 'status.root reads ' .. tostring(agent.status().root))
-agent.log('info', 'host test record')
+agent.log('info', 'host test record', 'agent', 'n', 3, 'b', true, 's', 'x', 'f', print)
+-- log is called inside the pump, so its record waits for the next write of
+-- the log: the pump's system-call frame, or the end of a call made outside
+-- the pump, such as status.
+local held = S.read(root .. 'logs/agent.log') or ''
+assert(not held:find('host test record', 1, true), 'log wrote its record at once')
+agent.status()
 local text = assert(S.read(root .. 'logs/agent.log'), 'no logs/agent.log')
+assert(text:find('"data":{"n":3,"b":true,"s":"x","f":null}', 1, true), 'the record data reads: ' .. text)
 assert(text:find('"msg":"agent configured"', 1, true), 'the configure record is missing')
 assert(text:find('"msg":"host test record"', 1, true), 'the logged record is missing')
 assert(text:find('"target":"agent"', 1, true), 'records lack the agent target')

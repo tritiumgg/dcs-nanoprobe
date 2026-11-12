@@ -1,9 +1,6 @@
 //! The host-native side: macOS and Linux, for tests under a stock Lua 5.1.
 
-use std::fs::OpenOptions;
-use std::os::fd::AsRawFd;
 use std::path::Path;
-use std::sync::atomic::AtomicU64;
 
 /// The calling thread's ID.
 pub fn thread_id() -> u64 {
@@ -32,9 +29,24 @@ pub fn pin() -> bool {
     false
 }
 
-/// The module's file name, without its folder.
+/// The module's file name, without its folder: the file the loader opened,
+/// found from an address inside it, as the Windows build does.
 pub fn module_name() -> String {
-    "host".into()
+    let mut info = libc::Dl_info {
+        dli_fname: core::ptr::null(),
+        dli_fbase: core::ptr::null_mut(),
+        dli_sname: core::ptr::null(),
+        dli_saddr: core::ptr::null_mut(),
+    };
+    // SAFETY: the address is this function's, inside the module; `info` is a
+    // valid out-pointer, and dladdr leaves it alone when it returns 0.
+    let found = unsafe { libc::dladdr(module_name as *const libc::c_void, &mut info) };
+    if found == 0 || info.dli_fname.is_null() {
+        return "host".into();
+    }
+    // SAFETY: dladdr returned a NUL-terminated path owned by the loader.
+    let path = unsafe { core::ffi::CStr::from_ptr(info.dli_fname) }.to_string_lossy();
+    path.rsplit(['/', '\\']).next().unwrap_or("host").to_owned()
 }
 
 /// The PDB signature that matches this build. The host build has none.
@@ -52,67 +64,4 @@ pub fn fault() {
     // SAFETY: deliberately not safe; this is the fault the crash capture
     // test needs. A null write is a SIGSEGV on the host.
     unsafe { core::ptr::write_volatile(core::ptr::null_mut::<u64>(), 1) }
-}
-
-/// A file mapped into memory, shared with every other process that maps it.
-pub struct Mapping {
-    ptr: *mut u8,
-    len: usize,
-}
-
-// SAFETY: the mapping is plain shared memory; access goes through atomics.
-unsafe impl Send for Mapping {}
-
-impl Mapping {
-    /// Map `path`, creating it and growing it to `len` bytes as needed.
-    pub fn open(path: &Path, len: usize) -> Result<Mapping, String> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-        let size = file.metadata().map_err(|e| e.to_string())?.len();
-        if size < len as u64 {
-            file.set_len(len as u64).map_err(|e| e.to_string())?;
-        }
-        // SAFETY: a fresh shared mapping of an open file of at least `len`
-        // bytes; the file may close afterwards, the mapping stays.
-        let ptr = unsafe {
-            libc::mmap(
-                core::ptr::null_mut(),
-                len,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                file.as_raw_fd(),
-                0,
-            )
-        };
-        if ptr == libc::MAP_FAILED {
-            return Err(format!(
-                "mmap {}: {}",
-                path.display(),
-                std::io::Error::last_os_error()
-            ));
-        }
-        Ok(Mapping {
-            ptr: ptr.cast(),
-            len,
-        })
-    }
-
-    /// The mapping as 64-bit words.
-    pub fn words(&self) -> &[AtomicU64] {
-        // SAFETY: the mapping is page-aligned, `len` bytes long and lives as
-        // long as `self`; AtomicU64 has the layout of u64.
-        unsafe { core::slice::from_raw_parts(self.ptr.cast::<AtomicU64>(), self.len / 8) }
-    }
-}
-
-impl Drop for Mapping {
-    fn drop(&mut self) {
-        // SAFETY: unmaps exactly what `open` mapped.
-        unsafe { libc::munmap(self.ptr.cast(), self.len) };
-    }
 }

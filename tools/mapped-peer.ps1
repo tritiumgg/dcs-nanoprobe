@@ -24,7 +24,7 @@ while (-not [IO.File]::Exists($path) -or (New-Object IO.FileInfo($path)).Length 
 }
 # DCS holds the file open for writing, so open it shared, then map the stream.
 $fs = [IO.File]::Open($path, 'Open', 'ReadWrite', 'ReadWrite, Delete')
-$map = [IO.MemoryMappedFiles.MemoryMappedFile]::CreateFromFile($fs, [NullString]::Value, 512, 'ReadWrite', $null, 'None', $false)
+$map = [IO.MemoryMappedFiles.MemoryMappedFile]::CreateFromFile($fs, [NullString]::Value, 0, 'ReadWrite', $null, 'None', $false)
 $view = $map.CreateViewAccessor(0, 512)
 function Word([int]$i) { return [UInt64]$view.ReadUInt64($i * 8) }
 while ((Word 0) -ne $magic) {

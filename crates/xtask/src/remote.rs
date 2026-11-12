@@ -141,6 +141,17 @@ fi"#
         }
     }
 
+    /// A path under the profile, as the container sees it.
+    pub fn full_path(&self, path: &str) -> String {
+        self.full(path)
+    }
+
+    /// Run a POSIX `script` in the container as the profile's owner, with
+    /// `args` as `$1`, `$2`, ..., feeding `input`.
+    pub fn shell(&self, script: &str, args: &[&str], input: &[u8]) -> Result<ssh::Output, String> {
+        self.exec_args(script, args, input)
+    }
+
     /// Run `script` as the profile's owner with `$1` set to `path` under the
     /// profile, feeding `input`.
     fn exec(&self, script: &str, path: &str, input: &[u8]) -> Result<ssh::Output, String> {
@@ -206,6 +217,11 @@ impl Profile for Remote {
 
     fn write(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
         let script = r#"set -e; mkdir -p -- "$(dirname -- "$1")"; cat > "$1.partial"; mv -f -- "$1.partial" "$1""#;
+        self.ok(script, path, bytes).map(drop)
+    }
+
+    fn write_private(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
+        let script = r#"set -e; mkdir -p -- "$(dirname -- "$1")"; umask 077; cat > "$1.partial"; chmod 600 "$1.partial"; mv -f -- "$1.partial" "$1""#;
         self.ok(script, path, bytes).map(drop)
     }
 

@@ -7,6 +7,7 @@ mod bundle;
 mod check;
 mod eval;
 mod install;
+mod link;
 mod live;
 mod miz;
 mod peerkill;
@@ -42,6 +43,9 @@ commands:
                             tree, outside Logs/, is as it was before
   bundle <name>             Collect the session's logs from the target, redact them,
                             and write a zip under bundles/
+  reload <name>             Ask the running hook to reload the shim of the active
+                            version without restarting DCS, and wait for its answer.
+                            Deploy first to change the Lua; a new DLL needs a restart.
   restart <name>            Restart DCS with the target's `restart` command, only
                             when no player is connected, and wait for the hook
   load <name> <miz>         Load a mission through the development mission loader,
@@ -64,6 +68,13 @@ commands:
   mapped <name>             Experiment E24: run tools/mapped-peer.py in the container
                             and lua/experiments/e24-mapped.lua in DCS together, and
                             write bundles/mapped-<name>-<time>.json
+  link <name> [--reloads N] The S7 exit test on a docker-wine target running the
+                            deployed --dev build: attach link-probe in the container
+                            as the sidecar, check the handshake in the inspector,
+                            reload the mission N times (default 10), request a shim
+                            reload, set the kill switch, then clear it and restart
+                            DCS. Writes bundles/link-<name>-<time>.json. Refuses a
+                            server with players.
   gates <name> on|off       Add or remove the net.allow_unsafe_api and
                             net.allow_dostring_in keys of experiment E2 in the
                             profile's Config/autoexec.cfg, between marker lines.
@@ -111,6 +122,11 @@ fn main() -> ExitCode {
         ["miz", template, out, rest @ ..] => miz(template, out, rest),
         ["bundle", name] => bundle(name),
         ["mapped", name] => mapped(name),
+        ["link", name, rest @ ..] => link::command(name, rest),
+        ["reload", name] => open(name).and_then(|profile| {
+            println!("{}", live::reload(profile.as_ref())?);
+            Ok(ExitCode::SUCCESS)
+        }),
         ["gates", name, "on"] => gates(name, true),
         ["gates", name, "off"] => gates(name, false),
         ["symbolize", file] => symbols::symbolize(Path::new(file)),
@@ -251,6 +267,17 @@ fn deploy(name: &str, dll: Option<PathBuf>, dev: bool) -> Result<ExitCode, Strin
     let payload = payload(dll, dev)?;
     let profile = open(name)?;
     let done = install::deploy(profile.as_ref(), &payload)?;
+    let map_path = match target(name)? {
+        Target::DockerWine { map_path, .. } => map_path,
+        _ => None,
+    };
+    let configured = install::configure(profile.as_ref(), map_path.as_deref())?;
+    if configured.token_created {
+        println!("created the handshake token");
+    }
+    if configured.agent_toml_written {
+        println!("wrote agent.toml");
+    }
     println!(
         "deployed {} to {name}: version folder {}, manifest {}",
         done.build,
