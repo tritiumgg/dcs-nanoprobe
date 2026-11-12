@@ -11,9 +11,14 @@ local E = ...
 local A = E.lib('agent')
 local agent = A.open()
 
--- /dev/shm in the container, through Wine's Z: drive. A host Lua (the mock
--- rehearsal) has no Z: drive, and maps a file in the profile instead.
-local PATH = package.config:sub(1, 1) == '\\' and 'Z:\\dev\\shm\\nanoprobe-e24.map'
+-- Under Wine, /dev/shm in the container through the Z: drive, which the peer
+-- reaches as /dev/shm. On Windows, and in the mock rehearsal, a file in the
+-- profile, which the peer's account can reach.
+local function wine_shm()
+  local ok, attributes = pcall(lfs.attributes, 'Z:\\dev\\shm')
+  return ok and type(attributes) == 'table' and attributes.mode == 'directory'
+end
+local PATH = package.config:sub(1, 1) == '\\' and wine_shm() and 'Z:\\dev\\shm\\nanoprobe-e24.map'
   or lfs.writedir() .. 'nanoprobe-e24.map'
 local SECONDS = 15
 

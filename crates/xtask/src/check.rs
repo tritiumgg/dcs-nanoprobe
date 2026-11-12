@@ -1,9 +1,12 @@
 //! `target check`: read a target's facts without changing anything on it.
 //!
-//! One SSH session runs a POSIX script on the host. The script asks the
-//! container for its Wine version, lists the Saved Games profiles under the
-//! Wine prefix, and reads the version and branch from each DCS install's
-//! `autoupdate.cfg`. It reads no environment variable and no server settings.
+//! One SSH session runs one script. On a docker-wine target, a POSIX script on
+//! the host asks the container for its Wine version, lists the Saved Games
+//! profiles under the Wine prefix, and reads the version and branch from each
+//! DCS install's `autoupdate.cfg`. On a windows-ssh target, a PowerShell script
+//! reads Windows' version, the install's `autoupdate.cfg`, whether the profile
+//! exists, and whether the two scheduled tasks exist. Neither reads an
+//! environment variable or a server setting.
 
 use std::fmt;
 
@@ -36,6 +39,11 @@ INNER
 pub struct Report {
     /// The output of `wine --version` in the container.
     pub wine: Option<String>,
+    /// Windows' version, on a Windows target.
+    pub os: Option<String>,
+    /// Each scheduled task a Windows target names, with `present` or
+    /// `MISSING`.
+    pub tasks: Vec<String>,
     /// Each DCS install found.
     pub installs: Vec<Install>,
     /// Each Saved Games profile folder found.
@@ -65,6 +73,8 @@ impl Report {
             let value = value.trim().to_owned();
             match key {
                 "wine" if !value.is_empty() => report.wine = Some(value),
+                "os" if !value.is_empty() => report.os = Some(value),
+                "task" => report.tasks.push(value),
                 "profile" => report.profiles.push(value),
                 "install" => report.installs.push(Install {
                     path: value,
@@ -86,9 +96,11 @@ impl Report {
         report
     }
 
-    /// Whether the check found Wine, a versioned install and a profile.
+    /// Whether the check found Wine or Windows, a versioned install, a
+    /// profile, and every task it looked for.
     pub fn is_complete(&self) -> bool {
-        self.wine.is_some()
+        (self.wine.is_some() || self.os.is_some())
+            && !self.tasks.iter().any(|t| t.ends_with("MISSING"))
             && !self.profiles.is_empty()
             && self.installs.iter().any(|i| i.version.is_some())
     }
@@ -110,12 +122,18 @@ impl fmt::Display for Report {
             )?;
             writeln!(f, "install   {}", install.path)?;
         }
-        writeln!(f, "wine      {}", self.wine.as_deref().unwrap_or(MISSING))?;
+        match &self.os {
+            Some(os) => writeln!(f, "windows   {os}")?,
+            None => writeln!(f, "wine      {}", self.wine.as_deref().unwrap_or(MISSING))?,
+        }
         if self.profiles.is_empty() {
             writeln!(f, "profile   {MISSING}")?;
         }
         for profile in &self.profiles {
             writeln!(f, "profile   {profile}")?;
+        }
+        for task in &self.tasks {
+            writeln!(f, "task      {task}")?;
         }
         Ok(())
     }
@@ -134,7 +152,23 @@ pub fn run(target: &Target) -> Result<Report, String> {
             let output = ssh_script(ssh, &remote, SCRIPT)?;
             Ok(Report::parse(&output))
         }
-        Target::Local { .. } => Err("target check reads docker-wine targets only".to_owned()),
+        Target::WindowsSsh {
+            ssh,
+            profile,
+            install,
+            start_task,
+            stop_task,
+        } => {
+            let windows = crate::windows::Windows::connect(ssh, profile)?;
+            let output = windows.check(
+                install
+                    .as_deref()
+                    .unwrap_or(crate::windows::DEFAULT_INSTALL),
+                &[start_task, stop_task],
+            )?;
+            Ok(Report::parse(&output))
+        }
+        Target::Local { .. } => Err("target check reads remote targets only".to_owned()),
     }
 }
 

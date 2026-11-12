@@ -90,37 +90,40 @@ awk '
         ssh::run(&self.ssh, &remote, program.as_bytes())
     }
 
-    /// Add `block` to `Config/autoexec.cfg` between marker lines, creating the
-    /// file if needed, or remove the marked block again. The file's other
-    /// lines are never read out or changed. `on` refuses when a block is
-    /// already there; removing a block the install created removes the file
-    /// once nothing else is in it.
+    /// Add `block` to the end of `Config/autoexec.cfg`, between marker lines,
+    /// after saving a byte-exact copy as `autoexec.cfg.pre-nanoprobe`; or with
+    /// None put that copy back. The file's contents are never read out. `on`
+    /// refuses when a copy is already there. When there was no file, the copy
+    /// is an empty `autoexec.cfg.pre-nanoprobe-absent` marker, and `off` deletes
+    /// the file.
     pub fn autoexec_block(&self, block: Option<&str>) -> Result<String, String> {
         let script = match block {
             Some(_) => {
                 r#"f=$1
+if [ -e "$f.pre-nanoprobe" ] || [ -e "$f.pre-nanoprobe-absent" ]; then echo 'a saved copy is already there; run gates off first'; exit 4; fi
 mkdir -p "$(dirname "$f")"
 if [ -f "$f" ]; then
-    grep -q '^-- nanoprobe-gates begin' "$f" && { echo 'a nanoprobe block is already there'; exit 4; }
+    cp -p "$f" "$f.pre-nanoprobe"
     created=0
-    [ -s "$f" ] && [ -n "$(tail -c 1 "$f")" ] && printf '
-' >> "$f"
+    [ -s "$f" ] && [ -n "$(tail -c 1 "$f")" ] && printf '\n' >> "$f"
 else
-    : > "$f"
+    : > "$f.pre-nanoprobe-absent"
     created=1
 fi
-{ printf -- '-- nanoprobe-gates begin created=%s
-' "$created"; cat; printf -- '-- nanoprobe-gates end
-'; } >> "$f"
+{ printf -- '-- nanoprobe-gates begin\n'; cat; printf -- '-- nanoprobe-gates end\n'; } >> "$f"
 echo "added (created=$created)""#
             }
             None => {
                 r#"f=$1
-[ -f "$f" ] || { echo 'no autoexec.cfg'; exit 0; }
-grep -q '^-- nanoprobe-gates begin' "$f" || { echo 'no nanoprobe block'; exit 0; }
-created=$(sed -n 's/^-- nanoprobe-gates begin created=\([01]\)$/\1/p' "$f" | head -n 1)
-awk '/^-- nanoprobe-gates begin/ { skip = 1 } !skip { print } /^-- nanoprobe-gates end/ { skip = 0 }' "$f" > "$f.np" && cat "$f.np" > "$f" && rm -f "$f.np"
-if [ "$created" = 1 ] && ! grep -q '[^[:space:]]' "$f"; then rm -f "$f"; echo 'removed the block and the file'; else echo 'removed the block'; fi"#
+if [ -f "$f.pre-nanoprobe" ]; then
+    cat "$f.pre-nanoprobe" > "$f" && rm -f "$f.pre-nanoprobe"
+    echo 'restored the saved copy'
+elif [ -e "$f.pre-nanoprobe-absent" ]; then
+    rm -f "$f" "$f.pre-nanoprobe-absent"
+    echo 'removed the file, which did not exist before'
+else
+    echo 'no saved copy; nothing to restore'
+fi"#
             }
         };
         let output = self.exec(

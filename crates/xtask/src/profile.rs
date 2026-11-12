@@ -16,6 +16,14 @@
 //! [targets.this-machine]
 //! kind = "local"                # a profile on this machine's file system
 //! profile = "/path/to/Saved Games/DCS"
+//!
+//! [targets.windows-pc]
+//! kind = "windows-ssh"          # DCS on Windows, reached over SSH
+//! ssh = "my-pc"                 # ssh destination; the account's shell is PowerShell
+//! profile = 'C:\Users\u\Saved Games\DCS'
+//! install = 'C:\Program Files\Eagle Dynamics\DCS World' # optional; this is the default
+//! start_task = '\nanoprobe\nanoprobe-start-dcs' # scheduled task that starts DCS
+//! stop_task = '\nanoprobe\nanoprobe-stop-dcs'   # scheduled task that ends it
 //! ```
 
 use std::collections::BTreeMap;
@@ -43,6 +51,22 @@ pub enum Target {
         #[serde(default)]
         restart: Option<String>,
     },
+    /// DCS on a Windows machine reached over SSH. DCS runs in the desktop
+    /// user's session, started and ended by two scheduled tasks the SSH
+    /// account may run.
+    WindowsSsh {
+        /// The SSH destination: a host, `user@host`, or an alias.
+        ssh: String,
+        /// The Saved Games profile, as a Windows path.
+        profile: String,
+        /// The DCS install folder, read for its version.
+        #[serde(default)]
+        install: Option<String>,
+        /// The scheduled task that starts DCS.
+        start_task: String,
+        /// The scheduled task that ends DCS.
+        stop_task: String,
+    },
     /// A Saved Games profile on this machine.
     Local {
         /// The profile folder.
@@ -57,6 +81,7 @@ impl Target {
             Target::DockerWine { ssh, container, .. } => {
                 format!("docker-wine, container {container} on {ssh}")
             }
+            Target::WindowsSsh { ssh, profile, .. } => format!("windows-ssh, {profile} on {ssh}"),
             Target::Local { profile } => format!("local, {profile}"),
         }
     }

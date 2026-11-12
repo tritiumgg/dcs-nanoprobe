@@ -14,6 +14,7 @@ mod profile;
 mod remote;
 mod ssh;
 mod symbols;
+mod windows;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -171,6 +172,9 @@ fn open(name: &str) -> Result<Box<dyn Profile>, String> {
                 &ssh, &container, &profile,
             )?))
         }
+        Target::WindowsSsh { ssh, profile, .. } => {
+            Ok(Box::new(windows::Windows::connect(&ssh, &profile)?))
+        }
     }
 }
 
@@ -215,7 +219,22 @@ fn payload(dll: Option<PathBuf>, dev: bool) -> Result<install::Payload, String> 
     install::Payload::from_repository(&repository(), &dll, dev)
 }
 
+/// On a Windows target, refuse while DCS runs there: the machine is also
+/// someone's to play on, and a running DCS holds the loaded DLL.
+fn refuse_while_playing(name: &str) -> Result<(), String> {
+    if let Target::WindowsSsh { ssh, profile, .. } = target(name)? {
+        let running = windows::Windows::connect(&ssh, &profile)?.dcs_processes()?;
+        if running > 0 {
+            return Err(format!(
+                "DCS is running on {name}; not changing its profile. Try again when DCS is closed."
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn deploy(name: &str, dll: Option<PathBuf>, dev: bool) -> Result<ExitCode, String> {
+    refuse_while_playing(name)?;
     let payload = payload(dll, dev)?;
     let profile = open(name)?;
     let done = install::deploy(profile.as_ref(), &payload)?;
@@ -240,6 +259,7 @@ fn deploy(name: &str, dll: Option<PathBuf>, dev: bool) -> Result<ExitCode, Strin
 }
 
 fn rollback(name: &str) -> Result<ExitCode, String> {
+    refuse_while_playing(name)?;
     let manifest = install::rollback(open(name)?.as_ref())?;
     println!(
         "rolled back {name}: active {}, previous {}",
@@ -250,6 +270,7 @@ fn rollback(name: &str) -> Result<ExitCode, String> {
 }
 
 fn undeploy(name: &str) -> Result<ExitCode, String> {
+    refuse_while_playing(name)?;
     if install::undeploy(open(name)?.as_ref())? {
         println!("undeployed from {name}");
     } else {
@@ -269,6 +290,9 @@ fn snapshot(target: &Target) -> Result<Vec<String>, String> {
             ..
         } => {
             remote::Remote::connect(ssh, container, profile.as_deref().unwrap_or(""))?.snapshot()?
+        }
+        Target::WindowsSsh { .. } => {
+            return Err("snapshot and roundtrip read docker-wine and local targets only".into());
         }
     };
     Ok(lines
@@ -359,14 +383,49 @@ fn remote(name: &str) -> Result<(remote::Remote, String, Option<String>), String
             restart,
         )),
         Target::DockerWine { .. } => Err(format!("target {name:?} has no `profile` key")),
-        Target::Local { .. } => Err("this command needs a docker-wine target".into()),
+        _ => Err("this command needs a docker-wine target".into()),
+    }
+}
+
+/// How many players the target's DCS has connected.
+fn players(name: &str) -> Result<usize, String> {
+    match target(name)? {
+        Target::DockerWine { .. } => remote(name)?.0.players(),
+        Target::WindowsSsh { .. } => live::players(open(name)?.as_ref()),
+        Target::Local { .. } => Ok(0),
     }
 }
 
 fn restart(name: &str) -> Result<ExitCode, String> {
-    let (remote, ssh, command) = remote(name)?;
-    let command = command.ok_or_else(|| format!("target {name:?} has no `restart` key"))?;
-    live::restart(&ssh, &command, &remote)?;
+    match target(name)? {
+        Target::WindowsSsh {
+            ssh,
+            profile,
+            start_task,
+            stop_task,
+            ..
+        } => {
+            // A Windows client starts at its main menu, so there is no
+            // mission to wait for.
+            let windows = windows::Windows::connect(&ssh, &profile)?;
+            let players = live::players(&windows)?;
+            live::restart(&windows, players, false, || {
+                windows.restart_tasks(&start_task, &stop_task)
+            })?;
+        }
+        _ => {
+            let (remote, ssh, command) = remote(name)?;
+            let command = command.ok_or_else(|| format!("target {name:?} has no `restart` key"))?;
+            let players = remote.players()?;
+            live::restart(&remote, players, true, || {
+                let output = ssh::run(&ssh, &command, b"")?;
+                match output.code {
+                    Some(0) => Ok(()),
+                    _ => Err(format!("the restart command failed: {}", output.stderr)),
+                }
+            })?;
+        }
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -439,10 +498,13 @@ fn facts(target: &Target) -> Result<bundle::Facts, String> {
             kind: "local".into(),
             ..Default::default()
         },
-        Target::DockerWine { .. } => {
+        Target::DockerWine { .. } | Target::WindowsSsh { .. } => {
             let report = check::run(target)?;
             bundle::Facts {
-                kind: "docker-wine".into(),
+                kind: match target {
+                    Target::WindowsSsh { .. } => "windows-ssh".into(),
+                    _ => "docker-wine".into(),
+                },
                 wine: report.wine.clone(),
                 dcs: report.installs.first().map(|install| {
                     format!(
@@ -475,8 +537,8 @@ fn eval_command(name: &str, state: &str, file: &str, rest: &[&str]) -> Result<Ex
 fn probes_command(name: &str, rest: &[&str]) -> Result<ExitCode, String> {
     let options = probes::ProbeOptions::parse(rest)?;
     let target = target(name)?;
-    if matches!(target, Target::DockerWine { .. }) && !options.with_players {
-        let players = remote(name)?.0.players()?;
+    if !matches!(target, Target::Local { .. }) && !options.with_players {
+        let players = players(name)?;
         if players > 0 {
             return Err(format!(
                 "{players} player(s) connected; not running probes. Use --with-players to run anyway."
@@ -510,8 +572,40 @@ const MAPPED_PATH: &str = "/dev/shm/nanoprobe-e24.map";
 /// How long the peer reads, from when it sees the agent's magic.
 const MAPPED_SECONDS: &str = "20";
 
+/// `mapped <name>` on a windows-ssh target: the file is in the profile,
+/// which both the DCS user and the SSH account can reach.
+fn mapped_windows(name: &str, ssh: &str, profile_path: &str) -> Result<ExitCode, String> {
+    let windows = windows::Windows::connect(ssh, profile_path)?;
+    let repo = repository();
+    let program = std::fs::read_to_string(repo.join("tools/mapped-peer.ps1"))
+        .map_err(|e| format!("tools/mapped-peer.ps1: {e}"))?;
+    let snippet = std::fs::read(repo.join("lua/experiments/e24-mapped.lua"))
+        .map_err(|e| format!("lua/experiments/e24-mapped.lua: {e}"))?;
+    let file = format!(
+        "{}\\nanoprobe-e24.map",
+        windows.profile().trim_end_matches('\\')
+    );
+    let peer_side = windows.clone();
+    let peer = std::thread::spawn(move || peer_side.powershell(&program, &[&file, MAPPED_SECONDS]));
+    let result = eval::run(
+        &windows,
+        "hook",
+        "e24-mapped",
+        &snippet,
+        std::time::Duration::from_secs(120),
+    );
+    let output = peer.join().map_err(|_| "the peer thread panicked")??;
+    if let Err(e) = windows.remove_file("nanoprobe-e24.map") {
+        println!("could not remove the mapped file: {e}");
+    }
+    mapped_report(name, &output.stdout, &output.stderr, result)
+}
+
 /// `mapped <name>`: experiment E24.
 fn mapped(name: &str) -> Result<ExitCode, String> {
+    if let Target::WindowsSsh { ssh, profile, .. } = target(name)? {
+        return mapped_windows(name, &ssh, &profile);
+    }
     let (remote, _, _) = remote(name)?;
     let players = remote.players()?;
     if players > 0 {
@@ -544,14 +638,24 @@ fn mapped(name: &str) -> Result<ExitCode, String> {
     if let Err(e) = cleanup {
         println!("could not remove {MAPPED_PATH}: {e}");
     }
-    let peer_report: serde_json::Value =
-        serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
-            serde_json::json!({
-                "error": "the peer printed no JSON",
-                "stdout": String::from_utf8_lossy(&output.stdout),
-                "stderr": output.stderr,
-            })
-        });
+    mapped_report(name, &output.stdout, &output.stderr, result)
+}
+
+/// Print and save the E24 report from the peer's output and the agent's
+/// result.
+fn mapped_report(
+    name: &str,
+    stdout: &[u8],
+    stderr: &str,
+    result: Result<serde_json::Value, String>,
+) -> Result<ExitCode, String> {
+    let peer_report: serde_json::Value = serde_json::from_slice(stdout).unwrap_or_else(|_| {
+        serde_json::json!({
+            "error": "the peer printed no JSON",
+            "stdout": String::from_utf8_lossy(stdout),
+            "stderr": stderr,
+        })
+    });
     let facts = facts(&target(name)?)?;
     let report = serde_json::json!({
         "target": name,
@@ -586,8 +690,12 @@ net.allow_dostring_in = { 'server', 'mission', 'gui', 'export', 'config' }
 
 /// `gates <name> on|off`.
 fn gates(name: &str, on: bool) -> Result<ExitCode, String> {
-    let (remote, _, _) = remote(name)?;
-    let text = remote.autoexec_block(on.then_some(GATES))?;
+    let text = if let Target::WindowsSsh { ssh, profile, .. } = target(name)? {
+        refuse_while_playing(name)?;
+        windows::Windows::connect(&ssh, &profile)?.autoexec_block(on.then_some(GATES))?
+    } else {
+        remote(name)?.0.autoexec_block(on.then_some(GATES))?
+    };
     println!("{name}: {text}");
     Ok(ExitCode::SUCCESS)
 }

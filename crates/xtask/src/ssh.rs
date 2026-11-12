@@ -23,6 +23,17 @@ pub struct Output {
 pub fn run(destination: &str, remote: &str, input: &[u8]) -> Result<Output, String> {
     let mut command = Command::new("ssh");
     command.args(["-o", "BatchMode=yes"]);
+    // A dead connection fails within about a minute instead of hanging: the
+    // connect times out after 15 s, and 4 unanswered keepalives 15 s apart
+    // end the session.
+    command.args([
+        "-o",
+        "ConnectTimeout=15",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=4",
+    ]);
     // One deploy makes dozens of calls. Sharing one connection for a minute
     // saves a handshake on each. Windows OpenSSH has no connection sharing.
     // The socket path stays short, because a Unix socket path is limited to
