@@ -30,6 +30,10 @@ gh = "2.97.0"
 "cargo:cargo-xwin" = { version = "0.23.1", os = ["linux", "macos"] }
 "github:llvm/llvm-project" = { version = "23.1.5", version_prefix = "llvmorg-", os = ["linux", "macos"] }
 
+# Fuzzing of the transport's decoders (`mise run fuzz`). cargo-fuzz and Miri
+# run on the rustup `nightly` toolchain, which `mise run nightly` installs.
+"cargo:cargo-fuzz" = { version = "0.13.2", os = ["linux", "macos"] }
+
 # Host builds pass --no-default-features: it turns off the agent's dcs-lua
 # feature, which links DCS's lua.dll. A machine without DCS has none.
 
@@ -64,6 +68,34 @@ run_windows = "cargo build --release -p nanoprobe-agent --target x86_64-pc-windo
 description = "Check the cross-built DLL's imports, exports and ABI marker, and that no entry point owns a value"
 depends = ["windows"]
 run = ["sh tools/checkdll.sh", "sh tools/raiseshape.sh"]
+
+[tasks.nightly]
+description = "Install the nightly toolchain with Miri, for the miri and fuzz tasks"
+run = "rustup toolchain install nightly --profile minimal --component miri,rust-src"
+
+[tasks.miri]
+description = "Run the transport's memory, ring, status and codec tests under Miri"
+run = "cargo +nightly miri test -p nanoprobe-transport --lib -- ring:: mem:: status:: codec:: records:: handshake:: golden:: layout::"
+
+[tasks.loom]
+description = "Model-check the rings and the sequence lock with Loom"
+env = { RUSTFLAGS = "--cfg loom" }
+run = "cargo test -p nanoprobe-transport --release --test loom"
+
+[tasks.fuzz]
+description = "Fuzz each transport decoder for FUZZ_SECONDS (default 60)"
+dir = "crates/transport/fuzz"
+# cargo-fuzz runs cargo again inside; the variable makes both use nightly.
+env = { RUSTUP_TOOLCHAIN = "nightly" }
+run = """
+for t in lv ring records handshake header; do
+  cargo fuzz run "$t" -- -max_total_time="${FUZZ_SECONDS:-60}" || exit 1
+done
+"""
+
+[tasks.peerkill]
+description = "The S6 exit test: 1,000 kill-the-peer cycles between the fake agent and the stub sidecar"
+run = "cargo xtask peerkill"
 
 [tasks.spec]
 description = "Write spec/transport.golden from the tables in the transport specification"

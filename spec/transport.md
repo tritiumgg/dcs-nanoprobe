@@ -96,7 +96,7 @@ records that are consumed.
 | 0x00E8 | u64 | crumb_arg | agent | A value for the site, such as an opcode or object ID |
 | 0x00F0 | u64 | crumb_frame | agent | `frame` when the breadcrumb was stored |
 | 0x00F8 | u64 | crumb_clock | agent | The agent's clock when the breadcrumb was stored |
-| 0x0100 | u64 | samples_dropped | agent | Sample records not written because the ring was full |
+| 0x0100 | u64 | samples_dropped | agent | Sample records taken and not written because the ring was full |
 | 0x0108 | u64 | events_dropped | agent | Event records dropped from the agent's queue |
 | 0x0110 | u64 | logs_dropped | agent | Log records dropped from the agent's queue |
 | 0x0118 | u64 | gaps | agent | `GAP` records written |
@@ -106,11 +106,11 @@ records that are consumed.
 | 0x0138 | u64 | event_queue_bytes | agent | Bytes in the agent's event and log queue |
 | 0x0140 | pad[64] | reserved1 | agent | |
 | 0x0180 | u64 | sidecar_boot | sidecar | A random non-zero value chosen once per sidecar process |
-| 0x0188 | u64 | sidecar_heartbeat | sidecar | Incremented on every poll |
+| 0x0188 | u64 | sidecar_heartbeat | sidecar | Incremented every poll interval while attached, on a schedule of its own that the journal does not hold up |
 | 0x0190 | u64 | agent_boot_seen | sidecar | The agent boot the sidecar attached to |
 | 0x0198 | u64 | in_tail | sidecar | Inbound write position |
 | 0x01A0 | u64 | out_head | sidecar | Outbound read position |
-| 0x01A8 | u64 | sidecar_ms | sidecar | Wall time of the last poll, milliseconds since the Unix epoch |
+| 0x01A8 | u64 | sidecar_ms | sidecar | Wall time of the last heartbeat, milliseconds since the Unix epoch |
 | 0x01B0 | u64 | attach_seen | sidecar | The attach ID of the handshake the sidecar finished attaching for |
 | 0x01B8 | pad[72] | reserved2 | sidecar | |
 | 0x0200 | u64 | metrics_seq | agent | Sequence lock over the metrics fields: odd while they change |
@@ -249,7 +249,10 @@ drops a record whose agent boot and number it has already journalled.
 A record of an unknown kind is skipped by its length; for a command, see
 spec/commands.md, "Unknown opcodes". A check that fails, in producing
 or consuming, means the other side is broken: the agent detaches and logs it; the
-sidecar reports it and attaches again through the handshake.
+sidecar reports it and attaches again through the handshake. A sidecar whose session
+of an agent boot ended on a failed record check does not read from the kept `out_head`
+when it attaches to that boot again, which would meet the same record: it sets
+`out_head` to `out_tail` and reports the records between as lost.
 
 A record whose payload would be over the limit is never written. What the agent writes
 in its place is in spec/records.md, "Oversized records". The sidecar refuses to build
@@ -322,10 +325,15 @@ so the kill switch is seen within a second (spec/install.md).
 
 | State | Socket call | At most |
 |---|---|---|
-| No connection | one `accept` | once a second; 100 ms after closing a connection that never completed a handshake |
+| No connection | one `accept` | once a second; 100 ms after closing a connection |
+| A connection to close | one close | on the next frame |
 | A connection, before `OK` or `ERR` | one `recv` or one `send` | once every 100 ms |
 | After `OK`, not yet attached | none: the agent watches `attach_seen` in the file | |
 | Attached | one `recv`, which shows whether the sidecar closed the connection | once a second |
+
+The agent closes a connection on the frame after it decides to, as that frame's one
+call, whatever the reason: a refused `HELLO`, a timeout, a refused attach, a detach.
+Making an accepted connection non-blocking goes with its `accept`.
 
 That is one such frame a second, outside a handshake: under 1% of frames above 100
 frames a second, so inside the p99 target there. A handshake adds up to ten such
@@ -345,7 +353,7 @@ fields separated by one space. Numbers are lower-case hex without a prefix.
 |---|---|---|
 | sidecar | `HELLO 1 <token> <sidecar_boot>` | Protocol version 1, the token from the token file, the sidecar's boot |
 | agent | `OK <layout_hash> <agent_boot> <attach_id> <path>` | The layout hash, the agent's boot, a random non-zero number for this attach, and the file's path as the agent opened it. `<path>` is the rest of the line and may hold spaces. |
-| agent | `ERR <reason>` | Refused. Reasons: `version`, `token`, `disabled`, `no_file`. The agent closes the connection. |
+| agent | `ERR <reason>` | Refused. Reasons: `version`, `token`, `disabled`, `no_file`. The agent closes the connection. A line that is not a well-formed `HELLO`, or one with a zero boot, is answered `ERR version`. |
 
 After `OK` neither side sends anything. The open connection is the session: closing it
 ends the session. The sidecar's heartbeat in the file shows that it is alive.
@@ -368,35 +376,47 @@ The sidecar, after `OK`:
 1. Maps the file and checks `magic`, `layout_version`, `layout_hash`, that `file_size`
    is 4,096 plus the two capacities and at most the length of the file, the ring
    offsets and capacities, and that `ready` is 1.
-2. If `agent_boot_seen` differs from the file's `agent_boot`, this DCS process is new to
-   it: it sets `out_head` and `in_tail` to 0. Otherwise a sidecar was attached to the
-   same process before: it keeps `out_head`, so it reads what was left unread, and
-   sets `in_tail` to `in_head`, so a command written and not yet handled is never
-   applied.
+2. Loads `out_tail` (acquire). If `agent_boot_seen` differs from the file's
+   `agent_boot`, this DCS process is new to it: it sets `out_head` and `in_tail` to 0.
+   Otherwise a sidecar was attached to the same process before: it keeps `out_head`,
+   so it reads what was left unread, and sets `in_tail` to `in_head`, so a command
+   written and not yet handled is never applied. A kept `out_head` that fails the
+   producer's check against that `out_tail` (step 1 of "Producing") was left by a late
+   store; the sidecar sets it to `out_tail` and reports the records between as lost.
 3. Stores `agent_boot_seen` and `sidecar_boot`, starts its heartbeat, and last stores
    `attach_seen` (release).
 
 The agent, on each frame after it sent `OK`, checks that `attach_seen` is the attach
 ID it sent, and that `sidecar_boot` and `agent_boot_seen` match the `HELLO` and its own
-boot. When they do:
+boot. When they do, it checks the sidecar's positions: `out_head` by step 1 of
+"Producing", and `in_tail`, which must equal its `in_head`. If either fails, it refuses
+the attach: it logs it and closes the connection. Otherwise:
 
 1. If the sidecar boot differs from the one it last served, it drops the position
    subscriptions and sample rates the old sidecar set; it keeps everything else.
-2. Stores `sidecar_boot_seen` and sets `ATTACHED`.
+2. Stores `sidecar_boot_seen` and sets `ATTACHED`, and reads the inbound ring on from
+   `in_head`, with no tail kept from before.
 3. Writes its queued records in the order they were made, with their `GAP` records
    (spec/records.md). This may take several frames. It reads no command meanwhile.
 4. Writes a `HELLO` record, then starts a full enumeration and reads commands again.
 
 The sidecar writes only control commands until it has read that `HELLO`. Its first
-command is `CAMPAIGN` (spec/commands.md).
+command is `CAMPAIGN` (spec/commands.md). The `HELLO` of this attach is the first
+`HELLO` naming this sidecar's boot at or after the `out_tail` the sidecar loaded in
+step 2: the agent writes nothing while detached, so a `HELLO` before it is an earlier
+attach's, left unread by a sidecar of the same boot.
 
 ## Detaching
 
 The agent detaches when `sidecar_heartbeat` has not changed for 0.5 s of real time, or
 when its `recv` shows the connection closed. The heartbeat is what finds a dead sidecar
 quickly: a sidecar polls every 1–5 ms, so 0.5 s without a change is not a slow poll.
-A new sidecar is then attached within 2 s of the old one's death: 0.5 s to detach, at
-most 1 s to the next `accept`, and a handshake of three calls. The agent then:
+The agent counts the 0.5 s from the time it last saw the value change, taking that time
+when it reads the value, not at the start of the frame. Otherwise a frame in which the
+agent itself stalled dates the change too early and detaches a live sidecar.
+A new sidecar is then attached within 2 s of the old one's death: 0.5 s to detach, the
+close on the next frame and the `accept` 100 ms after it, and a handshake of three
+calls. The agent then:
 
 - closes the connection and forgets the accepted `HELLO` and its attach ID, so
   attaching again needs a new handshake;

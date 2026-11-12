@@ -1,0 +1,55 @@
+# Fuzz targets for the transport's decoders: `mise run fuzz`. Needs a nightly
+# toolchain and cargo-fuzz, both from mise.toml's tasks. Outside the
+# workspace, so a stable build never builds it.
+
+[package]
+name = "nanoprobe-transport-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+nanoprobe-transport = { path = ".." }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "lv"
+path = "fuzz_targets/lv.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ring"
+path = "fuzz_targets/ring.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "records"
+path = "fuzz_targets/records.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "handshake"
+path = "fuzz_targets/handshake.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "header"
+path = "fuzz_targets/header.rs"
+test = false
+doc = false
+bench = false

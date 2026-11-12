@@ -9,6 +9,7 @@ mod eval;
 mod install;
 mod live;
 mod miz;
+mod peerkill;
 mod probes;
 mod profile;
 mod remote;
@@ -69,6 +70,11 @@ commands:
                             Restart DCS afterwards for them to apply.
   symbolize <file>          Resolve the frames of each record in a crash.log, or in a
                             bundle's logs/crash.log, with the kept PDB of its build
+  peerkill [--cycles N] [--seed HEX] [--fps N] [--keep DIR]
+                            The S6 exit test: kill the fake agent or the stub
+                            sidecar N times (default 1000), time each reconnect,
+                            and verify the stub's journals. Host only.
+  peerkill --verify DIR     Verify the journals a run kept with --keep DIR
   spec [--check]            Write spec/transport.golden from the layout and code tables
                             of the transport specification, or with --check fail
                             when it is out of date
@@ -108,6 +114,7 @@ fn main() -> ExitCode {
         ["gates", name, "on"] => gates(name, true),
         ["gates", name, "off"] => gates(name, false),
         ["symbolize", file] => symbols::symbolize(Path::new(file)),
+        ["peerkill", rest @ ..] => peerkill::command(&repository(), rest),
         ["spec"] => spec::command(&repository(), false),
         ["spec", "--check"] => spec::command(&repository(), true),
         ["help" | "-h" | "--help"] | [] => {

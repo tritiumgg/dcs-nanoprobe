@@ -4,11 +4,15 @@
 resolver = "3"
 members = [
     "crates/agent",
+    "crates/cli",
+    "crates/fake-agent",
     "crates/sidecar",
     "crates/sim-fake",
     "crates/transport",
     "crates/xtask",
 ]
+# Built with a nightly toolchain by `mise run fuzz`.
+exclude = ["crates/transport/fuzz"]
 
 [workspace.package]
 version = "0.1.0"
@@ -30,6 +34,9 @@ debug = "line-tables-only"
 [workspace.lints.rust]
 missing_docs = "warn"
 unsafe_op_in_unsafe_fn = "warn"
+# The transport's Loom tests build with `--cfg loom`, and its fuzz targets with
+# `--cfg fuzzing`.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(fuzzing)"] }
 
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "warn"

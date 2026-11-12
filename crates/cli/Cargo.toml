@@ -1,0 +1,20 @@
+[package]
+name = "nanoprobe-cli"
+description = "The nanoprobe command: inspect the transport file and watch it live with top."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "nanoprobe"
+path = "src/main.rs"
+
+[dependencies]
+nanoprobe-transport = { path = "../transport" }

@@ -18,3 +18,8 @@ targets.toml
 CLAUDE.local.md
 .claude/settings.local.json
 .DS_Store
+
+# The fuzz targets' build output, corpora and crash artifacts.
+/crates/transport/fuzz/target/
+/crates/transport/fuzz/corpus/
+/crates/transport/fuzz/artifacts/

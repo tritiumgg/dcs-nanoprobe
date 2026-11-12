@@ -34,7 +34,7 @@ takes the current lifecycle state and campaign only from a `FRAME` with `replay`
 
 | Class | When the outbound ring is full or no sidecar is attached |
 |---|---|
-| sample | Dropped and counted in `samples_dropped` |
+| sample | Dropped and counted in `samples_dropped` when the ring is full. A detached agent takes no samples (spec/transport.md, "Detaching"). |
 | event | Held in the agent's event queue, a fixed number of bytes (spec/config.md). When the queue is full the agent drops the oldest log records first, then the oldest other records, and records the loss in a `GAP` record. |
 | control | Held in the agent's control queue, never dropped while there is room. While the queue is full the agent sets `COMMANDS_HELD` and reads no commands, so it produces no more results. If a control record still cannot be queued, the agent drops it and sets `CONTROL_LOST`. |
 

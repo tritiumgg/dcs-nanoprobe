@@ -1,6 +1,6 @@
 [package]
 name = "nanoprobe-transport"
-description = "Records and the status block shared by the agent and the sidecar."
+description = "The mapped file, its rings and records, and the handshake, shared by the agent and the sidecar."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,3 +11,16 @@ publish = false
 
 [lints]
 workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Memory",
+] }
+
+# Loom runs only with `--cfg loom` (`mise run loom`).
+[target.'cfg(loom)'.dev-dependencies]
+loom = "0.7"

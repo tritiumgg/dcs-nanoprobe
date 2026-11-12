@@ -1,0 +1,29 @@
+# Test tooling: a fake agent with misbehaviors, a stub sidecar that journals
+# what it reads, and a verifier for the journals. Built from source to run;
+# never released.
+
+[package]
+name = "nanoprobe-fake-agent"
+description = "A pure-Rust agent peer with misbehaviors, a journalling stub sidecar, and a journal verifier. Not released."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+nanoprobe-sidecar = { path = "../sidecar" }
+nanoprobe-transport = { path = "../transport" }
+
+[[bin]]
+name = "fake-agent"
+path = "src/bin/fake-agent.rs"
+
+[[bin]]
+name = "stub-sidecar"
+path = "src/bin/stub-sidecar.rs"
