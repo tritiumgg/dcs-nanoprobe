@@ -36,7 +36,7 @@ raw = false            # allow extensions, EVAL and emit
 
 | Key | Rule |
 |---|---|
-| `map_path` | A path as DCS opens it. Default: `nanoprobe-<port>.map` in the folder `GetTempPathW` returns. Under Wine, set it to a path on a memory-backed volume the sidecar also mounts, such as `Z:\dev\shm\nanoprobe.map`. |
+| `map_path` | A path as DCS opens it. Default: `nanoprobe-<port>.map` in the folder `GetTempPathW` returns. Under Wine, set it to a path on a memory-backed volume the sidecar also mounts, such as `Z:\dev\shm\nanoprobe.map`. On Windows, when the sidecar runs as another account than DCS, set it to a path both accounts can open, such as `<profile>\nanoprobe\nanoprobe.map`: the default temp folder is per user (LIVE, docs/results/2026-11-12-s7-agent-in-the-game.md). A file in `<profile>/nanoprobe/` goes with the folder on undeploy. |
 | `port` | The agent listens on `127.0.0.1` only, so the sidecar runs in the same network namespace as DCS. A sidecar container that joins the game container's network is restarted whenever the game container is (spec/transport.md). |
 | `overhead_share`, `commanded_ms` | The two budget settings. The slice of a frame is `overhead_share` times the running average frame interval, and never more than 250 µs, which is fixed. `overhead_share` is above 0 and at most 1; `commanded_ms` is above 0 and at most 1,000. |
 | `[sampling]` | Defaults for the tiers. The sidecar may ask for other targets with `RATES` (spec/commands.md); the budget still holds. |

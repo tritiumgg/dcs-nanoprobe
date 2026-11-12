@@ -131,7 +131,9 @@ Scripts/Hooks/nanoprobe-dev.lua    the development mission loader
 Scripts/Hooks/nanoprobe-eval.lua   the eval hook (spec/eval.md)
 nanoprobe/dev/lua/prelude.lua      the prelude the eval hook sends to each state
 nanoprobe/dev/lua/<name>.lua       every Lua file in lua/dev/lib/ and lua/scenarios/
-nanoprobe/dev/missions/            missions the mission loader loads
+nanoprobe/dev/missions/            missions the mission loader or a test session loads
+nanoprobe/dev/link/                test programs and their output, written and removed
+                                   by `cargo xtask link`
 nanoprobe/dev/eval/in/             eval requests
 nanoprobe/dev/eval/taken/          eval requests the hook has taken
 nanoprobe/dev/eval/out/            eval results

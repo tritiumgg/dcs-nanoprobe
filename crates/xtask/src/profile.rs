@@ -27,6 +27,7 @@
 //! install = 'C:\Program Files\Eagle Dynamics\DCS World' # optional; this is the default
 //! start_task = '\nanoprobe\nanoprobe-start-dcs' # scheduled task that starts DCS
 //! stop_task = '\nanoprobe\nanoprobe-stop-dcs'   # scheduled task that ends it
+//! map_path = 'C:\Users\u\Saved Games\DCS\nanoprobe\nanoprobe.map' # optional
 //! ```
 
 use std::collections::BTreeMap;
@@ -74,6 +75,11 @@ pub enum Target {
         start_task: String,
         /// The scheduled task that ends DCS.
         stop_task: String,
+        /// The agent's mapped file, such as one in the profile's `nanoprobe`
+        /// folder, where the SSH account can open it too. Deploy writes it
+        /// to `agent.toml`; `cargo xtask link` needs it.
+        #[serde(default)]
+        map_path: Option<String>,
     },
     /// A Saved Games profile on this machine.
     Local {

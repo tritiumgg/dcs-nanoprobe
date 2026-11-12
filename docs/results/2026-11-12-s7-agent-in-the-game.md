@@ -1,16 +1,16 @@
-# The agent's link in DCS on the Wine server
+# The agent's link in DCS on the Wine server and a Windows client
 
 | | |
 |---|---|
 | Step | S7 exit test: handshake visible in the inspector; 10 mission reloads with reconnect under 2 s; kill switch stops work within 2 s |
-| Date | 2026-11-12, 22:44 to 22:52 UTC |
-| DCS | 2.9.31.29434, branch `dcs_server.release`, dedicated server |
-| Platform | Linux, Wine `wine-10.0 (Debian 10.0~repack-6)` in Docker; the probe and the inspector run in the game container |
+| Date | 2026-11-12: Wine server 22:44 to 22:52 UTC; Windows client 23:10 to 23:17 UTC |
+| DCS | Wine server: 2.9.31.29434, branch `dcs_server.release`, dedicated server. Windows client: 2.9.31.29434, branch not read (`target check` reports it unknown), hosting a private session. Both LIVE, from `target check` on the day. |
+| Platform | Linux, Wine `wine-10.0 (Debian 10.0~repack-6)` in Docker, with the probe and the inspector in the game container; Windows 10.0.26200, with the probe and the inspector run by the SSH account |
 | Build | `73350103b345a38d`, agent ABI 2 |
-| Script | `cargo xtask deploy <target> --dev`, `cargo xtask restart <target>`, then `cargo xtask link <target>` (`crates/xtask/src/link.rs`, `lua/live/reloads.lua`, `crates/fake-agent/src/bin/link-probe.rs`) |
+| Script | `cargo xtask deploy <target> --dev`, `cargo xtask restart <target>`, then `cargo xtask link <target>` (`crates/xtask/src/link.rs`, `lua/live/reloads.lua`, `crates/fake-agent/src/bin/link-probe.rs`; on Windows also `lua/experiments/alone/host-session.lua`), and on Windows `cargo xtask undeploy <target>` afterwards |
 | Rehearsal | `lua/tests/link.lua` on macOS, under the strict mock with the host-native agent |
-| Code | The commit that adds this document |
-| Result | PASS on the Wine server. Windows: queued for the plan's next checkpoint. |
+| Code | Wine run: commit `71a9b59`. Windows run: the commit that adds its section, whose `crates/xtask/src/link.rs` adds the Windows side; its container side is the reviewed code of `71a9b59` behind a `Peer` interface, not run on the server again. |
+| Result | PASS on the Wine server and on the Windows client |
 
 ## Setup
 
@@ -45,7 +45,7 @@ from the moment the status block shows the new mission paused to the moment the
 sidecar reads the agent's `LIFECYCLE` saying so, both on the container's clock. Per
 generation 2 to 11: 18, 17, 15, 18, 17, 17, 18, 18, 19 and 17 ms. The time is mostly
 the frame that follows `onSimulationStart` (about 9 ms at 110 frames a second) and the
-probe's 2 ms poll.
+sidecar link's 2 ms poll (the probe's status watcher reads every 1 ms).
 
 **Loads.** The reloads of the server's mission took 6.24 to 6.40 s each, from
 `net.load_mission` to `onSimulationStart` (LIVE). The first load after the restart took
@@ -70,6 +70,35 @@ No stored baseline exists before S11. From the status block at the end of the ru
 The p99 reflects the system-call frame, once a second, whose socket call costs 150 to
 290 µs under Wine (E25); the maximum is one frame, likely the kill switch's, which also
 closes the connection and the listener. S11 measures both against the budget.
+
+## On the Windows client
+
+DCS was started at its main menu by the target's scheduled task; the test then hosted a
+private session with a shell mission from `templates/caucasus.miz` (not public, random
+unrecorded password, port 10318). The target profile names a `map_path` inside the
+profile (`<profile>\nanoprobe\nanoprobe.map`), because the SSH account that runs the
+probe cannot open the desktop user's temp folder. The probe and the inspector are
+Windows programs in `<profile>\nanoprobe\dev\link`, removed afterwards; DCS was closed
+by the stop task and the build undeployed.
+
+| Check | Result |
+|---|---|
+| Handshake in the inspector | `ATTACHED`; `HELLO` names build `73350103b345a38d`, interface 2 |
+| Commands | campaign 7 stored; `UNKNOWN_OPCODE` and `WRONG_CAMPAIGN`; `epoch 1`, `last_applied_seq 2` |
+| 10 reloads | 10 of 10; per generation 2 to 11: 66, 67, 68, 70, 67, 79, 67, 68, 67 and 66 ms; 1 attach, 0 detaches |
+| Shim reload | read |
+| Kill switch | created at 1794525359012 ms, `DISABLED` read at 1794525359283 ms: 271 ms; `frame` stayed at 1862; the reason and the last `LIFECYCLE` read |
+| Restore | `disable` removed; DCS closed; programs removed; build undeployed |
+
+Reloads of the shell mission took 5.33 to 5.81 s each (LIVE). The client ran at about 60
+frames a second (`frame_interval_us` 16,712). Agent time per pump call over 1,861 calls:
+p50 under 1 µs, p99 under 128 µs, max under 256 µs.
+
+The reconnect times are about 4 times the server's. The cause is not established. One
+candidate is the client's frame rate, about 60 a second against the server's 110, but
+that accounts for one frame of about 17 ms, not 65. Windows' sleep resolution for the
+probe's waits is another, UNVERIFIED: Rust's standard library may use a high-resolution
+timer there. Both runs are well inside the 2 s rule.
 
 ## On the host
 

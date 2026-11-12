@@ -268,8 +268,8 @@ fn deploy(name: &str, dll: Option<PathBuf>, dev: bool) -> Result<ExitCode, Strin
     let profile = open(name)?;
     let done = install::deploy(profile.as_ref(), &payload)?;
     let map_path = match target(name)? {
-        Target::DockerWine { map_path, .. } => map_path,
-        _ => None,
+        Target::DockerWine { map_path, .. } | Target::WindowsSsh { map_path, .. } => map_path,
+        Target::Local { .. } => None,
     };
     let configured = install::configure(profile.as_ref(), map_path.as_deref())?;
     if configured.token_created {

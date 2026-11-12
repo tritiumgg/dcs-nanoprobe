@@ -158,6 +158,7 @@ pub fn run(target: &Target) -> Result<Report, String> {
             install,
             start_task,
             stop_task,
+            ..
         } => {
             let windows = crate::windows::Windows::connect(ssh, profile)?;
             let output = windows.check(
