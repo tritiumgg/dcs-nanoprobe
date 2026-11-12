@@ -9,11 +9,11 @@
 | Agent | ABI 1, static CRT, build `f8503cf7fcf2b5d3`, PDB `8A739528CC2F377F4C4C44205044422E1` |
 | Scripts | `lua/experiments/*.lua` through `cargo xtask probes <target> --dir lua/experiments --only <name>`; `cargo xtask mapped` with `tools/mapped-peer.py`; `cargo xtask gates`; `lua/experiments/alone/*.lua` through `cargo xtask eval`; `cargo xtask symbolize` |
 | Mission | A shell generated from `templates/caucasus.miz`, loaded fresh by `cargo xtask run`; no client connected |
-| Result | Every experiment that needs no client has a result. E25 misses the budget: see "E25" and the summary. E18, E30 and the player-facing part of E21 and E23 need a client and are queued. |
+| Result | Every experiment that needs no client has a result. E25 misses the budget: see "E25" and the summary. E18, E21 and E30 were run with the owner as the player. |
 
 Every value is LIVE on this build and platform unless a line says otherwise. No player
-was connected at any restart or during any run. Nothing here ran on Windows; each
-experiment's Windows run is queued for the first Windows checkpoint (last section).
+was connected at any restart or during any run, except in E18. The probe suite and every
+experiment also ran on the Windows client ("On the Windows client").
 
 ## The agent
 
@@ -41,24 +41,24 @@ fails a build that imports the dynamic one.
 
 | # | Rule | Result | Verdict |
 |---|---|---|---|
-| E2 | Bootstrap works with the keys set and the sandbox call fails | Works; sandbox refused | PASS |
+| E2 | Bootstrap works with the keys set and the sandbox call fails | Works; sandbox refused | PASS (Wine and Windows) |
 | E3 | One thread | One thread for every kind of call | PASS |
 | E4 | 50 reloads and a clean exit | 50 of 50; clean exit through the gui state | PASS (Wine) |
 | E5 | Adopt C-driven only if at least 2x faster | At most 1.2x | Lua loop with a C sink stays |
 | E10 | Recorded | About 111 frames a second, running or paused; no acceleration setter | Recorded |
 | E13 | Completes; time recorded | 2,000 units in 836 ms, one frame | PASS |
-| E18 | Remote client | Not run: needs a client | Queued |
+| E18 | Client stays connected and sees the result, or each failure is recorded | Connected throughout; burst, menu, mark and reload seen; the damage setter desynced the client | **One failure recorded** |
 | E20 | Behaviour recorded; validity rule confirmed or tightened | IDs not reused; a dead unit's ID still reads a position | Rule tightened |
-| E21 | Naming rule fixed in S5 | Unit and static names share one namespace; group names are apart | Recorded; visibility queued |
-| E23 | Recorded; a change is raised | `getTaintedFiles()` still nil | No change seen on the server; client side queued |
+| E21 | Naming rule fixed in S5 | Unit and static names share one namespace; group names are apart; players see names only in the unit dialog | Recorded |
+| E23 | Recorded; a change is raised | `getTaintedFiles()` still nil | No change |
 | E24 | Status block works, or the stream fallback | Same pages, no torn read | PASS |
-| E25 | Feeds E19 | About 380 µs per frame at p50, 720 µs at p99 | **Misses the budget** |
-| E26 | Caught by `lua_pcall`, no crash | 2,000 of 2,000 in each state | PASS (Wine) |
-| E27 | Loads; otherwise the dynamic CRT | Loads, pinned | PASS (Wine) |
+| E25 | Feeds E19 | Wine: about 380 µs per frame at p50, 720 µs at p99. Windows: 20 µs and 30 µs | **Misses the budget**; over 10 µs on both |
+| E26 | Caught by `lua_pcall`, no crash | 2,000 of 2,000 in each state | PASS (Wine; Windows, hook state) |
+| E27 | Loads; otherwise the dynamic CRT | Loads, pinned | PASS (Wine and Windows) |
 | E29 | A generated template loads and offers slots | The Mission Editor modules do not load on the server | Manual save stays |
-| E30 | A scripted client joins | Not run: needs the Windows PC | Queued |
-| E33 | Recorded; above 1 µs is raised | 73 ns | PASS |
-| Crash capture | A panic and an access violation each leave a diagnosable bundle | Both do | PASS |
+| E30 | A scripted client joins, takes a slot, and reports a menu item and a mark | Joins, takes a slot and spawns; the client's own screens do not follow; reading menus and marks not found | Partly |
+| E33 | Recorded; above 1 µs is raised | 73 ns under Wine, 15.5 ns on Windows | PASS |
+| Crash capture | A panic and an access violation each leave a diagnosable bundle | Both do; DCS then waits in its crash-report window instead of exiting | PASS (Wine and Windows) |
 
 ### E2: the autoexec.cfg gates
 
@@ -187,7 +187,11 @@ needs a client (queued).
 
 With the DLL open in the hook and server states, `DCS.getTaintedFiles()` returned nil,
 as it did with the hooks and no DLL in S3, and `DCS.getTaintedCategories()` returned all
-four categories false. What a connecting client sees is not covered (queued).
+four categories false.
+
+Integrity checks look only at the DCS installation; files in the Saved Games profile do
+not trigger them (PRIOR: the owner's own repeated testing). The agent and every file
+the platform installs live in the profile, so a connecting client sees no difference.
 
 ### E24: a mapped file across the Wine boundary
 
@@ -252,6 +256,77 @@ both states until the next restart. The Mission Editor route does not work on th
 server, so by the rule the one-time manual save stays; the two installed maps already
 have templates. Writing a shell from the documented key list was not tried.
 
+### E18 and E21: a player on the server
+
+Run 2026-11-12 (the reload at 00:11 UTC) with the owner as the player, on the
+Windows client joined to the Wine server, which ran the owner's own mission with 14
+fixed blue slots. `lua/experiments/alone/e18-actions.lua` and `e18-reload.lua` ran on
+the server; the owner reported what the client showed. The run used a form of
+`e18-actions.lua` that named the player's position, and of `e30-take-slot.lua` that named
+the slot; the committed forms find both at run time, so they work with any mission that
+has player slots, and have not been run since. Server values are LIVE; client
+values are the owner's observations.
+
+| Action on the server | Server | Client |
+|---|---|---|
+| Burst: 20 groups of 10 M-113 in one call, 1.5 km from the player | 109 ms | All shown; the player stayed connected. A stutter was not watched for. |
+| `trigger.action.outText` for 60 s | sent | Not watched for |
+| `trigger.action.markToAll` | added | Shown with its text |
+| `missionCommands.addCommandForCoalition` (blue) | added | Shown under F10; selected once, and the server's callback ran once |
+| `a_unit_set_life_percentage(id, 10)` on `np-e18-1` | The unit died: its group went from 10 to 9, and its three nearest neighbours lost 1–7% of their life, as from a blast | **`np-e18-1` still shown intact** (F11 view), its group with 10 units, its task blank where the others read "Not active". The neighbours' damage was shown. |
+| `net.load_mission` of the running mission | Reloaded in 6.6 s; the hook saw `onPlayerStop` for the server's player and the client | Stayed connected; returned to the coalition screen |
+
+The damage setter is the one failure. Setting a ground unit to 10% killed it on the
+server, and the death never reached the client, which kept a stale unit. Whether a
+higher value avoids the death, and whether a death from weapons replicates, is not
+known; S15's E16 must cover damage with a client connected and check what the client
+shows.
+
+E21's second half: on the F10 map the player sees only the type ("M-113"). Clicking a
+unit opens a dialog with its unit and group names, so platform names are visible to a
+player who looks. The naming rule must not put anything in a name that players should
+not see.
+
+The test units were removed by the reload, and the eval reset reported no errors.
+
+### E30: a client driven from Lua
+
+Run on the Windows PC on 2026-11-11, by the owner with a Claude Code session there, not
+through this repository's tooling. DCS 2.9.31.29434, Windows client; LIVE there, PRIOR
+here. With the client at its main menu, this in the client's `gui` state started a
+connection to the owner's server, and the owner saw the client join:
+
+```lua
+net.set_name('<player name>')
+return tostring(net.start_client('<server address>:<port>', '<server password>'))
+```
+
+It returned `"0"`. The call matches how ED's own server browser joins
+(`MissionEditor/modules/mul_server_list.lua`). `net.start_client` and `net.set_name`
+also exist in the hook state.
+
+Taking a slot (LIVE, same session as E18, the owner joined by hand):
+`lua/experiments/alone/e30-slots.lua` listed the slots with `DCS.getAvailableSlots`, and
+`e30-take-slot.lua` called `net.set_coalition(2, '')` then `net.set_slot(2, '8570', '',
+nil)`, as ED's role screen does. Both ran in the hook state; the `gui` state did not
+answer `net.dostring_in` while the client was connected. `net.get_slot` and
+`DCS.getPlayerUnit()` then reported the slot. The client's screen stayed on the
+coalition step, because ED's screens keep their own state and the calls bypass them.
+`net.spawn_player()`, which ED's "Fly" path calls, put the player in the cockpit.
+`net.stop_game()` in the hook state left the server.
+
+Reading the client's own view of a menu item or a mark from Lua was not found: the hook
+state lists the mark event IDs but no call that returns marks or menu items. E30's rule
+is therefore met for joining and taking a slot, not for reporting what the client sees;
+player-facing checks stay manual.
+
+How the game starts unattended, from the same session: the Start-menu shortcut runs
+`bin\DCS_updater.exe`, which runs `bin\DCS.exe` with no arguments, which is ED's
+launcher window; its Play button starts `bin\DCS.exe --restarted` and the launcher
+exits. Starting `bin\DCS.exe --restarted` directly skips the launcher: a short login
+window, then the main menu after about 30 s. Closing the game's window raises a
+confirmation dialog, so an unattended stop that cannot reach Lua must end the process.
+
 ### E33: the clock
 
 `QueryPerformanceCounter` at 10 MHz: 73 ns a read in a tight loop, in both states; 105 ns
@@ -275,11 +350,100 @@ through `guarded` and the `fault` entry, into `lua.dll`, `edCore.dll` and
 the agent DLL, wrote a `.crash` and a `.dmp`, and began packing them into
 `Logs/dcs.log-<time>.zip`.
 
-**Then DCS hung.** The log stopped at that point, the zip stayed incomplete, and the
+**Then DCS stopped.** The log stopped at that point, the zip stayed incomplete, and the
 process stayed alive at about 18% CPU. Five minutes later it had not exited, and
-`cargo xtask restart` restarted it. A crash under Wine can therefore leave a live,
-hung process. The supervisor (S19) must treat a stalled heartbeat as a crash, not wait
-for the process to exit, and `dcs-watchdog` will not see it while the port stays open.
+`cargo xtask restart` restarted it. The likely cause is ED's crash-report window
+waiting for input (see "On the Windows client"). A host check that only watches the
+process or the game port does not see this, because both stay up; the heartbeat
+stops.
+
+## On the Windows client
+
+| | |
+|---|---|
+| Date | 2026-11-11 23:38 UTC to 2026-11-12 00:41 UTC |
+| Platform | Windows 10.0.26200, DCS 2.9.31.29434 client, at the main menu, no mission loaded, about 60 frames a second |
+| Scripts | `cargo xtask deploy <target> --dev`, `cargo xtask restart <target>` (the windows-ssh target: DCS started by a scheduled task in the desktop session), then `cargo xtask eval <target> hook lua/experiments/<name>.lua`; `cargo xtask undeploy <target>` afterwards |
+| Agent | build `843dc82a51e097a1`, PDB `FAC1930B6DBAE4774C4C44205044422E1` |
+
+DCS started through the task, and the hook ran 36 s later. At the main menu the client
+has no mission and no `server` state, so the first runs used the hook state.
+
+**Hosting a session from Lua.** `lua/experiments/alone/host-session.lua`, run in the
+`gui` state, does what ED's own multiplayer screen does
+(`MissionEditor/modules/mul_create_server.lua`). It starts from
+`net.get_default_server_settings()`, never reading the profile's `serverSettings.lua`.
+It sets a private session on port 10318 (away from a real server's 10308), with a
+random unrecorded password and the shell mission in `missionList`, and calls
+`net.start_server`. That returned `0`. The client loaded `np-shell` 13 s later as a
+multiplayer server (`DCS.isServer()` true), paused at model time 0, and its `server`
+state answered.
+
+ED's defaults on this build: `port` 10308 (a number), `isPublic` true, `maxPlayers` 16,
+`name` "DCS Server", `mode` 0, `require_pure_clients`, `_models` and `_textures` true,
+`require_pure_scripts` false, an empty `advanced` table, no password.
+
+At the main menu the eval hook once took several minutes to take a request, and another
+time answered within seconds. Why is not established.
+
+- **E27:** the hook opened the DLL at start, pinned, ABI 1, and the module name matched
+  the build; it opened in the hosted session's `server` state too. PASS.
+- **E26:** in the hook state and in the hosted session's `server` state, 1,000 raises
+  through the entry and 1,000 errors inside the agent's `lua_pcall` all caught, the
+  nested case caught, the agent still enabled. PASS.
+- **E4, the clean exit:** with the agent open in the hook and `server` states and the
+  session running, `DCS.exitProcess()` in the `gui` state ended DCS. The log ends with
+  `=== Log closed.` and no `.crash` file was written. The 50 reloads were not run here.
+- **E33:** 15.5 ns a counter read in a tight loop, 29 ns through the `clock` entry.
+- **E25,** microseconds per frame, 600 frames a size:
+
+| Bytes | send p50 | send p99 | recv p50 | recv p99 | frame p50 | frame p99 |
+|---|---|---|---|---|---|---|
+| 0 (idle: recv would block) | 2.5 | 3.4 | 1.2 | 1.6 | 3.8 | 4.8 |
+| 64 | 17.1 | 22.2 | 1.7 | 2.1 | 18.8 | 24.3 |
+| 512 | 17.4 | 24.1 | 1.6 | 2.1 | 19.0 | 26.6 |
+| 4,096 | 18.9 | 26.3 | 2.7 | 3.6 | 21.6 | 29.4 |
+| 16,384 | 19.7 | 26.9 | 3.0 | 3.8 | 22.6 | 30.3 |
+
+A socket call on Windows costs about a twentieth of one under Wine, so most of the
+Wine cost is Wine's. It is still over E19's 10 µs at p99 whenever data is sent, so the
+mapped file stays the data path on both platforms (plan revision 7). The client's
+numbers come from a different machine than the server's.
+
+**The probe suite** (`cargo xtask probes <target>`), in the hosted session: all 25
+probes ran, nothing was left behind, and the only differences from the recorded client
+baseline are three the Wine server showed too. The hook state is not the `gui` state
+(`hook_is_gui` false), a reload sends `onPlayerStop`, and the scenario's aircraft
+reports `hasTask` true. So none of the three is a Wine or dedicated-server trait, and
+the S3 classifications stand; `hasTask` comes from the scenario.
+
+**The other experiments,** in the hosted session, each through `cargo xtask probes
+<target> --dir lua/experiments --only <name>`:
+
+| # | Windows client | Wine server, above |
+|---|---|---|
+| E3 | One thread for every kind of call | Same |
+| E4 | 50 of 50 reloads, the same table and open count each time; 5.40–6.04 s a load | Same; 1.96–2.21 s |
+| E5 | Best speed-up 1.14x (`byObjectId` 0.235 ms C-driven against 0.269 ms Lua into `sink`) | 1.20x |
+| E10 | Frames 16.95 ms median running and paused (60 a second, vsync); the 1 ms timer catches up within a frame | About 9 ms; same timer |
+| E13 | 2,000 units in 857 ms, one frame; still paused; removed 0.76 s after a resume | 836 ms |
+| E20 | The same behaviour; IDs only grew | Same |
+| E21 | The same collisions | Same |
+| E24 | `cargo xtask mapped <target>` with `tools/mapped-peer.ps1`, both sides mapping a file in the profile: 0 torn reads in 1,290; echo lag 1 frame (2 once in 887) | Same |
+| E90 | The panic caught, the agent disabled, the same reason | Same |
+| E2 | `cargo xtask gates <target> on` (the client's `autoexec.cfg` saved byte for byte first), then a restart and a hosted session: the hook reached `server`, `gui`, `mission`, `export` and `config`; `scripting` and the sandbox's call were refused; the agent loaded at start. `gates off` put the saved copy back, and its SHA-256 matched the one taken before. | Same |
+| E91 | The handler wrote one record: `0xC0000005` in the agent, depth 1, breadcrumb 91. `cargo xtask symbolize` resolved it to `fault` (`crates/agent/src/platform/windows.rs`) through `guarded`. DCS's own handler then wrote and removed a `.crash` and a `.dmp`, left `Logs/dcs.log-<time>.zip` at 0 bytes, and the process hung until the stop task ended it. | Same, hang included |
+
+The profile was undeployed afterwards and DCS stopped; the profile's tree was as before.
+
+On both platforms DCS stopped after its own crash handler ran. On the Windows client
+that is ED's crash-report window, which waits for the user to describe the crash and
+send it (PRIOR: the owner's experience of DCS crashes without the agent). The Wine
+server's container runs a desktop, so the same window may be waiting there
+(UNVERIFIED: the desktop was not viewed). Either way the sidecar's health verdict
+(S19) must report a process whose heartbeat stopped as hung, so the host's tooling can
+end and restart it, and E22 must find a setting that turns the window off or confirm
+that the host ending the process is the answer.
 
 ## Other findings
 
@@ -292,21 +456,6 @@ for the process to exit, and `dcs-watchdog` will not see it while the port stays
 
 ## What the Windows checkpoint must do
 
-Windows runs are queued, as the owner decided (2026-11-10). At the first checkpoint, on
-the Windows client hosting a session:
+Nothing from S2, S3 or S4 remains for it. Open, and needing a person:
 
-- E4, E26, E27, E33: deploy, then `cargo xtask probes <local target> --dir
-  lua/experiments --only e26` (and `e27`, `e33`, `e04`), and the clean exit.
-- E25 on Windows: `--only e25`. Its numbers decide whether the socket cost is Wine's.
-- E3, E5, E10, E13, E20, E21 again, for the client's values.
-- Crash capture: `e90-panic.lua`, then `alone/e91-fault.lua`; check whether DCS on
-  Windows exits or hangs after its crash report.
-
-Needing a person or the Windows PC over SSH:
-
-- E18: with one remote client connected, a burst spawn, the damage setter, menus and
-  marks, and a reload; whether the client stays connected and sees each.
-- E21's second half: where unit, group and static names show to a player.
-- E23's second half: whether a connecting client sees anything different with the DLL
-  loaded.
-- E30: a scripted client through `net.start_client` and `net.set_slot`.
+- E30: a way for the client to read its own menu items and marks, if one exists.
