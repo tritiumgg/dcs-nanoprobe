@@ -25,7 +25,11 @@ value for. A number that is not finite is written as `null`.
 ## Files
 
 Each writer appends to its own file and flushes after every record, so a crash loses at
-most the record being written. When a record would take the file past its cap, and the
+most the record being written. The agent is the exception: it holds its records, of
+every level, for up to a second and writes them on the frame where it makes its other
+system calls (spec/transport.md, "Handshake"). A crash can lose that second from
+`agent.log`. It does not lose it altogether: the records also go to the sidecar
+through the outbound ring, and the crash handler writes `crash.log` itself. When a record would take the file past its cap, and the
 file is not empty, the writer renames it to `<name>.1` (replacing an older `<name>.1`)
 and starts a new file. A writer therefore keeps at most twice its cap on disk.
 

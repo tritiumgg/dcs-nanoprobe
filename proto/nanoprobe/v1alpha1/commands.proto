@@ -1,0 +1,322 @@
+// Desired state and effects. Controller only.
+syntax = "proto3";
+
+package nanoprobe.v1alpha1;
+
+import "google/protobuf/struct.proto";
+import "nanoprobe/v1alpha1/common.proto";
+import "nanoprobe/v1alpha1/session.proto";
+import "nanoprobe/v1alpha1/world.proto";
+
+// A set-state call returns when the desired state is journalled; it does not
+// wait for DCS. An effect returns with its outcome.
+service CommandsService {
+  rpc PutGroup(PutGroupRequest) returns (PutGroupResponse);
+  rpc PutStatic(PutStaticRequest) returns (PutStaticResponse);
+  rpc SetOrder(SetOrderRequest) returns (SetOrderResponse);
+  rpc SetOptions(SetOptionsRequest) returns (SetOptionsResponse);
+  rpc Materialize(MaterializeRequest) returns (MaterializeResponse);
+  rpc Dematerialize(DematerializeRequest) returns (DematerializeResponse);
+  rpc RemoveEntity(RemoveEntityRequest) returns (RemoveEntityResponse);
+  rpc SetLostPolicy(SetLostPolicyRequest) returns (SetLostPolicyResponse);
+  rpc SetAirbaseOwner(SetAirbaseOwnerRequest) returns (SetAirbaseOwnerResponse);
+  rpc SetWarehouseStock(SetWarehouseStockRequest) returns (SetWarehouseStockResponse);
+  // Read an entity's full state from DCS. With persistence off this and
+  // PutGroup are the author's capture and restore: the captured units go back
+  // as a spec.
+  rpc Capture(CaptureRequest) returns (CaptureResponse);
+  rpc DoEffect(DoEffectRequest) returns (DoEffectResponse);
+  rpc SetSampleRates(SetSampleRatesRequest) returns (SetSampleRatesResponse);
+  // The outcome of an earlier effect or query call, by its idempotency key.
+  rpc GetOutcome(GetOutcomeRequest) returns (GetOutcomeResponse);
+}
+
+message UnitSpec {
+  // 0 in a new group; the server assigns the ID.
+  uint64 id = 1;
+  string type = 2;
+  string label = 3;
+  Position position = 4;
+  // Radians.
+  double heading = 5;
+  string skill = 6;
+  // Further keys of the DCS unit table: payload, livery, callsign and so on.
+  // Integer keys are written as decimal strings (spec/world.md).
+  google.protobuf.Struct extra = 7;
+  // State to spawn with, as a capture returned it. Absent spawns it new.
+  // Life is a percentage of the type's initial life, 0 to 100.
+  optional double life_percent = 8;
+  optional double fuel = 9;
+  map<string, uint32> ammo = 10;
+}
+
+message GroupSpec {
+  string label = 1;
+  // The DCS country number.
+  uint32 country = 2;
+  GroupCategory category = 3;
+  repeated UnitSpec units = 4;
+  // Further keys of the DCS group table.
+  google.protobuf.Struct extra = 5;
+  // Start under campaign authority, not in DCS.
+  bool virtual = 6;
+  map<string, google.protobuf.Struct> components = 7;
+}
+
+message StaticSpec {
+  string label = 1;
+  uint32 country = 2;
+  string type = 3;
+  Position position = 4;
+  double heading = 5;
+  google.protobuf.Struct extra = 6;
+}
+
+message Waypoint {
+  Position position = 1;
+  // Meters per second.
+  double speed = 2;
+  // Follow roads to this point. Ground groups only.
+  bool on_road = 3;
+  // Further keys of the DCS waypoint table.
+  google.protobuf.Struct extra = 4;
+}
+
+message RouteOrder {
+  repeated Waypoint waypoints = 1;
+}
+
+message AttackOrder {
+  // The group, unit or static to attack.
+  uint64 target_id = 1;
+}
+
+message HoldOrder {}
+
+message OrbitOrder {
+  Position center = 1;
+  double speed = 2;
+  // Meters.
+  double radius = 3;
+}
+
+// An order is stored as an intent. The server compiles what remains of it
+// into a DCS task whenever DCS must be told again.
+message Order {
+  oneof intent {
+    RouteOrder route = 1;
+    AttackOrder attack = 2;
+    HoldOrder hold = 3;
+    OrbitOrder orbit = 4;
+  }
+}
+
+message PutGroupRequest {
+  Write write = 1;
+  // 0 creates a group; otherwise replaces the spec of this one.
+  uint64 group_id = 2;
+  GroupSpec spec = 3;
+  // Optional first order.
+  Order order = 4;
+}
+
+message PutGroupResponse {
+  uint64 group_id = 1;
+  repeated uint64 unit_ids = 2;
+  uint64 spec_revision = 3;
+  // The store revision of the change.
+  uint64 revision = 4;
+}
+
+message PutStaticRequest {
+  Write write = 1;
+  uint64 static_id = 2;
+  StaticSpec spec = 3;
+}
+
+message PutStaticResponse {
+  uint64 static_id = 1;
+  uint64 spec_revision = 2;
+  uint64 revision = 3;
+}
+
+message SetOrderRequest {
+  Write write = 1;
+  uint64 group_id = 2;
+  Order order = 3;
+}
+
+message SetOrderResponse {
+  uint64 order_revision = 1;
+  uint64 revision = 2;
+}
+
+message SetOptionsRequest {
+  Write write = 1;
+  uint64 group_id = 2;
+  // Controller options by DCS option ID.
+  map<uint32, google.protobuf.Value> options = 3;
+}
+
+message SetOptionsResponse {
+  uint64 revision = 1;
+}
+
+message MaterializeRequest {
+  Write write = 1;
+  // Managed groups and statics.
+  repeated uint64 entity_ids = 2;
+}
+
+message MaterializeResponse {
+  uint64 revision = 1;
+}
+
+message DematerializeRequest {
+  Write write = 1;
+  repeated uint64 entity_ids = 2;
+}
+
+message DematerializeResponse {
+  uint64 revision = 1;
+}
+
+message RemoveEntityRequest {
+  Write write = 1;
+  // A managed group, static, mark, drawing or menu item.
+  uint64 entity_id = 2;
+}
+
+message RemoveEntityResponse {
+  uint64 revision = 1;
+}
+
+enum LostPolicy {
+  LOST_POLICY_UNSPECIFIED = 0;
+  LOST_POLICY_REPORT = 1;
+  LOST_POLICY_RESPAWN = 2;
+  LOST_POLICY_DEAD = 3;
+}
+
+message SetLostPolicyRequest {
+  Write write = 1;
+  // 0 sets the campaign's default.
+  uint64 group_id = 2;
+  LostPolicy policy = 3;
+}
+
+message SetLostPolicyResponse {
+  uint64 revision = 1;
+}
+
+message SetAirbaseOwnerRequest {
+  Write write = 1;
+  string theater = 2;
+  string airbase = 3;
+  Coalition owner = 4;
+}
+
+message SetAirbaseOwnerResponse {
+  uint64 revision = 1;
+}
+
+message SetWarehouseStockRequest {
+  Write write = 1;
+  string theater = 2;
+  string airbase = 3;
+  // Items to set, by name. An item not named keeps its count.
+  map<string, double> stock = 4;
+}
+
+message SetWarehouseStockResponse {
+  uint64 revision = 1;
+}
+
+message CaptureRequest {
+  Write write = 1;
+  // A live group or static.
+  uint64 entity_id = 2;
+}
+
+message CaptureResponse {
+  CommandResult result = 1;
+  Entity entity = 2;
+}
+
+message Explosion {
+  Position position = 1;
+  double power = 2;
+}
+
+message Smoke {
+  Position position = 1;
+  // The DCS smoke color number.
+  uint32 color = 2;
+}
+
+message Flare {
+  Position position = 1;
+  uint32 color = 2;
+  // Radians.
+  double azimuth = 3;
+}
+
+message Illumination {
+  Position position = 1;
+  double power = 2;
+}
+
+message Damage {
+  uint64 unit_id = 1;
+  // The life to set, as a percentage of the unit's initial life, 0 to 100.
+  double life_percent = 2;
+}
+
+message Effect {
+  oneof effect {
+    Explosion explosion = 1;
+    Smoke smoke = 2;
+    Flare flare = 3;
+    Illumination illumination = 4;
+    Damage damage = 5;
+  }
+}
+
+// At-most-once: an effect is never sent to DCS twice.
+message DoEffectRequest {
+  Write write = 1;
+  Effect effect = 2;
+}
+
+message DoEffectResponse {
+  CommandResult result = 1;
+}
+
+message SetSampleRatesRequest {
+  Write write = 1;
+  // Target periods in seconds; 0 keeps the agent's default.
+  double position_period = 2;
+  double vitals_period = 3;
+  double ammo_period = 4;
+  double warehouse_period = 5;
+  double enumeration_period = 6;
+}
+
+message SetSampleRatesResponse {}
+
+// Keys are remembered server-wide, so the request names no campaign. Fails
+// with OUTCOME_NOT_FOUND for a key that is unknown or no longer remembered.
+message GetOutcomeRequest {
+  string idempotency_key = 1;
+}
+
+// The final response of the call, as the call would have returned it.
+message GetOutcomeResponse {
+  CommandResult result = 1;
+  // The value, for InvokeLua and EvalLua.
+  google.protobuf.Value value = 2;
+  // The entity, for Capture.
+  Entity entity = 3;
+  // The campaign the call resolved to, 0 for none.
+  uint64 campaign_id = 4;
+}

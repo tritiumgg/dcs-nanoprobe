@@ -12,6 +12,7 @@ mod miz;
 mod probes;
 mod profile;
 mod remote;
+mod spec;
 mod ssh;
 mod symbols;
 mod windows;
@@ -68,6 +69,9 @@ commands:
                             Restart DCS afterwards for them to apply.
   symbolize <file>          Resolve the frames of each record in a crash.log, or in a
                             bundle's logs/crash.log, with the kept PDB of its build
+  spec [--check]            Write spec/transport.golden from the layout and code tables
+                            of the transport specification, or with --check fail
+                            when it is out of date
   api-dump <name>           Write lua/mock/api/<state>.txt from each state's globals
   snapshot <name>           List the profile's tree, outside Logs/
   miz <template> <out> [--start-time S]
@@ -104,6 +108,8 @@ fn main() -> ExitCode {
         ["gates", name, "on"] => gates(name, true),
         ["gates", name, "off"] => gates(name, false),
         ["symbolize", file] => symbols::symbolize(Path::new(file)),
+        ["spec"] => spec::command(&repository(), false),
+        ["spec", "--check"] => spec::command(&repository(), true),
         ["help" | "-h" | "--help"] | [] => {
             println!("{USAGE}");
             return ExitCode::SUCCESS;

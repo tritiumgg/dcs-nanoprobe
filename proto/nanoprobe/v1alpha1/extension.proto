@@ -1,0 +1,150 @@
+// Author schemas, author events, author data, Lua extensions and raw Lua.
+syntax = "proto3";
+
+package nanoprobe.v1alpha1;
+
+import "google/protobuf/struct.proto";
+import "nanoprobe/v1alpha1/common.proto";
+import "nanoprobe/v1alpha1/session.proto";
+
+// The Lua calls need raw Lua switched on in the agent's own file.
+service ExtensionService {
+  // Declare an author event or component, with its schema version.
+  rpc RegisterSchema(RegisterSchemaRequest) returns (RegisterSchemaResponse);
+  // Publish an author event into the event log.
+  rpc PublishEvent(PublishEventRequest) returns (PublishEventResponse);
+  rpc PutData(PutDataRequest) returns (PutDataResponse);
+  rpc GetData(GetDataRequest) returns (GetDataResponse);
+  // Install a named Lua chunk. It is installed again at every mission start.
+  rpc RegisterLua(RegisterLuaRequest) returns (RegisterLuaResponse);
+  rpc RemoveLua(RemoveLuaRequest) returns (RemoveLuaResponse);
+  // The registered extensions, with their run time.
+  rpc ListLua(ListLuaRequest) returns (ListLuaResponse);
+  rpc InvokeLua(InvokeLuaRequest) returns (InvokeLuaResponse);
+  // Run Lua source once in the server state.
+  rpc EvalLua(EvalLuaRequest) returns (EvalLuaResponse);
+}
+
+enum SchemaKind {
+  SCHEMA_KIND_UNSPECIFIED = 0;
+  SCHEMA_KIND_EVENT = 1;
+  SCHEMA_KIND_COMPONENT = 2;
+}
+
+message RegisterSchemaRequest {
+  Write write = 1;
+  SchemaKind kind = 2;
+  string name = 3;
+  uint32 version = 4;
+  // A JSON Schema for the payload. Optional.
+  google.protobuf.Struct schema = 5;
+}
+
+message RegisterSchemaResponse {}
+
+message PublishEventRequest {
+  Write write = 1;
+  string name = 2;
+  google.protobuf.Value payload = 3;
+  repeated string player_keys = 4;
+  repeated uint64 entity_ids = 5;
+}
+
+message PublishEventResponse {
+  // The event's sequence number.
+  uint64 sequence = 1;
+}
+
+// Where author data lives.
+enum DataScope {
+  DATA_SCOPE_UNSPECIFIED = 0;
+  // In the active campaign's store.
+  DATA_SCOPE_CAMPAIGN = 1;
+  // In the server-scoped store, across campaigns.
+  DATA_SCOPE_SERVER = 2;
+}
+
+message PutDataRequest {
+  Write write = 1;
+  DataScope scope = 2;
+  string key = 3;
+  // Absent deletes the key.
+  google.protobuf.Value value = 4;
+}
+
+message PutDataResponse {}
+
+message GetDataRequest {
+  DataScope scope = 1;
+  // The campaign to read, 0 for the active one. Campaign scope only.
+  uint64 campaign_id = 2;
+  string key = 3;
+}
+
+message GetDataResponse {
+  // Absent when the key does not exist.
+  google.protobuf.Value value = 1;
+}
+
+message RegisterLuaRequest {
+  Write write = 1;
+  string name = 2;
+  string source = 3;
+}
+
+message RegisterLuaResponse {
+  uint64 revision = 1;
+}
+
+message RemoveLuaRequest {
+  Write write = 1;
+  string name = 2;
+}
+
+message RemoveLuaResponse {}
+
+message ExtensionStatus {
+  string name = 1;
+  // The registered revision and the one the agent runs.
+  uint64 revision = 2;
+  uint64 applied_revision = 3;
+  // Hook calls, and their time in microseconds, since the mission started.
+  uint64 calls = 4;
+  uint64 total_us = 5;
+  uint64 max_us = 6;
+  // Events its queue dropped.
+  uint64 events_skipped = 7;
+  // The agent stopped its hooks after errors.
+  bool stopped = 8;
+}
+
+message ListLuaRequest {
+  // The campaign to read, 0 for the active one.
+  uint64 campaign_id = 1;
+}
+
+message ListLuaResponse {
+  repeated ExtensionStatus extensions = 1;
+}
+
+message InvokeLuaRequest {
+  Write write = 1;
+  string name = 2;
+  google.protobuf.ListValue args = 3;
+}
+
+message InvokeLuaResponse {
+  CommandResult result = 1;
+  // The first value the extension returned.
+  google.protobuf.Value value = 2;
+}
+
+message EvalLuaRequest {
+  Write write = 1;
+  string source = 2;
+}
+
+message EvalLuaResponse {
+  CommandResult result = 1;
+  google.protobuf.Value value = 2;
+}

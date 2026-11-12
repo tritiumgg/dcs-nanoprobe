@@ -1,0 +1,165 @@
+// Players and what they see: messages, marks, drawings, menus, chat.
+syntax = "proto3";
+
+package nanoprobe.v1alpha1;
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+import "nanoprobe/v1alpha1/common.proto";
+import "nanoprobe/v1alpha1/session.proto";
+
+// Menu selections and chat arrive as events (EventsService).
+service PlayersService {
+  rpc ListPlayers(ListPlayersRequest) returns (ListPlayersResponse);
+  // Who was in which unit, and when.
+  rpc ListOccupancy(ListOccupancyRequest) returns (ListOccupancyResponse);
+  rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
+  rpc PlaySound(PlaySoundRequest) returns (PlaySoundResponse);
+  rpc SendChat(SendChatRequest) returns (SendChatResponse);
+  rpc PutMark(PutMarkRequest) returns (PutMarkResponse);
+  rpc PutDrawing(PutDrawingRequest) returns (PutDrawingResponse);
+  rpc PutMenuItem(PutMenuItemRequest) returns (PutMenuItemResponse);
+  // Erase one player's records, or move them to a new key.
+  rpc ErasePlayer(ErasePlayerRequest) returns (ErasePlayerResponse);
+}
+
+message Player {
+  // Constant across sessions, names and campaigns.
+  string key = 1;
+  string name = 2;
+  bool connected = 3;
+  Coalition coalition = 4;
+  // The unit the player is in, 0 for none.
+  uint64 unit_id = 5;
+  uint32 seat = 6;
+}
+
+message Occupancy {
+  string player_key = 1;
+  uint64 unit_id = 2;
+  uint32 seat = 3;
+  google.protobuf.Timestamp from = 4;
+  // Absent while the player is still in the seat.
+  google.protobuf.Timestamp to = 5;
+}
+
+message ListPlayersRequest {
+  // Include players who are not connected.
+  bool include_offline = 1;
+}
+
+message ListPlayersResponse {
+  repeated Player players = 1;
+}
+
+message ListOccupancyRequest {
+  // The campaign to read, 0 for the active one.
+  uint64 campaign_id = 1;
+  // Empty for every player.
+  string player_key = 2;
+  // 0 for every unit.
+  uint64 unit_id = 3;
+  google.protobuf.Timestamp from = 4;
+  google.protobuf.Timestamp to = 5;
+}
+
+message ListOccupancyResponse {
+  repeated Occupancy occupancy = 1;
+}
+
+message SendMessageRequest {
+  Write write = 1;
+  Audience audience = 2;
+  string text = 3;
+  double seconds = 4;
+  // Clear earlier messages first.
+  bool clear = 5;
+}
+
+message SendMessageResponse {
+  CommandResult result = 1;
+}
+
+message PlaySoundRequest {
+  Write write = 1;
+  Audience audience = 2;
+  // The sound file's name in the mission.
+  string file = 3;
+}
+
+message PlaySoundResponse {
+  CommandResult result = 1;
+}
+
+message SendChatRequest {
+  Write write = 1;
+  // Empty for everyone.
+  string player_key = 2;
+  string text = 3;
+}
+
+message SendChatResponse {
+  CommandResult result = 1;
+}
+
+message PutMarkRequest {
+  Write write = 1;
+  // 0 creates a mark.
+  uint64 mark_id = 2;
+  // Everyone, one coalition or one group. A unit fails with INVALID_FIELD.
+  Audience audience = 3;
+  Position position = 4;
+  string text = 5;
+  bool read_only = 6;
+}
+
+message PutMarkResponse {
+  uint64 mark_id = 1;
+  uint64 revision = 2;
+}
+
+message PutDrawingRequest {
+  Write write = 1;
+  // 0 creates a drawing.
+  uint64 drawing_id = 2;
+  // Everyone or one coalition.
+  Audience audience = 3;
+  // The DCS shape ID.
+  uint32 shape = 4;
+  // The shape's arguments, as DCS takes them.
+  google.protobuf.ListValue args = 5;
+}
+
+message PutDrawingResponse {
+  uint64 drawing_id = 1;
+  uint64 revision = 2;
+}
+
+message PutMenuItemRequest {
+  Write write = 1;
+  // 0 creates an item.
+  uint64 item_id = 2;
+  // The parent submenu, 0 for the root.
+  uint64 parent_id = 3;
+  // Everyone, one coalition or one group.
+  Audience audience = 4;
+  string text = 5;
+  // A submenu holds items; a command returns a menu event when selected.
+  bool submenu = 6;
+}
+
+message PutMenuItemResponse {
+  uint64 item_id = 1;
+  uint64 revision = 2;
+}
+
+message ErasePlayerRequest {
+  Write write = 1;
+  string player_key = 2;
+  // Move the records to this key instead of erasing them. Empty erases.
+  string new_key = 3;
+  // Must be true.
+  bool confirm = 4;
+}
+
+message ErasePlayerResponse {}

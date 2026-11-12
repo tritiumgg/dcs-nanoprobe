@@ -1,0 +1,250 @@
+// The world: list, then watch.
+syntax = "proto3";
+
+package nanoprobe.v1alpha1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/struct.proto";
+import "nanoprobe/v1alpha1/common.proto";
+
+// The world of one campaign, active or archived. A call that names campaign
+// 0 while no campaign is active fails with NO_ACTIVE_CAMPAIGN.
+service WorldService {
+  // A snapshot at one revision.
+  rpc ListWorld(ListWorldRequest) returns (stream ListWorldResponse);
+  // Changes since a revision. A consumer that falls behind is ended with
+  // CONSUMER_TOO_SLOW and lists again.
+  rpc WatchWorld(WatchWorldRequest) returns (stream WatchWorldResponse);
+  // Entities near a point.
+  rpc QueryArea(QueryAreaRequest) returns (QueryAreaResponse);
+}
+
+// The lifecycle of a managed group or static (spec/world.md).
+enum EntityState {
+  ENTITY_STATE_UNSPECIFIED = 0;
+  ENTITY_STATE_VIRTUAL = 1;
+  ENTITY_STATE_MATERIALIZING = 2;
+  ENTITY_STATE_LIVE = 3;
+  ENTITY_STATE_DEMATERIALIZING = 4;
+  ENTITY_STATE_DEAD = 5;
+  ENTITY_STATE_LOST = 6;
+  ENTITY_STATE_UNSPAWNABLE = 7;
+}
+
+// How often a subscription wants positions.
+enum RateClass {
+  RATE_CLASS_UNSPECIFIED = 0;
+  // The default tier rate.
+  RATE_CLASS_NORMAL = 1;
+  // As fast as the cap allows.
+  RATE_CLASS_FAST = 2;
+  // Only when the store checkpoints.
+  RATE_CLASS_SLOW = 3;
+}
+
+message Unit {
+  uint64 id = 1;
+  uint64 group_id = 2;
+  // The DCS type name.
+  string type = 3;
+  // The author's label.
+  string label = 4;
+  bool alive = 5;
+  Position position = 6;
+  // As DCS sampled it. A unit DCS has not sampled has a heading derived from
+  // its movement, with pitch and roll 0, or no attitude if it has not moved.
+  Attitude attitude = 7;
+  // Meters per second, derived from position changes.
+  double speed = 8;
+  // DCS's own life value. Its scale depends on the unit type; life_max is the
+  // value the unit started with.
+  optional double life = 9;
+  // A fraction of internal fuel.
+  optional double fuel = 10;
+  // Ammunition by weapon type name.
+  map<string, uint32> ammo = 11;
+  // Player keys of the occupants, by seat.
+  repeated string occupants = 12;
+  Stamp sampled = 13;
+  optional double life_max = 14;
+}
+
+message Group {
+  uint64 id = 1;
+  string label = 2;
+  bool managed = 3;
+  EntityState state = 4;
+  Coalition coalition = 5;
+  // The DCS country number.
+  uint32 country = 6;
+  GroupCategory category = 7;
+  repeated Unit units = 8;
+  uint64 spec_revision = 9;
+  // The spec revision DCS has applied.
+  uint64 applied_spec_revision = 15;
+  uint64 order_revision = 10;
+  // The order revision DCS has been given.
+  uint64 applied_order_revision = 11;
+  // The engine's error for an unspawnable group.
+  string last_error = 12;
+  // The theater the group is on.
+  string theater = 13;
+  // Author components by name.
+  map<string, google.protobuf.Struct> components = 14;
+}
+
+message Static {
+  uint64 id = 1;
+  string label = 2;
+  bool managed = 3;
+  string type = 4;
+  Coalition coalition = 5;
+  uint32 country = 6;
+  bool alive = 7;
+  Position position = 8;
+  double heading = 9;
+  optional double life = 10;
+  EntityState state = 11;
+  // The engine's error for an unspawnable static.
+  string last_error = 12;
+  uint64 spec_revision = 13;
+  uint64 applied_spec_revision = 14;
+}
+
+message Airbase {
+  string theater = 1;
+  // The DCS name.
+  string name = 2;
+  Coalition owner = 3;
+  // Stock by item name. Absent until sampled.
+  map<string, double> stock = 4;
+}
+
+// A map mark the controller set.
+message Mark {
+  uint64 id = 1;
+  Audience audience = 2;
+  Position position = 3;
+  string text = 4;
+  bool read_only = 5;
+  uint64 spec_revision = 6;
+  // The revision DCS has applied, and the error if DCS refused the last one.
+  uint64 applied_spec_revision = 7;
+  string last_error = 8;
+}
+
+// A map drawing the controller set.
+message Drawing {
+  uint64 id = 1;
+  Audience audience = 2;
+  // The DCS shape ID.
+  uint32 shape = 3;
+  google.protobuf.ListValue args = 4;
+  uint64 spec_revision = 5;
+  uint64 applied_spec_revision = 6;
+  string last_error = 7;
+}
+
+// An F10 menu item the controller set.
+message MenuItem {
+  uint64 id = 1;
+  // The parent submenu, 0 for the root.
+  uint64 parent_id = 2;
+  Audience audience = 3;
+  string text = 4;
+  bool submenu = 5;
+  uint64 spec_revision = 6;
+  uint64 applied_spec_revision = 7;
+  string last_error = 8;
+}
+
+message Entity {
+  oneof kind {
+    Group group = 1;
+    Static static = 2;
+    Airbase airbase = 3;
+    Mark mark = 4;
+    Drawing drawing = 5;
+    MenuItem menu_item = 6;
+  }
+}
+
+// What a list or a watch covers. Empty covers everything.
+message WorldFilter {
+  // The campaign to read, 0 for the active one. An archived campaign is
+  // listed, never watched.
+  uint64 campaign_id = 1;
+  repeated Coalition coalitions = 2;
+  // Units are listed inside their groups: ENTITY_KIND_UNIT here fails with
+  // INVALID_FIELD.
+  repeated EntityKind kinds = 3;
+  // Only entities within radius of center.
+  Position center = 4;
+  double radius = 5;
+  // Leave unmanaged entities out.
+  bool managed_only = 6;
+}
+
+message ListWorldRequest {
+  WorldFilter filter = 1;
+}
+
+message ListWorldResponse {
+  // The same in every message of one list. Watch from it.
+  uint64 revision = 1;
+  repeated Entity entities = 2;
+  // The campaign the revision belongs to. A watch that continues from this
+  // list names it, not 0.
+  uint64 campaign_id = 3;
+}
+
+message WatchWorldRequest {
+  WorldFilter filter = 1;
+  // Send changes after this revision. Fails with REVISION_EXPIRED when the
+  // store no longer keeps the changes since it.
+  uint64 since_revision = 2;
+  RateClass rate = 3;
+  // The shortest time between two position updates of one unit. A period
+  // under the server's cap is served at the cap.
+  google.protobuf.Duration min_period = 4;
+}
+
+// Positions of many units, columnar.
+message PositionBatch {
+  string theater = 1;
+  repeated uint64 unit_id = 2 [packed = true];
+  repeated double north = 3 [packed = true];
+  repeated double east = 4 [packed = true];
+  repeated double alt = 5 [packed = true];
+  Stamp sampled = 6;
+}
+
+message WorldChange {
+  oneof change {
+    // An entity appeared or changed anything but a position.
+    Entity upsert = 1;
+    // An entity left the store.
+    uint64 removed_id = 2;
+    PositionBatch positions = 3;
+  }
+}
+
+// A watch that names campaign 0 follows the campaign active when it starts
+// and ends with CAMPAIGN_NOT_ACTIVE when another becomes active.
+message WatchWorldResponse {
+  // The store revision after these changes.
+  uint64 revision = 1;
+  repeated WorldChange changes = 2;
+  // The campaign the revision belongs to.
+  uint64 campaign_id = 3;
+}
+
+message QueryAreaRequest {
+  WorldFilter filter = 1;
+}
+
+message QueryAreaResponse {
+  uint64 revision = 1;
+  repeated Entity entities = 2;
+  uint64 campaign_id = 3;
+}

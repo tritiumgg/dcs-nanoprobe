@@ -65,6 +65,14 @@ description = "Check the cross-built DLL's imports, exports and ABI marker, and 
 depends = ["windows"]
 run = ["sh tools/checkdll.sh", "sh tools/raiseshape.sh"]
 
+[tasks.spec]
+description = "Write spec/transport.golden from the tables in the transport specification"
+run = "cargo xtask spec"
+
+[tasks.proto]
+description = "Lint the public API schema and check it for breaking changes against the last commit"
+run = ["buf lint", "sh tools/protobreak.sh"]
+
 [tasks.secrets]
 description = "Check that the pre-commit hook blocks a planted secret"
 run = "sh tools/secretscan-test.sh"
@@ -76,5 +84,7 @@ run = [
   "cargo clippy --workspace --all-targets --no-default-features -- -D warnings",
   "cargo test --workspace --no-default-features",
   "sh tools/luatest.sh",
+  "buf lint",
+  "sh tools/protobreak.sh",
   "sh tools/secretscan-test.sh",
 ]

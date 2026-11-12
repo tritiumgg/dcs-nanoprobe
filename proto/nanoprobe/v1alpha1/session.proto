@@ -1,0 +1,95 @@
+// Handshake, capabilities and the controller lease.
+syntax = "proto3";
+
+package nanoprobe.v1alpha1;
+
+import "google/protobuf/duration.proto";
+import "nanoprobe/v1alpha1/common.proto";
+
+// One controller holds the lease; any number of observers connect without one.
+service SessionService {
+  // Versions and what this server offers.
+  rpc Hello(HelloRequest) returns (HelloResponse);
+  // Take the controller lease. Fails with LEASE_HELD while another holds it.
+  rpc AcquireLease(AcquireLeaseRequest) returns (AcquireLeaseResponse);
+  // Keep the lease. A lease that is not renewed within its time is free, and
+  // the next AcquireLease takes it under a new epoch.
+  rpc RenewLease(RenewLeaseRequest) returns (RenewLeaseResponse);
+  // Give the lease up.
+  rpc ReleaseLease(ReleaseLeaseRequest) returns (ReleaseLeaseResponse);
+}
+
+message HelloRequest {
+  // The client's name, for logs.
+  string client_name = 1;
+  // The schema version the client was built for, such as "v1alpha1".
+  string schema_version = 2;
+}
+
+message Capabilities {
+  // Raw Lua and registered extensions are on in the agent.
+  bool raw_lua = 1;
+  // The sidecar persists campaigns itself.
+  bool persistence = 2;
+  // The cap on subscription rates: the shortest position period served.
+  google.protobuf.Duration min_position_period = 3;
+}
+
+message HelloResponse {
+  string server_version = 1;
+  string schema_version = 2;
+  Capabilities capabilities = 3;
+  // The role of the caller's token.
+  Role role = 4;
+}
+
+// What a caller may do (spec/errors.md, "Roles").
+enum Role {
+  ROLE_UNSPECIFIED = 0;
+  ROLE_OBSERVER = 1;
+  ROLE_CONTROLLER = 2;
+  ROLE_ADMIN = 3;
+}
+
+// The lease a controller presents on every changing call.
+message Lease {
+  // The fencing epoch. A call with an older epoch fails with LEASE_LOST.
+  uint64 epoch = 1;
+  // A random value AcquireLease returns. It proves the caller is the holder;
+  // a call with the current epoch and another ID fails with NOT_CONTROLLER.
+  string lease_id = 2;
+}
+
+// Presented on every call that changes something.
+message Write {
+  Lease lease = 1;
+  Idempotency idempotency = 2;
+  // The campaign the call acts on. 0 is the active one, or none when no
+  // campaign is active (spec/errors.md). A spec or an order may be written to
+  // a suspended campaign; nothing reaches DCS for it. A call that acts on DCS
+  // fails with CAMPAIGN_NOT_ACTIVE for any other campaign.
+  uint64 campaign_id = 3;
+}
+
+message AcquireLeaseRequest {
+  string client_name = 1;
+}
+
+message AcquireLeaseResponse {
+  Lease lease = 1;
+  google.protobuf.Duration ttl = 2;
+}
+
+message RenewLeaseRequest {
+  Lease lease = 1;
+}
+
+message RenewLeaseResponse {
+  google.protobuf.Duration ttl = 1;
+}
+
+message ReleaseLeaseRequest {
+  Lease lease = 1;
+}
+
+message ReleaseLeaseResponse {}

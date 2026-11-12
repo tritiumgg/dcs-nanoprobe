@@ -1,0 +1,94 @@
+// The mission DCS runs: weather and time for the next load, reload, status.
+syntax = "proto3";
+
+package nanoprobe.v1alpha1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+import "nanoprobe/v1alpha1/common.proto";
+import "nanoprobe/v1alpha1/events.proto";
+import "nanoprobe/v1alpha1/session.proto";
+
+service MissionService {
+  rpc GetServerStatus(GetServerStatusRequest) returns (GetServerStatusResponse);
+  // Weather and time written into the shell at the next load.
+  rpc SetNextMission(SetNextMissionRequest) returns (SetNextMissionResponse);
+  // Write the shell and load it. The campaign is restored after the load.
+  rpc Reload(ReloadRequest) returns (ReloadResponse);
+}
+
+enum Health {
+  HEALTH_UNSPECIFIED = 0;
+  HEALTH_HEALTHY = 1;
+  HEALTH_HUNG = 2;
+  HEALTH_GONE = 3;
+  HEALTH_DISABLED = 4;
+}
+
+// Achieved period of each sampling tier, so a controller sees how stale its
+// view is.
+message SampleRates {
+  google.protobuf.Duration position = 1;
+  google.protobuf.Duration vitals = 2;
+  google.protobuf.Duration ammo = 3;
+  google.protobuf.Duration warehouse = 4;
+  google.protobuf.Duration enumeration = 5;
+}
+
+message ServerStatus {
+  Health health = 1;
+  // Time since the agent's last heartbeat.
+  google.protobuf.Duration heartbeat_age = 2;
+  SimState sim_state = 3;
+  string theater = 4;
+  Stamp now = 5;
+  // The active campaign, 0 for none.
+  uint64 campaign_id = 6;
+  SampleRates achieved = 7;
+  // Agent overhead as a share of real time over the last minute.
+  double overhead_share = 8;
+  // Commands waiting to be applied.
+  uint32 commands_queued = 9;
+  // Commands over the commanded-work budget since DCS started.
+  uint64 commands_over_budget = 10;
+  uint64 samples_dropped = 11;
+  uint64 event_gaps = 12;
+  string agent_build = 13;
+  string dcs_version = 14;
+  // Whether the sidecar is attached to the agent. Not part of health: a DCS
+  // whose heartbeat advances is healthy even when the sidecar cannot attach.
+  bool attached = 15;
+  // The reason of the last refused handshake, empty for none.
+  string attach_error = 16;
+}
+
+message GetServerStatusRequest {}
+
+message GetServerStatusResponse {
+  ServerStatus status = 1;
+}
+
+message NextMission {
+  // The theater to load. Empty keeps the loaded one.
+  string theater = 1;
+  // The mission's date and start time. Absent carries the campaign clock.
+  google.protobuf.Timestamp start = 2;
+  // The DCS weather table. Absent keeps the template's.
+  google.protobuf.Struct weather = 3;
+}
+
+message SetNextMissionRequest {
+  Write write = 1;
+  NextMission next = 2;
+}
+
+message SetNextMissionResponse {}
+
+message ReloadRequest {
+  Write write = 1;
+}
+
+message ReloadResponse {
+  CommandResult result = 1;
+}

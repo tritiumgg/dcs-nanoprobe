@@ -1,0 +1,179 @@
+// Types shared by every service. The model is spec/world.md.
+syntax = "proto3";
+
+package nanoprobe.v1alpha1;
+
+import "google/protobuf/timestamp.proto";
+
+// A point on one map. DCS coordinates mean nothing across maps, so every
+// position names its theater.
+message Position {
+  // The map's name as DCS gives it, such as "Caucasus".
+  string theater = 1;
+  // Meters north, map-local (DCS x).
+  double north = 2;
+  // Meters east, map-local (DCS z).
+  double east = 3;
+  // Meters above sea level (DCS y).
+  double alt = 4;
+}
+
+// Orientation in radians.
+message Attitude {
+  double heading = 1;
+  double pitch = 2;
+  double roll = 3;
+}
+
+// When something happened.
+message Stamp {
+  // Wall-clock time: the agent's DCS real time plus the offset the server
+  // measures (spec/records.md, "Stamps"). An estimate for what happened
+  // while the server was not attached.
+  google.protobuf.Timestamp wall = 1;
+  // Model time in the mission, seconds.
+  double model_time = 2;
+  // The mission generation: one more at each mission load in a DCS process.
+  uint32 mission_generation = 3;
+  // The agent's frame sequence number.
+  uint64 frame = 4;
+}
+
+enum Coalition {
+  COALITION_UNSPECIFIED = 0;
+  COALITION_NEUTRAL = 1;
+  COALITION_RED = 2;
+  COALITION_BLUE = 3;
+}
+
+enum EntityKind {
+  ENTITY_KIND_UNSPECIFIED = 0;
+  ENTITY_KIND_GROUP = 1;
+  ENTITY_KIND_UNIT = 2;
+  ENTITY_KIND_STATIC = 3;
+  ENTITY_KIND_MARK = 4;
+  ENTITY_KIND_DRAWING = 5;
+  ENTITY_KIND_MENU_ITEM = 6;
+  ENTITY_KIND_AIRBASE = 7;
+}
+
+enum GroupCategory {
+  GROUP_CATEGORY_UNSPECIFIED = 0;
+  GROUP_CATEGORY_AIRPLANE = 1;
+  GROUP_CATEGORY_HELICOPTER = 2;
+  GROUP_CATEGORY_GROUND = 3;
+  GROUP_CATEGORY_SHIP = 4;
+  GROUP_CATEGORY_TRAIN = 5;
+}
+
+// Who a message, mark or menu item is for.
+message Audience {
+  oneof to {
+    // Everyone.
+    bool all = 1;
+    // One coalition.
+    Coalition coalition = 2;
+    // The players in one group.
+    uint64 group_id = 3;
+    // The players in one unit.
+    uint64 unit_id = 4;
+  }
+}
+
+// What happened to a command sent to DCS (spec/errors.md).
+enum Outcome {
+  OUTCOME_UNSPECIFIED = 0;
+  // DCS is in the commanded state.
+  OUTCOME_APPLIED = 1;
+  // The command reached DCS and failed.
+  OUTCOME_REFUSED = 2;
+  // The agent did not try it.
+  OUTCOME_REJECTED = 3;
+  // The agent handled it and the result was lost.
+  OUTCOME_UNKNOWN = 4;
+  // An effect that never reached the agent. It is not sent again.
+  OUTCOME_NOT_SENT = 5;
+  // Journalled, not yet sent or not yet answered.
+  OUTCOME_PENDING = 6;
+}
+
+// The agent's answer to a command (spec/commands.md, "Codes: result"). The
+// numbers are the agent's codes plus one.
+enum ResultCode {
+  RESULT_CODE_UNSPECIFIED = 0;
+  RESULT_CODE_APPLIED = 1;
+  RESULT_CODE_AT_REVISION = 3;
+  RESULT_CODE_DUPLICATE = 4;
+  RESULT_CODE_STALE_EPOCH = 17;
+  RESULT_CODE_NO_CAMPAIGN = 18;
+  RESULT_CODE_NOT_BOUND = 19;
+  RESULT_CODE_BAD_PAYLOAD = 20;
+  RESULT_CODE_UNKNOWN_OPCODE = 21;
+  RESULT_CODE_RAW_LUA_OFF = 22;
+  RESULT_CODE_DCS_REFUSED = 23;
+  RESULT_CODE_LUA_ERROR = 24;
+  RESULT_CODE_WRONG_CAMPAIGN = 25;
+  RESULT_CODE_TOO_LARGE = 26;
+  RESULT_CODE_WRONG_GENERATION = 27;
+}
+
+// The result of a command sent to DCS.
+message CommandResult {
+  Outcome outcome = 1;
+  // The error text for a refusal or a rejection.
+  string message = 2;
+  // Time DCS spent on the command, microseconds.
+  uint32 cost_us = 3;
+  // When the agent handled it. Absent for pending and not-sent.
+  Stamp applied = 4;
+  // The agent's answer. Unspecified while pending, and for unknown and
+  // not-sent, which have none.
+  ResultCode code = 5;
+}
+
+// The reasons of spec/errors.md.
+enum ErrorReason {
+  ERROR_REASON_UNSPECIFIED = 0;
+  ERROR_REASON_INVALID_FIELD = 1;
+  ERROR_REASON_IDEMPOTENCY_MISMATCH = 2;
+  ERROR_REASON_ENTITY_NOT_FOUND = 3;
+  ERROR_REASON_CAMPAIGN_NOT_FOUND = 4;
+  ERROR_REASON_EXTENSION_NOT_FOUND = 5;
+  ERROR_REASON_PLAYER_NOT_FOUND = 6;
+  ERROR_REASON_CAMPAIGN_EXISTS = 7;
+  ERROR_REASON_NO_ACTIVE_CAMPAIGN = 8;
+  ERROR_REASON_CAMPAIGN_NOT_ACTIVE = 9;
+  ERROR_REASON_CAMPAIGN_READ_ONLY = 10;
+  ERROR_REASON_NOT_CONTROLLER = 11;
+  ERROR_REASON_LEASE_HELD = 12;
+  ERROR_REASON_RAW_LUA_OFF = 13;
+  ERROR_REASON_THEATER_NOT_LOADED = 14;
+  ERROR_REASON_UNMANAGED_ENTITY = 15;
+  ERROR_REASON_CONFIRMATION_REQUIRED = 16;
+  ERROR_REASON_LEASE_LOST = 17;
+  ERROR_REASON_QUEUE_FULL = 18;
+  ERROR_REASON_CONSUMER_TOO_SLOW = 19;
+  ERROR_REASON_DCS_NOT_READY = 20;
+  ERROR_REASON_TOKEN_REQUIRED = 21;
+  ERROR_REASON_ROLE_REQUIRED = 22;
+  ERROR_REASON_SEQUENCE_EXPIRED = 23;
+  ERROR_REASON_REVISION_EXPIRED = 24;
+  ERROR_REASON_OUTCOME_NOT_FOUND = 25;
+  ERROR_REASON_INTERNAL = 26;
+}
+
+// Carried in the details of every failed call's gRPC status.
+message ErrorDetail {
+  ErrorReason reason = 1;
+  string message = 2;
+  // The entity the error is about, 0 for none.
+  uint64 entity_id = 3;
+  // The request field the error is about, empty for none.
+  string field = 4;
+}
+
+// A repeat with the same key and the same request returns the first call's
+// response. The server remembers a key for a configured time (spec/errors.md).
+message Idempotency {
+  string key = 1;
+}

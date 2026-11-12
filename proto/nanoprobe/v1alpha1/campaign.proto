@@ -1,0 +1,134 @@
+// Campaigns as first-class objects: one store each, one active per DCS.
+syntax = "proto3";
+
+package nanoprobe.v1alpha1;
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+import "nanoprobe/v1alpha1/common.proto";
+import "nanoprobe/v1alpha1/session.proto";
+
+// Changes need the controller lease. These calls name their campaign
+// themselves, so they carry the lease and the idempotency key directly. A finished or suspended campaign stays
+// readable through WorldService and EventsService by its ID.
+service CampaignService {
+  rpc CreateCampaign(CreateCampaignRequest) returns (CreateCampaignResponse);
+  rpc ListCampaigns(ListCampaignsRequest) returns (ListCampaignsResponse);
+  rpc GetCampaign(GetCampaignRequest) returns (GetCampaignResponse);
+  // Load the campaign's shell and restore it. Suspends the active one first.
+  rpc ActivateCampaign(ActivateCampaignRequest) returns (ActivateCampaignResponse);
+  // Capture, checkpoint and close the store. DCS keeps running unmanaged.
+  rpc SuspendCampaign(SuspendCampaignRequest) returns (SuspendCampaignResponse);
+  // As suspend, then the store becomes read-only with an outcome record.
+  rpc FinishCampaign(FinishCampaignRequest) returns (FinishCampaignResponse);
+  // The store as line-per-record text. The store file itself is a file in the
+  // server's store folder and is copied from there.
+  rpc ExportCampaign(ExportCampaignRequest) returns (stream ExportCampaignResponse);
+  rpc DeleteCampaign(DeleteCampaignRequest) returns (DeleteCampaignResponse);
+}
+
+enum CampaignState {
+  CAMPAIGN_STATE_UNSPECIFIED = 0;
+  CAMPAIGN_STATE_ACTIVE = 1;
+  CAMPAIGN_STATE_SUSPENDED = 2;
+  CAMPAIGN_STATE_FINISHED = 3;
+}
+
+message Campaign {
+  uint64 id = 1;
+  string name = 2;
+  CampaignState state = 3;
+  // The maps the campaign uses.
+  repeated string theaters = 4;
+  // The one loaded now, empty unless active.
+  string loaded_theater = 5;
+  // The campaign's date and time.
+  google.protobuf.Timestamp clock = 6;
+  uint32 platform_schema = 7;
+  // Author component schema versions by name.
+  map<string, uint32> component_schemas = 8;
+  google.protobuf.Timestamp created = 9;
+  // Written by the controller when the campaign finished.
+  google.protobuf.Struct outcome = 10;
+}
+
+message CreateCampaignRequest {
+  Lease lease = 1;
+  string name = 2;
+  repeated string theaters = 3;
+  // The theater to load first.
+  string first_theater = 4;
+  google.protobuf.Timestamp clock = 5;
+  // Activate it once created. Otherwise it starts suspended, and the first
+  // specs are written to it by its ID before it is activated.
+  bool activate = 6;
+  Idempotency idempotency = 7;
+}
+
+message CreateCampaignResponse {
+  Campaign campaign = 1;
+}
+
+message ListCampaignsRequest {}
+
+message ListCampaignsResponse {
+  repeated Campaign campaigns = 1;
+}
+
+message GetCampaignRequest {
+  uint64 campaign_id = 1;
+}
+
+message GetCampaignResponse {
+  Campaign campaign = 1;
+}
+
+message ActivateCampaignRequest {
+  Lease lease = 1;
+  uint64 campaign_id = 2;
+  Idempotency idempotency = 3;
+}
+
+message ActivateCampaignResponse {
+  Campaign campaign = 1;
+}
+
+message SuspendCampaignRequest {
+  Lease lease = 1;
+  uint64 campaign_id = 2;
+  Idempotency idempotency = 3;
+}
+
+message SuspendCampaignResponse {
+  Campaign campaign = 1;
+}
+
+message FinishCampaignRequest {
+  Lease lease = 1;
+  uint64 campaign_id = 2;
+  google.protobuf.Struct outcome = 3;
+  Idempotency idempotency = 4;
+}
+
+message FinishCampaignResponse {
+  Campaign campaign = 1;
+}
+
+message ExportCampaignRequest {
+  uint64 campaign_id = 1;
+}
+
+message ExportCampaignResponse {
+  // A run of whole lines, each one JSON record.
+  bytes lines = 1;
+}
+
+message DeleteCampaignRequest {
+  Lease lease = 1;
+  uint64 campaign_id = 2;
+  // Must equal the campaign's name.
+  string confirm_name = 3;
+  Idempotency idempotency = 4;
+}
+
+message DeleteCampaignResponse {}

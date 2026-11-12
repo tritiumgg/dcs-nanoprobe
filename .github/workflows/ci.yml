@@ -64,6 +64,13 @@ jobs:
       - name: Open the host build with Lua 5.1
         run: sh tools/luatest.sh
 
+      - name: Lint the API schema
+        run: buf lint
+
+      - name: Check the API schema for breaking changes
+        # The base of a pull request, or the commit before a push.
+        run: sh tools/protobreak.sh "${{ github.event.pull_request.base.sha || github.event.before }}"
+
       - name: Cross-build the agent DLL
         run: cargo xwin build --release -p nanoprobe-agent --target x86_64-pc-windows-msvc
 
