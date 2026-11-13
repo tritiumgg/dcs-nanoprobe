@@ -137,6 +137,7 @@ entries! {
     map_frame => work_map_frame, hot;
     map_load => work_map_load, hot;
     map_close => work_map_close;
+    inject => work_inject;
 }
 
 /// Push `key = value` into the table on top of the stack.
@@ -386,6 +387,12 @@ unsafe fn work_frame(state: *mut State) -> c_int {
     let model = unsafe { arg_num(state, 2, 0.0) };
     // SAFETY: as above; `lua_toboolean` reads any index.
     let paused = unsafe { lua::lua_toboolean(state, 3) } != 0;
+    #[cfg(feature = "faults")]
+    if driver::faults::take_raise() {
+        state::log(Level::Warn, "injected fault: raise", &[]);
+        // SAFETY: a live state from the entry, with the free slots Lua guarantees a C function.
+        return unsafe { raise_with(state, "injected Lua error") };
+    }
     let code = driver::frame(real, model, paused);
     // SAFETY: a live state with a free slot.
     unsafe { lua::lua_pushinteger(state, code as isize) };
@@ -501,6 +508,38 @@ unsafe fn work_fault(_state: *mut State) -> c_int {
     state::log(Level::Warn, "deliberate access violation", &[]);
     platform::fault();
     0
+}
+
+/// `inject(name[, arg])`: arm a fault for the next frame (driver::faults).
+/// Returns true, or nil and why. A build without the `faults` feature
+/// injects nothing and says so.
+unsafe fn work_inject(state: *mut State) -> c_int {
+    #[cfg(feature = "faults")]
+    {
+        // SAFETY: a live state.
+        let name = unsafe { lua::to_string(state, 1) }.unwrap_or_default();
+        // SAFETY: as above.
+        let arg = unsafe { arg_num(state, 2, 0.0) };
+        match driver::faults::inject(&name, arg) {
+            Ok(()) => {
+                state::log(
+                    Level::Warn,
+                    "fault armed",
+                    &[("fault", Value::Str(&name)), ("arg", Value::Num(arg))],
+                );
+                // SAFETY: a live state with a free slot.
+                unsafe { lua::lua_pushboolean(state, 1) };
+                1
+            }
+            // SAFETY: a live state from the entry, with the free slots Lua guarantees a C function.
+            Err(e) => unsafe { fail(state, &e) },
+        }
+    }
+    #[cfg(not(feature = "faults"))]
+    {
+        // SAFETY: as above.
+        unsafe { fail(state, "this build has no fault injection") }
+    }
 }
 
 /// The sink's running count and sum.

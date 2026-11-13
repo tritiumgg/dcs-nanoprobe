@@ -256,7 +256,10 @@ impl Session<'_> {
     }
 
     /// Send `HELLO` and read the answer. The agent answers on its own frames,
-    /// at most every 100 ms, so this waits up to the handshake timeout.
+    /// at most every 100 ms, so this waits up to the handshake timeout, of
+    /// time in which the agent runs frames: a DCS that loads a mission runs
+    /// none, and the sidecar waits for it on this connection
+    /// (spec/transport.md, "Handshake").
     fn handshake(&self, stream: &mut TcpStream, stop: &AtomicBool) -> Result<(u64, u64), End> {
         let retry = |why: String| Err(End::Retry(why));
         let hello = Line::Hello {
@@ -271,14 +274,27 @@ impl Session<'_> {
         if let Err(e) = stream.write_all(line.as_bytes()) {
             return retry(format!("send HELLO: {e}"));
         }
-        let deadline = Instant::now() + self.cfg.handshake_timeout;
+        // The frame number, when the file can be read; without it every
+        // moment counts.
+        let map = MappedFile::open_read_only(&self.cfg.map_path).ok();
+        let frame = || map.as_ref().map(|m| m.load(s::FRAME, Ordering::Acquire));
+        let mut last_frame = frame();
+        let mut checked = Instant::now();
+        let mut counted = Duration::ZERO;
         let mut buf = LineBuffer::new();
         let mut chunk = [0u8; 1024];
         loop {
             if stop.load(Ordering::Relaxed) {
                 return Err(End::Stopped);
             }
-            let left = deadline.saturating_duration_since(Instant::now());
+            let now = Instant::now();
+            let f = frame();
+            if f.is_none() || f != last_frame {
+                counted += now - checked;
+            }
+            last_frame = f;
+            checked = now;
+            let left = self.cfg.handshake_timeout.saturating_sub(counted);
             if left.is_zero() {
                 return retry("no answer to HELLO within the handshake timeout".into());
             }

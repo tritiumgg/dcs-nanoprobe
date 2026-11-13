@@ -139,6 +139,11 @@ nanoprobe/dev/eval/taken/          eval requests the hook has taken
 nanoprobe/dev/eval/out/            eval results
 ```
 
+`cargo xtask deploy --faults` builds the agent with its `faults` feature, which adds
+fault injection (spec/faults.md), into `target/faults`, and installs that DLL as a new
+version with its own build hash. A release never carries it, and `tools/checkdll.sh`
+refuses it. A deploy without `--faults` installs the shipping DLL again.
+
 Deploy also creates `nanoprobe/token` from 32 random bytes when there is none, readable
 only by the profile's owner on Linux and macOS; on Windows the profile folder's access
 list decides. When the target profile names a `map_path`, deploy sets that key in

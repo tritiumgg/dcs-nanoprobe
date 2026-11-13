@@ -17,7 +17,10 @@
 #
 # With no argument, builds the agent for x86_64-pc-windows-msvc in release with
 # its default features, as the cdylib that ships, and reads the assembly beside
-# it. With one argument, reads that assembly file instead.
+# it. FEATURES adds features to that build: FEATURES=faults checks the --faults
+# build, which has fault injection. That build goes to target/faults, so the
+# release path keeps the shipping DLL. With one argument, reads that assembly
+# file instead.
 #
 # POSIX sh and awk. Exits 1 on a finding, 2 when nothing could be read.
 set -eu
@@ -33,12 +36,15 @@ else
         MINGW* | MSYS* | CYGWIN* | Windows_NT) CARGO='cargo rustc' ;;
         *) CARGO='cargo xwin rustc' ;;
     esac
-    ASM=$ROOT/target/$TARGET/release/deps/nanoprobe.s
+    DIR=$ROOT/target
+    [ -z "${FEATURES:-}" ] || DIR=$ROOT/target/faults
+    ASM=$DIR/$TARGET/release/deps/nanoprobe.s
     # Cargo emits assembly only when it compiles, so the old file is removed
     # and the crate root touched to force a compile.
     rm -f "$ASM"
     touch "$ROOT/crates/agent/src/lib.rs"
-    (cd "$ROOT" && $CARGO -p nanoprobe-agent --release --target "$TARGET" -- --emit=asm)
+    (cd "$ROOT" && $CARGO -p nanoprobe-agent --release --target "$TARGET" \
+        --target-dir "$DIR" ${FEATURES:+--features "$FEATURES"} -- --emit=asm)
 fi
 
 [ -f "$ASM" ] || {

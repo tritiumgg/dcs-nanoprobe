@@ -93,8 +93,8 @@ impl Peer for Container {
 
     fn upload(&self) -> Result<(), String> {
         let (probe, inspector) = build_linux()?;
-        upload_container(&self.remote, &probe, "link-probe")?;
-        upload_container(&self.remote, &inspector, "nanoprobe")
+        upload_container(&self.remote, DIR, &probe, "link-probe")?;
+        upload_container(&self.remote, DIR, &inspector, "nanoprobe")
     }
 
     fn start_probe(&mut self, map: &str, port: &str, token: &str) -> Result<(), String> {
@@ -551,7 +551,7 @@ fn close_dcs(ssh: &str, profile: &str, stop_task: &str) -> Result<(), String> {
 
 /// The Linux path of a Windows path on Wine's `Z:` drive, which is the
 /// container's root.
-fn linux_path(windows: &str) -> Result<String, String> {
+pub(crate) fn linux_path(windows: &str) -> Result<String, String> {
     let rest = windows
         .strip_prefix("Z:")
         .or_else(|| windows.strip_prefix("z:"))
@@ -561,30 +561,26 @@ fn linux_path(windows: &str) -> Result<String, String> {
     Ok(rest.replace('\\', "/"))
 }
 
-/// Build the probe and the inspector for `target`, with cargo-xwin for
-/// Windows. Returns their paths.
-fn build_for(target: &str, xwin: bool, dir: &str, ext: &str) -> Result<(PathBuf, PathBuf), String> {
+/// Build `bins`, each a package and a binary, for `target`, with cargo-xwin
+/// for Windows. Returns their paths, in order.
+fn build_for(
+    target: &str,
+    xwin: bool,
+    dir: &str,
+    ext: &str,
+    bins: &[(&str, &str)],
+) -> Result<Vec<PathBuf>, String> {
     let repo = crate::repository();
     let target_dir = repo.join(dir);
     let mut command = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
     if xwin && !cfg!(windows) {
         command.arg("xwin");
     }
+    command.args(["build", "--release", "--target", target]);
+    for (package, bin) in bins {
+        command.args(["-p", package, "--bin", bin]);
+    }
     let status = command
-        .args([
-            "build",
-            "--release",
-            "--target",
-            target,
-            "-p",
-            "nanoprobe-fake-agent",
-            "--bin",
-            "link-probe",
-            "-p",
-            "nanoprobe-cli",
-            "--bin",
-            "nanoprobe",
-        ])
         .arg("--target-dir")
         .arg(&target_dir)
         .current_dir(&repo)
@@ -594,29 +590,51 @@ fn build_for(target: &str, xwin: bool, dir: &str, ext: &str) -> Result<(PathBuf,
         return Err(format!("the {target} build failed ({status})"));
     }
     let out = target_dir.join(target).join("release");
-    Ok((
-        out.join(format!("link-probe{ext}")),
-        out.join(format!("nanoprobe{ext}")),
-    ))
+    Ok(bins
+        .iter()
+        .map(|(_, bin)| out.join(format!("{bin}{ext}")))
+        .collect())
+}
+
+/// The probe and the inspector.
+const PROBE_BINS: &[(&str, &str)] = &[
+    ("nanoprobe-fake-agent", "link-probe"),
+    ("nanoprobe-cli", "nanoprobe"),
+];
+
+/// Build `bins` as static Linux programs, for the game container.
+pub(crate) fn build_linux_bins(bins: &[(&str, &str)]) -> Result<Vec<PathBuf>, String> {
+    build_for("x86_64-unknown-linux-musl", false, "target/linux", "", bins)
 }
 
 fn build_linux() -> Result<(PathBuf, PathBuf), String> {
-    build_for("x86_64-unknown-linux-musl", false, "target/linux", "")
+    let mut paths = build_linux_bins(PROBE_BINS)?;
+    let inspector = paths.pop().ok_or("no inspector built")?;
+    Ok((paths.pop().ok_or("no probe built")?, inspector))
 }
 
 fn build_windows() -> Result<(PathBuf, PathBuf), String> {
-    build_for(
+    let mut paths = build_for(
         "x86_64-pc-windows-msvc",
         true,
         "target/windows-tools",
         ".exe",
-    )
+        PROBE_BINS,
+    )?;
+    let inspector = paths.pop().ok_or("no inspector built")?;
+    Ok((paths.pop().ok_or("no probe built")?, inspector))
 }
 
-fn upload_container(remote: &remote::Remote, local: &Path, name: &str) -> Result<(), String> {
+/// Copy `local` into the container as `dir/name`, executable.
+pub(crate) fn upload_container(
+    remote: &remote::Remote,
+    dir: &str,
+    local: &Path,
+    name: &str,
+) -> Result<(), String> {
     let bytes = std::fs::read(local).map_err(|e| format!("{}: {e}", local.display()))?;
     let script = format!(
-        "set -e; mkdir -p {DIR}; cat > {DIR}/$1.partial; chmod 755 {DIR}/$1.partial; mv -f {DIR}/$1.partial {DIR}/$1"
+        "set -e; mkdir -p {dir}; cat > {dir}/$1.partial; chmod 755 {dir}/$1.partial; mv -f {dir}/$1.partial {dir}/$1"
     );
     let output = remote.shell(&script, &[name], &bytes)?;
     match output.code {
@@ -625,7 +643,7 @@ fn upload_container(remote: &remote::Remote, local: &Path, name: &str) -> Result
     }
 }
 
-fn parse_lines(bytes: &[u8]) -> Vec<Value> {
+pub(crate) fn parse_lines(bytes: &[u8]) -> Vec<Value> {
     String::from_utf8_lossy(bytes)
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())

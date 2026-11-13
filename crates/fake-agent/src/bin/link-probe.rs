@@ -1,5 +1,7 @@
 //! `link-probe --map PATH --port N --token-file PATH --seconds N [--poll-ms N]
-//! [--short-command]`
+//! [--short-command] [--bad-record past-tail|over-limit|misaligned|past-capacity|padding]`,
+//! or `link-probe --now-ms`, which prints the wall clock as the probe's `t`
+//! reads it and exits, so a test can compare its own times with the probe's.
 //!
 //! It runs for `--seconds`, or until one second after the status block reads
 //! `DISABLED`, whichever comes first.
@@ -16,15 +18,15 @@
 //! {"t":..,"ev":"log","level":N,"target":"..","msg":".."}
 //! {"t":..,"ev":"gap","class":N,"count":N}
 //! {"t":..,"ev":"report","text":".."}
-//! {"t":..,"ev":"status","lifecycle":N,"gen":N,"flags":N,"frame":N}
+//! {"t":..,"ev":"status","lifecycle":N,"gen":N,"flags":N,"frame":N,"boot":"<hex>"}
 //! {"t":..,"ev":"final","lifecycle":N,"frame":N,"commands":N,"timed":N,"over_budget":N}
 //! {"t":..,"ev":"reconnect","gen":N,"ready":T,"read":T,"ms":N}
 //! {"t":..,"ev":"end","records":N}
 //! ```
 //!
 //! A `status` line comes from a second thread that reads the status block
-//! every millisecond and prints when `lifecycle`, `mission_gen` or `flags`
-//! changes: it shows when DCS reached a state, and the `lifecycle` lines show
+//! every millisecond and prints when `lifecycle`, `mission_gen`, `flags` or
+//! `agent_boot` changes: it shows when DCS reached a state, and the `lifecycle` lines show
 //! when the sidecar read it. The `final` line is its last reading. At the end, one `reconnect` line per mission
 //! generation that ran: `ready` is when the status block first showed it
 //! running or paused, `read` when the sidecar first read its `LIFECYCLE`
@@ -35,6 +37,16 @@
 //! `HELLO` only, it then sends a command shorter than its header, which the
 //! agent answers by detaching.
 //!
+//! With `--bad-record`, once the first `HELLO`'s commands are answered, the
+//! probe breaks the inbound ring itself, writing to the mapped file past the
+//! link (spec/faults.md): `past-tail`, a record longer than what lies before
+//! the tail; `over-limit`, a record over the payload limit; `misaligned`, a
+//! tail that is not a multiple of 8; `past-capacity`, a tail more than the
+//! capacity ahead of the head; `padding`, a padding record that does not end
+//! at the end of the ring. It prints
+//! `{"t":..,"ev":"injected","what":".."}`. The agent detaches, and the probe
+//! attaches again.
+//!
 //! Test tooling: built from source, never released.
 
 use std::collections::HashMap;
@@ -44,13 +56,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use nanoprobe_fake_agent::{arg, content, read_token};
+use nanoprobe_fake_agent::{arg, content, json_string, read_token};
 use nanoprobe_sidecar::link::{self, Command, Config, End, Sink};
 use nanoprobe_transport::codec::Writer;
-use nanoprobe_transport::layout::{kind, status as s};
+use nanoprobe_transport::layout::{kind, record as r, status as s};
 use nanoprobe_transport::map::MappedFile;
 use nanoprobe_transport::mem::Memory;
 use nanoprobe_transport::records::{CommandHeader, CommandResult, Gap, Hello, Lifecycle, Log};
+use nanoprobe_transport::ring::{Ring, record_size};
 
 /// One JSON line on standard output, under a lock so the two threads' lines
 /// never mix.
@@ -64,7 +77,7 @@ impl Out {
             text.push_str(&format!(",\"{k}\":"));
             match v {
                 Json::Num(n) => text.push_str(&n.to_string()),
-                Json::Str(s) => text.push_str(&quote(s)),
+                Json::Str(s) => text.push_str(&json_string(s)),
             }
         }
         text.push('}');
@@ -80,20 +93,6 @@ enum Json {
     Str(String),
 }
 
-fn quote(s: &str) -> String {
-    let mut out = String::from("\"");
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
 /// Per mission generation: when the status block first showed it running
 /// or paused, and when the sidecar first read a `LIFECYCLE` saying so.
 type Times = Arc<Mutex<HashMap<u32, (Option<u64>, Option<u64>)>>>;
@@ -106,9 +105,106 @@ fn runs(state: u32) -> bool {
 /// The campaign the probe announces.
 const CAMPAIGN: u64 = 7;
 
+/// A way to break the inbound ring (`--bad-record`).
+#[derive(Clone, Copy, Debug)]
+enum Bad {
+    PastTail,
+    OverLimit,
+    Misaligned,
+    PastCapacity,
+    Padding,
+}
+
+impl Bad {
+    fn parse(text: &str) -> Option<Bad> {
+        Some(match text {
+            "past-tail" => Bad::PastTail,
+            "over-limit" => Bad::OverLimit,
+            "misaligned" => Bad::Misaligned,
+            "past-capacity" => Bad::PastCapacity,
+            "padding" => Bad::Padding,
+            _ => return None,
+        })
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Bad::PastTail => "past-tail",
+            Bad::OverLimit => "over-limit",
+            Bad::Misaligned => "misaligned",
+            Bad::PastCapacity => "past-capacity",
+            Bad::Padding => "padding",
+        }
+    }
+
+    /// Break the inbound ring of the file at `path`: write the record, if
+    /// any, at the tail and store a tail the agent's checks refuse. The
+    /// probe sends nothing more on this session, so the link's own tail
+    /// is never stored after this.
+    fn write(self, path: &std::path::Path) -> Result<(), String> {
+        let m = MappedFile::open(path).map_err(|e| format!("map: {e}"))?;
+        let ring = Ring::inbound(
+            m.load(s::OUT_CAPACITY, Ordering::Acquire),
+            m.load(s::IN_CAPACITY, Ordering::Acquire),
+        );
+        let tail = m.load(s::IN_TAIL, Ordering::Acquire);
+        let at = ring.data + (tail & (ring.capacity - 1)) as usize;
+        let header = |len: u32, kind: u16| {
+            let mut h = [0u8; r::HEADER];
+            h[r::LEN..r::LEN + 4].copy_from_slice(&len.to_le_bytes());
+            h[r::KIND..r::KIND + 2].copy_from_slice(&kind.to_le_bytes());
+            h
+        };
+        let opcode = content::OPCODE as u16;
+        let new_tail = match self {
+            Bad::PastTail => {
+                m.write(at, &header(64, opcode));
+                tail + r::HEADER as u64
+            }
+            Bad::OverLimit => {
+                let len = ring.max_payload() + 8;
+                m.write(at, &header(len as u32, opcode));
+                tail + record_size(len)
+            }
+            Bad::Padding => {
+                let mut end = tail;
+                for (pos, len) in padding(tail, ring.capacity) {
+                    let off = ring.data + (pos & (ring.capacity - 1)) as usize;
+                    m.write(off, &header(len, kind::PADDING as u16));
+                    end = pos + record_size(len as usize);
+                }
+                end
+            }
+            Bad::Misaligned => tail + 4,
+            Bad::PastCapacity => tail + ring.capacity + 8,
+        };
+        m.store(s::IN_TAIL, new_tail, Ordering::Release);
+        Ok(())
+    }
+}
+
+/// Padding records, as positions and lengths, that end in one a consumer
+/// refuses because it does not end at the end of the ring. An empty padding
+/// record at `tail` is refused unless it ends exactly at the end; there a
+/// valid one goes first, and the refused one follows at the ring's start.
+fn padding(tail: u64, capacity: u64) -> Vec<(u64, u32)> {
+    let size = record_size(0);
+    if (tail & (capacity - 1)) + size == capacity {
+        vec![(tail, 0), (tail + size, 0)]
+    } else {
+        vec![(tail, 0)]
+    }
+}
+
 struct Probe {
     /// Send a command shorter than its header after the first `HELLO`.
     short: bool,
+    /// Break the inbound ring once the first `HELLO`'s commands are
+    /// answered.
+    bad: Option<Bad>,
+    /// The answers are in: break the ring on the next poll.
+    fire: bool,
+    map_path: std::path::PathBuf,
     hellos: u64,
     out: Out,
     times: Times,
@@ -163,6 +259,9 @@ impl Sink for Probe {
             }
             kind::RESULT => {
                 if let Ok(r) = CommandResult::decode(payload) {
+                    if r.seq == 2 && self.bad.is_some() && self.hellos == 1 {
+                        self.fire = true;
+                    }
                     self.out.line(
                         "result",
                         &[
@@ -256,6 +355,17 @@ impl Sink for Probe {
     }
 
     fn next_command(&mut self) -> Option<Command> {
+        if self.fire {
+            self.fire = false;
+            if let Some(bad) = self.bad.take() {
+                let what = match bad.write(&self.map_path) {
+                    Ok(()) => bad.name().to_owned(),
+                    Err(e) => format!("{}: not written: {e}", bad.name()),
+                };
+                self.out.line("injected", &[("what", Json::Str(what))]);
+            }
+            return None;
+        }
         self.queue.pop()
     }
 
@@ -282,6 +392,7 @@ fn watch(path: std::path::PathBuf, out: Out, times: Times, stop: Arc<AtomicBool>
                 m.load32(s::LIFECYCLE, Ordering::Acquire),
                 m.load32(s::MISSION_GEN, Ordering::Acquire),
                 m.load32(s::FLAGS, Ordering::Acquire),
+                m.load(s::AGENT_BOOT, Ordering::Acquire),
             );
             if now.0 == 6 && disabled_at.is_none() {
                 disabled_at = Some(Instant::now());
@@ -304,6 +415,7 @@ fn watch(path: std::path::PathBuf, out: Out, times: Times, stop: Arc<AtomicBool>
                         ("gen", Json::Num(now.1.into())),
                         ("flags", Json::Num(now.2.into())),
                         ("frame", Json::Num(m.load(s::FRAME, Ordering::Acquire))),
+                        ("boot", Json::Str(format!("{:016x}", now.3))),
                     ],
                 );
             }
@@ -342,6 +454,10 @@ fn watch(path: std::path::PathBuf, out: Out, times: Times, stop: Arc<AtomicBool>
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--now-ms") {
+        println!("{}", content::now_ms());
+        return ExitCode::SUCCESS;
+    }
     let need = |name: &str| arg(&args, name).ok_or(format!("{name} is required"));
     let run = || -> Result<(), String> {
         let token =
@@ -383,8 +499,15 @@ fn main() -> ExitCode {
                 stop.store(true, Ordering::Relaxed);
             })
         };
+        let bad = match arg(&args, "--bad-record") {
+            Some(v) => Some(Bad::parse(&v).ok_or(format!("no --bad-record named {v}"))?),
+            None => None,
+        };
         let mut probe = Probe {
             short: args.iter().any(|a| a == "--short-command"),
+            bad,
+            fire: false,
+            map_path: cfg.map_path.clone(),
             hellos: 0,
             out: out.clone(),
             times: times.clone(),
@@ -436,6 +559,42 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("link-probe: {e}");
             ExitCode::from(2)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nanoprobe_transport::mem::Heap;
+    use nanoprobe_transport::ring::{Consumer, RingError};
+
+    /// At every tail position, the records `padding` gives fail the padding
+    /// check and no other.
+    #[test]
+    fn padding_is_refused_at_every_position() {
+        const CAP: u64 = 256;
+        for tail in (0..2 * CAP).step_by(8) {
+            let m = Heap::new(16 + CAP as usize);
+            let ring = Ring::new(16, CAP, 0, 8);
+            let mut end = tail;
+            for (pos, len) in padding(tail, CAP) {
+                let mut h = [0u8; r::HEADER];
+                h[r::LEN..r::LEN + 4].copy_from_slice(&len.to_le_bytes());
+                h[r::KIND..r::KIND + 2].copy_from_slice(&(kind::PADDING as u16).to_le_bytes());
+                m.write(16 + (pos % CAP) as usize, &h);
+                end = pos + record_size(len as usize);
+            }
+            m.store(0, end, Ordering::Release);
+            let mut c = Consumer::new(ring, tail);
+            c.refresh(&m).expect("tail");
+            match c.next(&m, &mut Vec::new()) {
+                Err(RingError::Record { rule, .. }) => assert_eq!(
+                    rule, "padding does not end at the end of the ring",
+                    "tail {tail}"
+                ),
+                other => panic!("tail {tail}: {other:?}"),
+            }
         }
     }
 }

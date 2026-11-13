@@ -53,4 +53,12 @@ else
     fail "the DLL carries no ABI marker"
 fi
 
+# The shipping DLL has no fault injection (spec/faults.md). Its log messages
+# are in the binary only when the faults feature is on.
+if LC_ALL=C grep -a -q 'injected fault' "$DLL"; then
+    fail "the DLL has fault injection, which a release never carries"
+else
+    printf 'ok  has no fault injection\n'
+fi
+
 exit "$FAILED"

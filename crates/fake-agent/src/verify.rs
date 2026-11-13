@@ -55,7 +55,7 @@ pub struct Report {
 
 /// Why a session may end when a peer is killed or restarted. Any other
 /// reason the stub reports is a failed check, and an error.
-const EXPECTED_ENDS: &[&str] = &[
+pub const EXPECTED_ENDS: &[&str] = &[
     "the agent closed the connection",
     "the connection: ",
     "connect ",

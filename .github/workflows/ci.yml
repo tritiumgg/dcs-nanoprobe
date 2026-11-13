@@ -61,6 +61,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
 
+      - name: Clippy on the agent with fault injection
+        run: cargo clippy -p nanoprobe-agent --all-targets --no-default-features --features faults -- -D warnings
+
       - name: Test
         run: cargo test --workspace --no-default-features
 
@@ -84,6 +87,14 @@ jobs:
         if: runner.os == 'Linux'
         run: sh tools/raiseshape.sh
 
+      - name: Check that no entry point owns a value, with fault injection
+        if: runner.os == 'Linux'
+        run: FEATURES=faults sh tools/raiseshape.sh
+
+      - name: Check that the DLL check refuses the fault-injection build
+        if: runner.os == 'Linux'
+        run: sh tools/checkdll.sh target/faults/x86_64-pc-windows-msvc/release/nanoprobe.dll 2>&1 | grep -q 'has fault injection'
+
       - name: Secret scan of the history
         if: runner.os == 'Linux'
         run: gitleaks git --redact --no-banner .
@@ -106,6 +117,9 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+
+      - name: Clippy on the agent with fault injection
+        run: cargo clippy -p nanoprobe-agent --all-targets --no-default-features --features faults -- -D warnings
 
       - name: Test
         run: cargo test --workspace --no-default-features

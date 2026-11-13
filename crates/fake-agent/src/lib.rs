@@ -8,6 +8,21 @@ pub mod content;
 pub mod stub;
 pub mod verify;
 
+/// `s` as a JSON string, with its quotes.
+pub fn json_string(s: &str) -> String {
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// Read a token file: its first line, without surrounding white space.
 pub fn read_token(path: &std::path::Path) -> std::io::Result<String> {
     Ok(std::fs::read_to_string(path)?.trim().to_owned())

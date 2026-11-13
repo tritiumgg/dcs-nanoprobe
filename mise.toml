@@ -67,7 +67,13 @@ run_windows = "cargo build --release -p nanoprobe-agent --target x86_64-pc-windo
 [tasks.dll]
 description = "Check the cross-built DLL's imports, exports and ABI marker, and that no entry point owns a value"
 depends = ["windows"]
-run = ["sh tools/checkdll.sh", "sh tools/raiseshape.sh"]
+run = [
+  "sh tools/checkdll.sh",
+  "sh tools/raiseshape.sh",
+  "FEATURES=faults sh tools/raiseshape.sh",
+  # checkdll.sh must refuse the faults build that raiseshape.sh just made.
+  "sh tools/checkdll.sh target/faults/x86_64-pc-windows-msvc/release/nanoprobe.dll 2>&1 | grep -q 'has fault injection'",
+]
 
 [tasks.nightly]
 description = "Install the nightly toolchain with Miri, for the miri and fuzz tasks"
@@ -119,6 +125,8 @@ depends = ["windows-check"]
 run = [
   "cargo fmt --all --check",
   "cargo clippy --workspace --all-targets --no-default-features -- -D warnings",
+  # The agent's fault injection (spec/faults.md), which no other build enables.
+  "cargo clippy -p nanoprobe-agent --all-targets --no-default-features --features faults -- -D warnings",
   "cargo test --workspace --no-default-features",
   "sh tools/luatest.sh",
   "buf lint",

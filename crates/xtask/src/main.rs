@@ -4,8 +4,10 @@
 //! profile in a file outside the repository (see [`profile`]).
 
 mod bundle;
+mod chaos;
 mod check;
 mod eval;
+mod faults;
 mod install;
 mod link;
 mod live;
@@ -32,10 +34,12 @@ commands:
   target list               List the target profiles
   target check <name>       Read a target's DCS version, Wine version, install and
                             Saved Games profile. Changes nothing on the target.
-  deploy <name> [--dll P] [--dev]
+  deploy <name> [--dll P] [--dev] [--faults]
                             Build the agent DLL (or take P), and install it with the
                             hook into the target's profile as the active version.
-                            --dev adds the development mission loader.
+                            --dev adds the development mission loader and the
+                            eval channel. --faults builds the DLL with fault
+                            injection, for `faults`; no other test uses it.
   rollback <name>           Make the previous version active again
   undeploy <name>           Remove everything deploy installed
   roundtrip <name> [--dll P]
@@ -86,6 +90,17 @@ commands:
                             sidecar N times (default 1000), time each reconnect,
                             and verify the stub's journals. Host only.
   peerkill --verify DIR     Verify the journals a run kept with --keep DIR
+  chaos host|<name> [--cycles N] [--seed HEX]
+                            The S8 chaos test: kill DCS or the sidecar N times
+                            (default 100) at random and time each reconnect. On
+                            host, DCS is the mock; on a docker-wine target, the
+                            deployed build, killed only while no player is
+                            connected. Writes bundles/chaos-<name>-<time>.json.
+  faults <name>             The S8 fault test on a docker-wine target running a
+                            --dev build: inject each agent fault through the eval
+                            channel and each sidecar fault from link-probe, check
+                            each is survived or refused with a log line, then
+                            restart DCS. Writes bundles/faults-<name>-<time>.json.
   spec [--check]            Write spec/transport.golden from the layout and code tables
                             of the transport specification, or with --check fail
                             when it is out of date
@@ -106,7 +121,7 @@ fn main() -> ExitCode {
         ["target", "list"] => target_list(),
         ["target", "check", name] => target_check(name),
         ["deploy", name, rest @ ..] => {
-            deploy_options(rest).and_then(|(dll, dev)| deploy(name, dll, dev))
+            deploy_options(rest).and_then(|(dll, dev, faults)| deploy(name, dll, dev, faults))
         }
         ["restart", name] => restart(name),
         ["load", name, miz] => load(name, miz),
@@ -131,6 +146,8 @@ fn main() -> ExitCode {
         ["gates", name, "off"] => gates(name, false),
         ["symbolize", file] => symbols::symbolize(Path::new(file)),
         ["peerkill", rest @ ..] => peerkill::command(&repository(), rest),
+        ["chaos", name, rest @ ..] => chaos::command(name, rest),
+        ["faults", name, rest @ ..] => faults::command(name, rest),
         ["spec"] => spec::command(&repository(), false),
         ["spec", "--check"] => spec::command(&repository(), true),
         ["help" | "-h" | "--help"] | [] => {
@@ -149,10 +166,20 @@ fn main() -> ExitCode {
     }
 }
 
-fn deploy_options(rest: &[&str]) -> Result<(Option<PathBuf>, bool), String> {
+/// `--dll P`, `--dev` and `--faults`.
+fn deploy_options(rest: &[&str]) -> Result<(Option<PathBuf>, bool, bool), String> {
     let dev = rest.contains(&"--dev");
-    let rest: Vec<&str> = rest.iter().copied().filter(|a| *a != "--dev").collect();
-    Ok((dll_option(&rest)?, dev))
+    let faults = rest.contains(&"--faults");
+    let rest: Vec<&str> = rest
+        .iter()
+        .copied()
+        .filter(|a| *a != "--dev" && *a != "--faults")
+        .collect();
+    let dll = dll_option(&rest)?;
+    if faults && dll.is_some() {
+        return Err("--faults builds the DLL; it does not take --dll".into());
+    }
+    Ok((dll, dev, faults))
 }
 
 fn dll_option(rest: &[&str]) -> Result<Option<PathBuf>, String> {
@@ -207,9 +234,17 @@ fn open(name: &str) -> Result<Box<dyn Profile>, String> {
     }
 }
 
-/// Cross-build the agent DLL, or on Windows build it natively.
-fn build_dll() -> Result<PathBuf, String> {
+/// Cross-build the agent DLL, or on Windows build it natively. With
+/// `faults`, the DLL has fault injection (spec/faults.md): only a
+/// `--faults` deploy builds it, into target/faults, so the release path keeps
+/// the shipping DLL.
+fn build_dll(faults: bool) -> Result<PathBuf, String> {
     let repo = repository();
+    let dir = if faults {
+        repo.join("target/faults")
+    } else {
+        repo.join("target")
+    };
     let args: &[&str] = if cfg!(windows) {
         &["build"]
     } else {
@@ -224,6 +259,13 @@ fn build_dll() -> Result<PathBuf, String> {
             "--target",
             "x86_64-pc-windows-msvc",
         ])
+        .args(if faults {
+            &["--features", "faults"][..]
+        } else {
+            &[]
+        })
+        .arg("--target-dir")
+        .arg(&dir)
         .current_dir(&repo)
         .status()
         .map_err(|e| format!("could not run cargo: {e}"))?;
@@ -232,13 +274,15 @@ fn build_dll() -> Result<PathBuf, String> {
             "the DLL build failed ({status}). Run it through mise: `mise exec -- cargo xtask ...`"
         ));
     }
-    Ok(repo.join("target/x86_64-pc-windows-msvc/release/nanoprobe.dll"))
+    Ok(dir.join("x86_64-pc-windows-msvc/release/nanoprobe.dll"))
 }
 
-fn payload(dll: Option<PathBuf>, dev: bool) -> Result<install::Payload, String> {
+/// The files to install: the DLL given, or one built with fault injection
+/// when `faults`, and the development files when `dev`.
+fn payload(dll: Option<PathBuf>, dev: bool, faults: bool) -> Result<install::Payload, String> {
     let dll = match dll {
         Some(path) => path,
-        None => build_dll()?,
+        None => build_dll(faults)?,
     };
     // Keep the DLL and its PDB, so a crash record from this build can be
     // symbolized later.
@@ -262,9 +306,9 @@ fn refuse_while_playing(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn deploy(name: &str, dll: Option<PathBuf>, dev: bool) -> Result<ExitCode, String> {
+fn deploy(name: &str, dll: Option<PathBuf>, dev: bool, faults: bool) -> Result<ExitCode, String> {
     refuse_while_playing(name)?;
-    let payload = payload(dll, dev)?;
+    let payload = payload(dll, dev, faults)?;
     let profile = open(name)?;
     let done = install::deploy(profile.as_ref(), &payload)?;
     let map_path = match target(name)? {
@@ -354,7 +398,7 @@ fn snapshot_command(name: &str) -> Result<ExitCode, String> {
 /// The exit test for deploy: deploy twice, undeploy, compare trees. `Logs/`
 /// is left out, because DCS writes it while running.
 fn roundtrip(name: &str, dll: Option<PathBuf>) -> Result<ExitCode, String> {
-    let payload = payload(dll, false)?;
+    let payload = payload(dll, false, false)?;
     let target = target(name)?;
     let profile = open(name)?;
     let snapshot = || snapshot(&target);
@@ -512,7 +556,7 @@ fn run(name: &str, test: &str, rest: &[&str]) -> Result<ExitCode, String> {
         ));
     }
     println!("== deploy");
-    deploy(name, dll, true)?;
+    deploy(name, dll, true, false)?;
     println!("== restart");
     restart(name)?;
     println!("== load a fresh shell mission");

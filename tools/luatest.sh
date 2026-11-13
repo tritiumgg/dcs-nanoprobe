@@ -38,23 +38,30 @@ case "$("$LUA" -v 2>&1)" in
 esac
 
 (cd "$ROOT" && cargo build -p nanoprobe-agent --no-default-features)
+# lua/tests/faults.lua needs fault injection, which the shipping build lacks.
+# It gets its own build, in its own folder, so every other script tests the
+# shipping feature set.
+(cd "$ROOT" && cargo build -p nanoprobe-agent --no-default-features --features faults \
+    --target-dir "$ROOT/target/faults")
 # The sidecar side of the link rehearsal, lua/tests/link.lua.
 (cd "$ROOT" && cargo build -p nanoprobe-fake-agent --bin link-probe -p nanoprobe-cli --bin nanoprobe)
 PROBE="$ROOT/target/debug/link-probe"
 INSPECT="$ROOT/target/debug/nanoprobe"
 
-MODULE=
-for candidate in \
-    "$ROOT/target/debug/libnanoprobe.so" \
-    "$ROOT/target/debug/libnanoprobe.dylib"
-do
-    [ -f "$candidate" ] && MODULE=$candidate
-done
-
-[ -n "$MODULE" ] || {
-    printf 'no libnanoprobe.so or libnanoprobe.dylib under %s/target/debug\n' "$ROOT" >&2
-    exit 1
+# The host-native module under the folder $1.
+module() {
+    found=
+    for candidate in "$1/libnanoprobe.so" "$1/libnanoprobe.dylib"; do
+        [ -f "$candidate" ] && found=$candidate
+    done
+    [ -n "$found" ] || {
+        printf 'no libnanoprobe.so or libnanoprobe.dylib under %s\n' "$1" >&2
+        exit 1
+    }
+    printf '%s\n' "$found"
 }
+MODULE=$(module "$ROOT/target/debug")
+FAULTS_MODULE=$(module "$ROOT/target/faults/debug")
 
 # The version the module reports must match the workspace's, or the test proves
 # only that some module opened.
@@ -74,5 +81,8 @@ VERSION=$(awk '
 for script in "$ROOT"/lua/tests/*.lua; do
     case ${script##*/} in support*) continue ;; esac
     printf '%s\n' "--- ${script#"$ROOT"/}"
-    "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT"
+    case ${script##*/} in
+        faults.lua) "$LUA" "$script" "$FAULTS_MODULE" "$VERSION" "$PROBE" "$INSPECT" ;;
+        *) "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" ;;
+    esac
 done

@@ -20,6 +20,7 @@ workspace = true
 nanoprobe-agent-link = { path = "../agent-link", features = ["faults"] }
 nanoprobe-sidecar = { path = "../sidecar" }
 nanoprobe-transport = { path = "../transport" }
+serde_json = "1.0.154"
 
 [[bin]]
 name = "fake-agent"
@@ -32,3 +33,7 @@ path = "src/bin/stub-sidecar.rs"
 [[bin]]
 name = "link-probe"
 path = "src/bin/link-probe.rs"
+
+[[bin]]
+name = "chaos-runner"
+path = "src/bin/chaos-runner.rs"

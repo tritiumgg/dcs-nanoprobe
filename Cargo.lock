@@ -292,6 +292,7 @@ dependencies = [
  "nanoprobe-agent-link",
  "nanoprobe-sidecar",
  "nanoprobe-transport",
+ "serde_json",
 ]
 
 [[package]]

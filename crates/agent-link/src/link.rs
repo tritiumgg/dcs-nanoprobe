@@ -187,6 +187,15 @@ struct Counters {
     commands_over_budget: u64,
 }
 
+/// Listen on the handshake port, non-blocking.
+fn listen(port: u16) -> Result<TcpListener, String> {
+    let l = TcpListener::bind(("127.0.0.1", port))
+        .map_err(|e| format!("could not listen on 127.0.0.1:{port}: {e}"))?;
+    l.set_nonblocking(true)
+        .map_err(|e| format!("the handshake socket is not non-blocking: {e}"))?;
+    Ok(l)
+}
+
 /// Whether the fault `name` is set; always false without the `faults`
 /// feature.
 macro_rules! fault {
@@ -212,6 +221,9 @@ pub struct Link {
     boot: u64,
     start: Instant,
     listener: Option<TcpListener>,
+    /// The listen failed and is tried again on each system-call frame, with
+    /// the number of tries so far.
+    listen_retry: Option<u64>,
     conn: Conn,
     next_syscall: Instant,
     out: Producer,
@@ -272,21 +284,19 @@ impl Link {
         if opts.raw_lua {
             flag_bits |= flags::RAW_LUA as u32;
         }
+        let mut listen_retry = None;
         let listener = match &opts.token {
             None => {
                 notes.push("no token, so no handshake: nothing listens".to_owned());
                 None
             }
-            Some(_) => match TcpListener::bind(("127.0.0.1", opts.port)) {
-                Ok(l) => match l.set_nonblocking(true) {
-                    Ok(()) => Some(l),
-                    Err(e) => {
-                        notes.push(format!("the handshake socket is not non-blocking: {e}"));
-                        None
-                    }
-                },
+            Some(_) => match listen(opts.port) {
+                Ok(l) => Some(l),
                 Err(e) => {
-                    notes.push(format!("could not listen on 127.0.0.1:{}: {e}", opts.port));
+                    // A port the last DCS process held can stay taken for a
+                    // while after it dies (LIVE under Wine, 2026-11-13).
+                    notes.push(format!("{e}; trying again once a second"));
+                    listen_retry = Some(1);
                     None
                 }
             },
@@ -304,6 +314,7 @@ impl Link {
             map,
             start: now,
             listener,
+            listen_retry,
             conn: Conn::None,
             next_syscall: now,
             frame: 0,
@@ -459,6 +470,24 @@ impl Link {
         let conn = std::mem::replace(&mut self.conn, Conn::None);
         self.next_syscall = now + every;
         self.conn = match conn {
+            Conn::None if self.listener.is_none() && self.listen_retry.is_some() => {
+                // The frame's one call is the listen, tried again.
+                self.next_syscall = now + second;
+                let tries = self.listen_retry.unwrap_or(0) + 1;
+                match listen(self.opts.port) {
+                    Ok(l) => {
+                        self.listener = Some(l);
+                        self.listen_retry = None;
+                        self.flags &= !(flags::NO_HANDSHAKE as u32);
+                        self.note(format!(
+                            "listening on 127.0.0.1:{} after {tries} tries",
+                            self.opts.port
+                        ));
+                    }
+                    Err(_) => self.listen_retry = Some(tries),
+                }
+                Conn::None
+            }
             Conn::None => {
                 self.next_syscall = now + second;
                 match self.listener.as_ref().map(|l| l.accept()) {
@@ -1065,6 +1094,7 @@ impl Link {
         }
         self.conn = Conn::None;
         self.listener = None;
+        self.listen_retry = None;
         self.store_counters();
         self.map
             .store32(s::LIFECYCLE, lifecycle::DISABLED as u32, Ordering::Release);
@@ -1295,16 +1325,21 @@ mod tests {
 
     /// A link on a free port in its own folder, and the folder.
     fn open(name: &str) -> (Link, PathBuf) {
-        let dir = std::env::temp_dir().join(format!(
-            "nanoprobe-link-{name}-{}",
-            nanoprobe_transport::random_nonzero()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
         let port = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
             .unwrap()
             .port();
+        open_on(name, port)
+    }
+
+    /// A link on `port` in its own folder, and the folder.
+    fn open_on(name: &str, port: u16) -> (Link, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "nanoprobe-link-{name}-{}",
+            nanoprobe_transport::random_nonzero()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
         let link = Link::open(Options {
             map_path: dir.join("map"),
             port,
@@ -1429,5 +1464,33 @@ mod tests {
         );
         assert!(!link.reading_commands());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A port another socket holds is tried again once a second, and the
+    /// link listens once it is free.
+    #[test]
+    fn a_taken_port_is_tried_again_until_it_is_free() {
+        let held = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = held.local_addr().unwrap().port();
+        let (mut link, dir) = open_on("retry", port);
+        let no_handshake = |l: &Link| l.flags() & flags::NO_HANDSHAKE as u32 != 0;
+        assert!(no_handshake(&link));
+        assert!(
+            link.take_notes()
+                .iter()
+                .any(|n| n.contains("trying again once a second")),
+        );
+        pump(&mut link, Duration::from_millis(1500), |_| false);
+        assert!(no_handshake(&link), "listening while the port is held");
+        drop(held);
+        pump(&mut link, Duration::from_secs(3), |l| !no_handshake(l));
+        assert!(!no_handshake(&link), "not listening once the port is free");
+        assert!(
+            link.take_notes()
+                .iter()
+                .any(|n| n.starts_with(&format!("listening on 127.0.0.1:{port} after"))),
+        );
+        std::net::TcpStream::connect(("127.0.0.1", port)).expect("the link listens");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

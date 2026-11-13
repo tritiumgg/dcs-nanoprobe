@@ -73,6 +73,11 @@ assert(ok == false and message == 'from the entry', 'raise gave ' .. tostring(ok
 -- The state is usable afterwards.
 assert(agent.thread() == agent.thread(), 'the agent is unusable after a raise')
 
+-- inject: the shipping build has no fault injection, and says so.
+local injected, refusal = agent.inject('stall', 10)
+assert(injected == nil and refusal == 'this build has no fault injection',
+  'inject gave ' .. tostring(injected) .. ', ' .. tostring(refusal))
+
 -- call: lua_pcall from C, on success and on error.
 local results = { agent.call(function(a, b)
   return a + b, 'x'

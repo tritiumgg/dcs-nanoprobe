@@ -16,9 +16,10 @@ publish = false
 [lints]
 workspace = true
 
-# `faults` lets the fake agent break the link on purpose. The DLL never
-# enables it: a release builds the agent alone, so no other crate's features
-# reach it.
+# `faults` lets the fake agent, and the agent's own `faults` feature (a
+# `deploy --faults` build and the host tests), break the link on purpose. A
+# release builds the agent alone with its default features, so it never has
+# it.
 [features]
 faults = []
 

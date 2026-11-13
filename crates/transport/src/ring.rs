@@ -91,6 +91,8 @@ pub enum RingError {
         tail: u64,
         /// The consumer's head.
         head: u64,
+        /// The check that failed.
+        rule: &'static str,
     },
     /// A record header that breaks a rule.
     Record {
@@ -116,8 +118,8 @@ impl fmt::Display for RingError {
             RingError::Head { head, tail } => {
                 write!(f, "head {head:#x} impossible for tail {tail:#x}")
             }
-            RingError::Tail { tail, head } => {
-                write!(f, "tail {tail:#x} impossible for head {head:#x}")
+            RingError::Tail { tail, head, rule } => {
+                write!(f, "tail {tail:#x} impossible for head {head:#x}: {rule}")
             }
             RingError::Record {
                 position,
@@ -328,14 +330,20 @@ impl Consumer {
     /// is a failed check.
     pub fn refresh(&mut self, m: &impl Memory) -> Result<(), RingError> {
         let tail = m.load(self.ring.tail, Ordering::Acquire);
-        if !tail.is_multiple_of(8)
-            || !self.head.is_multiple_of(8)
-            || tail < self.tail
-            || tail - self.head > self.ring.capacity
-        {
+        let rule = if !tail.is_multiple_of(8) || !self.head.is_multiple_of(8) {
+            Some("not a multiple of 8")
+        } else if tail < self.tail {
+            Some("behind the last tail read")
+        } else if tail - self.head > self.ring.capacity {
+            Some("more than the capacity ahead of the head")
+        } else {
+            None
+        };
+        if let Some(rule) = rule {
             return Err(RingError::Tail {
                 tail,
                 head: self.head,
+                rule,
             });
         }
         self.tail = tail;
@@ -529,17 +537,18 @@ mod tests {
         m.store(8, 4, Ordering::Release);
         assert!(matches!(p.refresh(&m), Err(RingError::Head { .. })));
         let mut c = Consumer::new(ring, 0);
+        let rule = |c: &mut Consumer| match c.refresh(&m) {
+            Err(RingError::Tail { rule, .. }) => rule,
+            other => panic!("{other:?}"),
+        };
         m.store(0, CAP + 8, Ordering::Release);
-        assert!(matches!(c.refresh(&m), Err(RingError::Tail { .. })));
+        assert_eq!(rule(&mut c), "more than the capacity ahead of the head");
         m.store(0, 12, Ordering::Release);
-        assert!(matches!(c.refresh(&m), Err(RingError::Tail { .. })));
+        assert_eq!(rule(&mut c), "not a multiple of 8");
         m.store(0, 16, Ordering::Release);
         c.refresh(&m).expect("a good tail");
         m.store(0, 8, Ordering::Release);
-        assert!(
-            matches!(c.refresh(&m), Err(RingError::Tail { .. })),
-            "a tail that moved back"
-        );
+        assert_eq!(rule(&mut c), "behind the last tail read");
     }
 
     #[test]

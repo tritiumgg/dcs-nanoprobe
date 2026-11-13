@@ -92,7 +92,7 @@ world_changes_keep = 100000 # changes kept for a watch to resume from
 [health]
 heartbeat_stale_s = 10      # no heartbeat for this long outside a load: hung or gone (spec/errors.md)
 loading_limit_s = 900       # no heartbeat for this long while loading: hung
-handshake_timeout_s = 15    # how long one handshake attempt waits; after a DCS restart, how long before the sidecar exits
+handshake_timeout_s = 15    # how long one handshake attempt waits, counting only time in which the agent runs frames; after a DCS restart, how long before the sidecar exits
 
 [world]
 position_period_min_s = 0.1 # the cap: the shortest position period a subscription gets

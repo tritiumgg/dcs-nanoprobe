@@ -209,6 +209,128 @@ pub fn start(root: &Path, dcs_version: &str) -> Result<String, String> {
     Ok(path)
 }
 
+/// Fault injection for the S8 tests, built only with the `faults` feature
+/// (spec/faults.md). `inject` arms a fault; the next frame takes it.
+#[cfg(feature = "faults")]
+pub mod faults {
+    use std::sync::Mutex;
+
+    /// The faults armed for the next frame.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Armed {
+        /// The `frame` entry raises a Lua error instead of pumping.
+        pub raise: bool,
+        /// The frame panics after it began, holding the driver.
+        pub panic: bool,
+        /// The frame sleeps this many milliseconds after it began.
+        pub stall_ms: u64,
+        /// The frame queues this many 1 KiB `LOG` records.
+        pub flood: u64,
+    }
+
+    pub(super) static ARMED: Mutex<Armed> = Mutex::new(Armed {
+        raise: false,
+        panic: false,
+        stall_ms: 0,
+        flood: 0,
+    });
+
+    /// The longest stall `inject` accepts.
+    pub const STALL_MAX_MS: u64 = 10_000;
+    /// The most flood records `inject` accepts.
+    pub const FLOOD_MAX: u64 = 100_000;
+
+    /// Arm the fault `name` with `arg`: `raise`, `panic`, `stall` (ms),
+    /// `flood` (records), or `lose-control`, which drops the link's next
+    /// control record.
+    pub fn inject(name: &str, arg: f64) -> Result<(), String> {
+        let n = if arg.is_finite() && arg >= 0.0 {
+            arg as u64
+        } else {
+            0
+        };
+        if name == "lose-control" {
+            return super::with(|d| d.link.faults().lose_control = true)
+                .ok_or_else(|| "no link is open".to_owned());
+        }
+        let mut armed = ARMED.lock().map_err(|_| "the fault table is poisoned")?;
+        match name {
+            "raise" => armed.raise = true,
+            "panic" => armed.panic = true,
+            "stall" if (1..=STALL_MAX_MS).contains(&n) => armed.stall_ms = n,
+            "stall" => return Err(format!("stall takes 1 to {STALL_MAX_MS} ms")),
+            "flood" if (1..=FLOOD_MAX).contains(&n) => armed.flood = n,
+            "flood" => return Err(format!("flood takes 1 to {FLOOD_MAX} records")),
+            _ => return Err(format!("no fault named {name}")),
+        }
+        Ok(())
+    }
+
+    /// Take the armed `raise`.
+    pub fn take_raise() -> bool {
+        ARMED
+            .lock()
+            .map(|mut a| std::mem::take(&mut a.raise))
+            .unwrap_or(false)
+    }
+
+    /// Take the faults the frame runs.
+    pub(super) fn take() -> Armed {
+        ARMED
+            .lock()
+            .map(|mut a| {
+                let taken = Armed { raise: false, ..*a };
+                a.panic = false;
+                a.stall_ms = 0;
+                a.flood = 0;
+                taken
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// Run the faults armed for this frame. Each is logged first, so the log
+/// says what was done on purpose.
+#[cfg(feature = "faults")]
+fn injected(d: &mut Driver) {
+    let armed = faults::take();
+    if armed.flood > 0 {
+        record(
+            d,
+            Level::Warn,
+            "injected fault: flood",
+            &[("records", Value::Int(armed.flood as i64))],
+        );
+        let filler = vec![b'x'; 1000];
+        for _ in 0..armed.flood {
+            enqueue_log(&mut d.link, 4, "agent", "flood", Lv::String(filler.clone()));
+        }
+    }
+    if armed.stall_ms > 0 {
+        record(
+            d,
+            Level::Warn,
+            "injected fault: stall",
+            &[("ms", Value::Int(armed.stall_ms as i64))],
+        );
+        let started = Instant::now();
+        std::thread::sleep(Duration::from_millis(armed.stall_ms));
+        // The message carries the time, so a sidecar that reads only the
+        // message sees how long the frame stalled.
+        let ms = started.elapsed().as_millis();
+        record(
+            d,
+            Level::Warn,
+            &format!("injected fault: stall ended after {ms} ms"),
+            &[],
+        );
+    }
+    if armed.panic {
+        record(d, Level::Warn, "injected fault: panic", &[]);
+        panic!("injected panic");
+    }
+}
+
 /// One frame: DCS real time, model time, and whether DCS is paused.
 pub fn frame(real: f64, model: f64, paused: bool) -> Frame {
     with(|d| frame_with(d, real, model, paused)).unwrap_or(Frame::NoLink)
@@ -221,6 +343,8 @@ fn frame_with(d: &mut Driver, real: f64, model: f64, paused: bool) -> Frame {
     let now = Instant::now();
     let syscall = d.link.begin(now, model, real);
     state::set_frame(d.link.stamps().frame);
+    #[cfg(feature = "faults")]
+    injected(d);
     let state_now = d.link.stamps().lifecycle;
     let want = if paused {
         lifecycle::PAUSED

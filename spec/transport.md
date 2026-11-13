@@ -154,7 +154,7 @@ adds codes for later risky calls here.
 | 2 | CONTROL_LOST | A control record was dropped; the sidecar resyncs |
 | 4 | COMMANDS_HELD | The control queue is full and the agent reads no commands |
 | 8 | RAW_LUA | Raw Lua is on in `agent.toml` |
-| 16 | NO_HANDSHAKE | The handshake socket could not be opened |
+| 16 | NO_HANDSHAKE | The handshake socket is not open: there is no token, or the listen failed and is tried again |
 
 ### Metrics
 
@@ -315,7 +315,16 @@ is restarted, the sidecar's container must be restarted with it. A sidecar that 
 a new `agent_boot` in the file and whose TCP connect is refused for
 `handshake_timeout_s` exits with an error, so that whatever runs it starts it again.
 A connect that succeeds and gets no answer is a DCS that is loading, and the sidecar
-waits.
+waits on that connection: its `handshake_timeout_s` counts only time in which the
+frame number in the file moves. A sidecar that gave up and connected again would leave
+connections the agent answers one by one once frames resume, each held up to 2 s for
+an attach that never comes (LIVE, 2026-11-13: a reconnect of 9.4 s after a 55 s load).
+
+When the listen fails, the agent sets `NO_HANDSHAKE` and tries again on each
+system-call frame, once a second, until it succeeds; then it clears the flag. That try
+is the frame's one socket call. Under Wine, the port a killed DCS process held stays
+taken for up to about a minute after the kill (LIVE, 2026-11-13: `OS Error 10048` 59 s
+after a `pkill -9`), so an agent that starts sooner listens only once it is free.
 
 **All of the agent's system calls happen on one kind of frame.** One socket call costs
 150–290 µs under Wine (LIVE, docs/results/2026-11-11-first-dll-and-spikes.md, E25),

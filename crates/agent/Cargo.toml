@@ -26,9 +26,13 @@ crate-type = ["cdylib"]
 # On by default, because the product is the Windows DLL, and a build that
 # quietly omits the Lua binding is the failure to rule out. Host builds pass
 # --no-default-features.
+# faults adds fault injection (the `inject` entry) for the S8 tests. Only
+# `cargo xtask deploy --faults` and the host tests build it; a release never
+# does.
 [features]
 default = ["dcs-lua"]
 dcs-lua = []
+faults = ["nanoprobe-agent-link/faults"]
 
 [lints]
 workspace = true
