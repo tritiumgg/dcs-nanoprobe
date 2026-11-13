@@ -165,7 +165,7 @@ a group of one.
 | `live` | `materializing` | The mission generation changes (a reload or a DCS restart), the theater is still the entity's and the authority is DCS |
 | `lost` | `live` | A later full enumeration finds the group |
 | `lost` | `materializing` or `virtual` | The mission generation changes: `materializing` if the new mission's theater is the entity's and the authority is DCS, else `virtual` |
-| `lost` | `materializing` | The author's policy is respawn, the authority is DCS, and a full enumeration used since the sidecar started and since the last `HELLO` finds no object of the entity. Until then the binding mirror may lack objects DCS holds, such as those of an entity that went `lost` after its destroys failed. The spawn carries a new spec revision: the agent still holds the old one for this generation and would answer `AT_REVISION`. |
+| `lost` | `materializing` | The author's policy is respawn, the authority is DCS, and a full enumeration used since the sidecar started, since the last `HELLO` and since the last `GAP` of events finds no object of the entity. Until then the binding mirror may lack objects DCS holds, such as those of an entity that went `lost` after its destroys failed. The spawn carries a new spec revision: the agent still holds the old one for this generation and would answer `AT_REVISION`. |
 | `lost` | `dead` | The author's policy is mark dead |
 | `unspawnable` | `virtual` | The author changes the spec; its last error is cleared. It materializes from `virtual` by the level condition above. |
 

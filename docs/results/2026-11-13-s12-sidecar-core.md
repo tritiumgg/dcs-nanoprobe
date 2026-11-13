@@ -7,7 +7,7 @@
 | Platform | Host: macOS 26.6.2 on arm64, Rust 1.99.1. No DCS ran for this step. |
 | Recording | `recording.jsonl` of S9's event catalogue run (`cargo xtask catalogue`, `link-probe --record`), SHA-256 `01c05308a5e4c785014287f6e1989a293c7fae2af50e313eb620b4f78d5a4580`: DCS 2.9.31.29434, branch `dcs_server.release`, dedicated server under Wine `wine-10.0 (Debian 10.0~repack-6)`, recorded 2026-11-13 07:43 UTC. It holds server data and is not committed. |
 | Script | `crates/sidecar/tests/reconciler.rs`, `crates/sidecar/tests/replay.rs`, `crates/sim-fake/tests/dst.rs`, `crates/sim-fake/tests/conformance.rs`; the harness is `crates/sim-fake/src/harness.rs` |
-| Code | The commit that adds this document |
+| Code | The commit that last changes this document; the figures come from that commit's code |
 | Result | Met on the fake sim. Partly met on recordings: S9's recording replays as stated below; the object table's records (`OBJECT`, `OBJECT_GONE`, enumerations) come from DCS only with S10's recordings, which do not exist yet. |
 
 ## What runs
@@ -72,16 +72,16 @@ command is unanswered.
 | `materializing` -> `dead` (a lost `RESULT`, then every member dies; the spawn resolves `applied`), `lost` -> `dead`, and a death with a wrong binding | 1 each | 0 |
 | A fixed `unspawnable` group materializes; a refused destroy stops at the limit and the entity goes `lost`, then leaves DCS once destroys work; an attack order follows its target when the target respawns in the same generation; a route advances with no new order; a `materializing` group under campaign authority is withdrawn with no spawn; a death while `dematerializing` | 1 each | 0 |
 | A death queued under another campaign and read by a sidecar of a campaign with the same `EntityId`s, without its store: live, and replayed with 5 sets of restarts; and the window between a campaign switch and the next load | 1 each | 0 |
-| A restarted sidecar, planning right after its `HELLO`, does not respawn a `lost` entity over objects DCS holds; a dead entity's refused destroys stop at the limit; a limit of 0 counts as 1; result codes map to the outcomes of spec/errors.md; an attack order never sent keeps its revision when its target respawns; an attack order on a unit or a static is refused | 1 each | 0 |
+| A restarted sidecar, planning right after its `HELLO`, does not respawn a `lost` entity over objects DCS holds; a dead entity's refused destroys stop at the limit; a limit of 0 counts as 1; result codes map to the outcomes of spec/errors.md; an attack order never sent keeps its revision when its target respawns; an attack order on a unit or a static is refused; a `GAP` of events holds a respawn until the next enumeration | 1 each | 0 |
 | The `LIFECYCLE` after a `HELLO`: no journal entry and no store revision for a store that has the mission, the binding kept; a fresh store learns the mission and is ready; the conformance suite, whose attach check requires that `LIFECYCLE`, on a mission already running | 1 each | 0 |
 | The seeds reach `live` -> `dead`, and never `virtual` -> `dead` | 200 seeds | 0 |
 | A restart after the last `FRAME`, with persistence off, leaves no death fact | the seeds of 64 whose recording ends after its last `FRAME` | 0 |
 | Conformance suite on the fake sim (9 checks), from the start of a mission and attached to a running one | 2 | 0 |
 | S9's recording, 841 records (93 `FRAME`, 1 `HELLO`, 34 `LIFECYCLE`, 2 `RESULT`, 694 `EVENT`, 17 `LOG`), the sidecar restarting at 1 to 7 points, with persistence on and off | 64 | 0 |
 
-On S9's recording every record decodes, every `EVENT` by S9's own decoder
-(`nanoprobe_transport::records::Event`), every `EVENT` is read, the only kind the
-reconciler does not read is `LOG`, and no death fact is journalled, since no object of
+On S9's recording every record decodes, each `EVENT` with S9's own decoder
+(`nanoprobe_transport::records::Event`); the reconciler reads every kind but `LOG`,
+and no death fact is journalled, since no object of
 the recording is the platform's. With persistence on the store ends on the generation
 and theater of the last `LIFECYCLE`; with it off, on that generation, taken from the
 stamps read after the last restart, and on that theater when a `LIFECYCLE` follows the
@@ -121,6 +121,7 @@ on it, with the seeds `mise run check` runs unless a count is given:
 | `NOT_BOUND` resolved `applied` | Seeds |
 | Destroy results the sidecar read resolved `unknown` | Seeds |
 | A `lost` respawn without an enumeration since the `HELLO` | `a_restarted_sidecar_does_not_respawn_over_objects_dcs_holds` |
+| A `GAP` of events does not hold the respawn until the next enumeration | `a_gap_of_events_holds_a_respawn_until_the_next_enumeration` |
 | The re-aim bumps every attack order on the target, sent or not | `an_attack_order_never_sent_keeps_its_revision_when_the_target_respawns` |
 | The fake writes no `LIFECYCLE` after a `HELLO` | Conformance |
 | The fake answers a spawn or order at its revision as new | Conformance |
@@ -138,8 +139,8 @@ the same members missing, so the end state is the same.
 - A respawn of a `lost` group at its old spec revision is answered `AT_REVISION`, so
   nothing spawns. It takes a new revision (spec/world.md).
 - A death the agent queued while no sidecar was attached could not be tied to its unit
-  after a restart. `OBJECT_GONE` carries the row's binding (the coordinator's ruling,
-  written into the spec by S10).
+  after a restart. `OBJECT_GONE` carries the row's binding (written into the spec by
+  step S10).
 - A member whose `OBJECT` was lost to a `GAP` was never marked missing.
 - A sidecar that lost its store dropped the deaths queued in a generation before the
   one it first saw named.
@@ -172,6 +173,7 @@ read. Step S14 settles it.
 
 The fake writes a `FRAME` right after a `CAMPAIGN` that changes the campaign, in a
 replayed queue wherever any stamp changes, and a `LIFECYCLE` right after every
-`HELLO`. The agent's doing the same is step S10's.
+`HELLO`. The agent's doing the same, and the spec text for it, are step S10's; the
+conformance suite already checks the `LIFECYCLE` after every `HELLO`.
 
 An attack order names a group. A unit or a static as the target is step S15's.

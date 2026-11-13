@@ -645,7 +645,15 @@ impl World {
         self.store = store;
         self.scan = Scan {
             before: self.sim.ledger().taken.keys().copied().collect(),
-            deaths_before: self.sim.ledger().reported_deaths.clone(),
+            // Deaths the earlier store read; those still unread are this
+            // store's to read.
+            deaths_before: self
+                .sim
+                .ledger()
+                .reported_deaths
+                .difference(&self.sim.unread_deaths())
+                .copied()
+                .collect(),
             ..Scan::default()
         };
         self.rec = Reconciler::new(self.rec_cfg, &self.store);
@@ -884,8 +892,6 @@ impl World {
                 }
                 State::Dead | State::Unspawnable | State::Lost | State::Virtual => {
                     let why = match g.state {
-                        // Every member died, or the group was lost and the
-                        // policy marked it dead.
                         // Every member died, or it was lost and the policy is
                         // to mark it dead.
                         State::Dead => {
@@ -908,7 +914,9 @@ impl World {
                                 let k = (boot, mission_gen, campaign, m.0);
                                 ledger.removed.contains(&k) || ledger.unreported.contains(&k)
                             }) || (g.error.as_deref().is_some_and(|e| e.starts_with("destroy failed"))
-                                && ledger.failed_destroys.get(&(campaign, g.id.0)).copied().unwrap_or(0)
+                                && ledger
+                                    .failed_destroys
+                                    .get(&(boot, mission_gen, campaign, g.id.0)).copied().unwrap_or(0)
                                     >= self.rec_cfg.destroy_retries.max(1))
                         }
                         _ => true,

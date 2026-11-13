@@ -177,18 +177,26 @@ fn expect(r: &CommandResult, code: u64, what: &str) -> R {
     }
 }
 
+/// The agent writes a LIFECYCLE of its state right after every HELLO, so a
+/// sidecar attaching to a running mission learns it (step S10 writes the
+/// rule into spec/records.md). `at` is the HELLO's index in `s.seen`.
+fn lifecycle_after_hello(s: &mut Session<'_>, at: usize) -> R {
+    s.until(at + 1, "a record after the HELLO", |x| {
+        x.first().map(|_| ())
+    })?;
+    match s.seen.get(at + 1) {
+        Some(Input::Lifecycle(_)) => Ok(()),
+        other => Err(format!(
+            "the record after the HELLO is {other:?}, not a LIFECYCLE"
+        )),
+    }
+}
+
 fn attach(s: &mut Session<'_>) -> R {
     let at = s.until(0, "HELLO", |x| {
         x.iter().position(|i| matches!(i, Input::Hello(_)))
     })?;
-    // The agent writes a LIFECYCLE of its state right after every HELLO, so
-    // a sidecar attaching to a running mission learns it.
-    if !matches!(s.seen.get(at + 1), Some(Input::Lifecycle(_))) {
-        return Err(format!(
-            "the record after the HELLO is {:?}, not a LIFECYCLE",
-            s.seen.get(at + 1)
-        ));
-    }
+    lifecycle_after_hello(s, at)?;
     s.until(0, "running mission", |x| {
         x.iter()
             .any(|i| matches!(i, Input::Lifecycle(l) if u64::from(l.state) == lc::RUNNING && !l.theater.is_empty()))
@@ -408,6 +416,7 @@ fn a_reattach_answers_what_was_taken(s: &mut Session<'_>) -> R {
             _ => None,
         })
     })?;
+    lifecycle_after_hello(s, from + hello_at)?;
     for _ in 0..5 {
         s.pump();
     }

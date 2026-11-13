@@ -150,8 +150,8 @@ impl Object {
 ///
 /// The layout carries the row's binding, so a death the agent queued while
 /// no sidecar was attached names its unit before the enumeration that
-/// re-reads the binding (coordinator ruling (b), 2026-11-13; S10 writes it
-/// into spec/records.md and the golden file). The decoder also takes the
+/// re-reads the binding (step S10 writes the layout into spec/records.md and
+/// the golden file). The decoder also takes the
 /// 16-byte layout the golden file still holds, with no binding.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ObjectGone {

@@ -172,8 +172,7 @@ fn with_persistence_off_a_restart_at_the_tail_leaves_no_fact() {
     assert!(checked > 0, "no recording ends after its last FRAME");
 }
 
-/// The required case of the coordinator's ruling (b): a death the agent
-/// queued while detached, read by a sidecar that restarted without its store
+/// A death the agent queued while detached, read by a sidecar that restarted without its store
 /// and has no binding yet.
 #[test]
 fn a_death_queued_while_detached_is_a_fact_after_a_restart_without_the_store() {
@@ -340,7 +339,7 @@ fn a_death_queued_for_another_campaign() -> World {
     w
 }
 
-/// The coordinator's campaign ruling: a death the agent queued under
+/// A death the agent queued under
 /// campaign A, read by a sidecar of campaign B where entity 2 exists, is no
 /// death fact of B, and is counted as dropped.
 #[test]

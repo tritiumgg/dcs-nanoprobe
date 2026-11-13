@@ -512,8 +512,8 @@ fn a_destroy_limit_of_zero_counts_as_one() {
     assert_eq!(w.store.group(id).unwrap().state, State::Lost);
 }
 
-/// The coordinator's ruling A: the agent writes a LIFECYCLE of its state
-/// right after every HELLO. A store with no mission learns it from that
+/// The agent writes a LIFECYCLE of its state right after every HELLO (step
+/// S10 specifies it). A store with no mission learns it from that
 /// (and is ready); a store that has it adds no journal entry, no
 /// generation change and no store revision, and keeps the binding.
 #[test]
@@ -590,4 +590,74 @@ fn an_attack_order_never_sent_keeps_its_revision_when_the_target_respawns() {
     let (new, _) = w.sim.attack_of(w.store.campaign().0, target.0).unwrap();
     assert_ne!(old, new, "the target respawned");
     assert_eq!(w.store.group(attacker).unwrap().order_rev, rev);
+}
+
+/// Round 5: a GAP of events may have dropped OBJECT rows, so the mirror may
+/// lack objects DCS holds: a lost entity is not respawned until the next
+/// enumeration. Here the mirror loses the static's row (as an OBJECT lost
+/// to the GAP would leave it), then the GAP arrives, and the sidecar plans.
+#[test]
+fn a_gap_of_events_holds_a_respawn_until_the_next_enumeration() {
+    use nanoprobe_sidecar::sim::RawRecord;
+    use nanoprobe_sidecar::sim::wire::{Input, ObjectGone, gone_reason, opcode};
+    use nanoprobe_sidecar::store::Authority;
+    use nanoprobe_transport::layout::gap_class;
+    use nanoprobe_transport::records::Gap;
+
+    let mut w = World::new(0, 1, LostPolicy::Respawn);
+    let id = w.store.groups().next().unwrap().id;
+    w.settle().unwrap();
+    let (object, _) = w
+        .units_in_dcs()
+        .into_iter()
+        .find(|(_, e)| *e == id.0)
+        .expect("in DCS");
+    w.sim.refuse_destroys(5);
+    w.store.set_authority(id, Authority::Campaign).unwrap();
+    for _ in 0..30 {
+        w.tick().unwrap();
+        if w.store.group(id).unwrap().state == State::Lost {
+            break;
+        }
+    }
+    assert_eq!(w.store.group(id).unwrap().state, State::Lost);
+    w.store.set_authority(id, Authority::Sim).unwrap();
+    let boot = w.sim.agent_boot();
+    let record = |input: Input, n: u64| {
+        let (kind, payload) = input.encode();
+        RawRecord {
+            agent_boot: boot,
+            number: u64::MAX - n,
+            kind,
+            payload,
+        }
+    };
+    let gone = record(
+        Input::ObjectGone(ObjectGone {
+            object,
+            reason: gone_reason::MISSING,
+            entity: 0,
+            group_entity: 0,
+        }),
+        1,
+    );
+    let gap = record(
+        Input::Gap(Gap {
+            class: gap_class::EVENTS as u32,
+            count: 1,
+            ..Gap::default()
+        }),
+        0,
+    );
+    w.rec.record(&mut w.store, &gone);
+    w.rec.record(&mut w.store, &gap);
+    let spawns = commands(&w, id, opcode::STATIC_SPAWN);
+    w.rec.step(&mut w.store, &mut w.sim);
+    assert_eq!(
+        commands(&w, id, opcode::STATIC_SPAWN),
+        spawns,
+        "no respawn before an enumeration"
+    );
+    w.settle().unwrap();
+    assert_eq!(w.store.group(id).unwrap().state, State::Live);
 }

@@ -157,8 +157,9 @@ pub struct Reconciler {
     spawn_rejected: HashMap<EntityId, (u64, u32)>,
     /// `CAMPAIGN` was written since the last `HELLO`.
     campaign_sent: bool,
-    /// A full enumeration was used since this reconciler started and since
-    /// the last `HELLO`: until then the mirror may lack objects DCS holds.
+    /// A full enumeration was used since this reconciler started, since the
+    /// last `HELLO` and since the last `GAP` of events: until then the mirror
+    /// may lack objects DCS holds.
     enumerated: bool,
     counters: Counters,
 }
@@ -296,6 +297,9 @@ impl Reconciler {
             Input::Gap(g) => {
                 if u64::from(g.class) == gap_class::EVENTS {
                     self.enum_wanted = true;
+                    // The lost records may be OBJECT rows: the mirror may
+                    // lack objects DCS holds until the next enumeration.
+                    self.enumerated = false;
                     if let Some(run) = &mut self.run {
                         run.gap = true;
                     }

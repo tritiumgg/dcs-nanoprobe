@@ -114,10 +114,10 @@ pub struct Ledger {
     /// `OBJECT_GONE` `DEAD` records with a binding written to the ring: agent
     /// boot, and the generation, campaign and unit entity of their stamps.
     pub reported_deaths: BTreeSet<(u64, u32, u64, u64)>,
-    /// Destroys of an entity, by campaign and entity, that DCS refused or
-    /// whose result was lost, since DCS last removed the entity: one count
-    /// per destroy.
-    pub failed_destroys: HashMap<(u64, u64), u32>,
+    /// Destroys of an entity that DCS refused or whose result was lost, by
+    /// agent boot, generation, campaign and entity: one count per destroy,
+    /// cleared whenever DCS removes the entity's group.
+    pub failed_destroys: HashMap<(u64, u32, u64, u64), u32>,
     /// Unit entities that left DCS without a death: agent boot, generation,
     /// campaign, entity.
     pub removed: BTreeSet<(u64, u32, u64, u64)>,
@@ -580,11 +580,8 @@ impl FakeSim {
         if matches!(r.opcode, opcode::GROUP_DESTROY | opcode::STATIC_DESTROY)
             && u64::from(r.code) != rc::DCS_REFUSED
         {
-            *self
-                .ledger
-                .failed_destroys
-                .entry((r.campaign, r.entity))
-                .or_default() += 1;
+            let key = (self.agent_boot, self.mission_gen_, r.campaign, r.entity);
+            *self.ledger.failed_destroys.entry(key).or_default() += 1;
         }
     }
 
@@ -682,6 +679,23 @@ impl FakeSim {
         self.refuse_destroys = n;
     }
 
+    /// The `OBJECT_GONE` `DEAD` records written and not yet read, as
+    /// [`Ledger::reported_deaths`] keys them.
+    pub fn unread_deaths(&self) -> BTreeSet<(u64, u32, u64, u64)> {
+        let mut stamp = (0, 0);
+        let mut out = BTreeSet::new();
+        for r in &self.out {
+            match Input::decode(r.kind, &r.payload) {
+                Ok(Input::Frame(f)) => stamp = (f.mission_gen, f.campaign),
+                Ok(Input::ObjectGone(g)) if g.reason == gone_reason::DEAD && g.entity != 0 => {
+                    out.insert((r.agent_boot, stamp.0, stamp.1, g.entity));
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
     /// The link drops: the agent detaches and queues its records.
     pub fn detach(&mut self) {
         self.attached = false;
@@ -731,7 +745,7 @@ impl FakeSim {
         self.write(&Input::Hello(hello));
         // A LIFECYCLE of the current state right after every HELLO, so a
         // sidecar that attaches to a running mission learns its theater
-        // (the coordinator's ruling; S10 builds it in the agent).
+        // (step S10 specifies it and builds it in the agent).
         self.lifecycle_record();
         if self.running() {
             self.start_enumeration();
@@ -1197,11 +1211,8 @@ impl FakeSim {
             Body::GroupDestroy | Body::StaticDestroy => {
                 if self.refuse_destroys > 0 {
                     self.refuse_destroys -= 1;
-                    *self
-                        .ledger
-                        .failed_destroys
-                        .entry((h.campaign, h.entity))
-                        .or_default() += 1;
+                    let key = (self.agent_boot, self.mission_gen_, h.campaign, h.entity);
+                    *self.ledger.failed_destroys.entry(key).or_default() += 1;
                     return self.result(
                         &cmd,
                         rc::DCS_REFUSED,
@@ -1211,7 +1222,6 @@ impl FakeSim {
                     );
                 }
                 self.destroy(h.entity);
-                self.ledger.failed_destroys.remove(&(h.campaign, h.entity));
                 self.result(&cmd, rc::APPLIED, 0, "", Lv::Nil);
             }
             Body::GroupCaptureDestroy | Body::Capture => {
@@ -1334,6 +1344,12 @@ impl FakeSim {
         let Some(g) = self.groups.remove(&gid) else {
             return;
         };
+        self.ledger.failed_destroys.remove(&(
+            self.agent_boot,
+            self.mission_gen_,
+            g.campaign,
+            g.entity,
+        ));
         for m in g.members {
             self.objects.remove(&m);
             self.gone(m, gone_reason::DESTROYED);
