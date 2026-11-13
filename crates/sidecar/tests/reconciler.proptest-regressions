@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 031d1b5160e8d7c1889aab28cae6c2e38532660f844ffbd432b587d532d92320 # shrinks to groups = 4, statics = 0, on_lost = Dead, ops = [Frames(2), Frames(1), Kill(0), Kill(15), Kill(14713), RemoveSilently(0), RestartDcs, Frames(1), Authority(125, false), Frames(1), Kill(22461), Frames(1), RemoveSilently(45906), Frames(1), Frames(1), FixSpec(737), Frames(2), Frames(7), Kill(18403), Frames(8)]
+cc f6d33b0c32c916624e8a9d3c5f5c5f92386898793cd7d799ad113dfdcfc00741 # shrinks to groups = 2, statics = 2, on_lost = Respawn, ops = [Frames(1), Kill(0), Reattach, Kill(0), Authority(0, false), Frames(1), Frames(1), Frames(1), Frames(1), Authority(2909, true), Kill(0), RemoveSilently(35936), Frames(1), Kill(4707), Order(20555)]
