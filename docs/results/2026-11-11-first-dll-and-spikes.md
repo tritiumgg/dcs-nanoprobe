@@ -14,6 +14,7 @@
 Every value is LIVE on this build and platform unless a line says otherwise. No player
 was connected at any restart or during any run, except in E18. The probe suite and every
 experiment also ran on the Windows client ("On the Windows client").
+E25's server numbers, and the conclusion that most of their cost is Wine's, reflect the host's CPU power saving: see docs/results/2026-11-13-e25-cpu-idle.md.
 
 ## The agent
 

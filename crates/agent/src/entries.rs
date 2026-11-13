@@ -133,6 +133,9 @@ entries! {
     sock_open => work_sock_open;
     sock_frame => work_sock_frame, hot;
     sock_close => work_sock_close;
+    sys_open => work_sys_open;
+    sys_frame => work_sys_frame, hot;
+    sys_close => work_sys_close;
     map_open => work_map_open;
     map_frame => work_map_frame, hot;
     map_load => work_map_load, hot;
@@ -688,6 +691,92 @@ unsafe fn work_sock_frame(state: *mut State) -> c_int {
 unsafe fn work_sock_close(_state: *mut State) -> c_int {
     if let Ok(mut sockets) = SOCKETS.try_lock() {
         *sockets = None;
+    }
+    0
+}
+
+/// The listener for the system-call frame probe.
+static LISTENER: Mutex<Option<std::net::TcpListener>> = Mutex::new(None);
+
+/// `sys_open()`: a non-blocking loopback listener that no one connects to.
+unsafe fn work_sys_open(state: *mut State) -> c_int {
+    let listener = (|| -> std::io::Result<_> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
+        Ok(listener)
+    })();
+    match listener {
+        Ok(listener) => {
+            let Ok(mut slot) = LISTENER.try_lock() else {
+                // SAFETY: a live state from the entry, with the free slots Lua guarantees a C function.
+                return unsafe { fail(state, "busy") };
+            };
+            *slot = Some(listener);
+            // SAFETY: a live state with a free slot.
+            unsafe { lua::lua_pushboolean(state, 1) };
+            1
+        }
+        // SAFETY: as above.
+        Err(e) => unsafe { fail(state, &e.to_string()) },
+    }
+}
+
+/// `sys_frame()`: the pump's system-call frame with no sidecar connected,
+/// whose socket call is an `accept`; with one connected a `recv` replaces it,
+/// which `sock_frame(0)` measures. Times, as `driver::frame_with` makes them,
+/// an `accept` with nothing waiting, the kill-switch check, the reload check,
+/// a log flush holding one record and a log flush holding none. Returns the
+/// nanoseconds of each, then the accept's outcome: -1 is "would block".
+unsafe fn work_sys_frame(state: *mut State) -> c_int {
+    let Some(root) = state::root() else {
+        // SAFETY: a live state from the entry, with the free slots Lua guarantees a C function.
+        return unsafe { fail(state, "not configured") };
+    };
+    let Ok(slot) = LISTENER.try_lock() else {
+        // SAFETY: a live state from the entry, with the free slots Lua guarantees a C function.
+        return unsafe { fail(state, "busy") };
+    };
+    let Some(listener) = slot.as_ref() else {
+        // SAFETY: a live state from the entry, with the free slots Lua guarantees a C function.
+        return unsafe { fail(state, "no listener; call sys_open") };
+    };
+    let freq = platform::frequency() as f64;
+    let t0 = platform::ticks();
+    let accepted = listener.accept();
+    let t1 = platform::ticks();
+    let disable = root.join("disable").exists();
+    let t2 = platform::ticks();
+    let reload = root.join("reload").exists();
+    let t3 = platform::ticks();
+    state::log(Level::Debug, "sys_frame probe", &[]);
+    let t4 = platform::ticks();
+    state::flush_log();
+    let t5 = platform::ticks();
+    state::flush_log();
+    let t6 = platform::ticks();
+    std::hint::black_box((disable, reload));
+    let outcome = match accepted {
+        Ok(_) => 1.0,
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => -1.0,
+        Err(_) => -2.0,
+    };
+    let ns = |a: i64, b: i64| (b - a) as f64 * 1e9 / freq;
+    // SAFETY: a live state with six free slots.
+    unsafe {
+        lua::lua_pushnumber(state, ns(t0, t1));
+        lua::lua_pushnumber(state, ns(t1, t2));
+        lua::lua_pushnumber(state, ns(t2, t3));
+        lua::lua_pushnumber(state, ns(t4, t5));
+        lua::lua_pushnumber(state, ns(t5, t6));
+        lua::lua_pushnumber(state, outcome);
+    }
+    6
+}
+
+/// `sys_close()`: close the listener.
+unsafe fn work_sys_close(_state: *mut State) -> c_int {
+    if let Ok(mut slot) = LISTENER.try_lock() {
+        *slot = None;
     }
     0
 }

@@ -132,6 +132,27 @@ agent.sock_close()
 local nothing, socket_error = agent.sock_frame(1)
 assert(nothing == nil and socket_error, 'sock_frame without a pair did not fail')
 
+-- The system-call frame's other calls: an accept that would block, two
+-- checks for files that are absent, and two log flushes.
+assert(agent.sys_open() == true, 'sys_open failed')
+local before = #S.read(root .. 'logs/agent.log')
+for _ = 1, 5 do
+  local values = { agent.sys_frame() }
+  assert(#values == 6, 'sys_frame returned ' .. #values .. ' values')
+  local sum = 0
+  for i = 1, 5 do
+    assert(values[i] >= 0, 'a negative timing')
+    sum = sum + values[i]
+  end
+  assert(sum > 0, 'every timing is zero')
+  assert(values[4] > 0, 'the flush of one record took no time')
+  assert(values[6] == -1, 'the accept did not report would-block')
+end
+assert(#S.read(root .. 'logs/agent.log') > before, 'the flush wrote nothing')
+agent.sys_close()
+nothing, socket_error = agent.sys_frame()
+assert(nothing == nil and socket_error, 'sys_frame without a listener did not fail')
+
 -- The mapped file: the payload under the sequence lock, and the peer's words.
 local map = root .. 'status.map'
 assert(agent.map_open(map) == true, 'map_open failed')
