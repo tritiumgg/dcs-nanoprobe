@@ -8,41 +8,49 @@
 //! not been given, an object that should be gone) is corrected.
 //!
 //! Every transition and every sequenced command is journalled before the
-//! command that follows from it is written. The reconciler's own state is
-//! volatile: after a sidecar restart a new one is built from the store
-//! ([`Reconciler::new`]) and resolves the commands it finds unanswered at the
-//! agent's next `HELLO`.
+//! command that follows from it is written. The reconciler's own state,
+//! the binding mirror included, is volatile: after a sidecar restart a new
+//! one is built from the store ([`Reconciler::new`]), re-reads the binding
+//! from the agent's enumeration, and resolves the commands it finds
+//! unanswered at the agent's next `HELLO`.
+//!
+//! A death fact comes only from `OBJECT_GONE` with reason `DEAD`, which the
+//! agent writes only for rows of its table: units and statics, never
+//! scenery. `EVENT` records are hints and are counted, not read.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use nanoprobe_transport::codec::Lv;
-use nanoprobe_transport::layout::{gap_class, lifecycle as lc, result as rc};
-use nanoprobe_transport::records::{CommandHeader, CommandResult, Hello, Lifecycle};
+use nanoprobe_transport::layout::{gap_class, kind, lifecycle as lc, result as rc};
+use nanoprobe_transport::records::{CommandHeader, CommandResult, Hello};
 
 use crate::ids::{self, CampaignId, EntityId, NameKind};
-use crate::intents::{self, Compiled};
+use crate::intents::{self, Compiled, Intent};
 use crate::lifecycle::{State, Trigger};
 use crate::sim::wire::{Body, Command, Input, Object, ObjectGone, gone_reason, lv, opcode};
 use crate::sim::{RawRecord, SimAdapter};
 use crate::store::{
-    Authority, Binding, Entry, Journalled, Kind, Loaded, LostPolicy, Outcome, Point, Store,
-    UnitState,
+    Authority, Entry, Journalled, Kind, Loaded, LostPolicy, Outcome, Point, Store, UnitState,
 };
 
 /// The reconciler's settings (spec/config.md, `[world]`).
 #[derive(Clone, Copy, Debug)]
 pub struct Config {
-    /// Groups spawned per step.
-    pub materialize_per_step: usize,
+    /// Groups spawned per step; the sidecar steps once per frame it reads.
+    pub materialize_per_frame: usize,
     /// The default policy for a lost group.
     pub on_lost: LostPolicy,
+    /// Refused or unknown destroys of one entity before the reconciler stops
+    /// sending them: a dematerializing entity goes `lost`.
+    pub destroy_retries: u32,
 }
 
 impl Default for Config {
     fn default() -> Config {
         Config {
-            materialize_per_step: 1,
+            materialize_per_frame: 1,
             on_lost: LostPolicy::Report,
+            destroy_retries: 3,
         }
     }
 }
@@ -52,6 +60,8 @@ impl Default for Config {
 pub struct Counters {
     /// Records that did not decode.
     pub undecodable: u64,
+    /// Records of a kind the reconciler does not read.
+    pub other: u64,
     /// Results for no command the reconciler holds.
     pub stray_results: u64,
     /// Objects with a platform name of another campaign.
@@ -64,6 +74,44 @@ pub struct Counters {
     pub enumerations_discarded: u64,
     /// `EVENT` records read.
     pub events: u64,
+    /// Records about an entity already `dead`, which change nothing.
+    pub after_dead: u64,
+    /// `OBJECT` and `OBJECT_GONE` records stamped with another campaign than
+    /// the store's (campaign 0 included): their binding names no entity of
+    /// this campaign, and they are dropped.
+    pub other_campaign: u64,
+    /// `OBJECT_GONE` records whose binding names no unit of the group it
+    /// gives.
+    pub bad_binding: u64,
+}
+
+impl Counters {
+    /// Add another reconciler's counts.
+    pub fn add(&mut self, o: Counters) {
+        self.undecodable += o.undecodable;
+        self.other += o.other;
+        self.stray_results += o.stray_results;
+        self.foreign += o.foreign;
+        self.unmanaged += o.unmanaged;
+        self.enumerations += o.enumerations;
+        self.enumerations_discarded += o.enumerations_discarded;
+        self.events += o.events;
+        self.after_dead += o.after_dead;
+        self.bad_binding += o.bad_binding;
+        self.other_campaign += o.other_campaign;
+    }
+}
+
+/// One row of the binding mirror: a DCS object of the loaded mission and the
+/// entities it is bound to (plan 4.4, "Binding").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Binding {
+    /// The unit, or the static.
+    pub unit: EntityId,
+    /// Its group, or the static.
+    pub group: EntityId,
+    /// The DCS group ID, 0 for a static.
+    pub dcs_group: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -87,7 +135,12 @@ pub struct Reconciler {
     epoch: u64,
     next_seq: u64,
     lifecycle: u32,
+    /// The agent boot, generation and active campaign of the last `FRAME`,
+    /// replays included, which stamp the records after it.
+    stamp: (u64, u32, u64),
     inflight: BTreeMap<(u64, u64), Journalled>,
+    /// The binding mirror, by DCS object ID, for the loaded mission.
+    binding: HashMap<u64, Binding>,
     run: Option<EnumRun>,
     enum_wanted: bool,
     /// The order revision the agent holds per group, as far as the reconciler
@@ -95,6 +148,12 @@ pub struct Reconciler {
     order_held: HashMap<EntityId, u64>,
     /// An order revision DCS refused; not sent again until it changes.
     order_refused: HashMap<EntityId, u64>,
+    /// Drift destroys (of an entity DCS should not hold) refused or unknown,
+    /// by entity, in the loaded generation. At the limit they stop.
+    drift_destroy_failures: HashMap<EntityId, u32>,
+    /// A spawn the agent rejected with a code that a resend cannot fix, by
+    /// spec revision and generation; not sent again until either changes.
+    spawn_rejected: HashMap<EntityId, (u64, u32)>,
     /// `CAMPAIGN` was written since the last `HELLO`.
     campaign_sent: bool,
     counters: Counters,
@@ -109,6 +168,15 @@ fn classify(code: u16, opcode: u16) -> Outcome {
         rc::DUPLICATE => Outcome::Unknown,
         _ => Outcome::Rejected,
     }
+}
+
+/// Whether a rejection means the command is fine and only its moment was
+/// wrong: derive it again under the current epoch (spec/errors.md).
+fn rejected_for_now(code: u16) -> bool {
+    matches!(
+        u64::from(code),
+        rc::STALE_EPOCH | rc::WRONG_CAMPAIGN | rc::WRONG_GENERATION
+    )
 }
 
 impl Reconciler {
@@ -126,11 +194,15 @@ impl Reconciler {
             epoch: 0,
             next_seq: 1,
             lifecycle: 0,
+            stamp: (0, 0, 0),
             inflight,
+            binding: HashMap::new(),
             run: None,
             enum_wanted: false,
             order_held: HashMap::new(),
             order_refused: HashMap::new(),
+            drift_destroy_failures: HashMap::new(),
+            spawn_rejected: HashMap::new(),
             campaign_sent: false,
             counters: Counters::default(),
         }
@@ -139,6 +211,11 @@ impl Reconciler {
     /// What the reconciler counted.
     pub fn counters(&self) -> Counters {
         self.counters
+    }
+
+    /// The binding mirror, by DCS object ID.
+    pub fn binding(&self) -> &HashMap<u64, Binding> {
+        &self.binding
     }
 
     /// Whether the reconciler is attached and DCS runs a mission it may
@@ -167,7 +244,25 @@ impl Reconciler {
     }
 
     /// Fold one record into the store. The replay driver calls this directly.
+    /// A record read twice is dropped by the link before it gets here
+    /// (crates/sidecar/src/link.rs, `Sink::last_number`).
     pub fn record(&mut self, store: &mut Store, r: &RawRecord) {
+        // A sidecar that started without its store knows no loaded
+        // mission. It takes the one the stamps name, replayed stamps
+        // included, and reads on in order: a record the agent queued while
+        // detached belongs to the mission it was made in.
+        let stamped = !matches!(
+            u64::from(r.kind),
+            kind::FRAME | kind::HELLO | kind::LIFECYCLE | kind::RESULT | kind::GAP
+        );
+        if stamped && store.loaded().is_none() && self.stamp.0 == r.agent_boot && r.agent_boot != 0
+        {
+            self.seen_mission(store, self.stamp.0, self.stamp.1, None);
+        }
+        self.fold(store, r);
+    }
+
+    fn fold(&mut self, store: &mut Store, r: &RawRecord) {
         let input = match Input::decode(r.kind, &r.payload) {
             Ok(i) => i,
             Err(_) => {
@@ -177,13 +272,21 @@ impl Reconciler {
         };
         match input {
             Input::Frame(f) => {
-                store.set_stamp(r.agent_boot, f.mission_gen);
-                if f.replay == 0 && r.agent_boot == self.agent_boot {
-                    self.lifecycle = f.lifecycle;
+                self.stamp = (r.agent_boot, f.mission_gen, f.campaign);
+                if f.replay == 0 {
+                    if r.agent_boot == self.agent_boot || self.agent_boot == 0 {
+                        self.lifecycle = f.lifecycle;
+                    }
+                    self.seen_mission(store, r.agent_boot, f.mission_gen, None);
                 }
             }
             Input::Hello(h) => self.hello(store, r.agent_boot, &h),
-            Input::Lifecycle(l) => self.lifecycle(store, r.agent_boot, &l),
+            Input::Lifecycle(l) => {
+                if r.agent_boot == self.agent_boot || self.agent_boot == 0 {
+                    self.lifecycle = l.state;
+                }
+                self.seen_mission(store, r.agent_boot, l.mission_gen, Some(&l.theater));
+            }
             Input::Result(res) => self.result(store, &res),
             Input::Gap(g) => {
                 if u64::from(g.class) == gap_class::EVENTS {
@@ -207,10 +310,12 @@ impl Reconciler {
                 if self.current(store, r.agent_boot) {
                     self.run = Some(EnumRun {
                         id: e.enumeration,
-                        before: store.binding().keys().copied().collect(),
+                        before: self.binding.keys().copied().collect(),
                         found: BTreeSet::new(),
                         count: 0,
-                        gap: false,
+                        // An enumeration made under another campaign says
+                        // nothing of this campaign's objects.
+                        gap: self.stamp.2 != store.campaign().0,
                     });
                 }
             }
@@ -222,15 +327,13 @@ impl Reconciler {
             Input::Positions(rows) => {
                 if self.current(store, r.agent_boot) {
                     for p in rows {
-                        if let Some(unit) = store.binding().get(&p.object).map(|b| b.unit) {
-                            store.observe_position(
-                                unit,
-                                Point {
-                                    x: p.x,
-                                    y: p.y,
-                                    z: p.z,
-                                },
-                            );
+                        if let Some(b) = self.binding.get(&p.object) {
+                            let at = Point {
+                                x: p.x,
+                                y: p.y,
+                                z: p.z,
+                            };
+                            store.observe_position(b.unit, at);
                         }
                     }
                 }
@@ -238,23 +341,82 @@ impl Reconciler {
             Input::Vitals(rows) => {
                 if self.current(store, r.agent_boot) {
                     for v in rows {
-                        if let Some(unit) = store.binding().get(&v.object).map(|b| b.unit) {
-                            store.observe_vitals(unit, v.life, v.fuel);
+                        if let Some(b) = self.binding.get(&v.object) {
+                            store.observe_vitals(b.unit, v.life, v.fuel);
                         }
                     }
                 }
             }
             Input::Event(_) => self.counters.events += 1,
-            Input::Other(_) => {}
+            Input::Other(_) => self.counters.other += 1,
         }
     }
 
     /// Whether a record stamped with the last `FRAME` belongs to the loaded
     /// mission. Records of an older generation are ignored (spec/records.md).
     fn current(&self, store: &Store, agent_boot: u64) -> bool {
-        store.loaded().is_some_and(|l| {
-            l.agent_boot == agent_boot && (agent_boot, l.mission_gen) == store.stamp()
-        })
+        self.stamp.0 == agent_boot
+            && store
+                .loaded()
+                .is_some_and(|l| l.agent_boot == agent_boot && l.mission_gen == self.stamp.1)
+    }
+
+    /// A `LIFECYCLE`, or a `FRAME` that is not a replay, names the loaded
+    /// mission. A `FRAME` carries no theater; a sidecar that started without
+    /// its store learns the theater from the next `LIFECYCLE`.
+    fn seen_mission(
+        &mut self,
+        store: &mut Store,
+        agent_boot: u64,
+        mission_gen: u32,
+        theater: Option<&str>,
+    ) {
+        if let Some(l) = store.loaded()
+            && l.agent_boot == agent_boot
+            && l.mission_gen == mission_gen
+        {
+            if let Some(t) = theater
+                && !t.is_empty()
+                && t != l.theater
+            {
+                store.set_loaded(Loaded {
+                    agent_boot,
+                    mission_gen,
+                    theater: t.to_owned(),
+                });
+            }
+            return;
+        }
+        // A new mission generation: DCS holds none of the platform's objects
+        // and the agent has forgotten every applied revision.
+        let theater = theater.unwrap_or("").to_owned();
+        store.set_loaded(Loaded {
+            agent_boot,
+            mission_gen,
+            theater: theater.clone(),
+        });
+        self.binding.clear();
+        self.order_held.clear();
+        self.order_refused.clear();
+        self.spawn_rejected.clear();
+        self.drift_destroy_failures.clear();
+        self.run = None;
+        store.clear_missing();
+        let ids: Vec<EntityId> = store.groups().map(|g| g.id).collect();
+        for id in ids {
+            let g = store.group(id).expect("group");
+            // Materializing again needs DCS authority as well as the theater.
+            let same_theater =
+                !theater.is_empty() && g.theater == theater && g.authority == Authority::Sim;
+            if matches!(
+                g.state,
+                State::Live | State::Materializing | State::Lost | State::Dematerializing
+            ) {
+                store
+                    .transition(id, Trigger::NewGeneration { same_theater })
+                    .expect("the table holds every generation change");
+            }
+        }
     }
 
     fn hello(&mut self, store: &mut Store, agent_boot: u64, h: &Hello) {
@@ -276,55 +438,18 @@ impl Reconciler {
             self.epoch = epoch;
             self.next_seq = 1;
         }
-        if h.agent_boot != self.agent_boot {
-            // A new DCS process: it holds nothing of what this one knew. Its
-            // LIFECYCLE records empty the binding mirror.
+        if h.agent_boot != self.agent_boot || h.campaign != store.campaign().0 {
+            // A new DCS process holds nothing this one knew. An agent on
+            // another campaign discards the binding and every applied
+            // revision when this sidecar's CAMPAIGN reaches it.
+            self.binding.clear();
             self.order_held.clear();
+            self.order_refused.clear();
             self.run = None;
         }
         self.agent_boot = agent_boot;
         self.attached = true;
         self.campaign_sent = false;
-    }
-
-    fn lifecycle(&mut self, store: &mut Store, agent_boot: u64, l: &Lifecycle) {
-        if agent_boot == self.agent_boot || self.agent_boot == 0 {
-            self.lifecycle = l.state;
-        }
-        let seen = Loaded {
-            agent_boot,
-            mission_gen: l.mission_gen,
-            theater: l.theater.clone(),
-        };
-        let same = store
-            .loaded()
-            .is_some_and(|x| x.agent_boot == agent_boot && x.mission_gen == l.mission_gen);
-        if same {
-            if store.loaded().is_some_and(|x| x.theater != l.theater) && !l.theater.is_empty() {
-                store.set_loaded(seen);
-            }
-            return;
-        }
-        // A new mission generation: DCS holds none of the platform's objects
-        // and the agent has forgotten every applied revision.
-        store.set_loaded(seen);
-        self.order_held.clear();
-        self.order_refused.clear();
-        self.run = None;
-        store.clear_missing();
-        let ids: Vec<EntityId> = store.groups().map(|g| g.id).collect();
-        for id in ids {
-            let g = store.group(id).expect("group");
-            let same_theater = g.theater == l.theater;
-            if matches!(
-                g.state,
-                State::Live | State::Materializing | State::Lost | State::Dematerializing
-            ) {
-                store
-                    .transition(id, Trigger::NewGeneration { same_theater })
-                    .expect("the table holds every generation change");
-            }
-        }
     }
 
     fn resolve(
@@ -346,7 +471,12 @@ impl Reconciler {
         let gen_now = store
             .loaded()
             .is_some_and(|l| l.agent_boot == c.agent_boot && l.mission_gen == c.mission_gen);
-        let (id, state, spec_rev) = (g.id, g.state, g.spec_rev);
+        let (id, state, spec_rev, captured) = (g.id, g.state, g.spec_rev, g.captured);
+        if state == State::Dead {
+            self.counters.after_dead += 1;
+            return;
+        }
+        let code = res.map(|r| u64::from(r.code));
         match c.opcode {
             opcode::GROUP_SPAWN | opcode::STATIC_SPAWN => {
                 if !gen_now || state != State::Materializing || c.rev != spec_rev {
@@ -354,11 +484,32 @@ impl Reconciler {
                 }
                 match outcome {
                     Outcome::Applied => {
-                        if res.is_some_and(|r| u64::from(r.code) == rc::APPLIED) {
-                            // A new group has no task, and an order refused
-                            // for the old one may suit it.
-                            self.order_held.remove(&id);
-                            self.order_refused.remove(&id);
+                        // The group may be new, even when the answer is
+                        // AT_REVISION to a resend of a spawn whose result was
+                        // lost: a new group has no task, and an order refused
+                        // for the old one may suit it. Sending the order again
+                        // costs at most an AT_REVISION.
+                        self.order_held.remove(&id);
+                        self.order_refused.remove(&id);
+                        // Spawned again in the same generation, the entity
+                        // has new DCS object IDs: an attack order on it is
+                        // compiled again at a new revision. After a
+                        // generation change every order is sent again anyway.
+                        if store
+                            .spawned(id, c.agent_boot, c.mission_gen)
+                            .expect("group")
+                        {
+                            let attackers: Vec<EntityId> = store
+                                .groups()
+                                .filter(|a| {
+                                    a.order_rev > 0
+                                        && matches!(a.order, Some(Intent::Attack { target }) if target == id)
+                                })
+                                .map(|a| a.id)
+                                .collect();
+                            for a in attackers {
+                                store.bump_order(a).expect("group");
+                            }
                         }
                         store
                             .transition(id, Trigger::SpawnApplied)
@@ -376,10 +527,20 @@ impl Reconciler {
                     }
                     Outcome::Unknown => {
                         store
+                            .spawn_unknown(id, c.agent_boot, c.mission_gen)
+                            .expect("group");
+                        store
                             .transition(id, Trigger::SpawnUnknown)
                             .expect("materializing");
                     }
-                    Outcome::Rejected | Outcome::NotSent => {}
+                    Outcome::Rejected => {
+                        if let Some(r) = res
+                            && !rejected_for_now(r.code)
+                        {
+                            self.spawn_rejected.insert(id, (c.rev, c.mission_gen));
+                        }
+                    }
+                    Outcome::NotSent => {}
                 }
             }
             opcode::GROUP_ORDER => {
@@ -405,28 +566,58 @@ impl Reconciler {
                     // Not tried: the next plan sends it again.
                     return;
                 }
-                if outcome == Outcome::Applied
+                if code == Some(rc::APPLIED)
                     && let Some(r) = res
-                    && u64::from(r.code) == rc::APPLIED
                 {
                     self.take_capture(store, id, &r.value);
                 }
-                if c.opcode == opcode::GROUP_CAPTURE_DESTROY
-                    && outcome == Outcome::Applied
-                    && res.is_some_and(|r| u64::from(r.code) != rc::TOO_LARGE)
-                {
-                    unbind_group(store, id);
+                // The capture is settled: the captured state, or else the
+                // last checkpointed one. A capture-and-destroy that ran in
+                // full also removed the group; anything else leaves a
+                // destroy to send (spec/errors.md).
+                store.set_captured(id).expect("group");
+                if c.opcode == opcode::GROUP_CAPTURE_DESTROY && code == Some(rc::APPLIED) {
+                    self.order_held.remove(&id);
+                    unbind_group(&mut self.binding, id);
+                    store
+                        .transition(id, Trigger::CaptureDone)
+                        .expect("dematerializing");
                 }
-                // Otherwise the last checkpointed state stands, and any object
-                // still bound is destroyed by the plan.
-                store
-                    .transition(id, Trigger::CaptureDone)
-                    .expect("dematerializing");
             }
-            opcode::GROUP_DESTROY | opcode::STATIC_DESTROY
-                if gen_now && outcome == Outcome::Applied =>
-            {
-                unbind_group(store, id);
+            opcode::GROUP_DESTROY | opcode::STATIC_DESTROY if gen_now => {
+                // APPLIED, or NOT_BOUND: DCS no longer holds the entity.
+                let gone = outcome == Outcome::Applied || code == Some(rc::NOT_BOUND);
+                if gone {
+                    // The agent sets the applied revisions of what it
+                    // destroyed to 0 (spec/commands.md).
+                    self.order_held.remove(&id);
+                    unbind_group(&mut self.binding, id);
+                    self.drift_destroy_failures.remove(&id);
+                    if state == State::Dematerializing && captured {
+                        store
+                            .transition(id, Trigger::CaptureDone)
+                            .expect("dematerializing");
+                    }
+                } else if matches!(outcome, Outcome::Refused | Outcome::Unknown) {
+                    // Sent again, safely (destroying nothing is APPLIED),
+                    // up to the limit.
+                    let limit = self.cfg.destroy_retries;
+                    if state == State::Dematerializing {
+                        if store.destroy_failed(id).expect("group") >= limit {
+                            let msg = res.map_or("the destroy's result was lost".to_owned(), |r| {
+                                r.message.clone()
+                            });
+                            store
+                                .set_error(id, format!("destroy failed {limit} times: {msg}"))
+                                .expect("group");
+                            store
+                                .transition(id, Trigger::DestroyFailed)
+                                .expect("dematerializing");
+                        }
+                    } else {
+                        *self.drift_destroy_failures.entry(id).or_default() += 1;
+                    }
+                }
             }
             _ => {}
         }
@@ -473,15 +664,14 @@ impl Reconciler {
         };
         let outcome = classify(r.code, c.opcode);
         self.resolve(store, &c, outcome, Some(r));
-        if c.opcode == opcode::GROUP_SPAWN
-            && outcome == Outcome::Applied
-            && r.object != 0
-            && let Some(row) = store
-                .binding_mut()
+        if c.opcode == opcode::GROUP_SPAWN && outcome == Outcome::Applied && r.object != 0 {
+            for row in self
+                .binding
                 .values_mut()
-                .find(|row| row.group == c.entity)
-        {
-            row.dcs_group = r.object;
+                .filter(|row| row.group == c.entity)
+            {
+                row.dcs_group = r.object;
+            }
         }
     }
 
@@ -516,30 +706,103 @@ impl Reconciler {
     }
 
     fn object(&mut self, store: &mut Store, o: &Object) {
+        let other = self.stamp.2 != store.campaign().0;
         if let Some(run) = &mut self.run
             && o.enumeration == run.id
         {
             run.found.insert(o.object);
             run.count += 1;
+            run.gap |= other;
+        }
+        if other {
+            // Made while another campaign was the agent's: its binding is
+            // that campaign's (spec/world.md, death facts).
+            self.counters.other_campaign += 1;
+            return;
         }
         let Some(row) = self.resolve_object(store, o) else {
             return;
         };
         store.set_missing(row.unit, false);
-        store.binding_mut().insert(o.object, row);
+        self.binding.insert(o.object, row);
+    }
+
+    /// The unit and group an `OBJECT_GONE` is about: from the binding it
+    /// carries, which must name a unit of that group (or a static, with no
+    /// group), else from the mirror.
+    fn gone_identity(
+        &mut self,
+        store: &Store,
+        g: &ObjectGone,
+        row: Option<Binding>,
+    ) -> Option<(EntityId, EntityId)> {
+        if g.entity == 0 {
+            return row.map(|b| (b.unit, b.group));
+        }
+        let unit = EntityId(g.entity);
+        let group = store.unit(unit).map(|u| u.group);
+        let want = if g.group_entity == 0 {
+            unit
+        } else {
+            EntityId(g.group_entity)
+        };
+        if group == Some(want) {
+            Some((unit, want))
+        } else {
+            self.counters.bad_binding += 1;
+            None
+        }
     }
 
     fn gone(&mut self, store: &mut Store, g: ObjectGone) {
-        let Some(row) = store.binding_mut().remove(&g.object) else {
+        let row = self.binding.remove(&g.object);
+        if self.stamp.2 != store.campaign().0 {
+            self.counters.other_campaign += 1;
+            if let Some(run) = &mut self.run {
+                run.gap = true;
+            }
+            return;
+        }
+        let Some((unit, group)) = self.gone_identity(store, &g, row) else {
             return;
         };
+        let state = store.group(group).expect("group").state;
         match g.reason {
+            gone_reason::DEAD if state == State::Dead => self.counters.after_dead += 1,
             gone_reason::DEAD => {
-                if store.death(row.unit).unwrap_or(false) && store.all_dead(row.group) {
-                    let _ = store.transition(row.group, Trigger::AllDead);
+                if !store.death(unit).unwrap_or(false) || !store.all_dead(group) {
+                    return;
+                }
+                // A death fact while the spawn is unanswered shows the spawn
+                // ran: resolve it applied.
+                let pending: Vec<Journalled> = if state == State::Materializing {
+                    let loaded = store.loaded().cloned();
+                    self.inflight
+                        .values()
+                        .filter(|c| {
+                            c.entity == group
+                                && matches!(c.opcode, opcode::GROUP_SPAWN | opcode::STATIC_SPAWN)
+                                && loaded.as_ref().is_some_and(|l| {
+                                    l.agent_boot == c.agent_boot && l.mission_gen == c.mission_gen
+                                })
+                        })
+                        .cloned()
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                if store.transition(group, Trigger::AllDead).is_ok() {
+                    for c in pending {
+                        self.inflight.remove(&(c.epoch, c.seq));
+                        store.journal(Entry::Outcome {
+                            epoch: c.epoch,
+                            seq: c.seq,
+                            outcome: Outcome::Applied,
+                        });
+                    }
                 }
             }
-            gone_reason::MISSING | gone_reason::REMOVED => store.set_missing(row.unit, true),
+            gone_reason::MISSING | gone_reason::REMOVED => store.set_missing(unit, true),
             _ => {}
         }
     }
@@ -555,19 +818,30 @@ impl Reconciler {
             return;
         }
         self.counters.enumerations += 1;
-        // The agent's rule, applied to the binding: a row bound at the start
+        // A drift destroy that reached its limit is tried again after each
+        // enumeration that still finds the objects.
+        self.drift_destroy_failures.clear();
+        // The agent's rule, applied to the mirror: a row bound at the start
         // and not found is missing.
         for o in run.before.difference(&run.found) {
-            if let Some(row) = store.binding_mut().remove(o) {
+            if let Some(row) = self.binding.remove(o) {
                 store.set_missing(row.unit, true);
             }
         }
-        let mut found: BTreeSet<EntityId> = BTreeSet::new();
-        for row in store.binding().values() {
-            found.insert(row.group);
-        }
+        let found: BTreeSet<EntityId> = self.binding.values().map(|r| r.group).collect();
+        let bound_units: BTreeSet<EntityId> = self.binding.values().map(|r| r.unit).collect();
         let ids: Vec<(EntityId, State)> = store.groups().map(|g| (g.id, g.state)).collect();
         for (id, state) in ids {
+            if state == State::Live {
+                // A member the agent's table does not hold is missing, even
+                // one the mirror never saw: its OBJECT may have been lost
+                // to a GAP.
+                for m in store.group(id).expect("group").members.clone() {
+                    if !bound_units.contains(&m) {
+                        store.set_missing(m, true);
+                    }
+                }
+            }
             match state {
                 State::Live if !found.contains(&id) && !store.all_dead(id) => {
                     for m in store.group(id).expect("group").members.clone() {
@@ -578,6 +852,7 @@ impl Reconciler {
                 State::Lost if found.contains(&id) => {
                     store.transition(id, Trigger::EnumFound).expect("lost");
                 }
+                State::Dead if found.contains(&id) => self.counters.after_dead += 1,
                 _ => {}
             }
         }
@@ -678,31 +953,27 @@ impl Reconciler {
             }
             self.enum_wanted = false;
         }
-        let theater = store.loaded().expect("ready").theater.clone();
+        let loaded = store.loaded().expect("ready").clone();
         let mut bound: HashMap<EntityId, u64> = HashMap::new();
-        for row in store.binding().values() {
+        for row in self.binding.values() {
             let e = bound.entry(row.group).or_default();
             if row.dcs_group != 0 {
                 *e = row.dcs_group;
             }
         }
-        let mut spawns = self.cfg.materialize_per_step;
+        let mut spawns = self.cfg.materialize_per_frame;
         let ids: Vec<EntityId> = store.groups().map(|g| g.id).collect();
         for id in ids {
             if !self.attached {
                 return;
             }
             let g = store.group(id).expect("group");
-            let here = g.theater == theater;
+            let here = g.theater == loaded.theater;
             let has_objects = bound.contains_key(&id);
             match g.state {
-                State::Virtual | State::Dead | State::Unspawnable | State::Lost if has_objects => {
+                State::Virtual | State::Dead | State::Unspawnable if has_objects => {
                     // Drift: DCS holds objects of an entity it should not.
-                    // A lost group with objects is settled by the next
-                    // enumeration, not destroyed.
-                    if g.state != State::Lost {
-                        self.destroy(store, sim, id);
-                    }
+                    self.destroy(store, sim, id);
                 }
                 State::Virtual => {
                     if g.authority == Authority::Sim && here && spawns > 0 {
@@ -712,9 +983,25 @@ impl Reconciler {
                         }
                     }
                 }
+                State::Materializing
+                    if (g.authority == Authority::Campaign || !here)
+                        && g.unknown_spawn_in != Some((loaded.agent_boot, loaded.mission_gen))
+                        && !self.inflight_for(
+                            store,
+                            id,
+                            &[opcode::GROUP_SPAWN, opcode::STATIC_SPAWN],
+                        ) =>
+                {
+                    store
+                        .transition(id, Trigger::Withdraw)
+                        .expect("materializing");
+                }
                 State::Materializing => {
+                    let rejected =
+                        self.spawn_rejected.get(&id) == Some(&(g.spec_rev, loaded.mission_gen));
                     if here
                         && spawns > 0
+                        && !rejected
                         && !self.inflight_for(
                             store,
                             id,
@@ -734,7 +1021,9 @@ impl Reconciler {
                     }
                 }
                 State::Dematerializing => {
-                    if !self.inflight_for(
+                    if g.captured {
+                        self.destroy(store, sim, id);
+                    } else if !self.inflight_for(
                         store,
                         id,
                         &[opcode::GROUP_CAPTURE_DESTROY, opcode::CAPTURE],
@@ -742,13 +1031,16 @@ impl Reconciler {
                         self.dematerialize(store, sim, id);
                     }
                 }
+                // A lost group with objects is settled by the next
+                // enumeration, not destroyed.
                 State::Lost => match g.on_lost.unwrap_or(self.cfg.on_lost) {
                     LostPolicy::Report => {}
                     LostPolicy::Respawn => {
-                        // The agent still holds the spawn's revision for this
-                        // generation, so a respawn needs a new one.
-                        store.bump_spec(id).expect("group");
-                        store.transition(id, Trigger::PolicyRespawn).expect("lost");
+                        // Objects still bound (a destroy that failed to its
+                        // limit) are settled by the next enumeration first.
+                        if g.authority == Authority::Sim && here && !has_objects {
+                            store.respawn(id).expect("lost");
+                        }
                     }
                     LostPolicy::Dead => {
                         store.transition(id, Trigger::PolicyDead).expect("lost");
@@ -761,7 +1053,9 @@ impl Reconciler {
 
     fn destroy(&mut self, store: &mut Store, sim: &mut dyn SimAdapter, id: EntityId) {
         let ops = [opcode::GROUP_DESTROY, opcode::STATIC_DESTROY];
-        if self.inflight_for(store, id, &ops) {
+        let given_up =
+            self.drift_destroy_failures.get(&id).copied().unwrap_or(0) >= self.cfg.destroy_retries;
+        if given_up || self.inflight_for(store, id, &ops) {
             return;
         }
         let body = match store.group(id).expect("group").kind {
@@ -799,20 +1093,27 @@ impl Reconciler {
                 let units = living
                     .iter()
                     .map(|u| {
-                        lv::obj(vec![
+                        let mut t = vec![
                             ("name", lv::s(&ids::name(NameKind::Unit, campaign, u.id))),
                             ("type", lv::s(&u.type_name)),
                             ("x", lv::n(u.state.at.x)),
                             ("y", lv::n(u.state.at.z)),
                             ("alt", lv::n(u.state.at.y)),
                             ("heading", lv::n(u.state.heading)),
-                        ])
+                        ];
+                        if !u.skill.is_empty() {
+                            t.push(("skill", lv::s(&u.skill)));
+                        }
+                        with_extra(lv::obj(t), &u.extra)
                     })
                     .collect();
                 Body::GroupSpawn {
                     country: g.country,
                     category: g.category,
-                    group: lv::obj(vec![("name", lv::s(&name)), ("units", lv::list(units))]),
+                    group: with_extra(
+                        lv::obj(vec![("name", lv::s(&name)), ("units", lv::list(units))]),
+                        &g.extra,
+                    ),
                     name,
                 }
             }
@@ -821,13 +1122,16 @@ impl Reconciler {
                 let name = ids::name(NameKind::Static, campaign, id);
                 Body::StaticSpawn {
                     country: g.country,
-                    table: lv::obj(vec![
-                        ("name", lv::s(&name)),
-                        ("type", lv::s(&u.type_name)),
-                        ("x", lv::n(u.state.at.x)),
-                        ("y", lv::n(u.state.at.z)),
-                        ("heading", lv::n(u.state.heading)),
-                    ]),
+                    table: with_extra(
+                        lv::obj(vec![
+                            ("name", lv::s(&name)),
+                            ("type", lv::s(&u.type_name)),
+                            ("x", lv::n(u.state.at.x)),
+                            ("y", lv::n(u.state.at.z)),
+                            ("heading", lv::n(u.state.heading)),
+                        ]),
+                        &u.extra,
+                    ),
                     name,
                 }
             }
@@ -844,12 +1148,13 @@ impl Reconciler {
     ) {
         let g = store.group(id).expect("group");
         let Some(intent) = &g.order else { return };
+        if g.kind != Kind::Group || self.inflight_for(store, id, &[opcode::GROUP_ORDER]) {
+            return;
+        }
+        let target_now = |t: EntityId| bound.get(&t).copied().filter(|v| *v != 0);
         let rev = g.order_rev;
-        if g.kind != Kind::Group
-            || self.order_held.get(&id).copied().unwrap_or(0) >= rev
-            || self.order_refused.get(&id) == Some(&rev)
-            || self.inflight_for(store, id, &[opcode::GROUP_ORDER])
-        {
+        let held = self.order_held.get(&id).copied().unwrap_or(0);
+        if held >= rev || self.order_refused.get(&id) == Some(&rev) {
             return;
         }
         let lead = g
@@ -861,9 +1166,7 @@ impl Reconciler {
             at: lead.map(|u| (u.state.at.x, u.state.at.z)),
             progress: g.progress,
         };
-        match intents::compile(intent, status, |t| {
-            bound.get(&t).copied().filter(|v| *v != 0)
-        }) {
+        match intents::compile(intent, status, target_now) {
             Compiled::Task(task) => {
                 self.send(store, sim, id, rev, Body::GroupOrder(task));
             }
@@ -875,8 +1178,24 @@ impl Reconciler {
     }
 }
 
-fn unbind_group(store: &mut Store, id: EntityId) {
-    store.binding_mut().retain(|_, r| r.group != id);
+/// A DCS table with the author's further keys added. A key the platform
+/// sets (name, type, position, heading, units, skill) keeps the platform's
+/// value: the platform's names are how it finds its objects again.
+fn with_extra(table: Lv, extra: &Lv) -> Lv {
+    let (Lv::Table(mut pairs), Lv::Table(more)) = (table.clone(), extra) else {
+        // No further keys (nil), or a value that is not a table.
+        return table;
+    };
+    for (k, v) in more {
+        if !pairs.iter().any(|(pk, _)| pk == k) {
+            pairs.push((k.clone(), v.clone()));
+        }
+    }
+    Lv::Table(pairs)
+}
+
+fn unbind_group(binding: &mut HashMap<u64, Binding>, id: EntityId) {
+    binding.retain(|_, r| r.group != id);
 }
 
 /// The units a spawn's group table names, by their platform names.
@@ -897,4 +1216,23 @@ fn unit_names(group: &Lv, campaign: CampaignId, key: &str) -> Vec<EntityId> {
 /// The outcome a result code gives a command of an opcode.
 pub fn outcome_of(code: u16, opcode: u16) -> Outcome {
     classify(code, opcode)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn further_keys_join_a_table_and_never_replace_the_platform_s() {
+        let base = lv::obj(vec![("name", lv::s("np.u.1.2")), ("type", lv::s("M-113"))]);
+        let extra = lv::obj(vec![
+            ("name", lv::s("mine")),
+            ("livery_id", lv::s("desert")),
+        ]);
+        let t = with_extra(base.clone(), &extra);
+        assert_eq!(lv::str_at(&t, "name").as_deref(), Some("np.u.1.2"));
+        assert_eq!(lv::str_at(&t, "livery_id").as_deref(), Some("desert"));
+        assert_eq!(with_extra(base.clone(), &Lv::Nil), base);
+        assert_eq!(with_extra(base.clone(), &Lv::Number(1.0)), base);
+    }
 }

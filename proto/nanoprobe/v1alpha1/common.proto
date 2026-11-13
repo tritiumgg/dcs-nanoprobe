@@ -91,7 +91,9 @@ enum Outcome {
   OUTCOME_REJECTED = 3;
   // The agent handled it and the result was lost.
   OUTCOME_UNKNOWN = 4;
-  // An effect that never reached the agent. It is not sent again.
+  // A command that is not a control command and that the agent never took.
+  // An effect or a client's query is not sent again. For a set-state call the
+  // store still drives the state: watch the entity's revision.
   OUTCOME_NOT_SENT = 5;
   // Journalled, not yet sent or not yet answered.
   OUTCOME_PENDING = 6;

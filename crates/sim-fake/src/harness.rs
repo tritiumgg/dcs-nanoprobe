@@ -10,30 +10,37 @@
 //!
 //! Safety, checked on every command and after every frame:
 //!
-//! - A sequenced command and the transition that led to it are journalled
-//!   before the command is written.
+//! - A sequenced command is journalled, with its inbound position, before it
+//!   is written, and the transition that led to it before that: a sidecar
+//!   that dies in the middle of a write ([`Op::SidecarCrashInWrite`]) keeps
+//!   only what it journalled first, and every command DCS took must be in
+//!   the journal.
 //! - A spawn never includes a unit with a death fact.
 //! - No spawn replaces a group DCS still holds (no duplicate group).
-//! - No order revision reaches DCS twice in one mission generation.
-//! - Every death fact is a death that happened.
-//! - `dead` is final.
+//! - Every death fact is a death that happened; `dead` is final.
+//! - Every outcome matches what the agent did: `not_sent` was never taken,
+//!   `unknown` was taken unless its agent boot is gone, and `applied` was
+//!   taken, or is a spawn of a revision DCS applied in that generation.
+//! - One epoch never spans two agent boots.
 //!
-//! Convergence, after [`World::settle`]: every entity under DCS authority is
-//! `live`, `dead`, `unspawnable` or `lost`; a `live` group is in DCS with
-//! exactly its members that have neither a death fact nor a missing mark,
-//! and its order applied; nothing else of the campaign is in DCS.
+//! Convergence, after [`World::settle`]: every entity is `live`, `dead`,
+//! `unspawnable`, `lost` or `virtual`, each with a cause; a `live` group is
+//! in DCS with exactly its members that have neither a death fact nor a
+//! missing mark, holding its order, and an attack order names its target's
+//! current DCS group; no entity outside `dead` has every member dead; and
+//! nothing else of the campaign is in DCS.
 
 use std::collections::BTreeSet;
 
 use nanoprobe_sidecar::ids::{CampaignId, EntityId};
 use nanoprobe_sidecar::intents::{self, Compiled, Intent, Waypoint};
 use nanoprobe_sidecar::lifecycle::State;
-use nanoprobe_sidecar::reconciler::{Config as RecConfig, Reconciler};
+use nanoprobe_sidecar::reconciler::{Config as RecConfig, Reconciler, outcome_of};
 use nanoprobe_sidecar::replay::{Batch, Recording};
-use nanoprobe_sidecar::sim::wire::{Body, Command};
+use nanoprobe_sidecar::sim::wire::{Body, Command, lv, opcode};
 use nanoprobe_sidecar::sim::{Detached, RawRecord, SimAdapter};
 use nanoprobe_sidecar::store::{
-    Authority, Entry, LostPolicy, NewGroup, Outcome, Point, Store, UnitState,
+    Authority, Entry, Journalled, LostPolicy, NewGroup, NewUnit, Outcome, Point, Store, UnitState,
 };
 
 use crate::{Config, FakeSim};
@@ -75,6 +82,20 @@ pub enum Op {
     BreakSpec(u16),
     /// Change a unit's type back to one DCS accepts.
     FixSpec(u16),
+    /// The next `RESULT` is lost and the link drops with it; its command
+    /// stays unanswered until the next attach's `HELLO`.
+    LoseResult,
+    /// Give a group an attack order on another group.
+    Attack(u16, u16),
+    /// A mission load on a theater none of the groups is on.
+    LoadOtherTheater,
+    /// The next destroys, this many, raise in DCS.
+    RefuseDestroys(u8),
+    /// The link drops, and a sidecar of another campaign has the agent switch
+    /// to it (`CAMPAIGN`); that campaign's group, whose `EntityId`s are this
+    /// campaign's too, is in DCS. This campaign's sidecar switches back when
+    /// it next attaches.
+    ForeignCampaign,
 }
 
 /// A schedule drawn from a seed: a SplitMix64 stream, so the same seed draws
@@ -102,9 +123,15 @@ impl Schedule {
     pub fn op(&mut self) -> Op {
         let r = self.next_u64();
         let i = (r >> 16) as u16;
+        let j = (r >> 32) as u16;
         match r % 100 {
-            0..=44 => Op::Frames(1 + (i % 8) as u8),
-            45..=54 => Op::Kill(i),
+            0..=39 => Op::Frames(1 + (i % 8) as u8),
+            40..=41 => Op::LoseResult,
+            42..=43 => Op::Attack(i, j),
+            44 => Op::LoadOtherTheater,
+            45 => Op::RefuseDestroys(1 + (i % 5) as u8),
+            46 => Op::ForeignCampaign,
+            47..=54 => Op::Kill(i),
             55..=57 => Op::RemoveSilently(i),
             58..=59 => Op::RemoveWithEvent(i),
             60..=63 => Op::Detach,
@@ -132,9 +159,25 @@ struct Logged<'a> {
     recording: &'a mut Recording,
     sent: Vec<Command>,
     /// Sequenced commands to write before the sidecar dies in the middle of
-    /// a write: that command reaches the ring, and nothing after it.
+    /// a write: that command reaches the ring, and the sidecar stops there.
     crash_after: Option<usize>,
-    crashed: bool,
+}
+
+/// The panic that stops the sidecar in the middle of a write.
+struct Crash;
+
+/// Keep the [`Crash`] panic out of the test output; any other panic is
+/// reported as before.
+fn quiet_crash_panics() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let earlier = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if info.payload().downcast_ref::<Crash>().is_none() {
+                earlier(info);
+            }
+        }));
+    });
 }
 
 impl SimAdapter for Logged<'_> {
@@ -143,27 +186,20 @@ impl SimAdapter for Logged<'_> {
     }
 
     fn send(&mut self, op: u16, payload: &[u8]) -> Result<u64, Detached> {
-        if self.crashed {
-            return Err(Detached);
-        }
         let r = self.sim.send(op, payload);
-        if r.is_ok()
-            && Command::decode(op, payload)
-                .ok()
-                .flatten()
-                .is_some_and(|c| !c.body.is_control())
-            && let Some(n) = &mut self.crash_after
-        {
-            if *n == 0 {
-                self.crashed = true;
-            } else {
-                *n -= 1;
-            }
-        }
         if let Ok(Some(cmd)) = Command::decode(op, payload)
             && !cmd.body.is_control()
+            && r.is_ok()
         {
             self.sent.push(cmd);
+            if let Some(n) = &mut self.crash_after {
+                if *n == 0 {
+                    // The command is in the ring; the sidecar dies before
+                    // the write returns.
+                    std::panic::panic_any(Crash);
+                }
+                *n -= 1;
+            }
         }
         r
     }
@@ -177,10 +213,11 @@ impl SimAdapter for Logged<'_> {
     }
 }
 
-/// Check each command written in a step against the journal as it stood
-/// when the command was journalled: the command is there, journalled before
-/// its inbound position was known, with its entity in the state the opcode
-/// needs and no unit of a spawn with an earlier death fact.
+/// Check each command written in a step against the journal: it is there,
+/// with a nonzero inbound position, its entity in the state the opcode needs
+/// as of that entry, and no unit of a spawn with an earlier death fact. That
+/// it was journalled before the write, and not after, is what
+/// [`Op::SidecarCrashInWrite`] checks.
 fn check_journal(store: &Store, sent: &[Command]) -> Result<(), Violation> {
     if sent.is_empty() {
         return Ok(());
@@ -249,15 +286,26 @@ fn check_journal(store: &Store, sent: &[Command]) -> Result<(), Violation> {
     Ok(())
 }
 
+/// The campaign a [`World`] runs.
+pub const CAMPAIGN: u64 = 1_763_000_000_000;
+
 /// The store a [`World`] starts with: `groups` groups of three units and
 /// `statics` statics, all under DCS authority, on [`THEATER`].
 pub fn new_store(groups: usize, statics: usize) -> Store {
-    let mut store = Store::new(CampaignId(1_763_000_000_000), 10_000);
+    new_store_for(CAMPAIGN, groups, statics)
+}
+
+/// [`new_store`] for another campaign: the same `EntityId`s.
+pub fn new_store_for(campaign: u64, groups: usize, statics: usize) -> Store {
+    let mut store = Store::new(CampaignId(campaign), 10_000);
     for g in 0..groups {
         let units = (0..3)
-            .map(|u| {
-                (
-                    "M-113".to_owned(),
+            .map(|u| NewUnit {
+                label: format!("tank {g}.{u}"),
+                skill: "Average".into(),
+                extra: lv::obj(vec![("livery_id", lv::s("desert"))]),
+                ..NewUnit::new(
+                    "M-113",
                     UnitState {
                         at: Point {
                             x: g as f64 * 1_000.0,
@@ -274,8 +322,11 @@ pub fn new_store(groups: usize, statics: usize) -> Store {
                 theater: THEATER.into(),
                 country: 2,
                 category: 2,
+                coalition: 2,
                 units,
                 authority: Authority::Sim,
+                label: format!("platoon {g}"),
+                extra: lv::obj(vec![("task", lv::s("Ground Nothing"))]),
             })
             .expect("ids");
     }
@@ -285,8 +336,9 @@ pub fn new_store(groups: usize, statics: usize) -> Store {
                 theater: THEATER.into(),
                 country: 2,
                 category: 0,
-                units: vec![(
-                    "Tent".to_owned(),
+                coalition: 2,
+                units: vec![NewUnit::new(
+                    "Tent",
                     UnitState {
                         at: Point {
                             x: -1_000.0 * (s + 1) as f64,
@@ -297,6 +349,8 @@ pub fn new_store(groups: usize, statics: usize) -> Store {
                     },
                 )],
                 authority: Authority::Sim,
+                label: format!("tent {s}"),
+                extra: lv::obj(vec![]),
             })
             .expect("ids");
     }
@@ -308,7 +362,7 @@ pub fn new_store(groups: usize, statics: usize) -> Store {
 struct Scan {
     upto: usize,
     journalled: BTreeSet<(u64, u64, u64)>,
-    commands: std::collections::HashMap<(u64, u64), u64>,
+    commands: std::collections::HashMap<(u64, u64), Journalled>,
     boots: std::collections::HashMap<u64, u64>,
     dead: BTreeSet<EntityId>,
 }
@@ -332,6 +386,11 @@ pub struct World {
 
 /// The theater every group is on.
 pub const THEATER: &str = "Caucasus";
+/// The campaign of [`Op::ForeignCampaign`].
+pub const FOREIGN_CAMPAIGN: u64 = 1_700_000_000_000;
+
+/// A theater no group is on.
+pub const OTHER_THEATER: &str = "Syria";
 
 impl World {
     /// A world with `groups` groups of three units and `statics` statics,
@@ -343,8 +402,9 @@ impl World {
         });
         let store = new_store(groups, statics);
         let rec_cfg = RecConfig {
-            materialize_per_step: 2,
+            materialize_per_frame: 2,
             on_lost,
+            destroy_retries: 3,
         };
         let rec = Reconciler::new(rec_cfg, &store);
         let mut w = World {
@@ -359,6 +419,17 @@ impl World {
         };
         w.sim.attach(w.sidecar_boot);
         w
+    }
+
+    /// The units of this campaign alive in DCS: object ID and unit entity.
+    pub fn units_in_dcs(&self) -> Vec<(u64, u64)> {
+        let c = self.store.campaign().0;
+        self.sim
+            .objects()
+            .into_iter()
+            .filter(|(_, oc, e)| *oc == c && *e != 0)
+            .map(|(o, _, e)| (o, e))
+            .collect()
     }
 
     fn groups(&self) -> Vec<EntityId> {
@@ -387,16 +458,24 @@ impl World {
     /// sequenced commands, in the middle of the next write, if it gets
     /// that far. It then starts again from the store.
     fn tick_crashing(&mut self, crash_after: Option<usize>) -> Result<(), Violation> {
+        quiet_crash_panics();
         self.sim.frame();
         let mut logged = Logged {
             sim: &mut self.sim,
             recording: &mut self.recording,
             sent: Vec::new(),
             crash_after,
-            crashed: false,
         };
-        self.rec.step(&mut self.store, &mut logged);
-        let (sent, crashed) = (logged.sent, logged.crashed);
+        let (rec, store) = (&mut self.rec, &mut self.store);
+        let step = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            rec.step(store, &mut logged)
+        }));
+        let crashed = match step {
+            Ok(()) => false,
+            Err(p) if p.downcast_ref::<Crash>().is_some() => true,
+            Err(p) => std::panic::resume_unwind(p),
+        };
+        let sent = logged.sent;
         check_journal(&self.store, &sent)?;
         if crashed {
             self.restart_sidecar();
@@ -407,7 +486,7 @@ impl World {
     /// Apply one operation, then run a frame.
     pub fn apply(&mut self, op: &Op) -> Result<(), Violation> {
         self.trace.push(op.clone());
-        let objects: Vec<u64> = self.sim.objects().into_iter().map(|(o, _)| o).collect();
+        let objects: Vec<u64> = self.sim.objects().into_iter().map(|(o, _, _)| o).collect();
         match *op {
             Op::Frames(n) => {
                 for _ in 1..n {
@@ -448,6 +527,26 @@ impl World {
                 self.sim.attach(self.sidecar_boot);
             }
             Op::LoadMission => self.sim.load_mission(),
+            Op::LoadOtherTheater => self.sim.load_mission_on(OTHER_THEATER),
+            Op::LoseResult => self.sim.lose_next_result(),
+            Op::RefuseDestroys(n) => self.sim.refuse_destroys(u32::from(n)),
+            Op::ForeignCampaign => {
+                self.sim.detach();
+                self.sim.set_campaign(FOREIGN_CAMPAIGN);
+                if self.sim.platform_groups(FOREIGN_CAMPAIGN).is_empty() {
+                    self.sim.add_campaign_group(FOREIGN_CAMPAIGN, 1, &[2, 3, 4]);
+                }
+            }
+            Op::Attack(i, j) => {
+                let groups = self.groups();
+                if let (Some(a), Some(t)) = (Self::pick(&groups, i), Self::pick(&groups, j))
+                    && a != t
+                {
+                    self.store
+                        .set_order(a, Intent::Attack { target: t })
+                        .expect("group");
+                }
+            }
             Op::Authority(i, sim) => {
                 if let Some(g) = Self::pick(&self.all(), i) {
                     let a = if sim {
@@ -509,6 +608,19 @@ impl World {
         self.tick()
     }
 
+    /// A sidecar with another store takes over: the link drops, and the new
+    /// sidecar attaches as a new sidecar boot. With a store of another
+    /// campaign it switches the agent to that campaign.
+    pub fn sidecar_of(&mut self, store: Store) {
+        self.recording.batches.push(Batch::SidecarRestart);
+        self.sim.detach();
+        self.sidecar_boot += 1;
+        self.store = store;
+        self.scan = Scan::default();
+        self.rec = Reconciler::new(self.rec_cfg, &self.store);
+        self.sim.attach(self.sidecar_boot);
+    }
+
     fn restart_sidecar(&mut self) {
         self.recording.batches.push(Batch::SidecarRestart);
         self.sim.detach();
@@ -525,13 +637,10 @@ impl World {
                 l.replacements
             )));
         }
-        if let Some((k, n)) = l.orders.iter().find(|(_, n)| **n > 1) {
-            return Err(Violation(format!("order {k:?} reached DCS {n} times")));
-        }
         for g in self.store.groups() {
             for m in &g.members {
                 let u = self.store.unit(*m).expect("unit");
-                if u.dead && !l.deaths.contains(&m.0) {
+                if u.dead && !l.deaths.contains(&(self.store.campaign().0, m.0)) {
                     return Err(Violation(format!(
                         "unit {m} has a death fact and did not die"
                     )));
@@ -545,7 +654,7 @@ impl World {
             match e {
                 Entry::Command(c) => {
                     scan.journalled.insert((c.agent_boot, c.epoch, c.seq));
-                    scan.commands.insert((c.epoch, c.seq), c.agent_boot);
+                    scan.commands.insert((c.epoch, c.seq), c.clone());
                     if *scan.boots.entry(c.epoch).or_insert(c.agent_boot) != c.agent_boot {
                         return Err(Violation(format!(
                             "epoch {} used for two agent boots",
@@ -558,13 +667,45 @@ impl World {
                     seq,
                     outcome,
                 } => {
-                    let boot = scan.commands.get(&(*epoch, *seq)).copied().unwrap_or(0);
-                    let taken = l.taken.contains(&(boot, *epoch, *seq));
+                    let cmd = scan.commands.get(&(*epoch, *seq));
+                    let boot = cmd.map_or(0, |c| c.agent_boot);
+                    // A spawn still unanswered when its group's last member
+                    // died resolves `applied` (spec/world.md) without a
+                    // result: DCS applied that revision in that generation,
+                    // and the agent would answer the spawn `AT_REVISION`.
+                    let spawned = cmd.is_some_and(|c| {
+                        matches!(c.opcode, opcode::GROUP_SPAWN | opcode::STATIC_SPAWN)
+                            && l.spawns.iter().any(|s| {
+                                (s.0, s.1, s.2, s.3)
+                                    == (c.agent_boot, c.mission_gen, c.entity.0, c.rev)
+                            })
+                    });
+                    let taken = l.taken.contains_key(&(boot, *epoch, *seq));
+                    // The outcome the agent's own result gives, where it gave
+                    // one (read or not).
+                    let by_result = cmd.and_then(|c| {
+                        l.results
+                            .get(&(c.agent_boot, *epoch, *seq))
+                            .map(|code| outcome_of(*code, c.opcode))
+                    });
+                    if let Some(want) = by_result
+                        && matches!(
+                            outcome,
+                            Outcome::Applied | Outcome::Refused | Outcome::Rejected
+                        )
+                        && *outcome != want
+                        && !(spawned && *outcome == Outcome::Applied)
+                    {
+                        return Err(Violation(format!(
+                            "command epoch {epoch} seq {seq} resolved {outcome:?}, the agent's result gives {want:?}"
+                        )));
+                    }
                     let wrong = match outcome {
                         Outcome::NotSent => taken,
                         // An Unknown for a command of an agent boot that is
                         // gone may be one it never took (spec/commands.md).
                         Outcome::Unknown => !taken && boot == self.sim.agent_boot(),
+                        Outcome::Applied => !taken && !spawned,
                         _ => !taken,
                     };
                     if wrong {
@@ -573,7 +714,9 @@ impl World {
                         )));
                     }
                 }
-                Entry::Transition { entity, from, to } => {
+                Entry::Transition {
+                    entity, from, to, ..
+                } => {
                     if *from == State::Dead && scan.dead.contains(entity) {
                         return Err(Violation(format!("entity {entity} left dead")));
                     }
@@ -585,7 +728,12 @@ impl World {
             }
         }
         scan.upto = self.store.entries().len();
-        if let Some(t) = l.taken.difference(&scan.journalled).next() {
+        let campaign = self.store.campaign().0;
+        if let Some((t, _)) = l
+            .taken
+            .iter()
+            .find(|(t, c)| **c == campaign && !scan.journalled.contains(t))
+        {
             return Err(Violation(format!(
                 "DCS took command {t:?}, which is not journalled"
             )));
@@ -599,9 +747,11 @@ impl World {
         if !self.sim.alive() {
             self.sim.restart_dcs();
         }
-        if !self.sim.attached() {
-            self.sim.attach(self.sidecar_boot);
-        }
+        self.sim.refuse_destroys(0);
+        // Attach again, as after a resync: a `HELLO` settles every command
+        // whose result was lost.
+        self.sim.detach();
+        self.sim.attach(self.sidecar_boot);
         // Long enough for a load, several enumerations and every spawn at
         // two per step.
         let frames = 400 + 4 * self.store.groups().count();
@@ -612,7 +762,8 @@ impl World {
     }
 
     fn check_converged(&self) -> Result<(), Violation> {
-        let held = self.sim.platform_groups();
+        let campaign = self.store.campaign().0;
+        let held = self.sim.platform_groups(campaign);
         let bad = |m: String| Err(Violation(m));
         let ledger = self.sim.ledger();
         let (boot, mission_gen) = (self.sim.agent_boot(), self.sim.mission_gen());
@@ -628,11 +779,18 @@ impl World {
         }
         for g in self.store.groups() {
             let in_dcs = held.iter().find(|(e, _, _)| *e == g.id.0);
-            let want_dcs = g.authority == Authority::Sim;
+            let want_dcs = g.authority == Authority::Sim && g.theater == self.sim.theater();
+            if g.state != State::Dead && self.store.all_dead(g.id) {
+                return bad(format!(
+                    "{} is {} with every member dead",
+                    g.id,
+                    g.state.name()
+                ));
+            }
             match g.state {
                 State::Live => {
                     if !want_dcs {
-                        return bad(format!("{} live under campaign authority", g.id));
+                        return bad(format!("{} live and not under DCS authority", g.id));
                     }
                     let Some((_, _, units)) = in_dcs else {
                         return bad(format!("{} live and not in DCS", g.id));
@@ -653,6 +811,16 @@ impl World {
                             g.id
                         ));
                     }
+                    if let Some(Intent::Attack { target }) = &g.order
+                        && let Some((_, aim)) = self.sim.attack_of(campaign, g.id.0)
+                        && let Some((target_gid, _)) = self.sim.attack_of(campaign, target.0)
+                        && aim != Some(target_gid)
+                    {
+                        return bad(format!(
+                            "{} attacks DCS group {aim:?}, its target {target} is DCS group {target_gid}",
+                            g.id
+                        ));
+                    }
                     if let Some(order) = &g.order {
                         let lead = g
                             .members
@@ -663,9 +831,11 @@ impl World {
                             at: lead.map(|u| (u.state.at.x, u.state.at.z)),
                             progress: g.progress,
                         };
-                        let done =
-                            matches!(intents::compile(order, status, |_| None), Compiled::Done);
-                        if !done && self.sim.applied_order(g.id.0) != g.order_rev {
+                        let compiled = intents::compile(order, status, |t| {
+                            self.sim.attack_of(campaign, t.0).map(|(gid, _)| gid)
+                        });
+                        let needed = matches!(compiled, Compiled::Task(_));
+                        if needed && self.sim.applied_order(g.id.0) != g.order_rev {
                             return bad(format!(
                                 "{} holds order {} in DCS, store has {}",
                                 g.id,
@@ -677,9 +847,14 @@ impl World {
                 }
                 State::Dead | State::Unspawnable | State::Lost | State::Virtual => {
                     let why = match g.state {
+                        // Every member died, or the group was lost and the
+                        // policy marked it dead.
                         State::Dead => {
-                            g.members.iter().all(|m| ledger.deaths.contains(&m.0))
-                                || g.on_lost.unwrap_or(self.rec_cfg.on_lost) == LostPolicy::Dead
+                            g.members.iter().all(|m| ledger.deaths.contains(&(campaign, m.0)))
+                                || self.store.entries().iter().any(|e| {
+                                    matches!(e, Entry::Transition { entity, from: State::Lost, to: State::Dead, .. }
+                                        if *entity == g.id)
+                                })
                         }
                         State::Unspawnable => g.members.iter().any(|m| {
                             self.store
@@ -688,10 +863,12 @@ impl World {
                                 .type_name
                                 .starts_with("Unknown")
                         }),
-                        State::Lost => g.members.iter().any(|m| {
-                            let k = (boot, mission_gen, m.0);
-                            ledger.removed.contains(&k) || ledger.unreported.contains(&k)
-                        }),
+                        State::Lost => {
+                            g.members.iter().any(|m| {
+                                let k = (boot, mission_gen, campaign, m.0);
+                                ledger.removed.contains(&k) || ledger.unreported.contains(&k)
+                            }) || g.error.as_deref().is_some_and(|e| e.starts_with("destroy failed"))
+                        }
                         _ => true,
                     };
                     if !why {
@@ -705,7 +882,10 @@ impl World {
                         return bad(format!("{} is {} and in DCS", g.id, g.state.name()));
                     }
                     if g.state == State::Virtual && want_dcs {
-                        return bad(format!("{} virtual under DCS authority", g.id));
+                        return bad(format!(
+                            "{} virtual under DCS authority on the loaded theater",
+                            g.id
+                        ));
                     }
                 }
                 State::Materializing | State::Dematerializing => {

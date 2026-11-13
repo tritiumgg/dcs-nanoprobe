@@ -98,6 +98,7 @@ handshake_timeout_s = 15    # how long one handshake attempt waits, counting onl
 position_period_min_s = 0.1 # the cap: the shortest position period a subscription gets
 materialize_per_frame = 1   # groups spawned per frame outside the restore burst
 on_lost = "report"          # report, respawn or dead: the default policy for a lost group
+destroy_retries = 3         # refused or unknown destroys of one entity before the sidecar stops
 
 [log]
 dir = "logs"
@@ -113,6 +114,7 @@ level = "info"
 | `position_period_min_s` | The only cap on subscription rates. A request for a shorter period gets this one. The agent's time slice holds whatever the period. |
 | `[health]` | Limits, not expectations (spec/errors.md, "Health"). A mission load has no fixed duration; `loading_limit_s` is only when to call a silent DCS hung. |
 | `on_lost` | An author may override it per group through the API. |
+| `destroy_retries` | At least 1. A dematerializing entity whose destroy is refused or unknown this many times goes `lost` with the error (spec/world.md). A destroy of an entity DCS should not hold is tried again after the next full enumeration. |
 
 Relative paths are relative to the folder that holds `sidecar.toml`.
 

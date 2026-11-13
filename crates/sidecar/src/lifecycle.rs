@@ -13,7 +13,8 @@ pub enum State {
     Materializing,
     /// In DCS, at least one member alive.
     Live,
-    /// A capture-and-destroy was sent and not yet acknowledged.
+    /// Leaving DCS: a capture-and-destroy, or for a static a capture and
+    /// then a destroy, was sent and DCS may still hold the entity.
     Dematerializing,
     /// Every member has a death fact. Final.
     Dead,
@@ -57,8 +58,8 @@ impl State {
 /// What happened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Trigger {
-    /// The authority moved to DCS, or the entity's theater is loaded, while the
-    /// authority is DCS.
+    /// The authority is DCS and the entity's theater is loaded: a level
+    /// condition, checked on every plan.
     Materialize,
     /// The spawn's outcome is `applied`.
     SpawnApplied,
@@ -66,7 +67,9 @@ pub enum Trigger {
     SpawnRefused,
     /// The spawn's outcome is `unknown`: it is sent again.
     SpawnUnknown,
-    /// Every member has a death fact.
+    /// Every member has a death fact. From `lost` this is unreachable under
+    /// the protocol's ordering (an enumeration finds no row of a lost group,
+    /// so no later `OBJECT_GONE` names one); the row keeps the rule total.
     AllDead,
     /// The authority moved to the campaign.
     Dematerialize,
@@ -89,11 +92,17 @@ pub enum Trigger {
     PolicyDead,
     /// The author changed the spec.
     SpecChanged,
+    /// The authority moved to the campaign, or the entity's theater is not
+    /// loaded, and no spawn of it is unanswered.
+    Withdraw,
+    /// The destroy that ends a dematerialization was refused or unknown as
+    /// many times as the limit allows.
+    DestroyFailed,
 }
 
 impl Trigger {
     /// One of each trigger, both values of `same_theater` included.
-    pub const ALL: [Trigger; 14] = [
+    pub const ALL: [Trigger; 16] = [
         Trigger::Materialize,
         Trigger::SpawnApplied,
         Trigger::SpawnRefused,
@@ -110,6 +119,8 @@ impl Trigger {
         Trigger::PolicyRespawn,
         Trigger::PolicyDead,
         Trigger::SpecChanged,
+        Trigger::Withdraw,
+        Trigger::DestroyFailed,
     ];
 }
 
@@ -123,7 +134,9 @@ pub fn next(state: State, trigger: Trigger) -> Option<State> {
         (S::Materializing, T::SpawnApplied) => S::Live,
         (S::Materializing, T::SpawnRefused) => S::Unspawnable,
         (S::Materializing, T::SpawnUnknown) => S::Materializing,
-        (S::Live | S::Materializing | S::Dematerializing | S::Lost, T::AllDead) => S::Dead,
+        (S::Live | S::Materializing | S::Dematerializing | S::Lost | S::Virtual, T::AllDead) => {
+            S::Dead
+        }
         (S::Live, T::Dematerialize) => S::Dematerializing,
         (S::Dematerializing, T::CaptureDone) => S::Virtual,
         (S::Dematerializing, T::NewGeneration { .. }) => S::Virtual,
@@ -140,7 +153,9 @@ pub fn next(state: State, trigger: Trigger) -> Option<State> {
         (S::Lost, T::EnumFound) => S::Live,
         (S::Lost, T::PolicyRespawn) => S::Materializing,
         (S::Lost, T::PolicyDead) => S::Dead,
-        (S::Unspawnable, T::SpecChanged) => S::Materializing,
+        (S::Unspawnable, T::SpecChanged) => S::Virtual,
+        (S::Materializing, T::Withdraw) => S::Virtual,
+        (S::Dematerializing, T::DestroyFailed) => S::Lost,
         _ => return None,
     })
 }
@@ -213,10 +228,13 @@ mod tests {
             ),
             (S::Lost, T::PolicyRespawn, S::Materializing),
             (S::Lost, T::PolicyDead, S::Dead),
-            (S::Unspawnable, T::SpecChanged, S::Materializing),
+            (S::Unspawnable, T::SpecChanged, S::Virtual),
             (S::Materializing, T::AllDead, S::Dead),
             (S::Dematerializing, T::AllDead, S::Dead),
             (S::Lost, T::AllDead, S::Dead),
+            (S::Virtual, T::AllDead, S::Dead),
+            (S::Materializing, T::Withdraw, S::Virtual),
+            (S::Dematerializing, T::DestroyFailed, S::Lost),
         ]
     };
 

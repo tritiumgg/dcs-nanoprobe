@@ -103,8 +103,11 @@ impl Grid {
         let (x0, x1) = (self.coord(x - radius), self.coord(x + radius));
         let (z0, z1) = (self.coord(z - radius), self.coord(z + radius));
         let mut out = BTreeSet::new();
-        let span = (x1 - x0 + 1).saturating_mul(z1 - z0 + 1);
-        if span as usize > self.cells.len() {
+        // In i128, so a huge or infinite radius, whose cell coordinates
+        // saturate at the ends of i64, cannot overflow.
+        let span = (i128::from(x1) - i128::from(x0) + 1)
+            .saturating_mul(i128::from(z1) - i128::from(z0) + 1);
+        if span > self.cells.len() as i128 {
             // A radius wider than the occupied cells: scan the cells instead.
             for (&(ct, _, _), set) in &self.cells {
                 if ct == t as u32 {
@@ -196,6 +199,21 @@ mod tests {
                 prop_assert_eq!(grid.len(), truth.len());
             }
         }
+    }
+
+    #[test]
+    fn a_huge_or_infinite_radius_finds_everything() {
+        let mut g = Grid::new(100.0);
+        g.set(EntityId(1), "Caucasus", -4.0e5, 3.0e5);
+        g.set(EntityId(2), "Caucasus", 7.0e5, -9.0e5);
+        for r in [f64::INFINITY, 1e300, 1e22] {
+            assert_eq!(
+                g.within("Caucasus", 0.0, 0.0, r),
+                vec![EntityId(1), EntityId(2)],
+                "{r}"
+            );
+        }
+        assert!(g.within("Caucasus", 0.0, 0.0, f64::NAN).is_empty());
     }
 
     #[test]

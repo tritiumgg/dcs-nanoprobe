@@ -56,19 +56,21 @@ pub enum Intent {
 pub const REACHED_M: f64 = 50.0;
 
 /// The progress of `intent` after the group is seen at a point, from its
-/// earlier progress. Progress never goes back.
+/// earlier progress. Positions are sampled, so a group may pass a waypoint
+/// between two samples: a group seen at a later waypoint has passed every
+/// one before it. Progress never goes back.
 pub fn progress(intent: &Intent, earlier: usize, x: f64, z: f64) -> usize {
     match intent {
         Intent::Route { waypoints, .. } => {
-            let mut p = earlier.min(waypoints.len());
-            while let Some(w) = waypoints.get(p) {
+            let p = earlier.min(waypoints.len());
+            let near = |w: &Waypoint| {
                 let (dx, dz) = (w.x - x, w.z - z);
-                if dx * dx + dz * dz > REACHED_M * REACHED_M {
-                    break;
-                }
-                p += 1;
-            }
-            p
+                dx * dx + dz * dz <= REACHED_M * REACHED_M
+            };
+            waypoints[p..]
+                .iter()
+                .rposition(near)
+                .map_or(p, |j| p + j + 1)
         }
         _ => earlier,
     }
@@ -215,6 +217,8 @@ mod tests {
         assert_eq!(progress(&r, 2, 0.0, 0.0), 2);
         assert_eq!(progress(&r, 2, 1_000.0, 1_000.0), 3);
         assert_eq!(progress(&r, 9, 0.0, 0.0), 3);
+        // Seen at the last waypoint without a sample at the ones before it.
+        assert_eq!(progress(&r, 0, 1_000.0, 1_000.0), 3);
         assert_eq!(progress(&Intent::Hold, 0, 0.0, 0.0), 0);
     }
 

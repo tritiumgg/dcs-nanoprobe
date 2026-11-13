@@ -20,6 +20,9 @@ pub trait Target: SimAdapter {
     fn advance(&mut self);
     /// Load the running mission again. Returns once the load was asked for.
     fn reload(&mut self);
+    /// Drop the link and attach again as the same sidecar (spec/transport.md,
+    /// "Detaching" and "Attaching").
+    fn reattach(&mut self);
     /// A ground unit type DCS accepts.
     fn unit_type(&self) -> &str;
     /// A point `x`, `z` on the loaded theater where a ground group may spawn.
@@ -369,6 +372,70 @@ fn capture_and_destroy(s: &mut Session<'_>) -> R {
     Ok(())
 }
 
+/// spec/transport.md, "Attaching", and spec/commands.md, "Unanswered
+/// commands": after a reattach the `HELLO`'s `in_head` covers exactly the
+/// commands the agent took, each with its `RESULT` before the `HELLO`; a
+/// command after it was discarded and is never answered.
+fn a_reattach_answers_what_was_taken(s: &mut Session<'_>) -> R {
+    let g = s.entity();
+    let mut sent = Vec::new();
+    for _ in 0..8 {
+        let h = s.header(g, 0);
+        let (op, payload) = Command {
+            header: h,
+            body: Body::GroupDestroy,
+        }
+        .encode();
+        let pos =
+            s.t.send(op, &payload)
+                .map_err(|_| "the adapter is detached".to_owned())?;
+        sent.push((h.epoch, h.seq, pos));
+    }
+    s.pump();
+    let from = s.seen.len();
+    s.t.reattach();
+    let (hello_at, in_head) = s.until(from, "HELLO after the reattach", |x| {
+        x.iter().enumerate().find_map(|(i, r)| match r {
+            Input::Hello(h) => Some((i, h.in_head)),
+            _ => None,
+        })
+    })?;
+    for _ in 0..5 {
+        s.pump();
+    }
+    let answered = |x: &[Input], e: u64, q: u64| {
+        x.iter()
+            .any(|i| matches!(i, Input::Result(r) if r.epoch == e && r.seq == q))
+    };
+    let before: Vec<Input> = s.seen[..from + hello_at].to_vec();
+    let after: Vec<Input> = s.seen[from + hello_at..].to_vec();
+    for (e, q, pos) in sent {
+        let taken = pos <= in_head;
+        if taken && !answered(&before, e, q) {
+            return Err(format!(
+                "seq {q} at {pos} is at or before in_head {in_head} and has no RESULT before the HELLO"
+            ));
+        }
+        if !taken && (answered(&before, e, q) || answered(&after, e, q)) {
+            return Err(format!(
+                "seq {q} at {pos} is after in_head {in_head} and was answered"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn an_order_for_a_group_dcs_lacks_is_not_bound(s: &mut Session<'_>) -> R {
+    let g = s.entity();
+    let task = lv::obj(vec![("id", lv::s("Hold")), ("params", lv::obj(vec![]))]);
+    let h = s.header(g, 1);
+    expect(
+        &s.call(h, Body::GroupOrder(task))?,
+        rc::NOT_BOUND,
+        "an order for no group",
+    )
+}
+
 fn a_mission_load_forgets_revisions(s: &mut Session<'_>) -> R {
     let (g, u) = (s.entity(), s.entity());
     let body = s.spawn_body(g, &[u]);
@@ -417,7 +484,7 @@ pub fn run(t: &mut dyn Target) -> Vec<Check> {
     if out[0].result.is_err() {
         return out;
     }
-    let checks: [CheckFn; 6] = [
+    let checks: [CheckFn; 8] = [
         ("spawn_is_guarded_by_revision", spawn_is_guarded_by_revision),
         (
             "sequence_epoch_campaign_and_generation",
@@ -429,6 +496,14 @@ pub fn run(t: &mut dyn Target) -> Vec<Check> {
             enumeration_counts_its_objects,
         ),
         ("capture_and_destroy", capture_and_destroy),
+        (
+            "a_reattach_answers_what_was_taken",
+            a_reattach_answers_what_was_taken,
+        ),
+        (
+            "an_order_for_a_group_dcs_lacks_is_not_bound",
+            an_order_for_a_group_dcs_lacks_is_not_bound,
+        ),
         (
             "a_mission_load_forgets_revisions",
             a_mission_load_forgets_revisions,

@@ -145,30 +145,52 @@ impl Object {
 }
 
 /// `OBJECT_GONE`: a unit or static left the agent's table.
+///
+/// The layout carries the row's binding, so a death the agent queued while
+/// no sidecar was attached names its unit before the enumeration that
+/// re-reads the binding (coordinator ruling (b), 2026-11-13; S10 writes it
+/// into spec/records.md and the golden file). The decoder also takes the
+/// 16-byte layout the golden file still holds, with no binding.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ObjectGone {
     /// DCS object ID.
     pub object: u64,
     /// `gone_reason`.
     pub reason: u32,
+    /// The `EntityId` the row was bound to, 0 for none.
+    pub entity: u64,
+    /// The group's `EntityId` the row was bound to, 0 for none or a static.
+    pub group_entity: u64,
 }
 
+/// Bytes of the `OBJECT_GONE` layout with the binding.
+pub const OBJECT_GONE_LEN: usize = 32;
+
 impl ObjectGone {
-    /// The payload.
+    /// The payload, with the binding.
     pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
-        w.u64(self.object).u32(self.reason).pad(4);
+        w.u64(self.object)
+            .u32(self.reason)
+            .pad(4)
+            .u64(self.entity)
+            .u64(self.group_entity);
         w.finish()
     }
 
-    /// Decode a payload.
+    /// Decode a payload of either layout.
     pub fn decode(b: &[u8]) -> Result<ObjectGone, DecodeError> {
         let mut r = Reader::new(b);
-        let g = ObjectGone {
+        let mut g = ObjectGone {
             object: r.u64()?,
             reason: r.u32()?,
+            ..ObjectGone::default()
         };
         r.skip(4)?;
+        if r.remaining() > 0 {
+            g.entity = r.u64()?;
+            g.group_entity = r.u64()?;
+        }
         Ok(g)
     }
 }
@@ -666,7 +688,6 @@ mod tests {
     fn fixed_parts_match_the_golden_layouts() {
         for (name, len) in [
             ("OBJECT", Object::default().encode().len() - 6),
-            ("OBJECT_GONE", ObjectGone::default().encode().len()),
             ("ENUM_BEGIN", Enumeration::default().encode_begin().len()),
             ("ENUM_END", Enumeration::default().encode_end().len()),
         ] {
@@ -695,6 +716,8 @@ mod tests {
             Input::ObjectGone(ObjectGone {
                 object: 7,
                 reason: 3,
+                entity: 9,
+                group_entity: 8,
             }),
             Input::EnumBegin(Enumeration {
                 enumeration: 4,
@@ -728,6 +751,18 @@ mod tests {
             let (k, p) = i.encode();
             assert_eq!(Input::decode(k, &p).unwrap(), i);
         }
+    }
+
+    #[test]
+    fn object_gone_reads_both_layouts() {
+        assert_eq!(ObjectGone::default().encode().len(), OBJECT_GONE_LEN);
+        // The golden file's layout, with no binding.
+        assert_eq!(golden::layout("OBJECT_GONE").unwrap().fixed, 16);
+        let mut short = vec![7, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];
+        let g = ObjectGone::decode(&short).unwrap();
+        assert_eq!((g.object, g.reason, g.entity, g.group_entity), (7, 1, 0, 0));
+        short.extend([1, 2, 3]);
+        assert!(ObjectGone::decode(&short).is_err());
     }
 
     #[test]

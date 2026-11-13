@@ -141,34 +141,51 @@ fn parse_line(line: &str) -> Option<RawRecord> {
     })
 }
 
+/// Whether the store outlives a sidecar restart (spec/config.md, `[store]
+/// enabled`).
+#[derive(Clone, Copy)]
+pub enum Persistence<'a> {
+    /// The store is kept.
+    On,
+    /// The store is lost; the function makes the one the sidecar starts
+    /// with, as the author writes the specs back.
+    Off(&'a dyn Fn() -> Store),
+}
+
 /// Fold a recording into a store, as a sidecar that reads it and writes
-/// nothing. The reconciler starts again from the store at every
-/// [`Batch::SidecarRestart`] and before each record index in `restarts`.
-/// Returns the counters of every reconciler, summed.
-pub fn fold(cfg: Config, store: &mut Store, recording: &Recording, restarts: &[usize]) -> Counters {
+/// nothing. The sidecar restarts at every [`Batch::SidecarRestart`], and at
+/// the first `FRAME` at or after each record index in `restarts`: a
+/// restarted sidecar reads on from a `FRAME`, whose stamps it applies
+/// (spec/transport.md, "Attaching"). An index past the last `FRAME` restarts
+/// at the tail. Returns the counters of every reconciler, summed.
+pub fn fold(
+    cfg: Config,
+    store: &mut Store,
+    recording: &Recording,
+    restarts: &[usize],
+    persistence: Persistence<'_>,
+) -> Counters {
     let mut rec = Reconciler::new(cfg, store);
     let mut total = Counters::default();
-    let add = |t: &mut Counters, c: Counters| {
-        t.undecodable += c.undecodable;
-        t.stray_results += c.stray_results;
-        t.foreign += c.foreign;
-        t.unmanaged += c.unmanaged;
-        t.enumerations += c.enumerations;
-        t.enumerations_discarded += c.enumerations_discarded;
-        t.events += c.events;
+    let restart = |rec: &mut Reconciler, store: &mut Store, total: &mut Counters| {
+        total.add(rec.counters());
+        if let Persistence::Off(fresh) = persistence {
+            *store = fresh();
+        }
+        *rec = Reconciler::new(cfg, store);
     };
+    let mut pending: Vec<usize> = restarts.to_vec();
+    pending.sort_unstable();
     let mut i = 0usize;
     for b in &recording.batches {
         match b {
-            Batch::SidecarRestart => {
-                add(&mut total, rec.counters());
-                rec = Reconciler::new(cfg, store);
-            }
+            Batch::SidecarRestart => restart(&mut rec, store, &mut total),
             Batch::Records(rs) => {
                 for r in rs {
-                    if restarts.contains(&i) {
-                        add(&mut total, rec.counters());
-                        rec = Reconciler::new(cfg, store);
+                    let due = pending.first().is_some_and(|p| *p <= i);
+                    if due && u64::from(r.kind) == kind::FRAME {
+                        pending.retain(|p| *p > i);
+                        restart(&mut rec, store, &mut total);
                     }
                     rec.record(store, r);
                     i += 1;
@@ -176,7 +193,10 @@ pub fn fold(cfg: Config, store: &mut Store, recording: &Recording, restarts: &[u
             }
         }
     }
-    add(&mut total, rec.counters());
+    if !pending.is_empty() {
+        restart(&mut rec, store, &mut total);
+    }
+    total.add(rec.counters());
     total
 }
 

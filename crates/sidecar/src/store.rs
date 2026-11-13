@@ -8,6 +8,8 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
+use nanoprobe_transport::codec::Lv;
+
 use crate::grid::Grid;
 use crate::ids::{CampaignId, EntityId, MAX_ID};
 use crate::intents::{self, Intent};
@@ -82,6 +84,14 @@ pub struct Unit {
     pub dead: bool,
     /// Missing from DCS without a death fact, in this mission generation.
     pub missing: bool,
+    /// The author's label. Never sent to DCS, where names hold only numbers
+    /// (spec/world.md, "Names").
+    pub label: String,
+    /// DCS skill, empty for the default. Spec.
+    pub skill: String,
+    /// Further keys of the DCS unit or static table: payload, livery,
+    /// callsign and so on (spec/world.md, "Lua tables in the API"). Spec.
+    pub extra: Lv,
 }
 
 /// A managed group or static.
@@ -99,6 +109,16 @@ pub struct Group {
     pub category: u32,
     /// Its units in spec order; for a static, itself.
     pub members: Vec<EntityId>,
+    /// The author's label. Never sent to DCS.
+    pub label: String,
+    /// DCS coalition number. Spec.
+    pub coalition: u32,
+    /// Further keys of the DCS group table; nil for a static, whose table is
+    /// its member's. Spec.
+    pub extra: Lv,
+    /// Author components by registered name: opaque bytes the sidecar stores
+    /// and serves. Never sent to DCS.
+    pub components: BTreeMap<String, Vec<u8>>,
     /// Revision of the spec.
     pub spec_rev: u64,
     /// The order, if any.
@@ -115,22 +135,16 @@ pub struct Group {
     pub on_lost: Option<LostPolicy>,
     /// Why DCS refused its spawn, when `unspawnable`.
     pub error: Option<String>,
-}
-
-/// One row of the binding mirror: a DCS object of the loaded mission and the
-/// entities it is bound to (plan 4.4, "Binding").
-///
-/// The mirror is durable: a death the agent queued while no sidecar was
-/// attached arrives as an `OBJECT_GONE` before the enumeration that would
-/// rebuild a lost mirror, and only the mirror names the unit it was.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Binding {
-    /// The unit, or the static.
-    pub unit: EntityId,
-    /// Its group, or the static.
-    pub group: EntityId,
-    /// The DCS group ID, 0 for a static or when not known.
-    pub dcs_group: u64,
+    /// While `dematerializing`: the capture is settled and only the destroy
+    /// remains.
+    pub captured: bool,
+    /// The agent boot and mission generation of its last applied spawn.
+    pub spawned_in: Option<(u64, u32)>,
+    /// Destroys refused or unknown while `dematerializing`.
+    pub destroy_failures: u32,
+    /// The agent boot and generation in which a spawn of it resolved
+    /// `unknown`: DCS may hold it, so it is not withdrawn to `virtual`.
+    pub unknown_spawn_in: Option<(u64, u32)>,
 }
 
 /// The mission DCS has loaded, as last seen.
@@ -192,6 +206,16 @@ pub enum Entry {
         from: State,
         /// To.
         to: State,
+        /// A new spec revision taken with the transition: a respawn of a
+        /// `lost` group, journalled as one entry with it.
+        spec_rev: Option<u64>,
+    },
+    /// A dematerializing entity's capture is settled: its captured state, or
+    /// its last checkpointed one, is the state to keep. What remains is the
+    /// destroy.
+    Captured {
+        /// The entity.
+        entity: EntityId,
     },
     /// A death fact.
     Death {
@@ -238,6 +262,34 @@ pub struct Journalled {
     pub units: Vec<EntityId>,
 }
 
+/// A new unit's spec.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NewUnit {
+    /// DCS type name.
+    pub type_name: String,
+    /// Starting state.
+    pub state: UnitState,
+    /// The author's label.
+    pub label: String,
+    /// DCS skill, empty for the default.
+    pub skill: String,
+    /// Further keys of the DCS unit table, or nil.
+    pub extra: Lv,
+}
+
+impl NewUnit {
+    /// A unit of a type at a state, with no label, skill or extra keys.
+    pub fn new(type_name: &str, state: UnitState) -> NewUnit {
+        NewUnit {
+            type_name: type_name.to_owned(),
+            state,
+            label: String::new(),
+            skill: String::new(),
+            extra: Lv::Nil,
+        }
+    }
+}
+
 /// A new group's spec.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NewGroup {
@@ -247,10 +299,16 @@ pub struct NewGroup {
     pub country: u32,
     /// DCS group category number.
     pub category: u32,
-    /// Each unit's type and starting state.
-    pub units: Vec<(String, UnitState)>,
+    /// DCS coalition number.
+    pub coalition: u32,
+    /// Its units; a static has exactly one.
+    pub units: Vec<NewUnit>,
     /// Who simulates it.
     pub authority: Authority,
+    /// The author's label.
+    pub label: String,
+    /// Further keys of the DCS group table, or nil.
+    pub extra: Lv,
 }
 
 /// The store's tables.
@@ -267,8 +325,6 @@ pub struct Store {
     changes: VecDeque<(u64, EntityId)>,
     changes_keep: usize,
     grid: Grid,
-    binding: BTreeMap<u64, Binding>,
-    stamp: (u64, u32),
 }
 
 /// A change the store refused.
@@ -301,8 +357,6 @@ impl Store {
             changes: VecDeque::new(),
             changes_keep,
             grid: Grid::new(GRID_CELL_M),
-            binding: BTreeMap::new(),
-            stamp: (0, 0),
         }
     }
 
@@ -364,7 +418,8 @@ impl Store {
     fn create(&mut self, kind: Kind, spec: NewGroup) -> Result<EntityId, StoreError> {
         let id = self.allocate()?;
         let mut members = Vec::with_capacity(spec.units.len());
-        for (type_name, state) in spec.units {
+        for u in spec.units {
+            let state = u.state;
             let uid = if kind == Kind::Static {
                 id
             } else {
@@ -376,10 +431,13 @@ impl Store {
                 Unit {
                     id: uid,
                     group: id,
-                    type_name,
+                    type_name: u.type_name,
                     state,
                     dead: false,
                     missing: false,
+                    label: u.label,
+                    skill: u.skill,
+                    extra: u.extra,
                 },
             );
             self.grid.set(uid, &spec.theater, state.at.x, state.at.z);
@@ -394,6 +452,10 @@ impl Store {
                 country: spec.country,
                 category: spec.category,
                 members,
+                label: spec.label,
+                coalition: spec.coalition,
+                extra: spec.extra,
+                components: BTreeMap::new(),
                 spec_rev: 1,
                 order: None,
                 order_rev: 0,
@@ -402,6 +464,10 @@ impl Store {
                 authority: spec.authority,
                 on_lost: None,
                 error: None,
+                captured: false,
+                spawned_in: None,
+                destroy_failures: 0,
+                unknown_spawn_in: None,
             },
         );
         self.touch(id);
@@ -469,8 +535,90 @@ impl Store {
         Ok(())
     }
 
+    /// Set the author's label of a group, unit or static. Not spec.
+    pub fn set_label(&mut self, id: EntityId, label: &str) -> Result<(), StoreError> {
+        if let Some(g) = self.groups.get_mut(&id) {
+            g.label = label.to_owned();
+        } else {
+            self.units
+                .get_mut(&id)
+                .ok_or(StoreError::NoSuchEntity(id))?
+                .label = label.to_owned();
+        }
+        self.touch(id);
+        Ok(())
+    }
+
+    /// Set an author component of a group or static by its registered name;
+    /// `None` removes it. Not spec.
+    pub fn set_component(
+        &mut self,
+        id: EntityId,
+        name: &str,
+        value: Option<Vec<u8>>,
+    ) -> Result<(), StoreError> {
+        let g = self.group_mut(id)?;
+        match value {
+            Some(v) => {
+                g.components.insert(name.to_owned(), v);
+            }
+            None => {
+                g.components.remove(name);
+            }
+        }
+        self.touch(id);
+        Ok(())
+    }
+
+    /// Set a group's or static's coalition: a spec change at a new revision.
+    pub fn set_coalition(&mut self, id: EntityId, coalition: u32) -> Result<u64, StoreError> {
+        self.group_mut(id)?.coalition = coalition;
+        self.spec_changed(id)
+    }
+
+    /// Set the further keys of a group's table, or of a unit's or static's:
+    /// a spec change at a new revision.
+    pub fn set_extra(&mut self, id: EntityId, extra: Lv) -> Result<u64, StoreError> {
+        let group = match self.groups.get_mut(&id) {
+            Some(g) if g.kind == Kind::Group => {
+                g.extra = extra;
+                id
+            }
+            _ => {
+                let u = self
+                    .units
+                    .get_mut(&id)
+                    .ok_or(StoreError::NoSuchEntity(id))?;
+                u.extra = extra;
+                u.group
+            }
+        };
+        self.spec_changed(group)
+    }
+
+    /// Set a unit's skill: a spec change at a new revision.
+    pub fn set_skill(&mut self, unit: EntityId, skill: &str) -> Result<u64, StoreError> {
+        let u = self
+            .units
+            .get_mut(&unit)
+            .ok_or(StoreError::NoSuchEntity(unit))?;
+        u.skill = skill.to_owned();
+        let gid = u.group;
+        self.spec_changed(gid)
+    }
+
+    /// A spec change of a group or static: a new revision, and an
+    /// `unspawnable` entity becomes `virtual`.
+    fn spec_changed(&mut self, id: EntityId) -> Result<u64, StoreError> {
+        let rev = self.bump_spec(id)?;
+        if self.groups[&id].state == State::Unspawnable {
+            self.transition(id, Trigger::SpecChanged)?;
+        }
+        Ok(rev)
+    }
+
     /// Change a unit's type: a spec change at a new revision. An
-    /// `unspawnable` group becomes `materializing`.
+    /// `unspawnable` group becomes `virtual`, and materializes from there.
     pub fn set_unit_type(&mut self, unit: EntityId, type_name: &str) -> Result<u64, StoreError> {
         let u = self
             .units
@@ -478,11 +626,7 @@ impl Store {
             .ok_or(StoreError::NoSuchEntity(unit))?;
         u.type_name = type_name.to_owned();
         let gid = u.group;
-        let rev = self.bump_spec(gid)?;
-        if self.groups[&gid].state == State::Unspawnable {
-            self.transition(gid, Trigger::SpecChanged)?;
-        }
-        Ok(rev)
+        self.spec_changed(gid)
     }
 
     /// A new spec revision with nothing else changed. A spawn at an older
@@ -507,15 +651,102 @@ impl Store {
             entity: id,
             from,
             to,
+            spec_rev: None,
         });
-        self.group_mut(id)?.state = to;
+        let g = self.group_mut(id)?;
+        g.state = to;
+        if to != State::Dematerializing {
+            g.captured = false;
+            g.destroy_failures = 0;
+        }
         self.touch(id);
         Ok(to)
+    }
+
+    /// Respawn a `lost` group: a new spec revision and the move to
+    /// `materializing`, journalled as one entry. The agent holds the spawn's
+    /// old revision for the whole generation and would answer a spawn at it
+    /// `AT_REVISION` (spec/world.md).
+    pub fn respawn(&mut self, id: EntityId) -> Result<u64, StoreError> {
+        let from = self.group(id).ok_or(StoreError::NoSuchEntity(id))?.state;
+        let trigger = Trigger::PolicyRespawn;
+        let to =
+            lifecycle::next(from, trigger).ok_or(StoreError::NoTransition(id, from, trigger))?;
+        let g = self.group_mut(id)?;
+        g.spec_rev += 1;
+        g.state = to;
+        let rev = g.spec_rev;
+        self.journal(Entry::Transition {
+            entity: id,
+            from,
+            to,
+            spec_rev: Some(rev),
+        });
+        self.touch(id);
+        Ok(rev)
+    }
+
+    /// Settle a dematerializing entity's capture (see [`Entry::Captured`]).
+    pub fn set_captured(&mut self, id: EntityId) -> Result<(), StoreError> {
+        let g = self.group_mut(id)?;
+        if g.state == State::Dematerializing && !g.captured {
+            g.captured = true;
+            self.journal(Entry::Captured { entity: id });
+            self.touch(id);
+        }
+        Ok(())
+    }
+
+    /// A new order revision with the same intent: the target of an attack
+    /// order got new DCS object IDs (spec/world.md, "Revisions").
+    pub fn bump_order(&mut self, id: EntityId) -> Result<u64, StoreError> {
+        let g = self.group_mut(id)?;
+        g.order_rev += 1;
+        let rev = g.order_rev;
+        self.journal(Entry::Order { entity: id, rev });
+        self.touch(id);
+        Ok(rev)
+    }
+
+    /// Record an applied spawn. Returns whether the entity was already
+    /// spawned in the same agent boot and generation: a respawn that gives
+    /// it new DCS object IDs, as opposed to the spawn after a generation
+    /// change.
+    pub fn spawned(
+        &mut self,
+        id: EntityId,
+        agent_boot: u64,
+        mission_gen: u32,
+    ) -> Result<bool, StoreError> {
+        let g = self.group_mut(id)?;
+        let again = g.spawned_in == Some((agent_boot, mission_gen));
+        g.spawned_in = Some((agent_boot, mission_gen));
+        Ok(again)
+    }
+
+    /// Record a spawn that resolved `unknown` in a generation.
+    pub fn spawn_unknown(
+        &mut self,
+        id: EntityId,
+        agent_boot: u64,
+        mission_gen: u32,
+    ) -> Result<(), StoreError> {
+        self.group_mut(id)?.unknown_spawn_in = Some((agent_boot, mission_gen));
+        Ok(())
+    }
+
+    /// Count a refused or unknown destroy of a dematerializing entity.
+    /// Returns the count.
+    pub fn destroy_failed(&mut self, id: EntityId) -> Result<u32, StoreError> {
+        let g = self.group_mut(id)?;
+        g.destroy_failures += 1;
+        Ok(g.destroy_failures)
     }
 
     /// Record why DCS refused a spawn.
     pub fn set_error(&mut self, id: EntityId, error: String) -> Result<(), StoreError> {
         self.group_mut(id)?.error = Some(error);
+        self.touch(id);
         Ok(())
     }
 
@@ -555,8 +786,15 @@ impl Store {
 
     /// Clear every unit's missing mark: a new mission generation.
     pub fn clear_missing(&mut self) {
-        for u in self.units.values_mut() {
-            u.missing = false;
+        let marked: Vec<EntityId> = self
+            .units
+            .values()
+            .filter(|u| u.missing)
+            .map(|u| u.id)
+            .collect();
+        for id in marked {
+            self.units.get_mut(&id).expect("unit").missing = false;
+            self.touch(id);
         }
     }
 
@@ -566,11 +804,12 @@ impl Store {
         let Some(u) = self.units.get_mut(&unit) else {
             return;
         };
-        if u.dead {
+        if u.dead || u.state.at == at {
             return;
         }
         u.state.at = at;
         let gid = u.group;
+        self.touch(unit);
         let Some(g) = self.groups.get(&gid) else {
             return;
         };
@@ -582,6 +821,7 @@ impl Store {
             let p = intents::progress(order, g.progress, at.x, at.z);
             if p != g.progress {
                 self.groups.get_mut(&gid).expect("group").progress = p;
+                self.touch(gid);
             }
         }
     }
@@ -590,9 +830,11 @@ impl Store {
     pub fn observe_vitals(&mut self, unit: EntityId, life: f32, fuel: f32) {
         if let Some(u) = self.units.get_mut(&unit)
             && !u.dead
+            && (u.state.life, u.state.fuel) != (life, fuel)
         {
             u.state.life = life;
             u.state.fuel = fuel;
+            self.touch(unit);
         }
     }
 
@@ -604,6 +846,7 @@ impl Store {
             u.state = state;
             let theater = self.groups[&u.group].theater.clone();
             self.grid.set(unit, &theater, state.at.x, state.at.z);
+            self.touch(unit);
         }
     }
 
@@ -619,42 +862,15 @@ impl Store {
         self.journal(Entry::Epoch(epoch));
     }
 
-    /// The binding mirror, by DCS object ID.
-    pub fn binding(&self) -> &BTreeMap<u64, Binding> {
-        &self.binding
-    }
-
-    /// The binding mirror, to change.
-    pub fn binding_mut(&mut self) -> &mut BTreeMap<u64, Binding> {
-        &mut self.binding
-    }
-
-    /// The agent boot and mission generation of the last `FRAME` read, which
-    /// stamp the records after it. Kept with the read position: a sidecar
-    /// that restarts reads on from where the last one stopped, which may be
-    /// after a `FRAME` and before the records it stamps.
-    pub fn stamp(&self) -> (u64, u32) {
-        self.stamp
-    }
-
-    /// Set the stamp from a `FRAME`.
-    pub fn set_stamp(&mut self, agent_boot: u64, mission_gen: u32) {
-        self.stamp = (agent_boot, mission_gen);
-    }
-
     /// The mission last seen loaded.
     pub fn loaded(&self) -> Option<&Loaded> {
         self.loaded.as_ref()
     }
 
-    /// Journal a newly seen loaded mission. A new agent boot or generation
-    /// empties the binding mirror: DCS holds none of the earlier objects.
+    /// Journal a newly seen loaded mission.
     pub fn set_loaded(&mut self, loaded: Loaded) {
-        if self.loaded.as_ref().is_none_or(|l| {
-            l.agent_boot != loaded.agent_boot || l.mission_gen != loaded.mission_gen
-        }) {
-            self.binding.clear();
-        }
+        // A campaign-level change: stamped under no entity.
+        self.touch(EntityId(0));
         self.journal(Entry::Loaded(loaded.clone()));
         self.loaded = Some(loaded);
     }
@@ -686,10 +902,11 @@ mod tests {
             theater: "Caucasus".into(),
             country: 2,
             category: 2,
+            coalition: 2,
             units: (0..n)
                 .map(|i| {
-                    (
-                        "M-113".to_owned(),
+                    NewUnit::new(
+                        "M-113",
                         UnitState {
                             at: Point {
                                 x: i as f64 * 10.0,
@@ -702,6 +919,8 @@ mod tests {
                 })
                 .collect(),
             authority: Authority::Sim,
+            label: String::new(),
+            extra: Lv::Nil,
         }
     }
 
@@ -770,6 +989,31 @@ mod tests {
             outcome: Outcome::Applied,
         });
         assert_eq!(s.unanswered(), vec![c(2)]);
+    }
+
+    #[test]
+    fn labels_and_components_stamp_the_revision_and_spec_fields_bump_spec_rev() {
+        let mut s = Store::new(CampaignId(1), 100);
+        let a = s.create_group(spec(2)).unwrap();
+        let u = s.group(a).unwrap().members[0];
+        let (r, spec_rev) = (s.revision(), s.group(a).unwrap().spec_rev);
+        s.set_label(a, "platoon").unwrap();
+        s.set_label(u, "lead").unwrap();
+        s.set_component(a, "supply", Some(vec![1, 2])).unwrap();
+        assert_eq!(s.revision(), r + 3);
+        assert_eq!(s.group(a).unwrap().spec_rev, spec_rev, "not spec");
+        assert_eq!(s.group(a).unwrap().components["supply"], vec![1, 2]);
+        s.set_component(a, "supply", None).unwrap();
+        assert!(s.group(a).unwrap().components.is_empty());
+        s.set_skill(u, "High").unwrap();
+        s.set_extra(a, Lv::Nil).unwrap();
+        s.set_extra(u, Lv::Nil).unwrap();
+        s.set_coalition(a, 1).unwrap();
+        assert_eq!(s.group(a).unwrap().spec_rev, spec_rev + 4, "spec");
+        assert_eq!(s.unit(u).unwrap().label, "lead");
+        let last: Vec<EntityId> = s.changes().map(|c| c.1).collect();
+        assert_eq!(last[last.len() - 4..], [a, a, a, a]);
+        assert!(s.set_label(EntityId(99), "x").is_err());
     }
 
     #[test]

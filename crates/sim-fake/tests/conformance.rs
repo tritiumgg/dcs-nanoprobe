@@ -13,6 +13,6 @@ fn the_fake_sim_conforms() {
         .iter()
         .filter_map(|c| c.result.as_ref().err().map(|e| format!("{}: {e}", c.name)))
         .collect();
-    assert_eq!(checks.len(), 7);
+    assert_eq!(checks.len(), 9);
     assert!(failed.is_empty(), "{failed:#?}");
 }

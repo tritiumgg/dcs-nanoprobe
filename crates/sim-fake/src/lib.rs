@@ -33,6 +33,26 @@ use nanoprobe_transport::codec::Lv;
 use nanoprobe_transport::layout::{Class, gap_class, lifecycle as lc, record_class, result as rc};
 use nanoprobe_transport::records::{CommandResult, Frame, Gap, Hello, Lifecycle};
 
+/// Scenery objects that die with each unit or static the fake kills.
+pub const SCENERY_PER_DEATH: u64 = 50;
+/// Scenery object IDs start here, above any ID the fake gives a unit.
+const SCENERY_BASE: u64 = 1 << 40;
+
+/// An `EVENT` for `S_EVENT_DEAD` (8) with `INITIATOR` and
+/// `INITIATOR_CATEGORY`: 1 a unit, 3 a static, 5 scenery (S9, LIVE).
+fn dead_event(object: u64, category: f64) -> Vec<u8> {
+    let mut w = nanoprobe_transport::codec::Writer::new();
+    w.u32(8).u32(2);
+    w.u16(2).lv(&Lv::Number(object as f64));
+    w.u16(17).lv(&Lv::Number(category));
+    w.finish()
+}
+
+/// The campaign a platform name gives, 0 for any other name.
+fn name_campaign(name: &str) -> u64 {
+    ids::parse(name).map_or(0, |p| p.campaign.0)
+}
+
 /// The fake's settings.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -75,24 +95,27 @@ impl Default for Config {
 /// Ground truth for the tests.
 #[derive(Clone, Debug, Default)]
 pub struct Ledger {
-    /// Unit entities that died in DCS.
-    pub deaths: BTreeSet<u64>,
+    /// Unit entities that died in DCS, by the campaign their name gives.
+    pub deaths: BTreeSet<(u64, u64)>,
     /// Spawns that replaced a group DCS still held under the name.
     pub replacements: u64,
     /// Spawns that reached the handler: agent boot, generation, group entity,
     /// spec revision, and the unit entities spawned.
     pub spawns: Vec<(u64, u32, u64, u64, Vec<u64>)>,
-    /// Orders that reached the handler, by agent boot, DCS group ID, group
-    /// entity and order revision. A respawned group is a new DCS group.
-    pub orders: HashMap<(u64, u64, u64, u64), u32>,
     /// Sequenced commands the agent took: agent boot, epoch, sequence number.
-    pub taken: BTreeSet<(u64, u64, u64)>,
-    /// Unit entities that left DCS without a death, by agent boot and
-    /// generation.
-    pub removed: BTreeSet<(u64, u32, u64)>,
-    /// Unit entities whose death or removal record the agent's event queue
-    /// dropped, by agent boot and generation.
-    pub unreported: BTreeSet<(u64, u32, u64)>,
+    /// The campaign each was written for.
+    pub taken: BTreeMap<(u64, u64, u64), u64>,
+    /// The result code the agent gave each command it answered, by agent
+    /// boot, epoch and sequence number, whether or not the result was read.
+    pub results: HashMap<(u64, u64, u64), u16>,
+    /// Unit entities that left DCS without a death: agent boot, generation,
+    /// campaign, entity.
+    pub removed: BTreeSet<(u64, u32, u64, u64)>,
+    /// Unit entities whose death or removal no record names: the agent's
+    /// event queue dropped it, or the agent held no binding for the row (it
+    /// was made under another campaign). Agent boot, generation, campaign,
+    /// entity.
+    pub unreported: BTreeSet<(u64, u32, u64, u64)>,
 }
 
 #[derive(Clone, Debug)]
@@ -103,6 +126,8 @@ struct FObject {
     group: u64,
     entity: u64,
     group_entity: u64,
+    /// The campaign its platform name gives, 0 for none.
+    campaign: u64,
     kind: u32,
     at: Position,
 }
@@ -111,9 +136,13 @@ struct FObject {
 struct FGroup {
     name: String,
     entity: u64,
+    /// The campaign its platform name gives, 0 for none.
+    campaign: u64,
     members: Vec<u64>,
     route: Vec<Waypoint>,
     wp: usize,
+    /// The DCS group an attack task names.
+    attack: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -122,6 +151,7 @@ struct Stamp {
     model_time: f64,
     mission_gen_: u32,
     lifecycle: u32,
+    campaign: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -164,10 +194,19 @@ pub struct FakeSim {
     // The world.
     groups: BTreeMap<u64, FGroup>,
     objects: BTreeMap<u64, FObject>,
-    table: BTreeSet<u64>,
+    /// The agent's object table: each row's unit entity and group entity.
+    table: BTreeMap<u64, (u64, u64)>,
     run: Option<Run>,
-    /// The unit entity of each object that left DCS, for the ledger.
-    gone_entities: HashMap<u64, u64>,
+    /// The loaded mission's theater.
+    theater: String,
+    /// Drop the next `RESULT` of the next frame.
+    lose_result: bool,
+    /// Destroys to answer `DCS_REFUSED`.
+    refuse_destroys: u32,
+    /// DCS groups that were in DCS when the active campaign changed.
+    orphans: BTreeSet<u64>,
+    /// Drop the next `RESULT` of this frame.
+    losing: bool,
     enumerations: u64,
     next_enum: u64,
 }
@@ -204,9 +243,13 @@ impl FakeSim {
             gap: None,
             groups: BTreeMap::new(),
             objects: BTreeMap::new(),
-            table: BTreeSet::new(),
+            table: BTreeMap::new(),
             run: None,
-            gone_entities: HashMap::new(),
+            theater: String::new(),
+            lose_result: false,
+            refuse_destroys: 0,
+            orphans: BTreeSet::new(),
+            losing: false,
             enumerations: 0,
             next_enum: 0,
         };
@@ -239,12 +282,12 @@ impl FakeSim {
         self.lifecycle == lc::RUNNING as u32
     }
 
-    /// The platform groups and statics DCS holds: entity, platform name and
-    /// the unit entities alive in it.
-    pub fn platform_groups(&self) -> Vec<(u64, String, Vec<u64>)> {
+    /// The groups and statics of a campaign's platform names that DCS holds:
+    /// entity, platform name and the unit entities alive in it.
+    pub fn platform_groups(&self, campaign: u64) -> Vec<(u64, String, Vec<u64>)> {
         self.groups
             .values()
-            .filter(|g| g.entity != 0)
+            .filter(|g| g.entity != 0 && g.campaign == campaign)
             .map(|g| {
                 let units = g.members.iter().map(|o| self.objects[o].entity).collect();
                 (g.entity, g.name.clone(), units)
@@ -252,15 +295,30 @@ impl FakeSim {
             .collect()
     }
 
+    /// The loaded mission's theater.
+    pub fn theater(&self) -> &str {
+        &self.theater
+    }
+
+    /// The DCS group of a group entity, and the DCS group its attack task
+    /// names, if it has one.
+    pub fn attack_of(&self, campaign: u64, entity: u64) -> Option<(u64, Option<u64>)> {
+        let gid = self.group_in(campaign, entity)?;
+        Some((gid, self.groups[&gid].attack))
+    }
+
     /// The order revision the agent holds for a group entity.
     pub fn applied_order(&self, entity: u64) -> u64 {
         self.applied_order.get(&entity).copied().unwrap_or(0)
     }
 
-    /// The DCS object IDs alive in the world, with the unit entity each
-    /// carries (0 for an unmanaged one).
-    pub fn objects(&self) -> Vec<(u64, u64)> {
-        self.objects.iter().map(|(o, x)| (*o, x.entity)).collect()
+    /// The DCS objects alive in the world: object ID, the campaign its name
+    /// gives and the unit entity it carries (0 and 0 for an unmanaged one).
+    pub fn objects(&self) -> Vec<(u64, u64, u64)> {
+        self.objects
+            .iter()
+            .map(|(o, x)| (*o, x.campaign, x.entity))
+            .collect()
     }
 
     fn stamp(&self) -> Stamp {
@@ -269,6 +327,7 @@ impl FakeSim {
             model_time: self.model_time,
             mission_gen_: self.mission_gen_,
             lifecycle: self.lifecycle,
+            campaign: self.campaign,
         }
     }
 
@@ -288,7 +347,7 @@ impl FakeSim {
             frame: s.frame,
             model_time: s.model_time,
             real_time: s.model_time,
-            campaign: self.campaign,
+            campaign: s.campaign,
             number: self.number + 2,
             mission_gen: s.mission_gen_,
             lifecycle: s.lifecycle,
@@ -299,6 +358,13 @@ impl FakeSim {
 
     /// Emit a record: written when attached, else queued by its class.
     fn emit(&mut self, input: Input) {
+        if self.losing && matches!(input, Input::Result(_)) {
+            // The result is lost and the link drops with it; the next
+            // attach's HELLO settles the command.
+            self.losing = false;
+            self.attached = false;
+            return;
+        }
         if self.attached {
             self.write(&input);
             return;
@@ -323,12 +389,13 @@ impl FakeSim {
                         })
                         .expect("an event");
                     let (s, dropped) = self.queue.remove(at).expect("queued");
-                    if let Input::ObjectGone(g) = dropped
-                        && let Some(e) = self.gone_entities.get(&g.object)
-                    {
-                        self.ledger
-                            .unreported
-                            .insert((self.agent_boot, s.mission_gen_, *e));
+                    if let Input::ObjectGone(g) = dropped {
+                        self.ledger.unreported.insert((
+                            self.agent_boot,
+                            s.mission_gen_,
+                            s.campaign,
+                            g.entity,
+                        ));
                     }
                     let g = self.gap.get_or_insert(Gap {
                         class: gap_class::EVENTS as u32,
@@ -381,7 +448,7 @@ impl FakeSim {
         let theater = if self.mission_gen_ == 0 {
             String::new()
         } else {
-            self.cfg.theater.clone()
+            self.theater.clone()
         };
         self.emit(Input::Lifecycle(Lifecycle {
             state: self.lifecycle,
@@ -401,11 +468,19 @@ impl FakeSim {
     /// without a record, the agent forgets the binding and applied
     /// revisions, and the mission runs after `load_frames` frames.
     pub fn load_mission(&mut self) {
+        let t = self.cfg.theater.clone();
+        self.load_mission_on(&t);
+    }
+
+    /// Start a mission load on another theater.
+    pub fn load_mission_on(&mut self, theater: &str) {
         if !self.alive {
             return;
         }
+        self.theater = theater.to_owned();
         self.mission_gen_ += 1;
         self.groups.clear();
+        self.orphans.clear();
         self.objects.clear();
         self.table.clear();
         self.run = None;
@@ -452,6 +527,95 @@ impl FakeSim {
         self.alive
     }
 
+    /// The next `RESULT` written in the next frame is lost, and the link
+    /// drops with it. Its command
+    /// stays unanswered until the next attach's `HELLO`. (A `RESULT` lost to
+    /// `CONTROL_LOST` and its resync `HELLO` are not modeled.)
+    pub fn lose_next_result(&mut self) {
+        self.lose_result = true;
+    }
+
+    /// The agent's active campaign changes, as a `CAMPAIGN` command from a
+    /// sidecar of another campaign does: the agent discards the binding and
+    /// the applied revisions, and binds again only the rows whose platform
+    /// names give the new campaign (spec/commands.md, `CAMPAIGN`).
+    pub fn set_campaign(&mut self, c: u64) {
+        if c == self.campaign {
+            return;
+        }
+        self.campaign = c;
+        self.applied_spec.clear();
+        self.applied_order.clear();
+        // Groups in DCS whose applied revision the agent no longer holds: a
+        // spawn under one of their names replaces it, as spec/commands.md
+        // allows between a switch and the next load.
+        self.orphans.extend(self.groups.keys().copied());
+        for (object, b) in self.table.iter_mut() {
+            *b = match self.objects.get(object) {
+                Some(o) if o.campaign == c && c != 0 => (o.entity, o.group_entity),
+                _ => (0, 0),
+            };
+        }
+    }
+
+    /// A group of another campaign's platform names, in DCS from a mission
+    /// that campaign ran: group `group`, units `units`, all `M-113`. The
+    /// agent binds its rows only while that campaign is active.
+    pub fn add_campaign_group(&mut self, campaign: u64, group: u64, units: &[u64]) {
+        use nanoprobe_sidecar::ids::{CampaignId, EntityId, NameKind};
+        let gname = ids::name(NameKind::Group, CampaignId(campaign), EntityId(group));
+        let gid = self.next_object;
+        self.next_object += 1;
+        let mut members = Vec::new();
+        for (i, u) in units.iter().enumerate() {
+            let id = self.next_object;
+            self.next_object += 1;
+            self.objects.insert(
+                id,
+                FObject {
+                    name: ids::name(NameKind::Unit, CampaignId(campaign), EntityId(*u)),
+                    type_name: "M-113".into(),
+                    group: gid,
+                    entity: *u,
+                    group_entity: group,
+                    campaign,
+                    kind: object_kind::UNIT,
+                    at: Position {
+                        object: id,
+                        x: 5_000.0 + 20.0 * i as f64,
+                        y: 0.0,
+                        z: 5_000.0,
+                    },
+                },
+            );
+            let bound = if campaign == self.campaign {
+                (*u, group)
+            } else {
+                (0, 0)
+            };
+            self.table.insert(id, bound);
+            members.push(id);
+        }
+        self.groups.insert(
+            gid,
+            FGroup {
+                name: gname,
+                entity: group,
+                campaign,
+                members,
+                route: Vec::new(),
+                attack: None,
+                wp: 0,
+            },
+        );
+    }
+
+    /// The next `n` destroys of any entity raise in DCS and are answered
+    /// `DCS_REFUSED`.
+    pub fn refuse_destroys(&mut self, n: u32) {
+        self.refuse_destroys = n;
+    }
+
     /// The link drops: the agent detaches and queues its records.
     pub fn detach(&mut self) {
         self.attached = false;
@@ -476,9 +640,11 @@ impl FakeSim {
             self.write(&Input::Gap(g));
         }
         for (s, input) in queued {
-            if last_frame != Some(s.frame) {
+            // A FRAME whenever the stamps change, the campaign included.
+            let key = (s.frame, s.mission_gen_, s.campaign, s.lifecycle);
+            if last_frame != Some(key) {
                 self.frame_record(&s, true);
-                last_frame = Some(s.frame);
+                last_frame = Some(key);
             }
             self.write(&input);
         }
@@ -503,18 +669,56 @@ impl FakeSim {
     }
 
     /// A unit or static dies: a death event, and the row leaves the table.
+    /// Scenery dies with it, [`SCENERY_PER_DEATH`] objects, each its own
+    /// death event and never in the table (S9's catalogue: 300 of 306
+    /// deaths were scenery, LIVE).
     pub fn kill(&mut self, object: u64) {
         let Some(o) = self.remove_object(object) else {
             return;
         };
         if o.entity != 0 {
-            self.ledger.deaths.insert(o.entity);
+            self.ledger.deaths.insert((o.campaign, o.entity));
         }
-        if self.table.remove(&object) {
-            self.emit(Input::Event(vec![8, 0, 0, 0, 0, 0, 0, 0]));
+        self.unattributed(object, &o);
+        let category = if o.kind == object_kind::STATIC {
+            3.0
+        } else {
+            1.0
+        };
+        for i in 0..SCENERY_PER_DEATH {
+            self.emit(Input::Event(dead_event(
+                SCENERY_BASE + object * 100 + i,
+                5.0,
+            )));
+        }
+        if self.table.contains_key(&object) {
+            self.emit(Input::Event(dead_event(object, category)));
+            self.gone(object, gone_reason::DEAD);
+        }
+    }
+
+    /// A platform object whose row holds no binding: its death or removal
+    /// names no unit.
+    fn unattributed(&mut self, object: u64, o: &FObject) {
+        if o.entity != 0 && self.table.get(&object).is_some_and(|b| b.0 == 0) {
+            self.ledger.unreported.insert((
+                self.agent_boot,
+                self.mission_gen_,
+                o.campaign,
+                o.entity,
+            ));
+        }
+    }
+
+    /// The row leaves the table with an `OBJECT_GONE` that carries its
+    /// binding.
+    fn gone(&mut self, object: u64, reason: u32) {
+        if let Some((entity, group_entity)) = self.table.remove(&object) {
             self.emit(Input::ObjectGone(ObjectGone {
                 object,
-                reason: gone_reason::DEAD,
+                reason,
+                entity,
+                group_entity,
             }));
         }
     }
@@ -525,7 +729,7 @@ impl FakeSim {
         if let Some(o) = self.remove_object(object) {
             self.ledger
                 .removed
-                .insert((self.agent_boot, self.mission_gen_, o.entity));
+                .insert((self.agent_boot, self.mission_gen_, o.campaign, o.entity));
         }
     }
 
@@ -536,18 +740,13 @@ impl FakeSim {
         };
         self.ledger
             .removed
-            .insert((self.agent_boot, self.mission_gen_, o.entity));
-        if self.table.remove(&object) {
-            self.emit(Input::ObjectGone(ObjectGone {
-                object,
-                reason: gone_reason::REMOVED,
-            }));
-        }
+            .insert((self.agent_boot, self.mission_gen_, o.campaign, o.entity));
+        self.unattributed(object, &o);
+        self.gone(object, gone_reason::REMOVED);
     }
 
     fn remove_object(&mut self, object: u64) -> Option<FObject> {
         let o = self.objects.remove(&object)?;
-        self.gone_entities.insert(object, o.entity);
         let gid = if o.kind == object_kind::STATIC {
             object
         } else {
@@ -582,6 +781,7 @@ impl FakeSim {
                     group: 0,
                     entity,
                     group_entity: 0,
+                    campaign: name_campaign(name),
                     kind: object_kind::STATIC,
                     at: Position { object: gid, ..at },
                 },
@@ -601,6 +801,7 @@ impl FakeSim {
                         group: gid,
                         entity: 0,
                         group_entity: entity,
+                        campaign: 0,
                         kind: object_kind::UNIT,
                         at: Position { object: id, ..at },
                     },
@@ -609,15 +810,18 @@ impl FakeSim {
             }
         }
         for m in &members {
-            self.table.insert(*m);
+            let o = &self.objects[m];
+            self.table.insert(*m, (o.entity, o.group_entity));
         }
         self.groups.insert(
             gid,
             FGroup {
                 name: name.to_owned(),
                 entity,
+                campaign: name_campaign(name),
                 members,
                 route: Vec::new(),
+                attack: None,
                 wp: 0,
             },
         );
@@ -633,7 +837,7 @@ impl FakeSim {
         }));
         self.run = Some(Run {
             id,
-            rows: self.table.iter().copied().collect(),
+            rows: self.table.keys().copied().collect(),
             written: 0,
         });
         self.next_enum = self.frame + self.cfg.enum_period;
@@ -647,7 +851,7 @@ impl FakeSim {
             let Some(row) = run.rows.pop_front() else {
                 break;
             };
-            if !self.table.contains(&row) {
+            if !self.table.contains_key(&row) {
                 continue;
             }
             if self.objects.contains_key(&row) {
@@ -655,11 +859,7 @@ impl FakeSim {
                 self.emit(r);
                 run.written += 1;
             } else {
-                self.table.remove(&row);
-                self.emit(Input::ObjectGone(ObjectGone {
-                    object: row,
-                    reason: gone_reason::MISSING,
-                }));
+                self.gone(row, gone_reason::MISSING);
             }
         }
         if run.rows.is_empty() {
@@ -676,6 +876,8 @@ impl FakeSim {
 
     /// Run one frame.
     pub fn frame(&mut self) {
+        // A lost result is lost in this frame or not at all.
+        self.losing = std::mem::take(&mut self.lose_result);
         if !self.alive {
             return;
         }
@@ -709,9 +911,10 @@ impl FakeSim {
                 if let Ok(Some(c)) = Command::decode(op, &payload)
                     && !c.body.is_control()
                 {
-                    self.ledger
-                        .taken
-                        .insert((self.agent_boot, c.header.epoch, c.header.seq));
+                    self.ledger.taken.insert(
+                        (self.agent_boot, c.header.epoch, c.header.seq),
+                        c.header.campaign,
+                    );
                 }
                 self.handle(op, &payload);
             }
@@ -725,7 +928,7 @@ impl FakeSim {
             if self.frame.is_multiple_of(self.cfg.positions_every) {
                 let rows: Vec<Position> = self
                     .table
-                    .iter()
+                    .keys()
                     .filter_map(|o| self.objects.get(o).map(|x| x.at))
                     .collect();
                 if !rows.is_empty() {
@@ -765,6 +968,11 @@ impl FakeSim {
 
     fn result(&mut self, cmd: &Command, code: u64, object: u64, message: &str, value: Lv) {
         let h = &cmd.header;
+        if h.seq != 0 {
+            self.ledger
+                .results
+                .insert((self.agent_boot, h.epoch, h.seq), code as u16);
+        }
         self.emit(Input::Result(CommandResult {
             seq: h.seq,
             epoch: h.epoch,
@@ -817,10 +1025,13 @@ impl FakeSim {
         if cmd.body.is_control() {
             match cmd.body {
                 Body::Campaign(c) => {
-                    if c != self.campaign {
-                        self.campaign = c;
-                        self.applied_spec.clear();
-                        self.applied_order.clear();
+                    let changed = c != self.campaign;
+                    self.set_campaign(c);
+                    // The records after it carry the new campaign: a FRAME
+                    // stamps them (the agent does the same, S10).
+                    if changed && self.attached {
+                        let s = self.stamp();
+                        self.frame_record(&s, false);
                     }
                 }
                 Body::Enumerate => self.start_enumeration(),
@@ -906,15 +1117,24 @@ impl FakeSim {
                 let g = self.groups.get_mut(&gid).expect("group");
                 g.route = route_points(task);
                 g.wp = 0;
+                g.attack = lv::get(task, "params")
+                    .filter(|_| lv::str_at(task, "id").as_deref() == Some("AttackGroup"))
+                    .and_then(|p| lv::num_at(p, "groupId"))
+                    .map(|v| v as u64);
                 self.applied_order.insert(h.entity, h.rev);
-                *self
-                    .ledger
-                    .orders
-                    .entry((self.agent_boot, gid, h.entity, h.rev))
-                    .or_default() += 1;
                 self.result(&cmd, rc::APPLIED, gid, "", Lv::Nil);
             }
             Body::GroupDestroy | Body::StaticDestroy => {
+                if self.refuse_destroys > 0 {
+                    self.refuse_destroys -= 1;
+                    return self.result(
+                        &cmd,
+                        rc::DCS_REFUSED,
+                        0,
+                        "injected: the destroy raised",
+                        Lv::Nil,
+                    );
+                }
                 self.destroy(h.entity);
                 self.result(&cmd, rc::APPLIED, 0, "", Lv::Nil);
             }
@@ -939,10 +1159,15 @@ impl FakeSim {
         }
     }
 
+    /// The DCS group of an entity of the active campaign.
     fn group_of(&self, entity: u64) -> Option<u64> {
+        self.group_in(self.campaign, entity)
+    }
+
+    fn group_in(&self, campaign: u64, entity: u64) -> Option<u64> {
         self.groups
             .iter()
-            .find(|(_, g)| g.entity == entity && entity != 0)
+            .find(|(_, g)| g.entity == entity && entity != 0 && g.campaign == campaign)
             .map(|(id, _)| *id)
     }
 
@@ -960,7 +1185,9 @@ impl FakeSim {
             .find(|(_, g)| g.name == name)
             .map(|(id, _)| *id)
         {
-            self.ledger.replacements += 1;
+            if !self.orphans.contains(&old) {
+                self.ledger.replacements += 1;
+            }
             self.destroy_group(old);
         }
         let gid = self.next_object;
@@ -986,6 +1213,7 @@ impl FakeSim {
                     group: if is_static { 0 } else { gid },
                     entity,
                     group_entity: if is_static { 0 } else { h.entity },
+                    campaign: h.campaign,
                     kind: if is_static {
                         object_kind::STATIC
                     } else {
@@ -1001,8 +1229,10 @@ impl FakeSim {
             FGroup {
                 name: name.to_owned(),
                 entity: h.entity,
+                campaign: name_campaign(name),
                 members: members.clone(),
                 route: Vec::new(),
+                attack: None,
                 wp: 0,
             },
         );
@@ -1017,7 +1247,8 @@ impl FakeSim {
         ));
         self.result(cmd, rc::APPLIED, gid, "", Lv::Nil);
         for m in members {
-            self.table.insert(m);
+            let o = &self.objects[&m];
+            self.table.insert(m, (o.entity, o.group_entity));
             let r = self.object_record(m, 0);
             self.emit(r);
         }
@@ -1029,12 +1260,7 @@ impl FakeSim {
         };
         for m in g.members {
             self.objects.remove(&m);
-            if self.table.remove(&m) {
-                self.emit(Input::ObjectGone(ObjectGone {
-                    object: m,
-                    reason: gone_reason::DESTROYED,
-                }));
-            }
+            self.gone(m, gone_reason::DESTROYED);
         }
     }
 
@@ -1066,14 +1292,6 @@ impl FakeSim {
             .collect();
         lv::list(items)
     }
-
-    /// The unit entity's DCS object, if it is alive.
-    pub fn object_of(&self, entity: u64) -> Option<u64> {
-        self.objects
-            .iter()
-            .find(|(_, o)| o.entity == entity && entity != 0)
-            .map(|(id, _)| *id)
-    }
 }
 
 impl SimAdapter for FakeSim {
@@ -1102,6 +1320,11 @@ impl nanoprobe_sidecar::conformance::Target for FakeSim {
 
     fn reload(&mut self) {
         self.load_mission();
+    }
+
+    fn reattach(&mut self) {
+        self.detach();
+        self.attach(self.sidecar_boot);
     }
 
     fn unit_type(&self) -> &str {

@@ -28,3 +28,42 @@ fn seeded_schedules_hold_every_invariant() {
         failures.join("\n")
     );
 }
+
+/// The seeds reach `live` -> `dead`, and never `virtual` -> `dead`.
+/// `materializing` -> `dead` and `dematerializing` -> `dead` need a death
+/// in a short window, too rare for random schedules to be sure of; scripted
+/// tests cover them (crates/sidecar/tests/reconciler.rs), as they do
+/// `lost` -> `dead`, which the protocol's ordering rules out.
+#[test]
+fn the_seeds_reach_the_new_arrows_to_dead() {
+    use std::collections::BTreeMap;
+
+    use nanoprobe_sidecar::lifecycle::State;
+    use nanoprobe_sidecar::store::{Entry, LostPolicy};
+    use nanoprobe_sim_fake::harness::{Schedule, World};
+
+    let mut seen: BTreeMap<&str, u32> = BTreeMap::new();
+    for seed in 0..200u64 {
+        let mut w = World::new(6, 2, LostPolicy::Report);
+        let mut s = Schedule::new(seed);
+        for _ in 0..300 {
+            w.apply(&s.op()).unwrap();
+        }
+        for e in w.store.entries() {
+            if let Entry::Transition {
+                from,
+                to: State::Dead,
+                ..
+            } = e
+            {
+                *seen.entry(from.name()).or_default() += 1;
+            }
+        }
+    }
+    // spec/world.md: `virtual` -> `dead` cannot happen in order.
+    assert_eq!(seen.get("virtual"), None, "{seen:?}");
+    assert!(
+        seen.get("live").copied().unwrap_or(0) > 0,
+        "no live -> dead in 200 seeds: {seen:?}"
+    );
+}

@@ -5,3 +5,5 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 92469dd633e427aa52e82beaf5b6374ca27264f9706dd1950b06280553a4dc2c # shrinks to seed = 13402076241050961517, cuts = [Index(4657166156676178712)]
+cc 6a182cf0d6edf94452a1e1c5fd06443bbd74f81130daec6e803e00580a2dc41b # shrinks to seed = 25120696275652248, cuts = [Index(0)]
+cc 0d73918f8de287627558c8db41c910175d764fe236bd35890a5b7fe1caa83f98 # shrinks to seed = 10782040802125813870, cuts = [Index(0)]
