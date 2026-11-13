@@ -7,6 +7,7 @@
 | DCS | None. The server runs over the fake sim (`crates/sim-fake`); no claim here is about DCS. |
 | Schema | `proto/nanoprobe/v1alpha1`, unchanged but for the `GetOutcome` comment |
 | Programs | `nanoprobe-fake-sidecar` (`crates/fake-sidecar`) and `hello-campaign` (`examples/hello-rust`), through `cargo xtask hello [<target>]` |
+| Code | Commit `b3d61d1`, built with Rust 1.99.1 (`rust-toolchain.toml`) |
 | Result | The hello campaign runs on macOS, Linux and Windows. `buf breaking` passes against `main`. |
 
 ## Exit test
@@ -20,8 +21,8 @@ route's end, then releases the lease.
 
 | System | Build | How it ran | Group states | Result |
 |---|---|---|---|---|
-| macOS 26 (Darwin 25.6.0), arm64 | host debug build | `cargo xtask hello` | materializing, live, arrived | passed |
-| Linux, x86-64 | static `x86_64-unknown-linux-musl`, linked by `rust-lld` | `cargo xtask hello <docker-wine target>`: on the SSH host, outside the game container, in a `mktemp` folder | materializing, live, arrived | passed |
+| macOS 26.6.2 (Darwin 25.6.0), arm64 | host debug build | `cargo xtask hello` | materializing, live, arrived | passed |
+| Ubuntu 24.04.5 LTS, Linux 6.8.0, x86-64 | static `x86_64-unknown-linux-musl`, linked by `rust-lld` | `cargo xtask hello <docker-wine target>`: on the SSH host, outside the game container, in a `mktemp` folder | materializing, live, arrived | passed |
 | Windows 11 (NT 10.0.26200), x86-64 | `x86_64-pc-windows-msvc`, cross-built with `cargo-xwin` | `cargo xtask hello <windows-ssh target>`: as the SSH account, in a folder under its temp folder | materializing, live, arrived | passed |
 
 On both remote systems `cargo xtask hello` checked, after the run, that no process started
