@@ -79,9 +79,13 @@ message Group {
   uint32 country = 6;
   GroupCategory category = 7;
   repeated Unit units = 8;
+  // Changes when the spec changes, and when a lost group is spawned again,
+  // whose spec may be the same (spec/world.md, "Revisions").
   uint64 spec_revision = 9;
   // The spec revision DCS has applied.
   uint64 applied_spec_revision = 15;
+  // Changes when the order changes, and when the target of a sent or applied
+  // attack order gets new DCS object IDs (spec/world.md, "Revisions").
   uint64 order_revision = 10;
   // The order revision DCS has been given.
   uint64 applied_order_revision = 11;
@@ -107,6 +111,8 @@ message Static {
   EntityState state = 11;
   // The engine's error for an unspawnable static.
   string last_error = 12;
+  // Changes when the spec changes, and when a lost static is spawned again,
+  // whose spec may be the same (spec/world.md, "Revisions").
   uint64 spec_revision = 13;
   uint64 applied_spec_revision = 14;
 }

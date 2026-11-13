@@ -14,3 +14,7 @@ workspace = true
 
 [dependencies]
 nanoprobe-transport = { path = "../transport" }
+
+[dev-dependencies]
+nanoprobe-sim-fake = { path = "../sim-fake" }
+proptest = "1"

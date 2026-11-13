@@ -121,8 +121,14 @@ A group with a death fact for a member is never respawned with that member.
 | Counter | Scope | Changes when |
 |---|---|---|
 | Store revision | campaign | Any change to the store. Stamps every change the World service reports. |
-| `spec_rev` | group, static, mark, drawing, menu item, extension | Its spec changes |
-| `order_rev` | group | Its order changes |
+| `spec_rev` | group, static, mark, drawing, menu item, extension | Its spec changes, or a `lost` group or static is respawned, whose spec may be the same |
+| `order_rev` | group | Its order changes, or the target group of a sent or applied attack order gets new DCS object IDs. The new revision is taken when the target's spawn resolves `applied`, and the order is compiled after it. Not on a mission generation change, after which every order is sent again. |
+
+A group's spec is its country, coalition, category, extra keys of its DCS table, and
+its units: each one's type, skill and extra keys. A static's is its country,
+coalition, type and extra keys. Positions and state are not spec; a spawn takes the
+last known ones. The author's label and components are not spec either: they never
+reach DCS, and a change to them moves only the store revision.
 
 The agent holds `applied_spec_rev` and `applied_order_rev` per entity it applied
 (spec/commands.md). The sidecar re-sends a spec or an order only when the agent's
@@ -138,28 +144,30 @@ a group of one.
 | `virtual` | Simulated by the campaign, not in DCS |
 | `materializing` | A spawn was sent and not yet acknowledged |
 | `live` | In DCS, at least one member alive |
-| `dematerializing` | A capture-and-destroy was sent and not yet acknowledged. For a static: a capture, then a destroy. |
+| `dematerializing` | Leaving DCS: a capture-and-destroy, or for a static a capture and then a destroy, was sent, and the destroy is not yet applied |
 | `dead` | Every member has a death fact. Final. |
 | `lost` | Missing from DCS with no death fact, in the same mission generation |
 | `unspawnable` | DCS refused the spawn. Not retried. |
 
 | From | To | When |
 |---|---|---|
-| `virtual` | `materializing` | The authority moves to DCS, or the theater is loaded |
+| `virtual` | `materializing` | The authority is DCS and the entity's theater is loaded. A level condition, checked on every plan. |
 | `materializing` | `live` | The spawn's outcome is `applied` |
 | `materializing` | `unspawnable` | The spawn's outcome is `refused` (spec/errors.md) |
-| `materializing` | `materializing` | The spawn's outcome is `unknown`, or the mission generation changes: the spawn is sent again |
-| `live` | `dead` | The last member's death fact arrives |
+| `materializing` | `materializing` | The spawn's outcome is `unknown` or `not_sent`, or the mission generation changes: the spawn is sent again |
+| `materializing` | `virtual` | The authority is the campaign, or the entity's theater is not loaded, no spawn of it is unanswered, and none was `unknown` in this generation (DCS may hold it; the spawn is sent again, answered `AT_REVISION`, and the group leaves through `live`) |
+| `live`, `materializing`, `dematerializing`, `lost`, `virtual` | `dead` | The last member's death fact arrives (see the conditions below) |
 | `live` | `dematerializing` | The authority moves to the campaign |
-| `dematerializing` | `virtual` | The capture result arrives with the state. If its outcome is `refused` or `unknown`, or the mission generation changes first, the group becomes `virtual` with its last checkpointed state. |
-| `live`, `materializing` | `virtual` | The mission generation changes and the new mission's theater is not the entity's |
+| `dematerializing` | `virtual` | The destroy is applied (the agent's `APPLIED`, which while paused comes before DCS lets go), or the agent answers `NOT_BOUND`: a capture-and-destroy that ran in full, or the `GROUP_DESTROY` or `STATIC_DESTROY` sent after a capture, or after a capture-and-destroy that was `refused`, `unknown` or `TOO_LARGE`. The entity keeps the captured state, or else its last checkpointed state. Also when the mission generation changes first. |
+| `dematerializing` | `lost` | The destroy was `refused` or `unknown` `destroy_retries` times (spec/config.md). The error is kept as the entity's last error. |
+| `live`, `materializing` | `virtual` | The mission generation changes and the new mission's theater is not the entity's, or the authority is the campaign |
 | `live` | `lost` | A full enumeration finds no member of the group, and no death fact explains it |
-| `live` | `materializing` | The mission generation changes (a reload or a DCS restart) and the theater is still the entity's |
+| `live` | `materializing` | The mission generation changes (a reload or a DCS restart), the theater is still the entity's and the authority is DCS |
 | `lost` | `live` | A later full enumeration finds the group |
-| `lost` | `materializing` or `virtual` | The mission generation changes: `materializing` if the new mission's theater is the entity's, else `virtual` |
-| `lost` | `materializing` | The author's policy is respawn |
+| `lost` | `materializing` or `virtual` | The mission generation changes: `materializing` if the new mission's theater is the entity's and the authority is DCS, else `virtual` |
+| `lost` | `materializing` | The author's policy is respawn, the authority is DCS, and a full enumeration used since the sidecar started, since the last `HELLO` and since the last `GAP` of events finds no object of the entity. Until then the binding mirror may lack objects DCS holds, such as those of an entity that went `lost` after its destroys failed. The spawn carries a new spec revision: the agent still holds the old one for this generation and would answer `AT_REVISION`. |
 | `lost` | `dead` | The author's policy is mark dead |
-| `unspawnable` | `materializing` | The author changes the spec |
+| `unspawnable` | `virtual` | The author changes the spec; its last error is cleared. It materializes from `virtual` by the level condition above. |
 
 - `lost` covers removals DCS reports no event for, and events lost because another
   script's handler raised first. The default policy is to report and wait for the next
@@ -169,9 +177,28 @@ a group of one.
   fact, so the next spawn of the group includes it.
 - After a DCS restart every `live` group is spawned again from its last captured state,
   on the same path as a first materialization.
-- A spawn sent again for a group that DCS already holds at that revision is answered
-  `AT_REVISION`, which is `applied` (spec/errors.md): sending a spawn twice never
-  makes two groups.
+- A spawn sent again at a revision the agent applied in this mission generation is
+  answered `AT_REVISION`, which is `applied` (spec/errors.md): sending a spawn twice
+  never makes two groups.
+- A death fact comes from an `OBJECT_GONE` with reason `DEAD` (spec/records.md), so
+  only units and statics in the agent's table have one, never scenery. It counts only
+  when it is stamped with the loaded generation and the store's campaign, and its
+  binding names a unit of the group (or the static). A death of an earlier
+  generation, of another campaign (campaign 0 included), or for an object the
+  binding does not tie to the group, changes nothing. The same stamp condition holds
+  for an `OBJECT`'s binding, and for an `EVENT`'s object IDs where the sidecar
+  resolves them. The sidecar counts what it drops. An enumeration with a record
+  stamped with another campaign is not used.
+- `dead` is final. A spawn or capture result, or an enumeration, that arrives for a
+  `dead` entity changes nothing and is counted. A destroy result for a `dead` entity
+  whose objects DCS still holds counts toward `destroy_retries` like any destroy of an
+  entity DCS should not hold (spec/config.md).
+- When the last death fact arrives while the group is `materializing`, the spawn
+  that is not yet answered ran: it resolves `applied`.
+- `lost` -> `dead` and `virtual` -> `dead` by death facts cannot happen in order: an
+  enumeration that finds no row of a group leaves no row for a later `OBJECT_GONE` to
+  name, and an entity becomes `virtual` only once DCS no longer holds it. The rows
+  keep the rule total.
 - Every transition is journalled before the command that causes it is sent.
 
 ## Events and the store

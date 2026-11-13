@@ -11,3 +11,7 @@ publish = false
 
 [lints]
 workspace = true
+
+[dependencies]
+nanoprobe-sidecar = { path = "../sidecar" }
+nanoprobe-transport = { path = "../transport" }
