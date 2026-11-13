@@ -1,0 +1,38 @@
+# Development tooling: the API server over the fake sim. Built from source,
+# never released.
+
+[package]
+name = "nanoprobe-fake-sidecar"
+description = "The nanoprobe API server over the fake sim, for development and tests. Not released."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "nanoprobe-fake-sidecar"
+path = "src/main.rs"
+
+[dependencies]
+nanoprobe-api = { path = "../api" }
+nanoprobe-proto = { path = "../proto" }
+nanoprobe-sidecar = { path = "../sidecar" }
+nanoprobe-sim-fake = { path = "../sim-fake" }
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-stream = "0.1.19"
+tonic = { version = "0.14.9", default-features = false, features = ["channel", "codegen", "router", "server", "transport"] }
+tower = "0.5.3"
+
+[dev-dependencies]
+nanoprobe-cli = { path = "../cli" }
+nanoprobe-hello = { path = "../../examples/hello-rust" }
+prost = "0.14.6"
+prost-types = "0.14.6"
+tonic-reflection = "0.14.9"

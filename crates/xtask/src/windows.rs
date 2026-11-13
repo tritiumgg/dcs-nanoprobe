@@ -165,7 +165,7 @@ $f.Close()"#,
 
     /// Send `bytes` to the Windows path `full` with SFTP, through a local
     /// temporary file.
-    fn send(&self, full: &str, bytes: &[u8]) -> Result<(), String> {
+    pub(crate) fn send(&self, full: &str, bytes: &[u8]) -> Result<(), String> {
         if full.contains('"') {
             return Err(format!("{full}: a path with a double quote cannot be sent"));
         }

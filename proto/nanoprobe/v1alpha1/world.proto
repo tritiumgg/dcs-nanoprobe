@@ -207,7 +207,10 @@ message ListWorldResponse {
 message WatchWorldRequest {
   WorldFilter filter = 1;
   // Send changes after this revision. Fails with REVISION_EXPIRED when the
-  // store no longer keeps the changes since it.
+  // store no longer keeps the changes since it. The first message may also
+  // carry the last state of an entity that changed since this revision and
+  // no longer passes the filter, such as one that died or left the area; a
+  // consumer that does not hold it drops it.
   uint64 since_revision = 2;
   RateClass rate = 3;
   // The shortest time between two position updates of one unit. A period

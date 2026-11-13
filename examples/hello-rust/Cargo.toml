@@ -1,0 +1,22 @@
+[package]
+name = "nanoprobe-hello"
+description = "The hello campaign: a minimal nanoprobe client in Rust."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "hello-campaign"
+path = "src/main.rs"
+
+[dependencies]
+nanoprobe-proto = { path = "../../crates/proto" }
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "time"] }
+tonic = { version = "0.14.9", default-features = false, features = ["channel", "codegen", "transport"] }

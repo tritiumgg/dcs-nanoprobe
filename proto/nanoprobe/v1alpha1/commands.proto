@@ -27,7 +27,12 @@ service CommandsService {
   rpc Capture(CaptureRequest) returns (CaptureResponse);
   rpc DoEffect(DoEffectRequest) returns (DoEffectResponse);
   rpc SetSampleRates(SetSampleRatesRequest) returns (SetSampleRatesResponse);
-  // The outcome of an earlier effect or query call, by its idempotency key.
+  // An earlier call, by its idempotency key: the campaign it acted on and,
+  // for an effect or a query, its outcome and value. A set-state call has no
+  // outcome of its own, so `result` is absent; follow the entity's applied
+  // revisions in WorldService. Repeating a set-state call with the same key
+  // returns its first response, revisions included. An unknown or expired
+  // key is OUTCOME_NOT_FOUND.
   rpc GetOutcome(GetOutcomeRequest) returns (GetOutcomeResponse);
 }
 

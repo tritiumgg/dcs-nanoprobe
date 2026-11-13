@@ -3,13 +3,15 @@
 //! `inspect` prints a snapshot of the transport file: the status block, the
 //! metrics and the unread records of both rings. `top` shows the live state and
 //! its rates. Both open the file read-only and decode private copies of what
-//! they read.
+//! they read. `watch` prints a sidecar's world changes or events from its
+//! API, one message per line.
 
 pub mod args;
 pub mod decode;
 pub mod inspect;
 pub mod top;
 pub mod util;
+pub mod watch;
 
 use std::io::Write;
 use std::time::{Duration, Instant};
@@ -32,6 +34,7 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
             let _ = write!(out, "{}", args::USAGE);
             0
         }
+        Command::Watch(o) => watch::run(&o, out, err),
         Command::Inspect { path, records } => {
             let map = match open(&path, err) {
                 Some(m) => m,

@@ -5,12 +5,16 @@ resolver = "3"
 members = [
     "crates/agent",
     "crates/agent-link",
+    "crates/api",
     "crates/cli",
     "crates/fake-agent",
+    "crates/fake-sidecar",
+    "crates/proto",
     "crates/sidecar",
     "crates/sim-fake",
     "crates/transport",
     "crates/xtask",
+    "examples/hello-rust",
 ]
 # Built with a nightly toolchain by `mise run fuzz`.
 exclude = ["crates/transport/fuzz"]

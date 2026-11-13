@@ -108,8 +108,12 @@ description = "Write spec/transport.golden from the tables in the transport spec
 run = "cargo xtask spec"
 
 [tasks.proto]
-description = "Lint the public API schema and check it for breaking changes against the last commit"
-run = ["buf lint", "sh tools/protobreak.sh"]
+description = "Lint the public API schema, check it for breaking changes against origin/main (else main, else HEAD), test that choice, and check the generated Rust code is current"
+run = ["buf lint", "sh tools/protobreak.sh", "sh tools/protobreak-test.sh", "cargo xtask proto --check"]
+
+[tasks.hello]
+description = "Run the Rust hello campaign against the API server over the fake sim"
+run = "cargo xtask hello"
 
 [tasks.secrets]
 description = "Check that the pre-commit hook blocks a planted secret"
@@ -131,5 +135,7 @@ run = [
   "sh tools/luatest.sh",
   "buf lint",
   "sh tools/protobreak.sh",
+  "sh tools/protobreak-test.sh",
+  "cargo xtask proto --check",
   "sh tools/secretscan-test.sh",
 ]

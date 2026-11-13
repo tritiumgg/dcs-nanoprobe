@@ -7,6 +7,7 @@ pub const USAGE: &str = "\
 Usage:
   nanoprobe inspect <map-file> [--records N]
   nanoprobe top <map-file> [--interval-ms MS] [--once]
+  nanoprobe watch world|events [--addr URL] [--campaign ID] [--since N]
 
 inspect  Print the status block, the metrics and the unread records of both
          rings. --records N lists at most N records per ring (default 50).
@@ -14,8 +15,17 @@ top      Show the live state and its rates. --interval-ms MS sets the refresh
          period (default 500). --once prints one screen and exits. Press
          Ctrl-C to stop.
 
-Both commands open the file read-only.
-Exit codes: 0 success, 2 usage error, 1 the file cannot be opened.
+watch    Print a sidecar's world changes or events as they arrive, one
+         message per line. --addr URL is the API (default NANOPROBE_ADDR, or
+         http://127.0.0.1:47311); a token is read from NANOPROBE_TOKEN.
+         --campaign ID reads that campaign (default the active one). --since N
+         starts after store revision N (world, default: list first, then watch
+         from the listed revision) or after event sequence N (events, default:
+         the oldest kept).
+
+inspect and top open the file read-only.
+Exit codes: 0 success, 2 usage error, 1 the file cannot be opened or the
+stream fails.
 ";
 
 /// Records listed per ring when `--records` is absent.
@@ -44,6 +54,8 @@ pub enum Command {
         /// Print one screen without clearing, then exit.
         once: bool,
     },
+    /// `nanoprobe watch`.
+    Watch(crate::watch::Options),
 }
 
 /// Parse the arguments after the program name. The error is a one-line message.
@@ -54,6 +66,9 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     };
     if matches!(sub.as_str(), "-h" | "--help" | "help") {
         return Ok(Command::Help);
+    }
+    if sub == "watch" {
+        return crate::watch::parse(&args[1..]).map(Command::Watch);
     }
     if sub != "inspect" && sub != "top" {
         return Err(format!("unknown subcommand `{sub}`"));

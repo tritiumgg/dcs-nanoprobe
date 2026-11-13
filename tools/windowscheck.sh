@@ -25,7 +25,7 @@ case "$(uname -s)" in
     *) clippy="cargo xwin clippy" ;;
 esac
 
-for manifest in "$ROOT"/crates/*/Cargo.toml; do
+for manifest in "$ROOT"/crates/*/Cargo.toml "$ROOT"/examples/*/Cargo.toml; do
     printf 'windows-check: %s\n' "${manifest#"$ROOT"/}"
     $clippy --manifest-path "$manifest" --all-targets \
         --target x86_64-pc-windows-msvc --quiet -- -D warnings

@@ -1,0 +1,19 @@
+[package]
+name = "nanoprobe-proto"
+description = "Rust types and gRPC stubs for the nanoprobe public API, schema v1alpha1."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+prost = "0.14.6"
+prost-types = "0.14.6"
+tonic = { version = "0.14.9", default-features = false, features = ["codegen", "transport"] }
+tonic-prost = "0.14.9"

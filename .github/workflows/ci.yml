@@ -77,6 +77,12 @@ jobs:
         # The base of a pull request, or the commit before a push.
         run: sh tools/protobreak.sh "${{ github.event.pull_request.base.sha || github.event.before }}"
 
+      - name: Check how the breaking check picks its base
+        run: sh tools/protobreak-test.sh
+
+      - name: Check the generated API code is current
+        run: cargo xtask proto --check
+
       - name: Cross-build the agent DLL
         run: cargo xwin build --release -p nanoprobe-agent --target x86_64-pc-windows-msvc
 

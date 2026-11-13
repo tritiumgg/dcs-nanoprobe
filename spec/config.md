@@ -109,7 +109,7 @@ level = "info"
 |---|---|
 | `[agent] map_path`, `token_path` | Paths on the sidecar's side. Under Wine with a native sidecar they are Linux paths to the same files the agent names with Windows paths. |
 | `[api] listen` | Loopback by default. A listener on any other address refuses to start without `tokens_path`. |
-| `tokens_path` | A TOML file of tokens, each with a role: `observer`, `controller` or `admin` (spec/errors.md, "Roles"). Kept outside any repository. |
+| `tokens_path` | A TOML file of tokens, each with a role: `observer`, `controller` or `admin` (spec/errors.md, "Roles"). Kept outside any repository. Its layout is under "Tokens file". |
 | `[store] enabled` | With `false` the stores are in memory and last as long as the sidecar process (spec/world.md). |
 | `position_period_min_s` | The only cap on subscription rates. A request for a shorter period gets this one. The agent's time slice holds whatever the period. |
 | `[health]` | Limits, not expectations (spec/errors.md, "Health"). A mission load has no fixed duration; `loading_limit_s` is only when to call a silent DCS hung. |
@@ -117,6 +117,24 @@ level = "info"
 | `destroy_retries` | At least 1. A dematerializing entity whose destroy is refused or unknown this many times goes `lost` with the error (spec/world.md). A destroy of an entity DCS should not hold is tried again after the next full enumeration. |
 
 Relative paths are relative to the folder that holds `sidecar.toml`.
+
+### Tokens file
+
+```toml
+[[token]]
+name = "campaign-host"  # for logs; never the token
+role = "controller"     # observer, controller or admin
+sha256 = "<64 lower-case hex digits>"
+```
+
+The file holds the SHA-256 of each token's text, never the token. A caller sends the
+token itself (`authorization: Bearer <token>`); the sidecar hashes it and compares the
+hash with every entry in constant time. A token is at least 32 characters of printable
+ASCII with no spaces; 64 hex digits from 32 random bytes, as the installer makes the
+agent's token, is the intended form. The sidecar refuses a presented token that breaks
+this rule, since the file holds only hashes and cannot say what a token looks like. An
+unknown key, an unknown role, a hash that is not 64 lower-case hex digits, and two
+entries with one hash are errors: the sidecar refuses to start.
 
 ### Health command
 
