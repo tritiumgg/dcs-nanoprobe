@@ -386,6 +386,8 @@ struct Scan {
     /// Commands taken before this store took over, which its journal does
     /// not hold.
     before: BTreeSet<(u64, u64, u64)>,
+    /// Deaths reported before this store took over, which it never read.
+    deaths_before: BTreeSet<(u64, u32, u64, u64)>,
     journalled: BTreeSet<(u64, u64, u64)>,
     commands: std::collections::HashMap<(u64, u64), Journalled>,
     boots: std::collections::HashMap<u64, u64>,
@@ -643,6 +645,7 @@ impl World {
         self.store = store;
         self.scan = Scan {
             before: self.sim.ledger().taken.keys().copied().collect(),
+            deaths_before: self.sim.ledger().reported_deaths.clone(),
             ..Scan::default()
         };
         self.rec = Reconciler::new(self.rec_cfg, &self.store);
@@ -906,7 +909,7 @@ impl World {
                                 ledger.removed.contains(&k) || ledger.unreported.contains(&k)
                             }) || (g.error.as_deref().is_some_and(|e| e.starts_with("destroy failed"))
                                 && ledger.failed_destroys.get(&(campaign, g.id.0)).copied().unwrap_or(0)
-                                    >= self.rec_cfg.destroy_retries)
+                                    >= self.rec_cfg.destroy_retries.max(1))
                         }
                         _ => true,
                     };
@@ -944,8 +947,9 @@ impl World {
         }
         // Every death a record reported is a fact: a reported death of a
         // unit of this campaign, unless its group was marked dead whole.
-        for (_, _, c, e) in &ledger.reported_deaths {
-            if *c != campaign {
+        for d in &ledger.reported_deaths {
+            let (_, _, c, e) = d;
+            if *c != campaign || self.scan.deaths_before.contains(d) {
                 continue;
             }
             let Some(u) = self.store.unit(EntityId(*e)) else {

@@ -165,7 +165,7 @@ a group of one.
 | `live` | `materializing` | The mission generation changes (a reload or a DCS restart), the theater is still the entity's and the authority is DCS |
 | `lost` | `live` | A later full enumeration finds the group |
 | `lost` | `materializing` or `virtual` | The mission generation changes: `materializing` if the new mission's theater is the entity's and the authority is DCS, else `virtual` |
-| `lost` | `materializing` | The author's policy is respawn, the authority is DCS, and no object of the entity is bound (an entity that went `lost` after its destroys failed waits for the next enumeration). The spawn carries a new spec revision: the agent still holds the old one for this generation and would answer `AT_REVISION`. |
+| `lost` | `materializing` | The author's policy is respawn, the authority is DCS, and a full enumeration used since the sidecar started and since the last `HELLO` finds no object of the entity. Until then the binding mirror may lack objects DCS holds, such as those of an entity that went `lost` after its destroys failed. The spawn carries a new spec revision: the agent still holds the old one for this generation and would answer `AT_REVISION`. |
 | `lost` | `dead` | The author's policy is mark dead |
 | `unspawnable` | `virtual` | The author changes the spec; its last error is cleared. It materializes from `virtual` by the level condition above. |
 
@@ -189,8 +189,10 @@ a group of one.
   for an `OBJECT`'s binding, and for an `EVENT`'s object IDs where the sidecar
   resolves them. The sidecar counts what it drops. An enumeration with a record
   stamped with another campaign is not used.
-- `dead` is final. A spawn, capture or destroy result, or an enumeration, that
-  arrives for a `dead` entity changes nothing and is counted.
+- `dead` is final. A spawn or capture result, or an enumeration, that arrives for a
+  `dead` entity changes nothing and is counted. A destroy result for a `dead` entity
+  whose objects DCS still holds counts toward `destroy_retries` like any destroy of an
+  entity DCS should not hold (spec/config.md).
 - When the last death fact arrives while the group is `materializing`, the spawn
   that is not yet answered ran: it resolves `applied`.
 - `lost` -> `dead` and `virtual` -> `dead` by death facts cannot happen in order: an

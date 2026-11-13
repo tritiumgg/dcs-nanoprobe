@@ -8,7 +8,9 @@
 
 use nanoprobe_transport::codec::{DecodeError, Lv, Reader, Writer};
 use nanoprobe_transport::layout::{command, kind};
-use nanoprobe_transport::records::{CommandHeader, CommandResult, Frame, Gap, Hello, Lifecycle};
+use nanoprobe_transport::records::{
+    CommandHeader, CommandResult, Event, Frame, Gap, Hello, Lifecycle,
+};
 
 /// Opcodes (spec/commands.md, "Codes: opcode") the reconciler writes.
 pub mod opcode {
@@ -374,8 +376,8 @@ pub enum Input {
     Positions(Vec<Position>),
     /// `VITALS`
     Vitals(Vec<Vitals>),
-    /// `EVENT`, undecoded: events are hints to a level-triggered reconciler.
-    Event(Vec<u8>),
+    /// `EVENT`: a hint to a level-triggered reconciler, never a fact.
+    Event(Event),
     /// Any other kind.
     Other(u16),
 }
@@ -395,7 +397,7 @@ impl Input {
             kind::ENUM_END => Input::EnumEnd(Enumeration::decode_end(payload)?),
             kind::POSITIONS => Input::Positions(decode_positions(payload)?),
             kind::VITALS => Input::Vitals(decode_vitals(payload)?),
-            kind::EVENT => Input::Event(payload.to_vec()),
+            kind::EVENT => Input::Event(Event::decode(payload)?),
             _ => Input::Other(record_kind),
         })
     }
@@ -414,7 +416,7 @@ impl Input {
             Input::EnumEnd(e) => (kind::ENUM_END, e.encode_end()),
             Input::Positions(p) => (kind::POSITIONS, encode_positions(p)),
             Input::Vitals(v) => (kind::VITALS, encode_vitals(v)),
-            Input::Event(b) => (kind::EVENT, b.clone()),
+            Input::Event(e) => (kind::EVENT, e.encode()),
             Input::Other(k) => (u64::from(*k), Vec::new()),
         };
         (k as u16, p)

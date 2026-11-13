@@ -339,6 +339,10 @@ pub enum StoreError {
     NoTransition(EntityId, State, Trigger),
     /// No more `EntityId`s below 2^53.
     Exhausted,
+    /// An attack order whose target is not a group of this campaign: a unit
+    /// or a static as the target is step S15's. The API answers
+    /// `INVALID_FIELD`.
+    UnsupportedTarget(EntityId),
 }
 
 /// The default grid cell, in meters.
@@ -504,6 +508,14 @@ impl Store {
 
     /// Give a group an order, at a new revision. Its progress starts over.
     pub fn set_order(&mut self, id: EntityId, intent: Intent) -> Result<u64, StoreError> {
+        if let Intent::Attack { target } = &intent
+            && self
+                .groups
+                .get(target)
+                .is_none_or(|t| t.kind != Kind::Group)
+        {
+            return Err(StoreError::UnsupportedTarget(*target));
+        }
         let g = self.group_mut(id)?;
         g.order_rev += 1;
         g.order = Some(intent);
@@ -1030,6 +1042,25 @@ mod tests {
         let last: Vec<EntityId> = s.changes().map(|c| c.1).collect();
         assert_eq!(last[last.len() - 4..], [a, a, a, a]);
         assert!(s.set_label(EntityId(99), "x").is_err());
+    }
+
+    #[test]
+    fn an_attack_order_on_a_unit_or_a_static_is_refused() {
+        let mut s = Store::new(CampaignId(1), 100);
+        let a = s.create_group(spec(2)).unwrap();
+        let b = s.create_group(spec(1)).unwrap();
+        let unit = s.group(b).unwrap().members[0];
+        let st = s.create_static(spec(1)).unwrap();
+        let rev = s.group(a).unwrap().order_rev;
+        for target in [unit, st, EntityId(999)] {
+            assert_eq!(
+                s.set_order(a, Intent::Attack { target }),
+                Err(StoreError::UnsupportedTarget(target))
+            );
+        }
+        assert_eq!(s.group(a).unwrap().order_rev, rev, "nothing changed");
+        assert!(s.group(a).unwrap().order.is_none());
+        assert!(s.set_order(a, Intent::Attack { target: b }).is_ok());
     }
 
     #[test]

@@ -178,9 +178,17 @@ fn expect(r: &CommandResult, code: u64, what: &str) -> R {
 }
 
 fn attach(s: &mut Session<'_>) -> R {
-    s.until(0, "HELLO", |x| {
-        x.iter().any(|i| matches!(i, Input::Hello(_))).then_some(())
+    let at = s.until(0, "HELLO", |x| {
+        x.iter().position(|i| matches!(i, Input::Hello(_)))
     })?;
+    // The agent writes a LIFECYCLE of its state right after every HELLO, so
+    // a sidecar attaching to a running mission learns it.
+    if !matches!(s.seen.get(at + 1), Some(Input::Lifecycle(_))) {
+        return Err(format!(
+            "the record after the HELLO is {:?}, not a LIFECYCLE",
+            s.seen.get(at + 1)
+        ));
+    }
     s.until(0, "running mission", |x| {
         x.iter()
             .any(|i| matches!(i, Input::Lifecycle(l) if u64::from(l.state) == lc::RUNNING && !l.theater.is_empty()))

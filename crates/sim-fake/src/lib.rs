@@ -40,12 +40,11 @@ const SCENERY_BASE: u64 = 1 << 40;
 
 /// An `EVENT` for `S_EVENT_DEAD` (8) with `INITIATOR` and
 /// `INITIATOR_CATEGORY`: 1 a unit, 3 a static, 5 scenery (S9, LIVE).
-fn dead_event(object: u64, category: f64) -> Vec<u8> {
-    let mut w = nanoprobe_transport::codec::Writer::new();
-    w.u32(8).u32(2);
-    w.u16(2).lv(&Lv::Number(object as f64));
-    w.u16(17).lv(&Lv::Number(category));
-    w.finish()
+fn dead_event(object: u64, category: f64) -> nanoprobe_transport::records::Event {
+    nanoprobe_transport::records::Event {
+        id: 8,
+        fields: vec![(2, Lv::Number(object as f64)), (17, Lv::Number(category))],
+    }
 }
 
 /// The campaign a platform name gives, 0 for any other name.
@@ -116,7 +115,8 @@ pub struct Ledger {
     /// boot, and the generation, campaign and unit entity of their stamps.
     pub reported_deaths: BTreeSet<(u64, u32, u64, u64)>,
     /// Destroys of an entity, by campaign and entity, that DCS refused or
-    /// whose result was lost.
+    /// whose result was lost, since DCS last removed the entity: one count
+    /// per destroy.
     pub failed_destroys: HashMap<(u64, u64), u32>,
     /// Unit entities that left DCS without a death: agent boot, generation,
     /// campaign, entity.
@@ -576,7 +576,10 @@ impl FakeSim {
 
     /// Count a destroy whose result will not be read.
     fn destroy_result_lost(&mut self, r: &CommandResult) {
-        if matches!(r.opcode, opcode::GROUP_DESTROY | opcode::STATIC_DESTROY) {
+        // A refused destroy was counted when DCS refused it.
+        if matches!(r.opcode, opcode::GROUP_DESTROY | opcode::STATIC_DESTROY)
+            && u64::from(r.code) != rc::DCS_REFUSED
+        {
             *self
                 .ledger
                 .failed_destroys
@@ -1208,6 +1211,7 @@ impl FakeSim {
                     );
                 }
                 self.destroy(h.entity);
+                self.ledger.failed_destroys.remove(&(h.campaign, h.entity));
                 self.result(&cmd, rc::APPLIED, 0, "", Lv::Nil);
             }
             Body::GroupCaptureDestroy | Body::Capture => {

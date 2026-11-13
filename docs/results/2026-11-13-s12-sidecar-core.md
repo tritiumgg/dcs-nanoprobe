@@ -53,7 +53,8 @@ died, or the group was `lost` and its policy is to mark it dead; a refused type;
 member removed, its death record dropped by a `GAP`, or as many of its destroys
 refused or lost as the limit; campaign authority or another theater loaded). A `lost`
 entity under the respawn policy, with DCS authority on the loaded theater, is not
-left out of DCS. Every death a record reported, of this campaign's unit, is a fact. A `live` group is in
+left out of DCS. Every death a record reported, of this campaign's unit, is a fact,
+unless its group is `dead`, which is final. A `live` group is in
 DCS with exactly its members that have neither a death fact nor a missing mark,
 holding its order, and an attack order names its target's current DCS group. No entity
 outside `dead` has every member dead. Nothing else of the campaign is in DCS, and no
@@ -71,14 +72,15 @@ command is unanswered.
 | `materializing` -> `dead` (a lost `RESULT`, then every member dies; the spawn resolves `applied`), `lost` -> `dead`, and a death with a wrong binding | 1 each | 0 |
 | A fixed `unspawnable` group materializes; a refused destroy stops at the limit and the entity goes `lost`, then leaves DCS once destroys work; an attack order follows its target when the target respawns in the same generation; a route advances with no new order; a `materializing` group under campaign authority is withdrawn with no spawn; a death while `dematerializing` | 1 each | 0 |
 | A death queued under another campaign and read by a sidecar of a campaign with the same `EntityId`s, without its store: live, and replayed with 5 sets of restarts; and the window between a campaign switch and the next load | 1 each | 0 |
-| A restarted sidecar does not respawn a `lost` entity over objects DCS holds before an enumeration; a dead entity's refused destroys stop at the limit; a limit of 0 counts as 1; result codes map to the outcomes of spec/errors.md | 1 each | 0 |
-| The `LIFECYCLE` after a `HELLO`: no journal entry, generation change or store revision for a store that has the mission, the binding kept; a fresh store learns the mission and is ready; the conformance suite on a mission already running | 1 each | 0 |
+| A restarted sidecar, planning right after its `HELLO`, does not respawn a `lost` entity over objects DCS holds; a dead entity's refused destroys stop at the limit; a limit of 0 counts as 1; result codes map to the outcomes of spec/errors.md; an attack order never sent keeps its revision when its target respawns; an attack order on a unit or a static is refused | 1 each | 0 |
+| The `LIFECYCLE` after a `HELLO`: no journal entry and no store revision for a store that has the mission, the binding kept; a fresh store learns the mission and is ready; the conformance suite, whose attach check requires that `LIFECYCLE`, on a mission already running | 1 each | 0 |
 | The seeds reach `live` -> `dead`, and never `virtual` -> `dead` | 200 seeds | 0 |
 | A restart after the last `FRAME`, with persistence off, leaves no death fact | the seeds of 64 whose recording ends after its last `FRAME` | 0 |
-| Conformance suite on the fake sim (9 checks) | 1 | 0 |
+| Conformance suite on the fake sim (9 checks), from the start of a mission and attached to a running one | 2 | 0 |
 | S9's recording, 841 records (93 `FRAME`, 1 `HELLO`, 34 `LIFECYCLE`, 2 `RESULT`, 694 `EVENT`, 17 `LOG`), the sidecar restarting at 1 to 7 points, with persistence on and off | 64 | 0 |
 
-On S9's recording every record decodes, every `EVENT` is read, the only kind the
+On S9's recording every record decodes, every `EVENT` by S9's own decoder
+(`nanoprobe_transport::records::Event`), every `EVENT` is read, the only kind the
 reconciler does not read is `LOG`, and no death fact is journalled, since no object of
 the recording is the platform's. With persistence on the store ends on the generation
 and theater of the last `LIFECYCLE`; with it off, on that generation, taken from the
@@ -118,6 +120,9 @@ on it, with the seeds `mise run check` runs unless a count is given:
 | A `lost` group never respawned under the respawn policy | Seeds |
 | `NOT_BOUND` resolved `applied` | Seeds |
 | Destroy results the sidecar read resolved `unknown` | Seeds |
+| A `lost` respawn without an enumeration since the `HELLO` | `a_restarted_sidecar_does_not_respawn_over_objects_dcs_holds` |
+| The re-aim bumps every attack order on the target, sent or not | `an_attack_order_never_sent_keeps_its_revision_when_the_target_respawns` |
+| The fake writes no `LIFECYCLE` after a `HELLO` | Conformance |
 | The fake answers a spawn or order at its revision as new | Conformance |
 | An attach keeps the commands it did not take | Conformance: `a_reattach_answers_what_was_taken` |
 

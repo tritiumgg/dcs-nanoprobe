@@ -411,9 +411,12 @@ fn a_materializing_group_under_campaign_authority_is_withdrawn() {
 }
 
 /// Round 3: a lost entity whose objects DCS still holds is not respawned by
-/// a restarted sidecar before an enumeration has rebuilt the mirror.
+/// a restarted sidecar before an enumeration has rebuilt the mirror. The
+/// sidecar plans right after its HELLO, while the attach's enumeration has
+/// only begun.
 #[test]
 fn a_restarted_sidecar_does_not_respawn_over_objects_dcs_holds() {
+    use nanoprobe_sidecar::sim::wire::opcode;
     use nanoprobe_sidecar::store::Authority;
 
     let mut w = World::new(0, 1, LostPolicy::Respawn);
@@ -429,12 +432,25 @@ fn a_restarted_sidecar_does_not_respawn_over_objects_dcs_holds() {
     }
     assert_eq!(w.store.group(id).unwrap().state, State::Lost);
     w.store.set_authority(id, Authority::Sim).unwrap();
-    w.apply(&Op::SidecarRestart).unwrap();
-    assert_ne!(
+    w.apply(&Op::Detach).unwrap();
+    let spawns = commands(&w, id, opcode::STATIC_SPAWN);
+    // A new sidecar attaches, reads the HELLO and the ENUM_BEGIN, and plans
+    // before any frame writes the enumeration's rows.
+    w.rec = nanoprobe_sidecar::reconciler::Reconciler::new(
+        nanoprobe_sidecar::reconciler::Config {
+            on_lost: LostPolicy::Respawn,
+            ..Default::default()
+        },
+        &w.store,
+    );
+    w.sim.attach(99);
+    w.rec.step(&mut w.store, &mut w.sim);
+    assert_eq!(
         w.store.group(id).unwrap().state,
-        State::Materializing,
+        State::Lost,
         "no respawn before an enumeration"
     );
+    assert_eq!(commands(&w, id, opcode::STATIC_SPAWN), spawns);
     w.settle().unwrap();
     assert_eq!(w.store.group(id).unwrap().state, State::Live);
 }
@@ -512,11 +528,8 @@ fn the_lifecycle_after_a_hello_is_quiet_for_a_store_that_has_the_mission() {
     assert!(bound > 0);
     w.apply(&Op::Detach).unwrap();
     w.apply(&Op::Reattach).unwrap();
-    let added: Vec<&Entry> = w.store.entries()[journal..]
-        .iter()
-        .filter(|e| matches!(e, Entry::Loaded(_) | Entry::Transition { .. }))
-        .collect();
-    assert!(added.is_empty(), "{added:?}");
+    let added: Vec<&Entry> = w.store.entries()[journal..].iter().collect();
+    assert!(added.is_empty(), "no journal entry: {added:?}");
     assert_eq!(w.store.revision(), revision, "no change for API clients");
     assert!(w.rec.binding().len() >= bound, "the binding is kept");
     assert!(w.rec.ready(&w.store));
@@ -543,4 +556,38 @@ fn the_lifecycle_after_a_hello_is_quiet_for_a_store_that_has_the_mission() {
         )
     );
     assert!(w.rec.ready(&w.store));
+}
+
+/// Round 4: the re-aim moves only an attack order written in this
+/// generation. An attacker under campaign authority, whose order was never
+/// sent, keeps its revision when the target respawns.
+#[test]
+fn an_attack_order_never_sent_keeps_its_revision_when_the_target_respawns() {
+    use nanoprobe_sidecar::intents::Intent;
+    use nanoprobe_sidecar::store::Authority;
+
+    let mut w = World::new(2, 0, LostPolicy::Respawn);
+    let ids: Vec<_> = w.store.groups().map(|g| g.id).collect();
+    let (attacker, target) = (ids[0], ids[1]);
+    w.store
+        .set_authority(attacker, Authority::Campaign)
+        .unwrap();
+    w.store
+        .set_order(attacker, Intent::Attack { target })
+        .unwrap();
+    w.settle().unwrap();
+    let rev = w.store.group(attacker).unwrap().order_rev;
+    let (old, _) = w.sim.attack_of(w.store.campaign().0, target.0).unwrap();
+    for (o, e) in w.units_in_dcs() {
+        if w.store
+            .unit(nanoprobe_sidecar::ids::EntityId(e))
+            .is_some_and(|u| u.group == target)
+        {
+            w.sim.remove_silently(o);
+        }
+    }
+    w.settle().unwrap();
+    let (new, _) = w.sim.attack_of(w.store.campaign().0, target.0).unwrap();
+    assert_ne!(old, new, "the target respawned");
+    assert_eq!(w.store.group(attacker).unwrap().order_rev, rev);
 }
