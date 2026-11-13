@@ -84,6 +84,9 @@ static UCID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b[0-9a-f]{32}\b").
 pub struct Redactor {
     key: Vec<u8>,
     names: Vec<String>,
+    /// Secrets, such as a server's join password, replaced by `<secret>`
+    /// before anything else.
+    secrets: Vec<String>,
     /// How many values of each kind were replaced.
     pub counts: [usize; 4],
 }
@@ -108,8 +111,16 @@ impl Redactor {
         Redactor {
             key: key.to_vec(),
             names,
+            secrets: Vec::new(),
             counts: [0; 4],
         }
+    }
+
+    /// The same redactor, which also replaces each of `secrets` whole.
+    pub fn with_secrets(mut self, secrets: Vec<String>) -> Redactor {
+        self.secrets = secrets.into_iter().filter(|s| !s.is_empty()).collect();
+        self.secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
+        self
     }
 
     fn token(&self, kind: &str, value: &str) -> String {
@@ -128,6 +139,9 @@ impl Redactor {
     /// `text` with every name, UCID and IP address replaced.
     pub fn redact(&mut self, text: &str) -> String {
         let mut out = text.to_owned();
+        for secret in &self.secrets {
+            out = out.replace(secret.as_str(), "<secret>");
+        }
         for name in self.names.clone() {
             let n = out.matches(name.as_str()).count();
             if n > 0 {
@@ -184,7 +198,12 @@ pub struct Facts {
 }
 
 /// Collect, redact and zip a bundle from `profile`.
-pub fn build(profile: &dyn Profile, facts: &Facts, key: &[u8]) -> Result<Vec<u8>, String> {
+pub fn build(
+    profile: &dyn Profile,
+    facts: &Facts,
+    key: &[u8],
+    secrets: Vec<String>,
+) -> Result<Vec<u8>, String> {
     let mut files: Vec<(String, String)> = Vec::new();
     let mut notes = Vec::new();
 
@@ -205,7 +224,7 @@ pub fn build(profile: &dyn Profile, facts: &Facts, key: &[u8]) -> Result<Vec<u8>
     }
 
     let texts: Vec<&str> = files.iter().map(|(_, text)| text.as_str()).collect();
-    let mut redactor = Redactor::new(key, &texts);
+    let mut redactor = Redactor::new(key, &texts).with_secrets(secrets);
     let files: Vec<(String, String)> = files
         .iter()
         .map(|(name, text)| (name.clone(), redactor.redact(text)))
@@ -297,7 +316,8 @@ mod tests {
     const KEY: &[u8] = b"a test key of thirty-two bytes!!";
 
     /// Fake secrets, each of which must not appear anywhere in a bundle.
-    const SECRETS: [&str; 8] = [
+    const SECRETS: [&str; 9] = [
+        "np-join-PLANTED-pw",
         "203.0.113.77",
         "198.51.100.4",
         "2001:db8::17",
@@ -321,7 +341,8 @@ mod tests {
              2026-11-10 10:00:02.000 INFO    ASYNCNET (Main): added client[2] name=Maverick Two addr=203.0.113.77:10308\n\
              2026-11-10 10:00:03.000 INFO    ASYNCNET (Main): added client[3] name=Goose addr=[2001:db8::17]:10308\n\
              2026-11-10 10:00:04.000 INFO    CHAT (Main): Goose: hello Maverick Two\n\
-             2026-11-10 10:00:05.000 INFO    APP (Main): 12:00:00 is a time in Ed::Logger\n",
+             2026-11-10 10:00:05.000 INFO    APP (Main): 12:00:00 is a time in Ed::Logger\n\
+             2026-11-10 10:00:06.000 INFO    NET (Main): joining with np-join-PLANTED-pw\n",
         );
         write(
             "nanoprobe/logs/hook.log",
@@ -353,7 +374,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let local = profile(&dir);
 
-        let bytes = build(&local, &Facts::default(), KEY).unwrap();
+        // A join password, as `client join` would pass it (client.rs).
+        let bytes = build(
+            &local,
+            &Facts::default(),
+            KEY,
+            vec!["np-join-PLANTED-pw".into()],
+        )
+        .unwrap();
         let files = unzip(&bytes);
         std::fs::remove_dir_all(&dir).unwrap();
 
@@ -395,7 +423,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("Logs")).unwrap();
         std::fs::write(dir.join("Logs/dcs.log"), "2026 INFO APP: 203.0.113.77\n").unwrap();
-        let bytes = build(&Local::new(&dir).unwrap(), &Facts::default(), KEY).unwrap();
+        let bytes = build(
+            &Local::new(&dir).unwrap(),
+            &Facts::default(),
+            KEY,
+            Vec::new(),
+        )
+        .unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
 
         let files = unzip(&bytes);

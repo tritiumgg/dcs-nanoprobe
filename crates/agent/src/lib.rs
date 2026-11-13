@@ -28,7 +28,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The version of the interface between the agent and its Lua shim. It moves
 /// when a call on the table `luaopen_nanoprobe` returns is added, removed, or
 /// changed in a way an older caller would misread.
-pub const ABI_VERSION: &str = "2";
+pub const ABI_VERSION: &str = "3";
 
 /// What tools outside DCS find the ABI version by in the DLL's bytes. The
 /// version alone is too short to search for.

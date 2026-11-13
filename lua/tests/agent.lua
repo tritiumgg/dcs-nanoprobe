@@ -24,7 +24,7 @@ end
 
 local agent = open(path)
 assert(type(agent) == 'table', 'the opener returned a ' .. type(agent))
-assert(agent.abi == '2', 'abi reads ' .. tostring(agent.abi))
+assert(agent.abi == '3', 'abi reads ' .. tostring(agent.abi))
 assert(type(agent.build) == 'string' and agent.build ~= '', 'build is missing')
 
 -- status works before configure.
@@ -53,6 +53,28 @@ assert(text:find('"msg":"host test record"', 1, true), 'the logged record is mis
 assert(text:find('"target":"agent"', 1, true), 'records lack the agent target')
 local nil_root, err = agent.configure()
 assert(nil_root == nil and type(err) == 'string', 'configure without a root did not fail')
+
+-- event takes any arguments without raising, with no link open.
+for _, args in ipairs({
+  {},
+  { 'x' },
+  { -1 },
+  { 1.5 },
+  { 2 ^ 40 },
+  { 0 / 0 },
+  { 15, 1, 2.5, 2, 99 },
+  { 15, 0, 1, 70000, 1, 1.5, 1, 'x', {}, print },
+  { 15, 1 },
+}) do
+  local ok, e = pcall(agent.event, unpack(args, 1, 10))
+  assert(ok, 'event raised: ' .. tostring(e))
+end
+local many = { 25 }
+for i = 1, 200 do
+  many[#many + 1] = 8
+  many[#many + 1] = string.rep('m', 2000)
+end
+assert(pcall(agent.event, unpack(many)), 'event raised on 200 fields')
 
 -- thread, clock and the clock's cost.
 assert(type(agent.thread()) == 'number' and agent.thread() == agent.thread(), 'thread is not stable')
@@ -131,6 +153,27 @@ assert(received > 0, 'nothing was received')
 agent.sock_close()
 local nothing, socket_error = agent.sock_frame(1)
 assert(nothing == nil and socket_error, 'sock_frame without a pair did not fail')
+
+-- The system-call frame's other calls: an accept that would block, two
+-- checks for files that are absent, and two log flushes.
+assert(agent.sys_open() == true, 'sys_open failed')
+local before = #S.read(root .. 'logs/agent.log')
+for _ = 1, 5 do
+  local values = { agent.sys_frame() }
+  assert(#values == 6, 'sys_frame returned ' .. #values .. ' values')
+  local sum = 0
+  for i = 1, 5 do
+    assert(values[i] >= 0, 'a negative timing')
+    sum = sum + values[i]
+  end
+  assert(sum > 0, 'every timing is zero')
+  assert(values[4] > 0, 'the flush of one record took no time')
+  assert(values[6] == -1, 'the accept did not report would-block')
+end
+assert(#S.read(root .. 'logs/agent.log') > before, 'the flush wrote nothing')
+agent.sys_close()
+nothing, socket_error = agent.sys_frame()
+assert(nothing == nil and socket_error, 'sys_frame without a listener did not fail')
 
 -- The mapped file: the payload under the sequence lock, and the peer's words.
 local map = root .. 'status.map'

@@ -1,10 +1,11 @@
 //! `link-probe --map PATH --port N --token-file PATH --seconds N [--poll-ms N]
-//! [--short-command] [--bad-record past-tail|over-limit|misaligned|past-capacity|padding]`,
+//! [--short-command] [--bad-record past-tail|over-limit|misaligned|past-capacity|padding]
+//! [--record FILE] [--stop-file FILE]`,
 //! or `link-probe --now-ms`, which prints the wall clock as the probe's `t`
 //! reads it and exits, so a test can compare its own times with the probe's.
 //!
-//! It runs for `--seconds`, or until one second after the status block reads
-//! `DISABLED`, whichever comes first.
+//! It runs for `--seconds`, until one second after the status block reads
+//! `DISABLED`, or until the `--stop-file` exists, whichever comes first.
 //!
 //! A sidecar for the in-game test of the agent's link (step S7). It attaches
 //! through `nanoprobe_sidecar::link` and prints one JSON object per line, each
@@ -16,10 +17,12 @@
 //! {"t":..,"ev":"lifecycle","state":N,"gen":N,"theater":"..","mission":".."}
 //! {"t":..,"ev":"result","opcode":N,"code":N,"seq":N}
 //! {"t":..,"ev":"log","level":N,"target":"..","msg":".."}
+//! {"t":..,"ev":"event","id":N,"codes":[<code>,..],"fields":{"<code>":<value>,..}}
 //! {"t":..,"ev":"gap","class":N,"count":N}
 //! {"t":..,"ev":"report","text":".."}
 //! {"t":..,"ev":"status","lifecycle":N,"gen":N,"flags":N,"frame":N,"boot":"<hex>"}
-//! {"t":..,"ev":"final","lifecycle":N,"frame":N,"commands":N,"timed":N,"over_budget":N}
+//! {"t":..,"ev":"final","lifecycle":N,"frame":N,"commands":N,"timed":N,"over_budget":N,
+//!  "events_dropped":N,"hist_event":[N x 32],"hist_pump":[N x 32]}
 //! {"t":..,"ev":"reconnect","gen":N,"ready":T,"read":T,"ms":N}
 //! {"t":..,"ev":"end","records":N}
 //! ```
@@ -47,6 +50,19 @@
 //! `{"t":..,"ev":"injected","what":".."}`. The agent detaches, and the probe
 //! attaches again.
 //!
+//! With `--record FILE`, the probe is the stream recorder: it appends every
+//! record it reads the first time, padding aside, to FILE as one JSON object
+//! per line, in the order read:
+//!
+//! ```text
+//! {"t":..,"boot":"<hex>","number":N,"kind":N,"payload":"<hex>"}
+//! ```
+//!
+//! `boot` is the agent boot and `number` the record's number
+//! (spec/records.md, "Stamps"); `FRAME` records are kept, so the stamps of
+//! every record can be read back. A recording holds server data and stays
+//! out of the repository.
+//!
 //! Test tooling: built from source, never released.
 
 use std::collections::HashMap;
@@ -58,11 +74,14 @@ use std::time::{Duration, Instant};
 
 use nanoprobe_fake_agent::{arg, content, json_string, read_token};
 use nanoprobe_sidecar::link::{self, Command, Config, End, Sink};
+use nanoprobe_transport::codec::Lv;
 use nanoprobe_transport::codec::Writer;
 use nanoprobe_transport::layout::{kind, record as r, status as s};
 use nanoprobe_transport::map::MappedFile;
 use nanoprobe_transport::mem::Memory;
-use nanoprobe_transport::records::{CommandHeader, CommandResult, Gap, Hello, Lifecycle, Log};
+use nanoprobe_transport::records::{
+    CommandHeader, CommandResult, Event, Gap, Hello, Lifecycle, Log,
+};
 use nanoprobe_transport::ring::{Ring, record_size};
 
 /// One JSON line on standard output, under a lock so the two threads' lines
@@ -78,6 +97,7 @@ impl Out {
             match v {
                 Json::Num(n) => text.push_str(&n.to_string()),
                 Json::Str(s) => text.push_str(&json_string(s)),
+                Json::Raw(s) => text.push_str(s),
             }
         }
         text.push('}');
@@ -91,6 +111,8 @@ impl Out {
 enum Json {
     Num(u64),
     Str(String),
+    /// Written as it is: already JSON.
+    Raw(String),
 }
 
 /// Per mission generation: when the status block first showed it running
@@ -212,6 +234,22 @@ struct Probe {
     records: u64,
     epoch: u64,
     queue: Vec<Command>,
+    /// The stream recording, with `--record`.
+    recording: Option<std::io::BufWriter<std::fs::File>>,
+}
+
+/// An `lv` value as JSON: a number (null when not finite), a string, a
+/// boolean, null, or a string naming any other kind.
+fn lv_json(v: &Lv) -> String {
+    match v {
+        Lv::Nil => "null".into(),
+        Lv::Bool(b) => b.to_string(),
+        Lv::Number(n) if n.is_finite() => format!("{n}"),
+        Lv::Number(_) => "null".into(),
+        Lv::String(s) => json_string(&String::from_utf8_lossy(s)),
+        Lv::Table(_) => json_string("<table>"),
+        Lv::Other(t) => json_string(&format!("<{t}>")),
+    }
 }
 
 impl Sink for Probe {
@@ -237,7 +275,39 @@ impl Sink for Probe {
     ) -> Result<(), String> {
         self.last.insert(agent_boot, number);
         self.records += 1;
+        if let Some(rec) = self.recording.as_mut()
+            && u64::from(kind) != kind::PADDING
+        {
+            let hex: String = payload.iter().map(|b| format!("{b:02x}")).collect();
+            // One write per line: the buffer flushes whole lines, so a
+            // probe stopped between flushes leaves no half line.
+            let line = format!(
+                "{{\"t\":{},\"boot\":\"{agent_boot:016x}\",\"number\":{number},\"kind\":{kind},\"payload\":\"{hex}\"}}\n",
+                content::now_ms()
+            );
+            rec.write_all(line.as_bytes())
+                .map_err(|e| format!("the recording: {e}"))?;
+        }
         match u64::from(kind) {
+            kind::EVENT => {
+                if let Ok(e) = Event::decode(payload) {
+                    let fields: Vec<String> = e
+                        .fields
+                        .iter()
+                        .map(|(c, v)| format!("\"{c}\":{}", lv_json(v)))
+                        .collect();
+                    // The codes in record order: the object above has none.
+                    let codes: Vec<String> = e.fields.iter().map(|(c, _)| c.to_string()).collect();
+                    self.out.line(
+                        "event",
+                        &[
+                            ("id", Json::Num(e.id.into())),
+                            ("codes", Json::Raw(format!("[{}]", codes.join(",")))),
+                            ("fields", Json::Raw(format!("{{{}}}", fields.join(",")))),
+                        ],
+                    );
+                }
+            }
             kind::LIFECYCLE => {
                 if let Ok(l) = Lifecycle::decode(payload) {
                     if runs(l.state)
@@ -301,6 +371,9 @@ impl Sink for Probe {
     }
 
     fn durable(&mut self) -> Result<(), String> {
+        if let Some(rec) = self.recording.as_mut() {
+            rec.flush().map_err(|e| format!("the recording: {e}"))?;
+        }
         Ok(())
     }
 
@@ -447,9 +520,23 @@ fn watch(path: std::path::PathBuf, out: Out, times: Times, stop: Arc<AtomicBool>
                     "over_budget",
                     Json::Num(m.load(s::COMMANDS_OVER_BUDGET, Ordering::Acquire)),
                 ),
+                (
+                    "events_dropped",
+                    Json::Num(m.load(s::EVENTS_DROPPED, Ordering::Acquire)),
+                ),
+                ("hist_event", Json::Raw(hist(m, s::HIST_EVENT))),
+                ("hist_pump", Json::Raw(hist(m, s::HIST_PUMP))),
             ],
         );
     }
+}
+
+/// The 32 buckets of the histogram at `at` as a JSON array.
+fn hist(m: &MappedFile, at: usize) -> String {
+    let counts: Vec<String> = (0..s::HIST_BUCKETS)
+        .map(|i| m.load(at + 8 * i, Ordering::Relaxed).to_string())
+        .collect();
+    format!("[{}]", counts.join(","))
 }
 
 fn main() -> ExitCode {
@@ -489,11 +576,15 @@ fn main() -> ExitCode {
             );
             std::thread::spawn(move || watch(path, out, times, stop))
         };
+        let stop_file = arg(&args, "--stop-file").map(std::path::PathBuf::from);
         let timer = {
             let stop = stop.clone();
             std::thread::spawn(move || {
                 let end = Instant::now() + Duration::from_secs(seconds);
-                while Instant::now() < end && !stop.load(Ordering::Relaxed) {
+                while Instant::now() < end
+                    && !stop.load(Ordering::Relaxed)
+                    && !stop_file.as_ref().is_some_and(|f| f.exists())
+                {
                     std::thread::sleep(Duration::from_millis(50));
                 }
                 stop.store(true, Ordering::Relaxed);
@@ -515,6 +606,16 @@ fn main() -> ExitCode {
             records: 0,
             epoch: 0,
             queue: Vec::new(),
+            recording: match arg(&args, "--record") {
+                Some(path) => Some(std::io::BufWriter::new(
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path)
+                        .map_err(|e| format!("--record {path}: {e}"))?,
+                )),
+                None => None,
+            },
         };
         let end = loop {
             match link::run(&cfg, &mut probe, &stop) {

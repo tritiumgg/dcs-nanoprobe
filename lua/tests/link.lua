@@ -14,7 +14,7 @@ local S = dofile((arg[0]:match('^(.*/)') or './') .. 'support.lua')
 local root = S.root()
 local mock = dofile(root .. 'lua/mock/dcs.lua')
 
-local MODULE, _, PROBE, INSPECT = ...
+local MODULE, _, PROBE, INSPECT, XTASK = ...
 assert(MODULE and PROBE and INSPECT,
   'usage: lua lua/tests/link.lua <module> <version> <link-probe> <nanoprobe>')
 
@@ -35,6 +35,7 @@ local version = profile .. 'nanoprobe/versions/' .. BUILD .. '/'
 local map = profile .. 'nanoprobe/link.map'
 local out = profile .. 'probe.jsonl'
 local pidfile = profile .. 'probe.pid'
+local recording = profile .. 'recording.jsonl'
 
 local function main()
   S.mkdir(profile .. 'Scripts/Hooks')
@@ -58,8 +59,8 @@ local function main()
 
   -- The probe lives longer than every wait below added up.
   assert(os.execute(string.format(
-    '%s --map %s --port %d --token-file %s --seconds 120 --short-command > %s 2>&1 & echo $! > %s',
-    S.quote(PROBE), S.quote(map), port, S.quote(profile .. 'nanoprobe/token'), S.quote(out),
+    '%s --map %s --port %d --token-file %s --seconds 120 --short-command --record %s > %s 2>&1 & echo $! > %s',
+    S.quote(PROBE), S.quote(map), port, S.quote(profile .. 'nanoprobe/token'), S.quote(recording), S.quote(out),
     S.quote(pidfile))) == 0, 'could not start link-probe')
 
   local function events()
@@ -132,7 +133,7 @@ local function main()
   local hello = find(function(e)
     return e.ev == 'hello'
   end)
-  assert(hello and hello.interface == 2, 'the HELLO reads interface ' .. tostring(hello and hello.interface))
+  assert(hello and hello.interface == 3, 'the HELLO reads interface ' .. tostring(hello and hello.interface))
   assert(hello.build == BUILD, 'the HELLO reads build ' .. tostring(hello.build))
   assert(find(function(e)
     return e.ev == 'log' and e.target == 'hook' and e.msg == 'capabilities'
@@ -153,6 +154,141 @@ local function main()
     return e.ev == 'log' and e.target == 'agent' and e.msg == 'a command too short for its header; detaching'
   end), 'the sidecar did not read why the agent detached')
   S.ok('a command shorter than its header is logged to the sidecar and the agent detaches')
+
+  -- World events reach the sidecar as EVENT records with the fields their
+  -- allow-list names, in its order (the probe prints the codes in record
+  -- order); an unknown type as its ID alone; and an event whose initiator
+  -- is no object without it.
+  local events_of = host.states.server.world.event
+  host:event({
+    id = events_of.S_EVENT_BIRTH,
+    time = 12.5,
+    initiator = setmetatable({ id_ = 16777472 }, {}),
+    place = setmetatable({ id_ = 22 }, {}),
+    subPlace = 0,
+  })
+  host:event({ id = 9999, time = 1 })
+  host:event({ id = events_of.S_EVENT_DEAD, time = 2, initiator = 'not an object' })
+  local function show(t)
+    local parts = {}
+    for k, v in pairs(t) do
+      parts[#parts + 1] = tostring(k) .. '=' .. tostring(v)
+    end
+    table.sort(parts)
+    return table.concat(parts, ' ')
+  end
+  local function event(id)
+    return find(function(e)
+      return e.ev == 'event' and e.id == id
+    end)
+  end
+  assert(run(5, function()
+    return event(events_of.S_EVENT_BIRTH) and event(9999) and event(events_of.S_EVENT_DEAD)
+  end), 'the events did not reach the sidecar:\n' .. (S.read(out) or ''))
+  local birth_codes = event(events_of.S_EVENT_BIRTH).codes
+  assert(table.concat(birth_codes, ',') == '1,2,6,7', 'the birth codes are ' .. table.concat(birth_codes, ','))
+  local birth = event(events_of.S_EVENT_BIRTH).fields
+  assert(birth['1'] == 12.5 and birth['2'] == 16777472 and birth['6'] == 22 and birth['7'] == 0,
+    'the birth reads ' .. show(birth))
+  local unknown = event(9999).fields
+  assert(next(unknown) == nil, 'an unknown type carried fields')
+  local dead = event(events_of.S_EVENT_DEAD).fields
+  assert(dead['1'] == 2 and dead['2'] == nil, 'the death reads ' .. show(dead))
+  S.ok('world events reach the sidecar as EVENT records with their allow-listed fields, in allow-list order')
+
+  -- An EVENT over the payload limit (32 KiB with this 256 KiB ring) is
+  -- written cut: its text at 1,024 bytes, its other fields kept, no GAP.
+  local gaps = count(function(e)
+    return e.ev == 'gap'
+  end)
+  host:event({
+    id = events_of.S_EVENT_MARK_ADDED,
+    time = 5,
+    idx = 77,
+    text = string.rep('x', 40000),
+  })
+  assert(run(5, function()
+    return event(events_of.S_EVENT_MARK_ADDED) ~= nil
+  end), 'the oversized mark did not reach the sidecar:\n' .. (S.read(out) or ''))
+  local mark = event(events_of.S_EVENT_MARK_ADDED).fields
+  assert(type(mark['8']) == 'string' and #mark['8'] == 1024 and mark['9'] == 77 and mark['1'] == 5,
+    'the cut mark reads text ' .. #tostring(mark['8']) .. ' bytes, id ' .. tostring(mark['9']))
+  assert(count(function(e)
+    return e.ev == 'gap'
+  end) == gaps, 'the oversized mark made a GAP')
+  S.ok('an EVENT over the payload limit is written cut, with no GAP')
+
+  -- The agent's entry takes 16 fields at most, and drops a pair whose code
+  -- is not a whole number from 1 to 65,535.
+  local agent = host.states.server.__nanoprobe_shim.agent
+  local many = { 9997 }
+  for _ = 1, 200 do
+    many[#many + 1] = 8
+    many[#many + 1] = string.rep('m', 3000)
+  end
+  agent.event(unpack(many))
+  agent.event(9998, 0, 1, 70000, 2, 1.5, 3, 4, 5, -1, 6)
+  assert(run(5, function()
+    return event(9997) ~= nil and event(9998) ~= nil
+  end), 'the direct events did not reach the sidecar:\n' .. (S.read(out) or ''))
+  local capped = event(9997)
+  assert(#capped.codes == 16, 'the capped event has ' .. #capped.codes .. ' fields')
+  assert(type(capped.fields['8']) == 'string' and #capped.fields['8'] == 1024,
+    'a capped field is ' .. #tostring(capped.fields['8']) .. ' bytes')
+  assert(table.concat(event(9998).codes, ',') == '4', 'the filtered codes are ' .. table.concat(event(9998).codes, ','))
+  assert(count(function(e)
+    return e.ev == 'gap'
+  end) == gaps, 'the capped event made a GAP')
+  S.ok('the agent takes 16 fields at most and drops pairs with bad codes')
+
+  -- The stream recording holds the FRAME and EVENT records, with numbers
+  -- that grow.
+  local kinds, last = {}, 0
+  for _, line in ipairs(S.lines(recording)) do
+    local r = S.json(line)
+    kinds[r.kind] = (kinds[r.kind] or 0) + 1
+    assert(r.number > last, 'a recorded number did not grow')
+    last = r.number
+  end
+  assert((kinds[1] or 0) > 0 and (kinds[20] or 0) >= 3, 'the recording has no FRAME or too few EVENT records')
+  S.ok('the stream recorder keeps every record, FRAME and EVENT among them')
+
+  -- The catalogue builder reads this recording as it is: every EVENT
+  -- decodes, none is counted twice, the birth is named, and the fields
+  -- of the direct test events, which no allow-list names, fail the build.
+  local xtask = XTASK
+  if xtask then
+    local report = profile .. 'probes.json'
+    S.write(report, '{"results":[{"probe":"link","result":{"reply":{"observations":'
+      .. '[{"name":"catalogue","value":{"by":{}}}]}}}]}')
+    local stem = profile .. 'catalogue'
+    local status = os.execute(S.quote(xtask) .. ' catalogue --build ' .. S.quote(report) .. ' --recording '
+      .. S.quote(recording) .. ' --out ' .. S.quote(stem) .. ' > ' .. S.quote(profile .. 'build.txt') .. ' 2>&1')
+    local built = S.json(assert(S.read(stem .. '.json'), 'no catalogue built:\n' .. (S.read(profile .. 'build.txt') or '')))
+    assert(#built.recorded.undecodable == 0 and built.recorded.duplicates == 0,
+      'the recording did not decode cleanly: ' .. (S.read(profile .. 'build.txt') or ''))
+    local birth
+    for _, e in ipairs(built.events) do
+      if e.name == 'S_EVENT_BIRTH' then
+        birth = e
+      end
+    end
+    assert(birth and birth.records >= 1, 'the built catalogue has no birth record')
+    -- The build is not whole, and says so: the direct test events above
+    -- carry fields no allow-list names.
+    assert(status ~= 0, 'catalogue --build passed a recording with fields no allow-list names')
+    -- And it fails for that reason only.
+    assert(#built.source.failed == 0 and #built.source.unforwarded == 0,
+      'the build failed for another reason: ' .. (S.read(profile .. 'build.txt') or ''))
+    local unexpected = false
+    for _, e in ipairs(built.events) do
+      if e.name == 'event 9997' and #e.forwarded_unexpected > 0 then
+        unexpected = true
+      end
+    end
+    assert(unexpected, 'the direct test event is not reported as forwarding unexpected fields')
+    S.ok('catalogue --build reads the real recording: every EVENT decodes, none twice')
+  end
 
   -- The inspector shows the handshake while attached.
   local pipe = io.popen(S.quote(INSPECT) .. ' inspect ' .. S.quote(map) .. ' --records 5 2>&1')

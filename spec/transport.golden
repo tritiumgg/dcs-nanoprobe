@@ -223,6 +223,8 @@ codes event_field
   14 GROUP_ID value=number
   15 COMMENT value=string
   16 ROUNDS value=number
+  17 INITIATOR_CATEGORY value=number
+  18 TARGET_CATEGORY value=number
 layout AUTHOR_EVENT fixed=8
   0x0000 u32 n
   0x0004 pad[4] reserved
@@ -475,4 +477,4 @@ layout EXTENSION_INVOKE fixed=0
   + lv args
 layout EVAL fixed=0
   + lv source
-hash 501dada1eb913155
+hash 820248137281bd3d

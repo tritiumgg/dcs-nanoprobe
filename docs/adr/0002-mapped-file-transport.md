@@ -14,17 +14,22 @@ events, command results and commands every frame. The agent's whole overhead bud
 The transport must work between a Wine process and a native Linux process. Windows
 named shared memory, named events and named pipes do not cross that boundary.
 
-Measured on 2026-11-11 on DCS 2.9.31.29434 (LIVE,
-docs/results/2026-11-11-first-dll-and-spikes.md):
+Measured on DCS 2.9.31.29434 (LIVE): E24 and the Windows client on 2026-11-11
+(docs/results/2026-11-11-first-dll-and-spikes.md), E25 on the Wine server on
+2026-11-13 with the host's CPU idle states limited to C1 and the `performance` energy
+preference (docs/results/2026-11-13-e25-cpu-idle.md):
 
 | Experiment | Wine dedicated server | Windows client |
 |---|---|---|
-| E25: one non-blocking `send` and one `recv` per frame on a loopback TCP socket | 380 µs at p50, 720 µs at p99 | 20 µs at p50, 30 µs at p99 |
+| E25: one non-blocking `send` and one `recv` per frame on a loopback TCP socket | 63–105 µs at p50, 103–141 µs at p99 | 20 µs at p50, 30 µs at p99 |
 | E24: a file mapped by the agent and by a native peer | The same pages; 0 torn reads in 64,426; echo lag of one frame | 0 torn reads in 1,290; echo lag of one frame |
 
 E19 asked whether the socket is cheap enough for samples, with a limit of 10 µs per
-frame. It is not, on either platform. Under Wine the socket alone would take 4–5% of
-real time.
+frame. It is not, on either platform, whenever data is sent. On the Wine server the
+socket alone would take about 1.2% of real time, four times the agent's whole budget.
+With the host's default power saving the server's cost was about five times higher
+(380 µs at p50, 720 µs at p99), so the socket's cost also depends on the host's power
+settings.
 
 ## Decision
 
@@ -62,15 +67,20 @@ Rejected:
   that does it is confined to the transport crate, copies before it validates, and is
   checked with Loom, Miri and fuzzing (step S6).
 - The sidecar's poll adds up to 5 ms of latency to every record and command.
-- A socket call under Wine costs more than a whole frame's slice (150–290 µs against a
-  cap of 250 µs), and a file call may cost as much (UNVERIFIED). The agent therefore
-  puts all its system calls on one kind of frame: the socket call, the kill-switch
-  check and the log flush. Outside a handshake one frame a second is such a frame. If
-  the three calls cost 300 µs each, that is 0.09% of real time, a third of the
-  agent's budget, and each such frame is over the cap: one frame in 110 at 110 frames
-  a second, which is inside the p99 target only above 100 frames a second. A
-  handshake adds up to ten such frames a second for a second or two. Step S11
-  measures all of it.
+- A system call under Wine costs tens of microseconds: 23–60 µs for a socket call and
+  38–56 µs for a file check at p50 on the Wine server
+  (docs/results/2026-11-13-e25-cpu-idle.md). The agent therefore puts all its system
+  calls on one kind of frame: the socket call, the kill-switch check, the reload check
+  and the log flush. Outside a handshake one frame a second is such a frame. With no
+  sidecar connected its calls together cost 117 µs at p50 and 165 µs at p99 with
+  nothing to flush, and 188 µs at p99 with one record; the slowest flush of 600 took
+  4.2 ms. That is 0.012% of real time, a twenty-fifth of the agent's budget, but at
+  p99 two thirds to three quarters of the frame's 250 µs slice. With a sidecar
+  connected a `recv` replaces the `accept`; that frame was not measured whole. A
+  handshake adds up to ten such frames a second for a second or two. With the host's
+  default power saving a socket call costs 141–290 µs on the same server; the file
+  checks were not measured then. The system-call frame does no sampling, and step S11
+  measures the per-frame p99 with and without it.
 - The sidecar's heartbeat and boot are fields of the status block, on a line only the
   sidecar writes, not records in the inbound ring. A heartbeat is one word that is
   overwritten, which a ring of consumed records does not model.

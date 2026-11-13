@@ -4,8 +4,10 @@
 //! profile in a file outside the repository (see [`profile`]).
 
 mod bundle;
+mod catalogue;
 mod chaos;
 mod check;
+mod client;
 mod eval;
 mod faults;
 mod install;
@@ -101,6 +103,22 @@ commands:
                             channel and each sidecar fault from link-probe, check
                             each is survived or refused with a log line, then
                             restart DCS. Writes bundles/faults-<name>-<time>.json.
+  catalogue <name>          Experiment E9 on a docker-wine target: deploy with --dev,
+                            restart DCS, load a fresh shell, record the agent's stream
+                            with link-probe, run the scenarios in lua/catalogue, load
+                            the shell again, and build the event catalogue under
+                            bundles/catalogue-<name>-<time>/. Refuses a server with
+                            players.
+  catalogue --build <probes.json> [--recording F]... --out STEM
+                            Build the field-presence report STEM.md and the catalogue
+                            STEM.json from a probes report and stream recordings
+  client join <client> <server>
+                            Experiment E30: join the docker-wine server <server> from
+                            the windows-ssh client <client>, which runs a --dev build
+                            at its main menu. Reads the server profile's
+                            client_address and client_password_file; the password
+                            goes to the client through SSH's standard input and is
+                            never printed, logged or kept.
   spec [--check]            Write spec/transport.golden from the layout and code tables
                             of the transport specification, or with --check fail
                             when it is out of date
@@ -148,6 +166,8 @@ fn main() -> ExitCode {
         ["peerkill", rest @ ..] => peerkill::command(&repository(), rest),
         ["chaos", name, rest @ ..] => chaos::command(name, rest),
         ["faults", name, rest @ ..] => faults::command(name, rest),
+        ["catalogue", rest @ ..] => catalogue::command(&repository(), rest),
+        ["client", rest @ ..] => client::command(rest),
         ["spec"] => spec::command(&repository(), false),
         ["spec", "--check"] => spec::command(&repository(), true),
         ["help" | "-h" | "--help"] | [] => {
@@ -641,7 +661,14 @@ fn api_dump(name: &str) -> Result<ExitCode, String> {
 fn bundle(name: &str) -> Result<ExitCode, String> {
     let target = target(name)?;
     let facts = facts(&target)?;
-    let bytes = bundle::build(open(name)?.as_ref(), &facts, &bundle::key()?)?;
+    // Every target's join password is redacted from every bundle: a client's
+    // logs may hold the server's.
+    let bytes = bundle::build(
+        open(name)?.as_ref(),
+        &facts,
+        &bundle::key()?,
+        client::passwords(),
+    )?;
     let folder = bundle::folder();
     std::fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
     let path = folder.join(format!("{name}-{}.zip", bundle::stamp()));

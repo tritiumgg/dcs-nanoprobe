@@ -102,7 +102,7 @@ assert(#host.callbacks == 1, 'the hook registered ' .. #host.callbacks .. ' call
 local msgs, all = records(hooklog)
 assert(msgs[1] == 'hook loaded' and msgs[2] == 'agent loaded' and msgs[3] == 'link open'
   and msgs[4] == 'capabilities', table.concat(msgs, ', '))
-assert(all[2].data.abi == '2', 'the agent loaded reads abi ' .. tostring(all[2].data.abi))
+assert(all[2].data.abi == '3', 'the agent loaded reads abi ' .. tostring(all[2].data.abi))
 assert(all[3].data.map == profile .. 'nanoprobe/test.map', 'the link opened ' .. tostring(all[3].data.map))
 for name, present in pairs(all[4].data) do
   assert(present == true, name .. ' is absent from the mock hook state')
@@ -235,12 +235,12 @@ S.remove(profile)
 -- A hook written for another ABI refuses the DLL, and carries on.
 profile = install()
 local hookfile = profile .. 'nanoprobe/versions/' .. BUILD .. '/lua/hook.lua'
-local text = S.read(hookfile):gsub("local ABI = '2'", "local ABI = '1'")
+local text = S.read(hookfile):gsub("local ABI = '3'", "local ABI = '1'")
 S.write(hookfile, text)
 host = start(profile)
 assert(#host.callbacks == 1, 'the hook stopped on an ABI mismatch')
 lines = S.lines(profile .. 'nanoprobe/logs/hook.log')
-assert(lines[2]:find('"msg":"agent not loaded"', 1, true) and lines[2]:find('ABI 2; this hook needs 1', 1, true),
+assert(lines[2]:find('"msg":"agent not loaded"', 1, true) and lines[2]:find('ABI 3; this hook needs 1', 1, true),
   tostring(lines[2]))
 S.ok('a hook of another ABI refuses the DLL with one error record and carries on')
 S.remove(profile)
