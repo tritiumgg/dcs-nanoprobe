@@ -87,7 +87,8 @@ message RouteOrder {
 }
 
 message AttackOrder {
-  // The group, unit or static to attack.
+  // The group to attack. A unit or a static as the target is not supported
+  // yet (step S15).
   uint64 target_id = 1;
 }
 

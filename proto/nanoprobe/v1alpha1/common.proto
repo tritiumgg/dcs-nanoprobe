@@ -92,8 +92,7 @@ enum Outcome {
   // The agent handled it and the result was lost.
   OUTCOME_UNKNOWN = 4;
   // A command that is not a control command and that the agent never took.
-  // An effect or a client's query is not sent again. For a set-state call the
-  // store still drives the state: watch the entity's revision.
+  // An effect or a client's query is not sent again.
   OUTCOME_NOT_SENT = 5;
   // Journalled, not yet sent or not yet answered.
   OUTCOME_PENDING = 6;

@@ -145,6 +145,9 @@ pub struct Group {
     /// The agent boot and generation in which a spawn of it resolved
     /// `unknown`: DCS may hold it, so it is not withdrawn to `virtual`.
     pub unknown_spawn_in: Option<(u64, u32)>,
+    /// The agent boot, generation and order revision of the last order
+    /// written for it.
+    pub order_sent_in: Option<(u64, u32, u64)>,
 }
 
 /// The mission DCS has loaded, as last seen.
@@ -468,6 +471,7 @@ impl Store {
                 spawned_in: None,
                 destroy_failures: 0,
                 unknown_spawn_in: None,
+                order_sent_in: None,
             },
         );
         self.touch(id);
@@ -722,6 +726,18 @@ impl Store {
         let again = g.spawned_in == Some((agent_boot, mission_gen));
         g.spawned_in = Some((agent_boot, mission_gen));
         Ok(again)
+    }
+
+    /// Record an order written for a group at a revision in a generation.
+    pub fn order_sent(
+        &mut self,
+        id: EntityId,
+        agent_boot: u64,
+        mission_gen: u32,
+        rev: u64,
+    ) -> Result<(), StoreError> {
+        self.group_mut(id)?.order_sent_in = Some((agent_boot, mission_gen, rev));
+        Ok(())
     }
 
     /// Record a spawn that resolved `unknown` in a generation.

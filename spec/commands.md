@@ -126,8 +126,8 @@ command with no result is one of two things:
 **After a sidecar restart** the new sidecar sets `in_tail` to `in_head` when it
 attaches, so a command after the `HELLO`'s `in_head` is no longer in the ring and was
 never applied. Every command that is not a control command resolves as `not_sent`.
-An effect is not sent again; for a set-state command the sidecar derives what DCS
-still needs from the store (spec/errors.md).
+An effect or a client's query is not sent again; for a set-state command the sidecar
+derives what DCS still needs from the store (spec/errors.md).
 
 **After `CONTROL_LOST`** the ring is untouched: a command after the `HELLO`'s `in_head`
 is still there and stays `pending`.

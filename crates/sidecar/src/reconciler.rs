@@ -41,7 +41,8 @@ pub struct Config {
     /// The default policy for a lost group.
     pub on_lost: LostPolicy,
     /// Refused or unknown destroys of one entity before the reconciler stops
-    /// sending them: a dematerializing entity goes `lost`.
+    /// sending them: a dematerializing entity goes `lost`. At least 1; a 0
+    /// counts as 1.
     pub destroy_retries: u32,
 }
 
@@ -156,6 +157,9 @@ pub struct Reconciler {
     spawn_rejected: HashMap<EntityId, (u64, u32)>,
     /// `CAMPAIGN` was written since the last `HELLO`.
     campaign_sent: bool,
+    /// A full enumeration was used since this reconciler started and since
+    /// the last `HELLO`: until then the mirror may lack objects DCS holds.
+    enumerated: bool,
     counters: Counters,
 }
 
@@ -204,6 +208,7 @@ impl Reconciler {
             drift_destroy_failures: HashMap::new(),
             spawn_rejected: HashMap::new(),
             campaign_sent: false,
+            enumerated: false,
             counters: Counters::default(),
         }
     }
@@ -363,7 +368,9 @@ impl Reconciler {
 
     /// A `LIFECYCLE`, or a `FRAME` that is not a replay, names the loaded
     /// mission. A `FRAME` carries no theater; a sidecar that started without
-    /// its store learns the theater from the next `LIFECYCLE`.
+    /// its store learns it from the `LIFECYCLE` the agent writes right after
+    /// every `HELLO`. For a store that already holds the mission that
+    /// `LIFECYCLE` changes nothing: no journal entry, no new generation.
     fn seen_mission(
         &mut self,
         store: &mut Store,
@@ -450,6 +457,7 @@ impl Reconciler {
         self.agent_boot = agent_boot;
         self.attached = true;
         self.campaign_sent = false;
+        self.enumerated = false;
     }
 
     fn resolve(
@@ -472,11 +480,19 @@ impl Reconciler {
             .loaded()
             .is_some_and(|l| l.agent_boot == c.agent_boot && l.mission_gen == c.mission_gen);
         let (id, state, spec_rev, captured) = (g.id, g.state, g.spec_rev, g.captured);
+        let code = res.map(|r| u64::from(r.code));
+        if matches!(c.opcode, opcode::GROUP_DESTROY | opcode::STATIC_DESTROY) {
+            // Before the check for `dead`: a dead entity's drift destroy is
+            // counted to the limit like any other.
+            if gen_now {
+                self.destroy_resolved(store, id, state, captured, outcome, res);
+            }
+            return;
+        }
         if state == State::Dead {
             self.counters.after_dead += 1;
             return;
         }
-        let code = res.map(|r| u64::from(r.code));
         match c.opcode {
             opcode::GROUP_SPAWN | opcode::STATIC_SPAWN => {
                 if !gen_now || state != State::Materializing || c.rev != spec_rev {
@@ -502,7 +518,7 @@ impl Reconciler {
                             let attackers: Vec<EntityId> = store
                                 .groups()
                                 .filter(|a| {
-                                    a.order_rev > 0
+                                    a.order_sent_in == Some((c.agent_boot, c.mission_gen, a.order_rev))
                                         && matches!(a.order, Some(Intent::Attack { target }) if target == id)
                                 })
                                 .map(|a| a.id)
@@ -584,42 +600,52 @@ impl Reconciler {
                         .expect("dematerializing");
                 }
             }
-            opcode::GROUP_DESTROY | opcode::STATIC_DESTROY if gen_now => {
-                // APPLIED, or NOT_BOUND: DCS no longer holds the entity.
-                let gone = outcome == Outcome::Applied || code == Some(rc::NOT_BOUND);
-                if gone {
-                    // The agent sets the applied revisions of what it
-                    // destroyed to 0 (spec/commands.md).
-                    self.order_held.remove(&id);
-                    unbind_group(&mut self.binding, id);
-                    self.drift_destroy_failures.remove(&id);
-                    if state == State::Dematerializing && captured {
-                        store
-                            .transition(id, Trigger::CaptureDone)
-                            .expect("dematerializing");
-                    }
-                } else if matches!(outcome, Outcome::Refused | Outcome::Unknown) {
-                    // Sent again, safely (destroying nothing is APPLIED),
-                    // up to the limit.
-                    let limit = self.cfg.destroy_retries;
-                    if state == State::Dematerializing {
-                        if store.destroy_failed(id).expect("group") >= limit {
-                            let msg = res.map_or("the destroy's result was lost".to_owned(), |r| {
-                                r.message.clone()
-                            });
-                            store
-                                .set_error(id, format!("destroy failed {limit} times: {msg}"))
-                                .expect("group");
-                            store
-                                .transition(id, Trigger::DestroyFailed)
-                                .expect("dematerializing");
-                        }
-                    } else {
-                        *self.drift_destroy_failures.entry(id).or_default() += 1;
-                    }
-                }
-            }
             _ => {}
+        }
+    }
+
+    fn destroy_resolved(
+        &mut self,
+        store: &mut Store,
+        id: EntityId,
+        state: State,
+        captured: bool,
+        outcome: Outcome,
+        res: Option<&CommandResult>,
+    ) {
+        let code = res.map(|r| u64::from(r.code));
+        // APPLIED, or NOT_BOUND: DCS no longer holds the entity.
+        let gone = outcome == Outcome::Applied || code == Some(rc::NOT_BOUND);
+        if gone {
+            // The agent sets the applied revisions of what it
+            // destroyed to 0 (spec/commands.md).
+            self.order_held.remove(&id);
+            unbind_group(&mut self.binding, id);
+            self.drift_destroy_failures.remove(&id);
+            if state == State::Dematerializing && captured {
+                store
+                    .transition(id, Trigger::CaptureDone)
+                    .expect("dematerializing");
+            }
+        } else if matches!(outcome, Outcome::Refused | Outcome::Unknown) {
+            // Sent again, safely (destroying nothing is APPLIED),
+            // up to the limit.
+            let limit = self.cfg.destroy_retries.max(1);
+            if state == State::Dematerializing {
+                if store.destroy_failed(id).expect("group") >= limit {
+                    let msg = res.map_or("the destroy's result was lost".to_owned(), |r| {
+                        r.message.clone()
+                    });
+                    store
+                        .set_error(id, format!("destroy failed {limit} times: {msg}"))
+                        .expect("group");
+                    store
+                        .transition(id, Trigger::DestroyFailed)
+                        .expect("dematerializing");
+                }
+            } else {
+                *self.drift_destroy_failures.entry(id).or_default() += 1;
+            }
         }
     }
 
@@ -818,6 +844,7 @@ impl Reconciler {
             return;
         }
         self.counters.enumerations += 1;
+        self.enumerated = true;
         // A drift destroy that reached its limit is tried again after each
         // enumeration that still finds the objects.
         self.drift_destroy_failures.clear();
@@ -1036,9 +1063,11 @@ impl Reconciler {
                 State::Lost => match g.on_lost.unwrap_or(self.cfg.on_lost) {
                     LostPolicy::Report => {}
                     LostPolicy::Respawn => {
-                        // Objects still bound (a destroy that failed to its
-                        // limit) are settled by the next enumeration first.
-                        if g.authority == Authority::Sim && here && !has_objects {
+                        // Objects DCS may still hold (a destroy that failed to
+                        // its limit) are settled by an enumeration first: one
+                        // used since the last HELLO, so the mirror is whole.
+                        if g.authority == Authority::Sim && here && self.enumerated && !has_objects
+                        {
                             store.respawn(id).expect("lost");
                         }
                     }
@@ -1053,8 +1082,8 @@ impl Reconciler {
 
     fn destroy(&mut self, store: &mut Store, sim: &mut dyn SimAdapter, id: EntityId) {
         let ops = [opcode::GROUP_DESTROY, opcode::STATIC_DESTROY];
-        let given_up =
-            self.drift_destroy_failures.get(&id).copied().unwrap_or(0) >= self.cfg.destroy_retries;
+        let given_up = self.drift_destroy_failures.get(&id).copied().unwrap_or(0)
+            >= self.cfg.destroy_retries.max(1);
         if given_up || self.inflight_for(store, id, &ops) {
             return;
         }
@@ -1168,6 +1197,10 @@ impl Reconciler {
         };
         match intents::compile(intent, status, target_now) {
             Compiled::Task(task) => {
+                let loaded = store.loaded().cloned().expect("ready");
+                store
+                    .order_sent(id, loaded.agent_boot, loaded.mission_gen, rev)
+                    .expect("group");
                 self.send(store, sim, id, rev, Body::GroupOrder(task));
             }
             Compiled::Done => {
@@ -1221,6 +1254,39 @@ pub fn outcome_of(code: u16, opcode: u16) -> Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every result code against the table of spec/errors.md, "Command
+    /// outcomes".
+    #[test]
+    fn result_codes_map_to_the_outcomes_of_the_spec() {
+        let set_state = opcode::GROUP_SPAWN;
+        let query = opcode::CAPTURE;
+        for (code, want) in [
+            (rc::APPLIED, Outcome::Applied),
+            (rc::AT_REVISION, Outcome::Applied),
+            (rc::DUPLICATE, Outcome::Unknown),
+            (rc::STALE_EPOCH, Outcome::Rejected),
+            (rc::NO_CAMPAIGN, Outcome::Rejected),
+            (rc::NOT_BOUND, Outcome::Refused),
+            (rc::BAD_PAYLOAD, Outcome::Rejected),
+            (rc::UNKNOWN_OPCODE, Outcome::Rejected),
+            (rc::RAW_LUA_OFF, Outcome::Rejected),
+            (rc::DCS_REFUSED, Outcome::Refused),
+            (rc::LUA_ERROR, Outcome::Refused),
+            (rc::WRONG_CAMPAIGN, Outcome::Rejected),
+            (rc::WRONG_GENERATION, Outcome::Rejected),
+        ] {
+            assert_eq!(classify(code as u16, set_state), want, "code {code}");
+            assert_eq!(classify(code as u16, query), want, "code {code}");
+        }
+        assert_eq!(classify(rc::TOO_LARGE as u16, set_state), Outcome::Applied);
+        assert_eq!(classify(rc::TOO_LARGE as u16, query), Outcome::Refused);
+        assert_eq!(
+            nanoprobe_transport::layout::result::ALL.len(),
+            14,
+            "a code without a row here"
+        );
+    }
 
     #[test]
     fn further_keys_join_a_table_and_never_replace_the_platform_s() {

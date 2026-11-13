@@ -35,13 +35,14 @@ use std::collections::BTreeSet;
 use nanoprobe_sidecar::ids::{CampaignId, EntityId};
 use nanoprobe_sidecar::intents::{self, Compiled, Intent, Waypoint};
 use nanoprobe_sidecar::lifecycle::State;
-use nanoprobe_sidecar::reconciler::{Config as RecConfig, Reconciler, outcome_of};
+use nanoprobe_sidecar::reconciler::{Config as RecConfig, Reconciler};
 use nanoprobe_sidecar::replay::{Batch, Recording};
 use nanoprobe_sidecar::sim::wire::{Body, Command, lv, opcode};
 use nanoprobe_sidecar::sim::{Detached, RawRecord, SimAdapter};
 use nanoprobe_sidecar::store::{
     Authority, Entry, Journalled, LostPolicy, NewGroup, NewUnit, Outcome, Point, Store, UnitState,
 };
+use nanoprobe_transport::layout::result as rc;
 
 use crate::{Config, FakeSim};
 
@@ -152,6 +153,27 @@ impl Schedule {
 /// An invariant failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Violation(pub String);
+
+/// The outcome a result code gives, from the table in spec/errors.md,
+/// "Command outcomes", written here apart from the reconciler's own mapping.
+fn spec_outcome(code: u16, op: u16) -> Outcome {
+    match u64::from(code) {
+        rc::APPLIED | rc::AT_REVISION => Outcome::Applied,
+        rc::TOO_LARGE if op == opcode::CAPTURE => Outcome::Refused,
+        rc::TOO_LARGE => Outcome::Applied,
+        rc::DCS_REFUSED | rc::NOT_BOUND | rc::LUA_ERROR => Outcome::Refused,
+        rc::STALE_EPOCH
+        | rc::WRONG_CAMPAIGN
+        | rc::WRONG_GENERATION
+        | rc::NO_CAMPAIGN
+        | rc::BAD_PAYLOAD
+        | rc::UNKNOWN_OPCODE
+        | rc::RAW_LUA_OFF => Outcome::Rejected,
+        // DUPLICATE says only that the number was handled before; it never
+        // becomes `applied`.
+        _ => Outcome::Unknown,
+    }
+}
 
 /// The fake sim behind an adapter that logs every sequenced command.
 struct Logged<'a> {
@@ -361,6 +383,9 @@ pub fn new_store_for(campaign: u64, groups: usize, statics: usize) -> Store {
 #[derive(Debug, Default)]
 struct Scan {
     upto: usize,
+    /// Commands taken before this store took over, which its journal does
+    /// not hold.
+    before: BTreeSet<(u64, u64, u64)>,
     journalled: BTreeSet<(u64, u64, u64)>,
     commands: std::collections::HashMap<(u64, u64), Journalled>,
     boots: std::collections::HashMap<u64, u64>,
@@ -616,7 +641,10 @@ impl World {
         self.sim.detach();
         self.sidecar_boot += 1;
         self.store = store;
-        self.scan = Scan::default();
+        self.scan = Scan {
+            before: self.sim.ledger().taken.keys().copied().collect(),
+            ..Scan::default()
+        };
         self.rec = Reconciler::new(self.rec_cfg, &self.store);
         self.sim.attach(self.sidecar_boot);
     }
@@ -686,7 +714,7 @@ impl World {
                     let by_result = cmd.and_then(|c| {
                         l.results
                             .get(&(c.agent_boot, *epoch, *seq))
-                            .map(|code| outcome_of(*code, c.opcode))
+                            .map(|code| spec_outcome(*code, c.opcode))
                     });
                     if let Some(want) = by_result
                         && matches!(
@@ -704,7 +732,13 @@ impl World {
                         Outcome::NotSent => taken,
                         // An Unknown for a command of an agent boot that is
                         // gone may be one it never took (spec/commands.md).
-                        Outcome::Unknown => !taken && boot == self.sim.agent_boot(),
+                        // A result written to the ring is read: `unknown` is
+                        // for a result that was lost.
+                        Outcome::Unknown => {
+                            (!taken && boot == self.sim.agent_boot())
+                                || (l.delivered.contains(&(boot, *epoch, *seq))
+                                    && by_result != Some(Outcome::Unknown))
+                        }
                         Outcome::Applied => !taken && !spawned,
                         _ => !taken,
                     };
@@ -729,11 +763,9 @@ impl World {
         }
         scan.upto = self.store.entries().len();
         let campaign = self.store.campaign().0;
-        if let Some((t, _)) = l
-            .taken
-            .iter()
-            .find(|(t, c)| **c == campaign && !scan.journalled.contains(t))
-        {
+        if let Some((t, _)) = l.taken.iter().find(|(t, c)| {
+            **c == campaign && !scan.journalled.contains(t) && !scan.before.contains(t)
+        }) {
             return Err(Violation(format!(
                 "DCS took command {t:?}, which is not journalled"
             )));
@@ -766,6 +798,8 @@ impl World {
         let held = self.sim.platform_groups(campaign);
         let bad = |m: String| Err(Violation(m));
         let ledger = self.sim.ledger();
+        let policy =
+            |g: &nanoprobe_sidecar::store::Group| g.on_lost.unwrap_or(self.rec_cfg.on_lost);
         let (boot, mission_gen) = (self.sim.agent_boot(), self.sim.mission_gen());
         if self
             .store
@@ -849,12 +883,15 @@ impl World {
                     let why = match g.state {
                         // Every member died, or the group was lost and the
                         // policy marked it dead.
+                        // Every member died, or it was lost and the policy is
+                        // to mark it dead.
                         State::Dead => {
                             g.members.iter().all(|m| ledger.deaths.contains(&(campaign, m.0)))
-                                || self.store.entries().iter().any(|e| {
-                                    matches!(e, Entry::Transition { entity, from: State::Lost, to: State::Dead, .. }
-                                        if *entity == g.id)
-                                })
+                                || (policy(g) == LostPolicy::Dead
+                                    && self.store.entries().iter().any(|e| {
+                                        matches!(e, Entry::Transition { entity, from: State::Lost, to: State::Dead, .. }
+                                            if *entity == g.id)
+                                    }))
                         }
                         State::Unspawnable => g.members.iter().any(|m| {
                             self.store
@@ -867,10 +904,22 @@ impl World {
                             g.members.iter().any(|m| {
                                 let k = (boot, mission_gen, campaign, m.0);
                                 ledger.removed.contains(&k) || ledger.unreported.contains(&k)
-                            }) || g.error.as_deref().is_some_and(|e| e.starts_with("destroy failed"))
+                            }) || (g.error.as_deref().is_some_and(|e| e.starts_with("destroy failed"))
+                                && ledger.failed_destroys.get(&(campaign, g.id.0)).copied().unwrap_or(0)
+                                    >= self.rec_cfg.destroy_retries)
                         }
                         _ => true,
                     };
+                    if g.state == State::Lost
+                        && policy(g) == LostPolicy::Respawn
+                        && want_dcs
+                        && in_dcs.is_none()
+                    {
+                        return bad(format!(
+                            "{} is lost under the respawn policy and was not respawned",
+                            g.id
+                        ));
+                    }
                     if !why {
                         return bad(format!(
                             "{} is {} with no cause in DCS",
@@ -891,6 +940,23 @@ impl World {
                 State::Materializing | State::Dematerializing => {
                     return bad(format!("{} still {}", g.id, g.state.name()));
                 }
+            }
+        }
+        // Every death a record reported is a fact: a reported death of a
+        // unit of this campaign, unless its group was marked dead whole.
+        for (_, _, c, e) in &ledger.reported_deaths {
+            if *c != campaign {
+                continue;
+            }
+            let Some(u) = self.store.unit(EntityId(*e)) else {
+                continue;
+            };
+            let marked = self
+                .store
+                .group(u.group)
+                .is_some_and(|g| g.state == State::Dead);
+            if !u.dead && !marked {
+                return bad(format!("unit {e}'s death was reported and is no fact"));
             }
         }
         if let Some((e, n, _)) = held

@@ -117,17 +117,15 @@ proptest! {
         seed in any::<u64>(),
         cuts in prop::collection::vec(any::<prop::sample::Index>(), 1..4),
     ) {
-        let (w, live) = live_run(seed);
+        let (w, _) = live_run(seed);
         let total = w.recording.records().count();
         let restarts: Vec<usize> = cuts.iter().map(|c| c.index(total.max(1))).collect();
         let last = last_restart(&w.recording, &restarts);
         let mut store = new_store(5, 2);
         let fresh = || new_store(5, 2);
         fold(Config::default(), &mut store, &w.recording, &restarts, Persistence::Off(&fresh));
-        let want: BTreeSet<EntityId> = dead_records_from(&w.recording, last)
-            .intersection(&live)
-            .copied()
-            .collect();
+        // From the records alone, not from the live run.
+        let want = dead_records_from(&w.recording, last);
         prop_assert_eq!(deaths(&store), want);
     }
 }
@@ -385,7 +383,7 @@ fn a_replay_by_another_campaign_drops_the_death() {
 /// Between a switch to B and the next load, campaign A's objects stay in
 /// DCS with no binding: B binds none of them, and A's unit 2 dying is no
 /// death of B's unit 2. B, started without a store, learns the theater from
-/// the load and only then spawns.
+/// the LIFECYCLE after the HELLO and spawns its own group at once.
 #[test]
 fn between_a_switch_and_the_next_load_the_old_campaign_is_ignored() {
     let mut w = World::new(1, 0, LostPolicy::Report);
@@ -407,6 +405,11 @@ fn between_a_switch_and_the_next_load_the_old_campaign_is_ignored() {
         "A's unit is still in DCS"
     );
     assert!(!w.rec.binding().contains_key(&object));
+    assert_eq!(
+        w.store.group(EntityId(1)).unwrap().state,
+        nanoprobe_sidecar::lifecycle::State::Live,
+        "B spawned before any load"
+    );
     w.sim.kill(object);
     for _ in 0..60 {
         w.tick().unwrap();

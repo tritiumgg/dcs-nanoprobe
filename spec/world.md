@@ -122,7 +122,7 @@ A group with a death fact for a member is never respawned with that member.
 |---|---|---|
 | Store revision | campaign | Any change to the store. Stamps every change the World service reports. |
 | `spec_rev` | group, static, mark, drawing, menu item, extension | Its spec changes, or a `lost` group or static is respawned, whose spec may be the same |
-| `order_rev` | group | Its order changes, or the target of a sent or applied attack order (group, unit or static) gets new DCS object IDs. The new revision is taken when the target's spawn resolves `applied`, and the order is compiled after it. Not on a mission generation change, after which every order is sent again. |
+| `order_rev` | group | Its order changes, or the target group of a sent or applied attack order gets new DCS object IDs. The new revision is taken when the target's spawn resolves `applied`, and the order is compiled after it. Not on a mission generation change, after which every order is sent again. |
 
 A group's spec is its country, coalition, category, extra keys of its DCS table, and
 its units: each one's type, skill and extra keys. A static's is its country,

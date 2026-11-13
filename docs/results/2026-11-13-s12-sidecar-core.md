@@ -39,17 +39,21 @@ Safety, checked on every command and after every frame:
 - No spawn replaces a group DCS holds.
 - Every death fact is a death of this campaign's unit that happened; `dead` is final.
 - Every outcome matches what the agent did: `not_sent` was never taken; `unknown` was
-  taken unless its agent boot is gone; `applied`, `refused` and `rejected` are the
-  outcome of the result code the agent gave. The one exception is a spawn resolved
+  taken unless its agent boot is gone, and its result was never written to the ring
+  (or was `DUPLICATE`); `applied`, `refused` and `rejected` are the outcome of the
+  result code the agent gave, by the table of spec/errors.md, which the harness holds
+  apart from the reconciler's own mapping. The one exception is a spawn resolved
   `applied` without a result, when the group's last member died while it was
   unanswered (spec/world.md): DCS applied that revision in that generation.
 - One epoch never spans two agent boots.
 
 Convergence, after the faults stop, a reattach and 400 frames more: every entity is
 `live`, `dead`, `unspawnable`, `lost` or `virtual`, each with a cause (every member
-died, or the group was `lost` and the `dead` policy marked it; a refused type; a member
-removed, its death record dropped by a `GAP`, or its destroys failed to the limit;
-campaign authority or another theater loaded). A `live` group is in
+died, or the group was `lost` and its policy is to mark it dead; a refused type; a
+member removed, its death record dropped by a `GAP`, or as many of its destroys
+refused or lost as the limit; campaign authority or another theater loaded). A `lost`
+entity under the respawn policy, with DCS authority on the loaded theater, is not
+left out of DCS. Every death a record reported, of this campaign's unit, is a fact. A `live` group is in
 DCS with exactly its members that have neither a death fact nor a missing mark,
 holding its order, and an attack order names its target's current DCS group. No entity
 outside `dead` has every member dead. Nothing else of the campaign is in DCS, and no
@@ -62,11 +66,13 @@ command is unanswered.
 | Seeded schedules, 300 operations, 6 groups and 2 statics, the three lost policies in turn | 20,000 seeds | 0 |
 | Proptest, 1 to 199 operations, 1 to 6 groups, 0 to 2 statics, any lost policy | 30,000 cases | 0 |
 | Replay of a recorded fake-sim run, the sidecar restarting at up to 5 points the property picks, persistence on: the same death facts as the live run | 500 cases | 0 |
-| The same with persistence off (a fresh store at each restart): exactly the deaths read after the last restart | 500 cases | 0 |
+| The same with persistence off (a fresh store at each restart): exactly the deaths that records stamped with this campaign report after the last restart, computed from the records alone | 500 cases | 0 |
 | A death queued while detached, read by a sidecar restarted without its store | 1 | 0 |
 | `materializing` -> `dead` (a lost `RESULT`, then every member dies; the spawn resolves `applied`), `lost` -> `dead`, and a death with a wrong binding | 1 each | 0 |
 | A fixed `unspawnable` group materializes; a refused destroy stops at the limit and the entity goes `lost`, then leaves DCS once destroys work; an attack order follows its target when the target respawns in the same generation; a route advances with no new order; a `materializing` group under campaign authority is withdrawn with no spawn; a death while `dematerializing` | 1 each | 0 |
 | A death queued under another campaign and read by a sidecar of a campaign with the same `EntityId`s, without its store: live, and replayed with 5 sets of restarts; and the window between a campaign switch and the next load | 1 each | 0 |
+| A restarted sidecar does not respawn a `lost` entity over objects DCS holds before an enumeration; a dead entity's refused destroys stop at the limit; a limit of 0 counts as 1; result codes map to the outcomes of spec/errors.md | 1 each | 0 |
+| The `LIFECYCLE` after a `HELLO`: no journal entry, generation change or store revision for a store that has the mission, the binding kept; a fresh store learns the mission and is ready; the conformance suite on a mission already running | 1 each | 0 |
 | The seeds reach `live` -> `dead`, and never `virtual` -> `dead` | 200 seeds | 0 |
 | A restart after the last `FRAME`, with persistence off, leaves no death fact | the seeds of 64 whose recording ends after its last `FRAME` | 0 |
 | Conformance suite on the fake sim (9 checks) | 1 | 0 |
@@ -107,6 +113,11 @@ on it, with the seeds `mise run check` runs unless a count is given:
 | A refused destroy is sent again without a limit | `a_refused_destroy_stops_at_the_limit` |
 | A `materializing` group under campaign authority is never withdrawn | `a_materializing_group_under_campaign_authority_is_withdrawn` |
 | `OBJECT_GONE` stamped with another campaign counts | Seeds, and the three campaign tests |
+| `OBJECT_GONE` `DEAD` ignored unless it names the group's last living member | Seeds |
+| A `lost` group marked dead under the report policy | Seeds |
+| A `lost` group never respawned under the respawn policy | Seeds |
+| `NOT_BOUND` resolved `applied` | Seeds |
+| Destroy results the sidecar read resolved `unknown` | Seeds |
 | The fake answers a spawn or order at its revision as new | Conformance |
 | An attach keeps the commands it did not take | Conformance: `a_reattach_answers_what_was_taken` |
 
@@ -136,6 +147,10 @@ the same members missing, so the end state is the same.
 - A death the agent queued under another campaign counted against this campaign's
   entity of the same `EntityId`. The stamps carry the campaign, and such records are
   dropped.
+- A restarted sidecar respawned a `lost` entity whose destroys had failed, before its
+  enumeration showed DCS still held it. A respawn waits for an enumeration used since
+  the last `HELLO`.
+- A dead entity's refused destroy was sent again every frame, uncounted.
 
 ## Not covered
 
@@ -150,5 +165,8 @@ the sidecar does not read the status block's `in_head`, and the rule of
 spec/commands.md, "After DCS dies", is not yet safe for commands taken after the last
 read. Step S14 settles it.
 
-The fake writes a `FRAME` right after a `CAMPAIGN` that changes the campaign, and in a
-replayed queue wherever any stamp changes. The agent's doing the same is step S10's.
+The fake writes a `FRAME` right after a `CAMPAIGN` that changes the campaign, in a
+replayed queue wherever any stamp changes, and a `LIFECYCLE` right after every
+`HELLO`. The agent's doing the same is step S10's.
+
+An attack order names a group. A unit or a static as the target is step S15's.

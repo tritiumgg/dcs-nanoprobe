@@ -108,6 +108,16 @@ pub struct Ledger {
     /// The result code the agent gave each command it answered, by agent
     /// boot, epoch and sequence number, whether or not the result was read.
     pub results: HashMap<(u64, u64, u64), u16>,
+    /// Results written to the ring, which a sidecar reads: agent boot, epoch,
+    /// sequence number. A result lost with the link, or cleared by a crash
+    /// before it was read, is not here.
+    pub delivered: BTreeSet<(u64, u64, u64)>,
+    /// `OBJECT_GONE` `DEAD` records with a binding written to the ring: agent
+    /// boot, and the generation, campaign and unit entity of their stamps.
+    pub reported_deaths: BTreeSet<(u64, u32, u64, u64)>,
+    /// Destroys of an entity, by campaign and entity, that DCS refused or
+    /// whose result was lost.
+    pub failed_destroys: HashMap<(u64, u64), u32>,
     /// Unit entities that left DCS without a death: agent boot, generation,
     /// campaign, entity.
     pub removed: BTreeSet<(u64, u32, u64, u64)>,
@@ -201,6 +211,8 @@ pub struct FakeSim {
     theater: String,
     /// Drop the next `RESULT` of the next frame.
     lose_result: bool,
+    /// The generation and campaign of the last `FRAME` written.
+    written_stamp: (u32, u64),
     /// Destroys to answer `DCS_REFUSED`.
     refuse_destroys: u32,
     /// DCS groups that were in DCS when the active campaign changed.
@@ -247,6 +259,7 @@ impl FakeSim {
             run: None,
             theater: String::new(),
             lose_result: false,
+            written_stamp: (0, 0),
             refuse_destroys: 0,
             orphans: BTreeSet::new(),
             losing: false,
@@ -332,6 +345,24 @@ impl FakeSim {
     }
 
     fn write(&mut self, input: &Input) {
+        match input {
+            Input::Frame(f) => self.written_stamp = (f.mission_gen, f.campaign),
+            Input::Result(r) if r.seq != 0 => {
+                self.ledger
+                    .delivered
+                    .insert((self.agent_boot, r.epoch, r.seq));
+            }
+            Input::ObjectGone(g) if g.reason == gone_reason::DEAD && g.entity != 0 => {
+                let (mission_gen, campaign) = self.written_stamp;
+                self.ledger.reported_deaths.insert((
+                    self.agent_boot,
+                    mission_gen,
+                    campaign,
+                    g.entity,
+                ));
+            }
+            _ => {}
+        }
         let (kind, payload) = input.encode();
         self.number += 1;
         self.out.push(RawRecord {
@@ -358,9 +389,12 @@ impl FakeSim {
 
     /// Emit a record: written when attached, else queued by its class.
     fn emit(&mut self, input: Input) {
-        if self.losing && matches!(input, Input::Result(_)) {
+        if self.losing
+            && let Input::Result(r) = &input
+        {
             // The result is lost and the link drops with it; the next
             // attach's HELLO settles the command.
+            self.destroy_result_lost(r);
             self.losing = false;
             self.attached = false;
             return;
@@ -519,7 +553,36 @@ impl FakeSim {
     pub fn crash(&mut self) {
         self.alive = false;
         self.attached = false;
-        self.out.clear();
+        // What was written and not read is lost: take it out of the ledger.
+        let mut stamp = (0, 0);
+        for r in std::mem::take(&mut self.out) {
+            match Input::decode(r.kind, &r.payload) {
+                Ok(Input::Frame(f)) => stamp = (f.mission_gen, f.campaign),
+                Ok(Input::Result(res)) => {
+                    self.ledger
+                        .delivered
+                        .remove(&(r.agent_boot, res.epoch, res.seq));
+                    self.destroy_result_lost(&res);
+                }
+                Ok(Input::ObjectGone(g)) if g.reason == gone_reason::DEAD => {
+                    self.ledger
+                        .reported_deaths
+                        .remove(&(r.agent_boot, stamp.0, stamp.1, g.entity));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Count a destroy whose result will not be read.
+    fn destroy_result_lost(&mut self, r: &CommandResult) {
+        if matches!(r.opcode, opcode::GROUP_DESTROY | opcode::STATIC_DESTROY) {
+            *self
+                .ledger
+                .failed_destroys
+                .entry((r.campaign, r.entity))
+                .or_default() += 1;
+        }
     }
 
     /// Whether the process is up.
@@ -663,6 +726,10 @@ impl FakeSim {
             dcs_version: "fake".into(),
         };
         self.write(&Input::Hello(hello));
+        // A LIFECYCLE of the current state right after every HELLO, so a
+        // sidecar that attaches to a running mission learns its theater
+        // (the coordinator's ruling; S10 builds it in the agent).
+        self.lifecycle_record();
         if self.running() {
             self.start_enumeration();
         }
@@ -1127,6 +1194,11 @@ impl FakeSim {
             Body::GroupDestroy | Body::StaticDestroy => {
                 if self.refuse_destroys > 0 {
                     self.refuse_destroys -= 1;
+                    *self
+                        .ledger
+                        .failed_destroys
+                        .entry((h.campaign, h.entity))
+                        .or_default() += 1;
                     return self.result(
                         &cmd,
                         rc::DCS_REFUSED,

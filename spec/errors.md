@@ -34,7 +34,7 @@ The sidecar journals every command and resolves it to one outcome:
 | `refused` | result `DCS_REFUSED`, `NOT_BOUND` or `LUA_ERROR`; result `TOO_LARGE` for a query | The command reached DCS and failed, or a query's value does not fit a record. The message says why. |
 | `rejected` | result `STALE_EPOCH`, `WRONG_CAMPAIGN`, `WRONG_GENERATION`, `NO_CAMPAIGN`, `BAD_PAYLOAD`, `UNKNOWN_OPCODE` or `RAW_LUA_OFF` | The agent did not try it |
 | `unknown` | no result, and the agent's `in_head` is past the command (spec/commands.md, "Unanswered commands") | The agent took it, and its result was lost |
-| `not_sent` | a command the agent never took | It did not happen. An effect is not sent again; for a set-state command or a query, what DCS still needs is derived from the store and sent as a new command. |
+| `not_sent` | a command the agent never took | It did not happen. An effect or a client's query is not sent again. For a set-state command, or a query the sidecar itself needs (the `CAPTURE` of a dematerialization), what DCS still needs is derived from the store and sent as a new command. |
 
 `DUPLICATE` says only that the agent handled the sequence number before. The command's
 outcome is the one journalled from its first result, or `unknown` when there is none.

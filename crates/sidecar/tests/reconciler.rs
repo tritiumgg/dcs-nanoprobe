@@ -409,3 +409,138 @@ fn a_materializing_group_under_campaign_authority_is_withdrawn() {
     );
     w.settle().unwrap();
 }
+
+/// Round 3: a lost entity whose objects DCS still holds is not respawned by
+/// a restarted sidecar before an enumeration has rebuilt the mirror.
+#[test]
+fn a_restarted_sidecar_does_not_respawn_over_objects_dcs_holds() {
+    use nanoprobe_sidecar::store::Authority;
+
+    let mut w = World::new(0, 1, LostPolicy::Respawn);
+    let id = w.store.groups().next().unwrap().id;
+    w.settle().unwrap();
+    w.sim.refuse_destroys(5);
+    w.store.set_authority(id, Authority::Campaign).unwrap();
+    for _ in 0..30 {
+        w.tick().unwrap();
+        if w.store.group(id).unwrap().state == State::Lost {
+            break;
+        }
+    }
+    assert_eq!(w.store.group(id).unwrap().state, State::Lost);
+    w.store.set_authority(id, Authority::Sim).unwrap();
+    w.apply(&Op::SidecarRestart).unwrap();
+    assert_ne!(
+        w.store.group(id).unwrap().state,
+        State::Materializing,
+        "no respawn before an enumeration"
+    );
+    w.settle().unwrap();
+    assert_eq!(w.store.group(id).unwrap().state, State::Live);
+}
+
+/// Round 3: a dead entity whose objects DCS still holds and refuses to
+/// destroy is sent a destroy only up to the limit until the next enumeration.
+#[test]
+fn a_dead_entity_s_refused_destroys_stop_at_the_limit() {
+    use nanoprobe_sidecar::sim::wire::opcode;
+    use nanoprobe_sidecar::store::Authority;
+
+    let mut w = World::new(0, 1, LostPolicy::Dead);
+    let id = w.store.groups().next().unwrap().id;
+    w.settle().unwrap();
+    w.sim.refuse_destroys(1_000);
+    w.store.set_authority(id, Authority::Campaign).unwrap();
+    for _ in 0..30 {
+        w.tick().unwrap();
+    }
+    assert_eq!(w.store.group(id).unwrap().state, State::Dead);
+    let sent = commands(&w, id, opcode::STATIC_DESTROY);
+    for _ in 0..20 {
+        w.tick().unwrap();
+    }
+    assert_eq!(
+        commands(&w, id, opcode::STATIC_DESTROY),
+        sent,
+        "no destroy between enumerations"
+    );
+    assert!(sent <= 3 * 2, "{sent}");
+}
+
+/// Round 3: a `destroy_retries` of 0 counts as 1, so a destroy is still sent.
+#[test]
+fn a_destroy_limit_of_zero_counts_as_one() {
+    use nanoprobe_sidecar::reconciler::{Config, Reconciler};
+    use nanoprobe_sidecar::sim::wire::opcode;
+    use nanoprobe_sidecar::store::Authority;
+
+    let mut w = World::new(0, 1, LostPolicy::Report);
+    let id = w.store.groups().next().unwrap().id;
+    w.settle().unwrap();
+    w.rec = Reconciler::new(
+        Config {
+            destroy_retries: 0,
+            ..Config::default()
+        },
+        &w.store,
+    );
+    w.apply(&Op::Reattach).unwrap();
+    w.apply(&Op::Detach).unwrap();
+    w.apply(&Op::Reattach).unwrap();
+    w.sim.refuse_destroys(1);
+    w.store.set_authority(id, Authority::Campaign).unwrap();
+    for _ in 0..20 {
+        w.tick().unwrap();
+    }
+    assert_eq!(commands(&w, id, opcode::STATIC_DESTROY), 1);
+    assert_eq!(w.store.group(id).unwrap().state, State::Lost);
+}
+
+/// The coordinator's ruling A: the agent writes a LIFECYCLE of its state
+/// right after every HELLO. A store with no mission learns it from that
+/// (and is ready); a store that has it adds no journal entry, no
+/// generation change and no store revision, and keeps the binding.
+#[test]
+fn the_lifecycle_after_a_hello_is_quiet_for_a_store_that_has_the_mission() {
+    use nanoprobe_sidecar::store::Entry;
+
+    let mut w = World::new(2, 0, LostPolicy::Report);
+    w.settle().unwrap();
+    let journal = w.store.entries().len();
+    let revision = w.store.revision();
+    let bound = w.rec.binding().len();
+    assert!(bound > 0);
+    w.apply(&Op::Detach).unwrap();
+    w.apply(&Op::Reattach).unwrap();
+    let added: Vec<&Entry> = w.store.entries()[journal..]
+        .iter()
+        .filter(|e| matches!(e, Entry::Loaded(_) | Entry::Transition { .. }))
+        .collect();
+    assert!(added.is_empty(), "{added:?}");
+    assert_eq!(w.store.revision(), revision, "no change for API clients");
+    assert!(w.rec.binding().len() >= bound, "the binding is kept");
+    assert!(w.rec.ready(&w.store));
+
+    // A sidecar with a fresh store attaching to the running mission.
+    let fresh = nanoprobe_sim_fake::harness::new_store(2, 0);
+    w.sidecar_of(fresh);
+    w.tick().unwrap();
+    let loaded = w
+        .store
+        .loaded()
+        .cloned()
+        .expect("learned from the stamps and the LIFECYCLE");
+    assert_eq!(
+        (
+            loaded.agent_boot,
+            loaded.mission_gen,
+            loaded.theater.as_str()
+        ),
+        (
+            w.sim.agent_boot(),
+            w.sim.mission_gen(),
+            nanoprobe_sim_fake::harness::THEATER
+        )
+    );
+    assert!(w.rec.ready(&w.store));
+}
