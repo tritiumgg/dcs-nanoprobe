@@ -326,16 +326,21 @@ is the frame's one socket call. Under Wine, the port a killed DCS process held s
 taken for up to about a minute after the kill (LIVE, 2026-11-13: `OS Error 10048` 59 s
 after a `pkill -9`), so an agent that starts sooner listens only once it is free.
 
-**All of the agent's system calls happen on one kind of frame.** One socket call costs
-150–290 µs under Wine (LIVE, docs/results/2026-11-11-first-dll-and-spikes.md, E25),
-more than a whole frame's slice, so a frame with a system call exceeds the slice. What
-a file call costs under Wine is UNVERIFIED and assumed to be as much. The agent
-therefore makes at most one socket call on a frame, on few frames, and on that same
-frame checks the kill switch and the shim reload request and flushes its log file
-(spec/install.md, spec/log.md). It makes no system call on any other frame, except the
-one that finds the kill switch, which also closes the connection and the listener.
-Outside a handshake such a frame comes once a second, so the kill switch is seen
-within a second (spec/install.md).
+**All of the agent's system calls happen on one kind of frame.** Under Wine one socket
+call costs 23–60 µs at p50 and a file check 38–56 µs. With no sidecar connected that
+frame's calls together cost 117 µs at p50 and 165 µs at p99 with nothing to flush, and
+188 µs at p99 with one record: two thirds to three quarters of the frame's slice. The
+slowest flush of 600 took 4.2 ms. (LIVE, on a host with CPU idle states limited to C1
+and the `performance` energy preference, docs/results/2026-11-13-e25-cpu-idle.md.)
+With the host's default power saving one socket call costs 141–290 µs (LIVE,
+docs/results/2026-11-11-first-dll-and-spikes.md, E25); the file checks and the whole
+frame were not measured there, and with file checks costing as much the frame would
+exceed the slice (UNVERIFIED). The agent therefore makes at most one socket call on a
+frame, on few frames, and on that same frame checks the kill switch and the shim
+reload request and flushes its log file (spec/install.md, spec/log.md). It makes no system call on any other
+frame, except the one that finds the kill switch, which also closes the connection and
+the listener. Outside a handshake such a frame comes once a second, so the kill switch
+is seen within a second (spec/install.md).
 
 | State | Socket call | At most |
 |---|---|---|
