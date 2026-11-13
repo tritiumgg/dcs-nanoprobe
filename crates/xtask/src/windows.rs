@@ -120,6 +120,22 @@ impl Windows {
         self.run(program, args, b"")
     }
 
+    /// Write `bytes` to the profile file `path` through SSH's standard
+    /// input, creating its folder: no copy is made on this machine's disk,
+    /// and the bytes are in no command line. For a secret.
+    pub fn write_from_stdin(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
+        self.ok(
+            r#"[void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($p))
+$in = [Console]::OpenStandardInput()
+$f = [IO.File]::Create($p)
+$in.CopyTo($f)
+$f.Close()"#,
+            path,
+            bytes,
+        )
+        .map(drop)
+    }
+
     /// The profile folder's Windows path.
     pub fn profile(&self) -> &str {
         &self.profile

@@ -15,7 +15,7 @@ use nanoprobe_agent_link::{Admit, Link, Options};
 use nanoprobe_transport::codec::{Lv, Reader};
 use nanoprobe_transport::layout::{kind, lifecycle, result};
 use nanoprobe_transport::log::{Level, Value};
-use nanoprobe_transport::records::{CommandHeader, Log};
+use nanoprobe_transport::records::{CommandHeader, Event, Log};
 
 use crate::state;
 
@@ -518,6 +518,31 @@ pub fn lifecycle(name: &str, theater: &str, mission: &str, real: f64, model: f64
         notes(d);
         d.link.stamps().mission_gen
     })
+}
+
+/// Queue an `EVENT` record from the shim's event handler, and count the
+/// time since `started` in `hist_event`. A record over the payload limit
+/// goes cut (spec/records.md, "Oversized records"); one still over it is a
+/// `LOG` at `error` and a count in the pending `GAP` of events.
+pub fn event(event: Event, started: Instant) {
+    with(|d| {
+        let max = d.link.outbound().ring().max_payload();
+        let mut payload = event.encode();
+        if payload.len() > max {
+            payload = event.cut().encode();
+        }
+        if payload.len() > max {
+            record(
+                d,
+                Level::Error,
+                "an EVENT over the payload limit",
+                &[("id", Value::Int(i64::from(event.id)))],
+            );
+        }
+        // The link counts a record still over the limit in the pending GAP.
+        d.link.enqueue(kind::EVENT as u16, payload);
+        d.link.record_event(started.elapsed().as_secs_f64() * 1e6);
+    });
 }
 
 /// Queue a `LOG` record from Lua: `target` is `hook`, `shim` or `agent`.

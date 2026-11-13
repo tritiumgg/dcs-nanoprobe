@@ -1,0 +1,4384 @@
+{
+  "events": [
+    {
+      "allow": [
+        "TIME",
+        "INITIATOR",
+        "INITIATOR_CATEGORY",
+        "PLACE",
+        "SUBPLACE"
+      ],
+      "allowed_unseen": [],
+      "causes": {
+        "damage": 1
+      },
+      "count": 1,
+      "fields": [
+        {
+          "path": "id",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "object:Unit": 1
+          }
+        },
+        {
+          "path": "initiator.id_",
+          "present": 1,
+          "read_as": "INITIATOR",
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator_data",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "table": 1
+          }
+        },
+        {
+          "path": "initiator_data.coalition",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator_data.mission_id",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "string": 1
+          }
+        },
+        {
+          "path": "initiator_data.object_category",
+          "present": 1,
+          "read_as": "INITIATOR_CATEGORY",
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator_data.object_id",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator_data.unit_name",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "string": 1
+          }
+        },
+        {
+          "path": "initiator_data.unit_type",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "string": 1
+          }
+        },
+        {
+          "path": "place",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "object:Airbase": 1
+          }
+        },
+        {
+          "path": "place.id_",
+          "present": 1,
+          "read_as": "PLACE",
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "subPlace",
+          "present": 1,
+          "read_as": "SUBPLACE",
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "time",
+          "present": 1,
+          "read_as": "TIME",
+          "shapes": {
+            "number": 1
+          }
+        }
+      ],
+      "fields_by_cause": {
+        "damage": {
+          "id": 1,
+          "initiator": 1,
+          "initiator.id_": 1,
+          "initiator_data": 1,
+          "initiator_data.coalition": 1,
+          "initiator_data.mission_id": 1,
+          "initiator_data.object_category": 1,
+          "initiator_data.object_id": 1,
+          "initiator_data.unit_name": 1,
+          "initiator_data.unit_type": 1,
+          "place": 1,
+          "place.id_": 1,
+          "subPlace": 1,
+          "time": 1
+        }
+      },
+      "forwarded": {
+        "INITIATOR": 1,
+        "INITIATOR_CATEGORY": 1,
+        "PLACE": 1,
+        "SUBPLACE": 1,
+        "TIME": 1
+      },
+      "forwarded_over_present": [],
+      "forwarded_under_present": [],
+      "forwarded_unexpected": [],
+      "id": 10,
+      "name": "S_EVENT_BASE_CAPTURED",
+      "records": 1,
+      "seen_unread": [
+        "id",
+        "initiator_data.coalition",
+        "initiator_data.mission_id",
+        "initiator_data.object_id",
+        "initiator_data.unit_name",
+        "initiator_data.unit_type"
+      ],
+      "stream_only": false,
+      "time_skew_by_cause": {
+        "damage": 0.0
+      },
+      "values": {
+        "initiator_data.object_category": {
+          "1": 1
+        }
+      },
+      "values_by_cause": {
+        "damage": {
+          "initiator_data.object_category": {
+            "1": 1
+          }
+        }
+      }
+    },
+    {
+      "allow": [
+        "TIME",
+        "INITIATOR",
+        "INITIATOR_CATEGORY",
+        "TARGET",
+        "TARGET_CATEGORY",
+        "WEAPON",
+        "WEAPON_NAME"
+      ],
+      "allowed_unseen": [],
+      "causes": {
+        "combat": 3
+      },
+      "count": 3,
+      "fields": [
+        {
+          "path": "id",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "initiator",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "object:Unit": 3
+          }
+        },
+        {
+          "path": "initiator.id_",
+          "present": 3,
+          "read_as": "INITIATOR",
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "initiator_data",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "table": 3
+          }
+        },
+        {
+          "path": "initiator_data.coalition",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "initiator_data.mission_id",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "string": 3
+          }
+        },
+        {
+          "path": "initiator_data.object_category",
+          "present": 3,
+          "read_as": "INITIATOR_CATEGORY",
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "initiator_data.object_id",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "initiator_data.unit_name",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "string": 3
+          }
+        },
+        {
+          "path": "initiator_data.unit_type",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "string": 3
+          }
+        },
+        {
+          "path": "target",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "object:Unit": 3
+          }
+        },
+        {
+          "path": "target.id_",
+          "present": 3,
+          "read_as": "TARGET",
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "target_data",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "table": 3
+          }
+        },
+        {
+          "path": "target_data.coalition",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "target_data.mission_id",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "string": 3
+          }
+        },
+        {
+          "path": "target_data.object_category",
+          "present": 3,
+          "read_as": "TARGET_CATEGORY",
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "target_data.object_id",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "target_data.unit_name",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "string": 3
+          }
+        },
+        {
+          "path": "target_data.unit_type",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "string": 3
+          }
+        },
+        {
+          "path": "time",
+          "present": 3,
+          "read_as": "TIME",
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "weapon",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "object:Weapon": 3
+          }
+        },
+        {
+          "path": "weapon.id_",
+          "present": 3,
+          "read_as": "WEAPON",
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "weapon_name",
+          "present": 3,
+          "read_as": "WEAPON_NAME",
+          "shapes": {
+            "string": 3
+          }
+        }
+      ],
+      "fields_by_cause": {
+        "combat": {
+          "id": 3,
+          "initiator": 3,
+          "initiator.id_": 3,
+          "initiator_data": 3,
+          "initiator_data.coalition": 3,
+          "initiator_data.mission_id": 3,
+          "initiator_data.object_category": 3,
+          "initiator_data.object_id": 3,
+          "initiator_data.unit_name": 3,
+          "initiator_data.unit_type": 3,
+          "target": 3,
+          "target.id_": 3,
+          "target_data": 3,
+          "target_data.coalition": 3,
+          "target_data.mission_id": 3,
+          "target_data.object_category": 3,
+          "target_data.object_id": 3,
+          "target_data.unit_name": 3,
+          "target_data.unit_type": 3,
+          "time": 3,
+          "weapon": 3,
+          "weapon.id_": 3,
+          "weapon_name": 3
+        }
+      },
+      "forwarded": {
+        "INITIATOR": 3,
+        "INITIATOR_CATEGORY": 3,
+        "TARGET": 3,
+        "TARGET_CATEGORY": 3,
+        "TIME": 3,
+        "WEAPON": 3,
+        "WEAPON_NAME": 3
+      },
+      "forwarded_over_present": [],
+      "forwarded_under_present": [],
+      "forwarded_unexpected": [],
+      "id": 37,
+      "name": "S_EVENT_BDA",
+      "records": 3,
+      "seen_unread": [
+        "id",
+        "initiator_data.coalition",
+        "initiator_data.mission_id",
+        "initiator_data.object_id",
+        "initiator_data.unit_name",
+        "initiator_data.unit_type",
+        "target_data.coalition",
+        "target_data.mission_id",
+        "target_data.object_id",
+        "target_data.unit_name",
+        "target_data.unit_type"
+      ],
+      "stream_only": false,
+      "time_skew_by_cause": {
+        "combat": 0.0
+      },
+      "values": {
+        "initiator_data.object_category": {
+          "1": 3
+        },
+        "target_data.object_category": {
+          "1": 3
+        }
+      },
+      "values_by_cause": {
+        "combat": {
+          "initiator_data.object_category": {
+            "1": 3
+          },
+          "target_data.object_category": {
+            "1": 3
+          }
+        }
+      }
+    },
+    {
+      "allow": [
+        "TIME",
+        "INITIATOR",
+        "INITIATOR_CATEGORY",
+        "PLACE",
+        "SUBPLACE"
+      ],
+      "allowed_unseen": [],
+      "causes": {
+        "air-defense": 3,
+        "cold": 1,
+        "combat": 4,
+        "land": 1,
+        "runway": 1,
+        "spawn": 3
+      },
+      "count": 13,
+      "fields": [
+        {
+          "path": "id",
+          "present": 13,
+          "read_as": null,
+          "shapes": {
+            "number": 13
+          }
+        },
+        {
+          "path": "initiator",
+          "present": 13,
+          "read_as": null,
+          "shapes": {
+            "object:StaticObject": 1,
+            "object:Unit": 12
+          }
+        },
+        {
+          "path": "initiator.id_",
+          "present": 13,
+          "read_as": "INITIATOR",
+          "shapes": {
+            "number": 13
+          }
+        },
+        {
+          "path": "initiator_data",
+          "present": 13,
+          "read_as": null,
+          "shapes": {
+            "table": 13
+          }
+        },
+        {
+          "path": "initiator_data.coalition",
+          "present": 13,
+          "read_as": null,
+          "shapes": {
+            "number": 13
+          }
+        },
+        {
+          "path": "initiator_data.mission_id",
+          "present": 13,
+          "read_as": null,
+          "shapes": {
+            "string": 13
+          }
+        },
+        {
+          "path": "initiator_data.object_category",
+          "present": 13,
+          "read_as": "INITIATOR_CATEGORY",
+          "shapes": {
+            "number": 13
+          }
+        },
+        {
+          "path": "initiator_data.object_id",
+          "present": 13,
+          "read_as": null,
+          "shapes": {
+            "number": 13
+          }
+        },
+        {
+          "path": "initiator_data.unit_name",
+          "present": 13,
+          "read_as": null,
+          "shapes": {
+            "string": 13
+          }
+        },
+        {
+          "path": "initiator_data.unit_type",
+          "present": 13,
+          "read_as": null,
+          "shapes": {
+            "string": 13
+          }
+        },
+        {
+          "path": "place",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "object:Airbase": 2
+          }
+        },
+        {
+          "path": "place.id_",
+          "present": 2,
+          "read_as": "PLACE",
+          "shapes": {
+            "number": 2
+          }
+        },
+        {
+          "path": "subPlace",
+          "present": 2,
+          "read_as": "SUBPLACE",
+          "shapes": {
+            "number": 2
+          }
+        },
+        {
+          "path": "time",
+          "present": 13,
+          "read_as": "TIME",
+          "shapes": {
+            "number": 13
+          }
+        }
+      ],
+      "fields_by_cause": {
+        "air-defense": {
+          "id": 3,
+          "initiator": 3,
+          "initiator.id_": 3,
+          "initiator_data": 3,
+          "initiator_data.coalition": 3,
+          "initiator_data.mission_id": 3,
+          "initiator_data.object_category": 3,
+          "initiator_data.object_id": 3,
+          "initiator_data.unit_name": 3,
+          "initiator_data.unit_type": 3,
+          "time": 3
+        },
+        "cold": {
+          "id": 1,
+          "initiator": 1,
+          "initiator.id_": 1,
+          "initiator_data": 1,
+          "initiator_data.coalition": 1,
+          "initiator_data.mission_id": 1,
+          "initiator_data.object_category": 1,
+          "initiator_data.object_id": 1,
+          "initiator_data.unit_name": 1,
+          "initiator_data.unit_type": 1,
+          "place": 1,
+          "place.id_": 1,
+          "subPlace": 1,
+          "time": 1
+        },
+        "combat": {
+          "id": 4,
+          "initiator": 4,
+          "initiator.id_": 4,
+          "initiator_data": 4,
+          "initiator_data.coalition": 4,
+          "initiator_data.mission_id": 4,
+          "initiator_data.object_category": 4,
+          "initiator_data.object_id": 4,
+          "initiator_data.unit_name": 4,
+          "initiator_data.unit_type": 4,
+          "time": 4
+        },
+        "land": {
+          "id": 1,
+          "initiator": 1,
+          "initiator.id_": 1,
+          "initiator_data": 1,
+          "initiator_data.coalition": 1,
+          "initiator_data.mission_id": 1,
+          "initiator_data.object_category": 1,
+          "initiator_data.object_id": 1,
+          "initiator_data.unit_name": 1,
+          "initiator_data.unit_type": 1,
+          "time": 1
+        },
+        "runway": {
+          "id": 1,
+          "initiator": 1,
+          "initiator.id_": 1,
+          "initiator_data": 1,
+          "initiator_data.coalition": 1,
+          "initiator_data.mission_id": 1,
+          "initiator_data.object_category": 1,
+          "initiator_data.object_id": 1,
+          "initiator_data.unit_name": 1,
+          "initiator_data.unit_type": 1,
+          "place": 1,
+          "place.id_": 1,
+          "subPlace": 1,
+          "time": 1
+        },
+        "spawn": {
+          "id": 3,
+          "initiator": 3,
+          "initiator.id_": 3,
+          "initiator_data": 3,
+          "initiator_data.coalition": 3,
+          "initiator_data.mission_id": 3,
+          "initiator_data.object_category": 3,
+          "initiator_data.object_id": 3,
+          "initiator_data.unit_name": 3,
+          "initiator_data.unit_type": 3,
+          "time": 3
+        }
+      },
+      "forwarded": {
+        "INITIATOR": 13,
+        "INITIATOR_CATEGORY": 13,
+        "PLACE": 2,
+        "SUBPLACE": 2,
+        "TIME": 13
+      },
+      "forwarded_over_present": [],
+      "forwarded_under_present": [],
+      "forwarded_unexpected": [],
+      "id": 15,
+      "name": "S_EVENT_BIRTH",
+      "records": 13,
+      "seen_unread": [
+        "id",
+        "initiator_data.coalition",
+        "initiator_data.mission_id",
+        "initiator_data.object_id",
+        "initiator_data.unit_name",
+        "initiator_data.unit_type"
+      ],
+      "stream_only": false,
+      "time_skew_by_cause": {
+        "air-defense": 0.0,
+        "cold": 0.0,
+        "combat": 0.0,
+        "land": 0.0,
+        "runway": 0.0,
+        "spawn": 0.0
+      },
+      "values": {
+        "initiator_data.object_category": {
+          "1": 12,
+          "3": 1
+        }
+      },
+      "values_by_cause": {
+        "air-defense": {
+          "initiator_data.object_category": {
+            "1": 3
+          }
+        },
+        "cold": {
+          "initiator_data.object_category": {
+            "1": 1
+          }
+        },
+        "combat": {
+          "initiator_data.object_category": {
+            "1": 4
+          }
+        },
+        "land": {
+          "initiator_data.object_category": {
+            "1": 1
+          }
+        },
+        "runway": {
+          "initiator_data.object_category": {
+            "1": 1
+          }
+        },
+        "spawn": {
+          "initiator_data.object_category": {
+            "1": 2,
+            "3": 1
+          }
+        }
+      }
+    },
+    {
+      "allow": [
+        "TIME",
+        "INITIATOR",
+        "INITIATOR_CATEGORY"
+      ],
+      "allowed_unseen": [],
+      "causes": {
+        "air-defense": 3,
+        "damage": 31,
+        "explosion": 166,
+        "static": 109
+      },
+      "count": 309,
+      "fields": [
+        {
+          "path": "id",
+          "present": 309,
+          "read_as": null,
+          "shapes": {
+            "number": 309
+          }
+        },
+        {
+          "path": "initiator",
+          "present": 309,
+          "read_as": null,
+          "shapes": {
+            "object:SceneryObject": 304,
+            "object:StaticObject": 1,
+            "object:Unit": 4
+          }
+        },
+        {
+          "path": "initiator.id_",
+          "present": 309,
+          "read_as": "INITIATOR",
+          "shapes": {
+            "number": 309
+          }
+        },
+        {
+          "path": "initiator_data",
+          "present": 309,
+          "read_as": null,
+          "shapes": {
+            "table": 309
+          }
+        },
+        {
+          "path": "initiator_data.coalition",
+          "present": 5,
+          "read_as": null,
+          "shapes": {
+            "number": 5
+          }
+        },
+        {
+          "path": "initiator_data.mission_id",
+          "present": 5,
+          "read_as": null,
+          "shapes": {
+            "string": 5
+          }
+        },
+        {
+          "path": "initiator_data.object_category",
+          "present": 309,
+          "read_as": "INITIATOR_CATEGORY",
+          "shapes": {
+            "number": 309
+          }
+        },
+        {
+          "path": "initiator_data.object_id",
+          "present": 309,
+          "read_as": null,
+          "shapes": {
+            "number": 309
+          }
+        },
+        {
+          "path": "initiator_data.unit_name",
+          "present": 5,
+          "read_as": null,
+          "shapes": {
+            "string": 5
+          }
+        },
+        {
+          "path": "initiator_data.unit_type",
+          "present": 309,
+          "read_as": null,
+          "shapes": {
+            "string": 309
+          }
+        },
+        {
+          "path": "time",
+          "present": 309,
+          "read_as": "TIME",
+          "shapes": {
+            "number": 309
+          }
+        }
+      ],
+      "fields_by_cause": {
+        "air-defense": {
+          "id": 3,
+          "initiator": 3,
+          "initiator.id_": 3,
+          "initiator_data": 3,
+          "initiator_data.coalition": 3,
+          "initiator_data.mission_id": 3,
+          "initiator_data.object_category": 3,
+          "initiator_data.object_id": 3,
+          "initiator_data.unit_name": 3,
+          "initiator_data.unit_type": 3,
+          "time": 3
+        },
+        "damage": {
+          "id": 31,
+          "initiator": 31,
+          "initiator.id_": 31,
+          "initiator_data": 31,
+          "initiator_data.object_category": 31,
+          "initiator_data.object_id": 31,
+          "initiator_data.unit_type": 31,
+          "time": 31
+        },
+        "explosion": {
+          "id": 166,
+          "initiator": 166,
+          "initiator.id_": 166,
+          "initiator_data": 166,
+          "initiator_data.coalition": 1,
+          "initiator_data.mission_id": 1,
+          "initiator_data.object_category": 166,
+          "initiator_data.object_id": 166,
+          "initiator_data.unit_name": 1,
+          "initiator_data.unit_type": 166,
+          "time": 166
+        },
+        "static": {
+          "id": 109,
+          "initiator": 109,
+          "initiator.id_": 109,
+          "initiator_data": 109,
+          "initiator_data.coalition": 1,
+          "initiator_data.mission_id": 1,
+          "initiator_data.object_category": 109,
+          "initiator_data.object_id": 109,
+          "initiator_data.unit_name": 1,
+          "initiator_data.unit_type": 109,
+          "time": 109
+        }
+      },
+      "forwarded": {
+        "INITIATOR": 309,
+        "INITIATOR_CATEGORY": 309,
+        "TIME": 309
+      },
+      "forwarded_over_present": [],
+      "forwarded_under_present": [],
+      "forwarded_unexpected": [],
+      "id": 8,
+      "name": "S_EVENT_DEAD",
+      "records": 309,
+      "seen_unread": [
+        "id",
+        "initiator_data.coalition",
+        "initiator_data.mission_id",
+        "initiator_data.object_id",
+        "initiator_data.unit_name",
+        "initiator_data.unit_type"
+      ],
+      "stream_only": false,
+      "time_skew_by_cause": {
+        "air-defense": 0.0,
+        "damage": 0.0040000000000000036,
+        "explosion": 0.0,
+        "static": 0.0019999999999988916
+      },
+      "values": {
+        "initiator_data.object_category": {
+          "1": 4,
+          "3": 1,
+          "5": 304
+        }
+      },
+      "values_by_cause": {
+        "air-defense": {
+          "initiator_data.object_category": {
+            "1": 3
+          }
+        },
+        "damage": {
+          "initiator_data.object_category": {
+            "5": 31
+          }
+        },
+        "explosion": {
+          "initiator_data.object_category": {
+            "1": 1,
+            "5": 165
+          }
+        },
+        "static": {
+          "initiator_data.object_category": {
+            "3": 1,
+            "5": 108
+          }
+        }
+      }
+    },
+    {
+      "allow": [
+        "TIME",
+        "INITIATOR",
+        "INITIATOR_CATEGORY",
+        "PLACE",
+        "SUBPLACE"
+      ],
+      "allowed_unseen": [],
+      "causes": {
+        "air-defense": 1,
+        "cold": 1,
+        "land": 1,
+        "runway": 1
+      },
+      "count": 4,
+      "fields": [
+        {
+          "path": "id",
+          "present": 4,
+          "read_as": null,
+          "shapes": {
+            "number": 4
+          }
+        },
+        {
+          "path": "initiator",
+          "present": 4,
+          "read_as": null,
+          "shapes": {
+            "object:Unit": 4
+          }
+        },
+        {
+          "path": "initiator.id_",
+          "present": 4,
+          "read_as": "INITIATOR",
+          "shapes": {
+            "number": 4
+          }
+        },
+        {
+          "path": "initiator_data",
+          "present": 4,
+          "read_as": null,
+          "shapes": {
+            "table": 4
+          }
+        },
+        {
+          "path": "initiator_data.coalition",
+          "present": 4,
+          "read_as": null,
+          "shapes": {
+            "number": 4
+          }
+        },
+        {
+          "path": "initiator_data.mission_id",
+          "present": 4,
+          "read_as": null,
+          "shapes": {
+            "string": 4
+          }
+        },
+        {
+          "path": "initiator_data.object_category",
+          "present": 4,
+          "read_as": "INITIATOR_CATEGORY",
+          "shapes": {
+            "number": 4
+          }
+        },
+        {
+          "path": "initiator_data.object_id",
+          "present": 4,
+          "read_as": null,
+          "shapes": {
+            "number": 4
+          }
+        },
+        {
+          "path": "initiator_data.unit_name",
+          "present": 4,
+          "read_as": null,
+          "shapes": {
+            "string": 4
+          }
+        },
+        {
+          "path": "initiator_data.unit_type",
+          "present": 4,
+          "read_as": null,
+          "shapes": {
+            "string": 4
+          }
+        },
+        {
+          "path": "place",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "object:Airbase": 2
+          }
+        },
+        {
+          "path": "place.id_",
+          "present": 2,
+          "read_as": "PLACE",
+          "shapes": {
+            "number": 2
+          }
+        },
+        {
+          "path": "subPlace",
+          "present": 2,
+          "read_as": "SUBPLACE",
+          "shapes": {
+            "number": 2
+          }
+        },
+        {
+          "path": "time",
+          "present": 4,
+          "read_as": "TIME",
+          "shapes": {
+            "number": 4
+          }
+        }
+      ],
+      "fields_by_cause": {
+        "air-defense": {
+          "id": 1,
+          "initiator": 1,
+          "initiator.id_": 1,
+          "initiator_data": 1,
+          "initiator_data.coalition": 1,
+          "initiator_data.mission_id": 1,
+          "initiator_data.object_category": 1,
+          "initiator_data.object_id": 1,
+          "initiator_data.unit_name": 1,
+          "initiator_data.unit_type": 1,
+          "time": 1
+        },
+        "cold": {
+          "id": 1,
+          "initiator": 1,
+          "initiator.id_": 1,
+          "initiator_data": 1,
+          "initiator_data.coalition": 1,
+          "initiator_data.mission_id": 1,
+          "initiator_data.object_category": 1,
+          "initiator_data.object_id": 1,
+          "initiator_data.unit_name": 1,
+          "initiator_data.unit_type": 1,
+          "place": 1,
+          "place.id_": 1,
+          "subPlace": 1,
+          "time": 1
+        },
+        "land": {
+          "id": 1,
+          "initiator": 1,
+          "initiator.id_": 1,
+          "initiator_data": 1,
+          "initiator_data.coalition": 1,
+          "initiator_data.mission_id": 1,
+          "initiator_data.object_category": 1,
+          "initiator_data.object_id": 1,
+          "initiator_data.unit_name": 1,
+          "initiator_data.unit_type": 1,
+          "time": 1
+        },
+        "runway": {
+          "id": 1,
+          "initiator": 1,
+          "initiator.id_": 1,
+          "initiator_data": 1,
+          "initiator_data.coalition": 1,
+          "initiator_data.mission_id": 1,
+          "initiator_data.object_category": 1,
+          "initiator_data.object_id": 1,
+          "initiator_data.unit_name": 1,
+          "initiator_data.unit_type": 1,
+          "place": 1,
+          "place.id_": 1,
+          "subPlace": 1,
+          "time": 1
+        }
+      },
+      "forwarded": {
+        "INITIATOR": 4,
+        "INITIATOR_CATEGORY": 4,
+        "PLACE": 2,
+        "SUBPLACE": 2,
+        "TIME": 4
+      },
+      "forwarded_over_present": [],
+      "forwarded_under_present": [],
+      "forwarded_unexpected": [],
+      "id": 18,
+      "name": "S_EVENT_ENGINE_STARTUP",
+      "records": 4,
+      "seen_unread": [
+        "id",
+        "initiator_data.coalition",
+        "initiator_data.mission_id",
+        "initiator_data.object_id",
+        "initiator_data.unit_name",
+        "initiator_data.unit_type"
+      ],
+      "stream_only": false,
+      "time_skew_by_cause": {
+        "air-defense": 0.0,
+        "cold": 0.0,
+        "land": 0.0,
+        "runway": 0.0
+      },
+      "values": {
+        "initiator_data.object_category": {
+          "1": 4
+        }
+      },
+      "values_by_cause": {
+        "air-defense": {
+          "initiator_data.object_category": {
+            "1": 1
+          }
+        },
+        "cold": {
+          "initiator_data.object_category": {
+            "1": 1
+          }
+        },
+        "land": {
+          "initiator_data.object_category": {
+            "1": 1
+          }
+        },
+        "runway": {
+          "initiator_data.object_category": {
+            "1": 1
+          }
+        }
+      }
+    },
+    {
+      "allow": [
+        "TIME",
+        "INITIATOR",
+        "INITIATOR_CATEGORY",
+        "TARGET",
+        "TARGET_CATEGORY",
+        "WEAPON",
+        "WEAPON_NAME"
+      ],
+      "allowed_unseen": [],
+      "causes": {
+        "combat": 3
+      },
+      "count": 3,
+      "fields": [
+        {
+          "path": "id",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "initiator",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "object:Unit": 3
+          }
+        },
+        {
+          "path": "initiator.id_",
+          "present": 3,
+          "read_as": "INITIATOR",
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "initiator_data",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "table": 3
+          }
+        },
+        {
+          "path": "initiator_data.coalition",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "initiator_data.mission_id",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "string": 3
+          }
+        },
+        {
+          "path": "initiator_data.object_category",
+          "present": 3,
+          "read_as": "INITIATOR_CATEGORY",
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "initiator_data.object_id",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "initiator_data.unit_name",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "string": 3
+          }
+        },
+        {
+          "path": "initiator_data.unit_type",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "string": 3
+          }
+        },
+        {
+          "path": "target",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "object:Unit": 3
+          }
+        },
+        {
+          "path": "target.id_",
+          "present": 3,
+          "read_as": "TARGET",
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "target_data",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "table": 3
+          }
+        },
+        {
+          "path": "target_data.coalition",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "target_data.mission_id",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "string": 3
+          }
+        },
+        {
+          "path": "target_data.object_category",
+          "present": 3,
+          "read_as": "TARGET_CATEGORY",
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "target_data.object_id",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "target_data.unit_name",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "string": 3
+          }
+        },
+        {
+          "path": "target_data.unit_type",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "string": 3
+          }
+        },
+        {
+          "path": "time",
+          "present": 3,
+          "read_as": "TIME",
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "weapon",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "object:Weapon": 3
+          }
+        },
+        {
+          "path": "weapon.id_",
+          "present": 3,
+          "read_as": "WEAPON",
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "weapon_name",
+          "present": 3,
+          "read_as": "WEAPON_NAME",
+          "shapes": {
+            "string": 3
+          }
+        }
+      ],
+      "fields_by_cause": {
+        "combat": {
+          "id": 3,
+          "initiator": 3,
+          "initiator.id_": 3,
+          "initiator_data": 3,
+          "initiator_data.coalition": 3,
+          "initiator_data.mission_id": 3,
+          "initiator_data.object_category": 3,
+          "initiator_data.object_id": 3,
+          "initiator_data.unit_name": 3,
+          "initiator_data.unit_type": 3,
+          "target": 3,
+          "target.id_": 3,
+          "target_data": 3,
+          "target_data.coalition": 3,
+          "target_data.mission_id": 3,
+          "target_data.object_category": 3,
+          "target_data.object_id": 3,
+          "target_data.unit_name": 3,
+          "target_data.unit_type": 3,
+          "time": 3,
+          "weapon": 3,
+          "weapon.id_": 3,
+          "weapon_name": 3
+        }
+      },
+      "forwarded": {
+        "INITIATOR": 3,
+        "INITIATOR_CATEGORY": 3,
+        "TARGET": 3,
+        "TARGET_CATEGORY": 3,
+        "TIME": 3,
+        "WEAPON": 3,
+        "WEAPON_NAME": 3
+      },
+      "forwarded_over_present": [],
+      "forwarded_under_present": [],
+      "forwarded_unexpected": [],
+      "id": 2,
+      "name": "S_EVENT_HIT",
+      "records": 3,
+      "seen_unread": [
+        "id",
+        "initiator_data.coalition",
+        "initiator_data.mission_id",
+        "initiator_data.object_id",
+        "initiator_data.unit_name",
+        "initiator_data.unit_type",
+        "target_data.coalition",
+        "target_data.mission_id",
+        "target_data.object_id",
+        "target_data.unit_name",
+        "target_data.unit_type"
+      ],
+      "stream_only": false,
+      "time_skew_by_cause": {
+        "combat": 0.0
+      },
+      "values": {
+        "initiator_data.object_category": {
+          "1": 3
+        },
+        "target_data.object_category": {
+          "1": 3
+        }
+      },
+      "values_by_cause": {
+        "combat": {
+          "initiator_data.object_category": {
+            "1": 3
+          },
+          "target_data.object_category": {
+            "1": 3
+          }
+        }
+      }
+    },
+    {
+      "allow": [
+        "TIME",
+        "INITIATOR",
+        "INITIATOR_CATEGORY",
+        "TARGET",
+        "TARGET_CATEGORY",
+        "WEAPON",
+        "WEAPON_NAME"
+      ],
+      "allowed_unseen": [],
+      "causes": {
+        "air-defense": 3
+      },
+      "count": 3,
+      "fields": [
+        {
+          "path": "id",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "initiator",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "object:Unit": 1,
+            "table": 2
+          }
+        },
+        {
+          "path": "initiator.coalition",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "number": 2
+          }
+        },
+        {
+          "path": "initiator.dead",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "boolean": 2
+          }
+        },
+        {
+          "path": "initiator.id_",
+          "present": 3,
+          "read_as": "INITIATOR",
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "initiator.misID",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "string": 2
+          }
+        },
+        {
+          "path": "initiator.unit_type",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "string": 2
+          }
+        },
+        {
+          "path": "initiator_data",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "table": 3
+          }
+        },
+        {
+          "path": "initiator_data.coalition",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "initiator_data.mission_id",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "string": 3
+          }
+        },
+        {
+          "path": "initiator_data.object_category",
+          "present": 3,
+          "read_as": "INITIATOR_CATEGORY",
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "initiator_data.object_id",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "initiator_data.unit_name",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "string": 3
+          }
+        },
+        {
+          "path": "initiator_data.unit_type",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "string": 3
+          }
+        },
+        {
+          "path": "target",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "object:Unit": 3
+          }
+        },
+        {
+          "path": "target.id_",
+          "present": 3,
+          "read_as": "TARGET",
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "target_data",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "table": 3
+          }
+        },
+        {
+          "path": "target_data.coalition",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "target_data.mission_id",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "string": 3
+          }
+        },
+        {
+          "path": "target_data.object_category",
+          "present": 3,
+          "read_as": "TARGET_CATEGORY",
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "target_data.object_id",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "target_data.unit_name",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "string": 3
+          }
+        },
+        {
+          "path": "target_data.unit_type",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "string": 3
+          }
+        },
+        {
+          "path": "time",
+          "present": 3,
+          "read_as": "TIME",
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "weapon",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "object:Weapon": 3
+          }
+        },
+        {
+          "path": "weapon.id_",
+          "present": 3,
+          "read_as": "WEAPON",
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "weapon_name",
+          "present": 3,
+          "read_as": "WEAPON_NAME",
+          "shapes": {
+            "string": 3
+          }
+        }
+      ],
+      "fields_by_cause": {
+        "air-defense": {
+          "id": 3,
+          "initiator": 3,
+          "initiator.coalition": 2,
+          "initiator.dead": 2,
+          "initiator.id_": 3,
+          "initiator.misID": 2,
+          "initiator.unit_type": 2,
+          "initiator_data": 3,
+          "initiator_data.coalition": 3,
+          "initiator_data.mission_id": 3,
+          "initiator_data.object_category": 3,
+          "initiator_data.object_id": 3,
+          "initiator_data.unit_name": 3,
+          "initiator_data.unit_type": 3,
+          "target": 3,
+          "target.id_": 3,
+          "target_data": 3,
+          "target_data.coalition": 3,
+          "target_data.mission_id": 3,
+          "target_data.object_category": 3,
+          "target_data.object_id": 3,
+          "target_data.unit_name": 3,
+          "target_data.unit_type": 3,
+          "time": 3,
+          "weapon": 3,
+          "weapon.id_": 3,
+          "weapon_name": 3
+        }
+      },
+      "forwarded": {
+        "INITIATOR": 3,
+        "INITIATOR_CATEGORY": 3,
+        "TARGET": 3,
+        "TARGET_CATEGORY": 3,
+        "TIME": 3,
+        "WEAPON": 3,
+        "WEAPON_NAME": 3
+      },
+      "forwarded_over_present": [],
+      "forwarded_under_present": [],
+      "forwarded_unexpected": [],
+      "id": 28,
+      "name": "S_EVENT_KILL",
+      "records": 3,
+      "seen_unread": [
+        "id",
+        "initiator.coalition",
+        "initiator.dead",
+        "initiator.misID",
+        "initiator.unit_type",
+        "initiator_data.coalition",
+        "initiator_data.mission_id",
+        "initiator_data.object_id",
+        "initiator_data.unit_name",
+        "initiator_data.unit_type",
+        "target_data.coalition",
+        "target_data.mission_id",
+        "target_data.object_id",
+        "target_data.unit_name",
+        "target_data.unit_type"
+      ],
+      "stream_only": false,
+      "time_skew_by_cause": {
+        "air-defense": 0.0
+      },
+      "values": {
+        "initiator_data.object_category": {
+          "1": 3
+        },
+        "target_data.object_category": {
+          "1": 3
+        }
+      },
+      "values_by_cause": {
+        "air-defense": {
+          "initiator_data.object_category": {
+            "1": 3
+          },
+          "target_data.object_category": {
+            "1": 3
+          }
+        }
+      }
+    },
+    {
+      "allow": [
+        "TIME",
+        "INITIATOR",
+        "INITIATOR_CATEGORY",
+        "PLACE",
+        "SUBPLACE"
+      ],
+      "allowed_unseen": [],
+      "causes": {
+        "land": 1
+      },
+      "count": 1,
+      "fields": [
+        {
+          "path": "id",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "object:Unit": 1
+          }
+        },
+        {
+          "path": "initiator.id_",
+          "present": 1,
+          "read_as": "INITIATOR",
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator_data",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "table": 1
+          }
+        },
+        {
+          "path": "initiator_data.coalition",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator_data.mission_id",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "string": 1
+          }
+        },
+        {
+          "path": "initiator_data.object_category",
+          "present": 1,
+          "read_as": "INITIATOR_CATEGORY",
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator_data.object_id",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator_data.unit_name",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "string": 1
+          }
+        },
+        {
+          "path": "initiator_data.unit_type",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "string": 1
+          }
+        },
+        {
+          "path": "place",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "object:Airbase": 1
+          }
+        },
+        {
+          "path": "place.id_",
+          "present": 1,
+          "read_as": "PLACE",
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "subPlace",
+          "present": 1,
+          "read_as": "SUBPLACE",
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "time",
+          "present": 1,
+          "read_as": "TIME",
+          "shapes": {
+            "number": 1
+          }
+        }
+      ],
+      "fields_by_cause": {
+        "land": {
+          "id": 1,
+          "initiator": 1,
+          "initiator.id_": 1,
+          "initiator_data": 1,
+          "initiator_data.coalition": 1,
+          "initiator_data.mission_id": 1,
+          "initiator_data.object_category": 1,
+          "initiator_data.object_id": 1,
+          "initiator_data.unit_name": 1,
+          "initiator_data.unit_type": 1,
+          "place": 1,
+          "place.id_": 1,
+          "subPlace": 1,
+          "time": 1
+        }
+      },
+      "forwarded": {
+        "INITIATOR": 1,
+        "INITIATOR_CATEGORY": 1,
+        "PLACE": 1,
+        "SUBPLACE": 1,
+        "TIME": 1
+      },
+      "forwarded_over_present": [],
+      "forwarded_under_present": [],
+      "forwarded_unexpected": [],
+      "id": 4,
+      "name": "S_EVENT_LAND",
+      "records": 1,
+      "seen_unread": [
+        "id",
+        "initiator_data.coalition",
+        "initiator_data.mission_id",
+        "initiator_data.object_id",
+        "initiator_data.unit_name",
+        "initiator_data.unit_type"
+      ],
+      "stream_only": false,
+      "time_skew_by_cause": {
+        "land": 0.0
+      },
+      "values": {
+        "initiator_data.object_category": {
+          "1": 1
+        }
+      },
+      "values_by_cause": {
+        "land": {
+          "initiator_data.object_category": {
+            "1": 1
+          }
+        }
+      }
+    },
+    {
+      "allow": [
+        "TIME",
+        "INITIATOR",
+        "MARK_ID",
+        "TEXT",
+        "POS_X",
+        "POS_Y",
+        "POS_Z",
+        "COALITION",
+        "GROUP_ID"
+      ],
+      "allowed_unseen": [
+        "INITIATOR"
+      ],
+      "causes": {
+        "line-add": 1,
+        "mark-add": 2
+      },
+      "count": 3,
+      "fields": [
+        {
+          "path": "coalition",
+          "present": 3,
+          "read_as": "COALITION",
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "groupID",
+          "present": 3,
+          "read_as": "GROUP_ID",
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "id",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "idx",
+          "present": 3,
+          "read_as": "MARK_ID",
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "pos",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "table": 3
+          }
+        },
+        {
+          "path": "pos.x",
+          "present": 3,
+          "read_as": "POS_X",
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "pos.y",
+          "present": 3,
+          "read_as": "POS_Y",
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "pos.z",
+          "present": 3,
+          "read_as": "POS_Z",
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "text",
+          "present": 3,
+          "read_as": "TEXT",
+          "shapes": {
+            "string": 3
+          }
+        },
+        {
+          "path": "time",
+          "present": 3,
+          "read_as": "TIME",
+          "shapes": {
+            "number": 3
+          }
+        }
+      ],
+      "fields_by_cause": {
+        "line-add": {
+          "coalition": 1,
+          "groupID": 1,
+          "id": 1,
+          "idx": 1,
+          "pos": 1,
+          "pos.x": 1,
+          "pos.y": 1,
+          "pos.z": 1,
+          "text": 1,
+          "time": 1
+        },
+        "mark-add": {
+          "coalition": 2,
+          "groupID": 2,
+          "id": 2,
+          "idx": 2,
+          "pos": 2,
+          "pos.x": 2,
+          "pos.y": 2,
+          "pos.z": 2,
+          "text": 2,
+          "time": 2
+        }
+      },
+      "forwarded": {
+        "COALITION": 3,
+        "GROUP_ID": 3,
+        "MARK_ID": 3,
+        "POS_X": 3,
+        "POS_Y": 3,
+        "POS_Z": 3,
+        "TEXT": 3,
+        "TIME": 3
+      },
+      "forwarded_over_present": [],
+      "forwarded_under_present": [],
+      "forwarded_unexpected": [],
+      "id": 25,
+      "name": "S_EVENT_MARK_ADDED",
+      "records": 3,
+      "seen_unread": [
+        "id"
+      ],
+      "stream_only": false,
+      "time_skew_by_cause": {
+        "line-add": 28799.131,
+        "mark-add": 28799.139
+      },
+      "values": {},
+      "values_by_cause": {}
+    },
+    {
+      "allow": [
+        "TIME",
+        "INITIATOR",
+        "MARK_ID",
+        "TEXT",
+        "POS_X",
+        "POS_Y",
+        "POS_Z",
+        "COALITION",
+        "GROUP_ID"
+      ],
+      "allowed_unseen": [
+        "INITIATOR"
+      ],
+      "causes": {
+        "mark-remove": 3
+      },
+      "count": 3,
+      "fields": [
+        {
+          "path": "coalition",
+          "present": 3,
+          "read_as": "COALITION",
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "groupID",
+          "present": 3,
+          "read_as": "GROUP_ID",
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "id",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "idx",
+          "present": 3,
+          "read_as": "MARK_ID",
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "pos",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "table": 3
+          }
+        },
+        {
+          "path": "pos.x",
+          "present": 3,
+          "read_as": "POS_X",
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "pos.y",
+          "present": 3,
+          "read_as": "POS_Y",
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "pos.z",
+          "present": 3,
+          "read_as": "POS_Z",
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "text",
+          "present": 3,
+          "read_as": "TEXT",
+          "shapes": {
+            "string": 3
+          }
+        },
+        {
+          "path": "time",
+          "present": 3,
+          "read_as": "TIME",
+          "shapes": {
+            "number": 3
+          }
+        }
+      ],
+      "fields_by_cause": {
+        "mark-remove": {
+          "coalition": 3,
+          "groupID": 3,
+          "id": 3,
+          "idx": 3,
+          "pos": 3,
+          "pos.x": 3,
+          "pos.y": 3,
+          "pos.z": 3,
+          "text": 3,
+          "time": 3
+        }
+      },
+      "forwarded": {
+        "COALITION": 3,
+        "GROUP_ID": 3,
+        "MARK_ID": 3,
+        "POS_X": 3,
+        "POS_Y": 3,
+        "POS_Z": 3,
+        "TEXT": 3,
+        "TIME": 3
+      },
+      "forwarded_over_present": [],
+      "forwarded_under_present": [],
+      "forwarded_unexpected": [],
+      "id": 27,
+      "name": "S_EVENT_MARK_REMOVED",
+      "records": 3,
+      "seen_unread": [
+        "id"
+      ],
+      "stream_only": false,
+      "time_skew_by_cause": {
+        "mark-remove": 28796.125
+      },
+      "values": {},
+      "values_by_cause": {}
+    },
+    {
+      "allow": [
+        "TIME"
+      ],
+      "allowed_unseen": [],
+      "causes": {},
+      "count": 0,
+      "fields": [],
+      "fields_by_cause": {},
+      "forwarded": {
+        "TIME": 2
+      },
+      "forwarded_over_present": [],
+      "forwarded_under_present": [],
+      "forwarded_unexpected": [],
+      "id": 12,
+      "name": "S_EVENT_MISSION_END",
+      "records": 2,
+      "seen_unread": [],
+      "stream_only": true,
+      "time_skew_by_cause": {},
+      "values": {},
+      "values_by_cause": {}
+    },
+    {
+      "allow": [
+        "TIME"
+      ],
+      "allowed_unseen": [],
+      "causes": {},
+      "count": 0,
+      "fields": [],
+      "fields_by_cause": {},
+      "forwarded": {
+        "TIME": 2
+      },
+      "forwarded_over_present": [],
+      "forwarded_under_present": [],
+      "forwarded_unexpected": [],
+      "id": 52,
+      "name": "S_EVENT_MISSION_RESTART",
+      "records": 2,
+      "seen_unread": [],
+      "stream_only": true,
+      "time_skew_by_cause": {},
+      "values": {},
+      "values_by_cause": {}
+    },
+    {
+      "allow": [
+        "TIME"
+      ],
+      "allowed_unseen": [],
+      "causes": {},
+      "count": 0,
+      "fields": [],
+      "fields_by_cause": {},
+      "forwarded": {
+        "TIME": 2
+      },
+      "forwarded_over_present": [],
+      "forwarded_under_present": [],
+      "forwarded_unexpected": [],
+      "id": 11,
+      "name": "S_EVENT_MISSION_START",
+      "records": 2,
+      "seen_unread": [],
+      "stream_only": true,
+      "time_skew_by_cause": {},
+      "values": {},
+      "values_by_cause": {}
+    },
+    {
+      "allow": [
+        "TIME",
+        "INITIATOR",
+        "INITIATOR_CATEGORY",
+        "PLACE",
+        "SUBPLACE"
+      ],
+      "allowed_unseen": [],
+      "causes": {
+        "cold": 1,
+        "runway": 1
+      },
+      "count": 2,
+      "fields": [
+        {
+          "path": "id",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "number": 2
+          }
+        },
+        {
+          "path": "initiator",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "object:Unit": 2
+          }
+        },
+        {
+          "path": "initiator.id_",
+          "present": 2,
+          "read_as": "INITIATOR",
+          "shapes": {
+            "number": 2
+          }
+        },
+        {
+          "path": "initiator_data",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "table": 2
+          }
+        },
+        {
+          "path": "initiator_data.coalition",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "number": 2
+          }
+        },
+        {
+          "path": "initiator_data.mission_id",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "string": 2
+          }
+        },
+        {
+          "path": "initiator_data.object_category",
+          "present": 2,
+          "read_as": "INITIATOR_CATEGORY",
+          "shapes": {
+            "number": 2
+          }
+        },
+        {
+          "path": "initiator_data.object_id",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "number": 2
+          }
+        },
+        {
+          "path": "initiator_data.unit_name",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "string": 2
+          }
+        },
+        {
+          "path": "initiator_data.unit_type",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "string": 2
+          }
+        },
+        {
+          "path": "place",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "object:Airbase": 2
+          }
+        },
+        {
+          "path": "place.id_",
+          "present": 2,
+          "read_as": "PLACE",
+          "shapes": {
+            "number": 2
+          }
+        },
+        {
+          "path": "subPlace",
+          "present": 2,
+          "read_as": "SUBPLACE",
+          "shapes": {
+            "number": 2
+          }
+        },
+        {
+          "path": "time",
+          "present": 2,
+          "read_as": "TIME",
+          "shapes": {
+            "number": 2
+          }
+        }
+      ],
+      "fields_by_cause": {
+        "cold": {
+          "id": 1,
+          "initiator": 1,
+          "initiator.id_": 1,
+          "initiator_data": 1,
+          "initiator_data.coalition": 1,
+          "initiator_data.mission_id": 1,
+          "initiator_data.object_category": 1,
+          "initiator_data.object_id": 1,
+          "initiator_data.unit_name": 1,
+          "initiator_data.unit_type": 1,
+          "place": 1,
+          "place.id_": 1,
+          "subPlace": 1,
+          "time": 1
+        },
+        "runway": {
+          "id": 1,
+          "initiator": 1,
+          "initiator.id_": 1,
+          "initiator_data": 1,
+          "initiator_data.coalition": 1,
+          "initiator_data.mission_id": 1,
+          "initiator_data.object_category": 1,
+          "initiator_data.object_id": 1,
+          "initiator_data.unit_name": 1,
+          "initiator_data.unit_type": 1,
+          "place": 1,
+          "place.id_": 1,
+          "subPlace": 1,
+          "time": 1
+        }
+      },
+      "forwarded": {
+        "INITIATOR": 2,
+        "INITIATOR_CATEGORY": 2,
+        "PLACE": 2,
+        "SUBPLACE": 2,
+        "TIME": 2
+      },
+      "forwarded_over_present": [],
+      "forwarded_under_present": [],
+      "forwarded_unexpected": [],
+      "id": 54,
+      "name": "S_EVENT_RUNWAY_TAKEOFF",
+      "records": 2,
+      "seen_unread": [
+        "id",
+        "initiator_data.coalition",
+        "initiator_data.mission_id",
+        "initiator_data.object_id",
+        "initiator_data.unit_name",
+        "initiator_data.unit_type"
+      ],
+      "stream_only": false,
+      "time_skew_by_cause": {
+        "cold": 0.0,
+        "runway": 0.0
+      },
+      "values": {
+        "initiator_data.object_category": {
+          "1": 2
+        }
+      },
+      "values_by_cause": {
+        "cold": {
+          "initiator_data.object_category": {
+            "1": 1
+          }
+        },
+        "runway": {
+          "initiator_data.object_category": {
+            "1": 1
+          }
+        }
+      }
+    },
+    {
+      "allow": [
+        "TIME",
+        "INITIATOR",
+        "INITIATOR_CATEGORY",
+        "PLACE",
+        "SUBPLACE"
+      ],
+      "allowed_unseen": [],
+      "causes": {
+        "land": 1
+      },
+      "count": 1,
+      "fields": [
+        {
+          "path": "id",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "object:Unit": 1
+          }
+        },
+        {
+          "path": "initiator.id_",
+          "present": 1,
+          "read_as": "INITIATOR",
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator_data",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "table": 1
+          }
+        },
+        {
+          "path": "initiator_data.coalition",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator_data.mission_id",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "string": 1
+          }
+        },
+        {
+          "path": "initiator_data.object_category",
+          "present": 1,
+          "read_as": "INITIATOR_CATEGORY",
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator_data.object_id",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator_data.unit_name",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "string": 1
+          }
+        },
+        {
+          "path": "initiator_data.unit_type",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "string": 1
+          }
+        },
+        {
+          "path": "place",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "object:Airbase": 1
+          }
+        },
+        {
+          "path": "place.id_",
+          "present": 1,
+          "read_as": "PLACE",
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "subPlace",
+          "present": 1,
+          "read_as": "SUBPLACE",
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "time",
+          "present": 1,
+          "read_as": "TIME",
+          "shapes": {
+            "number": 1
+          }
+        }
+      ],
+      "fields_by_cause": {
+        "land": {
+          "id": 1,
+          "initiator": 1,
+          "initiator.id_": 1,
+          "initiator_data": 1,
+          "initiator_data.coalition": 1,
+          "initiator_data.mission_id": 1,
+          "initiator_data.object_category": 1,
+          "initiator_data.object_id": 1,
+          "initiator_data.unit_name": 1,
+          "initiator_data.unit_type": 1,
+          "place": 1,
+          "place.id_": 1,
+          "subPlace": 1,
+          "time": 1
+        }
+      },
+      "forwarded": {
+        "INITIATOR": 1,
+        "INITIATOR_CATEGORY": 1,
+        "PLACE": 1,
+        "SUBPLACE": 1,
+        "TIME": 1
+      },
+      "forwarded_over_present": [],
+      "forwarded_under_present": [],
+      "forwarded_unexpected": [],
+      "id": 55,
+      "name": "S_EVENT_RUNWAY_TOUCH",
+      "records": 1,
+      "seen_unread": [
+        "id",
+        "initiator_data.coalition",
+        "initiator_data.mission_id",
+        "initiator_data.object_id",
+        "initiator_data.unit_name",
+        "initiator_data.unit_type"
+      ],
+      "stream_only": false,
+      "time_skew_by_cause": {
+        "land": 0.0
+      },
+      "values": {
+        "initiator_data.object_category": {
+          "1": 1
+        }
+      },
+      "values_by_cause": {
+        "land": {
+          "initiator_data.object_category": {
+            "1": 1
+          }
+        }
+      }
+    },
+    {
+      "allow": [
+        "TIME",
+        "INITIATOR",
+        "INITIATOR_CATEGORY",
+        "COMMENT"
+      ],
+      "allowed_unseen": [],
+      "causes": {
+        "air-defense": 3
+      },
+      "count": 3,
+      "fields": [
+        {
+          "path": "comment",
+          "present": 3,
+          "read_as": "COMMENT",
+          "shapes": {
+            "string": 3
+          }
+        },
+        {
+          "path": "id",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "initiator",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "object:Unit": 1,
+            "table": 2
+          }
+        },
+        {
+          "path": "initiator.coalition",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "number": 2
+          }
+        },
+        {
+          "path": "initiator.dead",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "boolean": 2
+          }
+        },
+        {
+          "path": "initiator.id_",
+          "present": 3,
+          "read_as": "INITIATOR",
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "initiator.misID",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "string": 2
+          }
+        },
+        {
+          "path": "initiator_data",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "table": 3
+          }
+        },
+        {
+          "path": "initiator_data.coalition",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator_data.mission_id",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "string": 1
+          }
+        },
+        {
+          "path": "initiator_data.object_category",
+          "present": 1,
+          "read_as": "INITIATOR_CATEGORY",
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator_data.object_id",
+          "present": 3,
+          "read_as": null,
+          "shapes": {
+            "number": 3
+          }
+        },
+        {
+          "path": "initiator_data.unit_name",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "string": 1
+          }
+        },
+        {
+          "path": "initiator_data.unit_type",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "string": 1
+          }
+        },
+        {
+          "path": "time",
+          "present": 3,
+          "read_as": "TIME",
+          "shapes": {
+            "number": 3
+          }
+        }
+      ],
+      "fields_by_cause": {
+        "air-defense": {
+          "comment": 3,
+          "id": 3,
+          "initiator": 3,
+          "initiator.coalition": 2,
+          "initiator.dead": 2,
+          "initiator.id_": 3,
+          "initiator.misID": 2,
+          "initiator_data": 3,
+          "initiator_data.coalition": 1,
+          "initiator_data.mission_id": 1,
+          "initiator_data.object_category": 1,
+          "initiator_data.object_id": 3,
+          "initiator_data.unit_name": 1,
+          "initiator_data.unit_type": 1,
+          "time": 3
+        }
+      },
+      "forwarded": {
+        "COMMENT": 3,
+        "INITIATOR": 3,
+        "INITIATOR_CATEGORY": 1,
+        "TIME": 3
+      },
+      "forwarded_over_present": [],
+      "forwarded_under_present": [],
+      "forwarded_unexpected": [],
+      "id": 29,
+      "name": "S_EVENT_SCORE",
+      "records": 3,
+      "seen_unread": [
+        "id",
+        "initiator.coalition",
+        "initiator.dead",
+        "initiator.misID",
+        "initiator_data.coalition",
+        "initiator_data.mission_id",
+        "initiator_data.object_id",
+        "initiator_data.unit_name",
+        "initiator_data.unit_type"
+      ],
+      "stream_only": false,
+      "time_skew_by_cause": {
+        "air-defense": 0.0
+      },
+      "values": {
+        "initiator_data.object_category": {
+          "1": 1
+        }
+      },
+      "values_by_cause": {
+        "air-defense": {
+          "initiator_data.object_category": {
+            "1": 1
+          }
+        }
+      }
+    },
+    {
+      "allow": [
+        "TIME",
+        "INITIATOR",
+        "INITIATOR_CATEGORY",
+        "WEAPON_NAME"
+      ],
+      "allowed_unseen": [],
+      "causes": {
+        "air-defense": 1
+      },
+      "count": 1,
+      "fields": [
+        {
+          "path": "id",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "object:Unit": 1
+          }
+        },
+        {
+          "path": "initiator.id_",
+          "present": 1,
+          "read_as": "INITIATOR",
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator_data",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "table": 1
+          }
+        },
+        {
+          "path": "initiator_data.coalition",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator_data.mission_id",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "string": 1
+          }
+        },
+        {
+          "path": "initiator_data.object_category",
+          "present": 1,
+          "read_as": "INITIATOR_CATEGORY",
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator_data.object_id",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator_data.unit_name",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "string": 1
+          }
+        },
+        {
+          "path": "initiator_data.unit_type",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "string": 1
+          }
+        },
+        {
+          "path": "time",
+          "present": 1,
+          "read_as": "TIME",
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "weapon_name",
+          "present": 1,
+          "read_as": "WEAPON_NAME",
+          "shapes": {
+            "string": 1
+          }
+        }
+      ],
+      "fields_by_cause": {
+        "air-defense": {
+          "id": 1,
+          "initiator": 1,
+          "initiator.id_": 1,
+          "initiator_data": 1,
+          "initiator_data.coalition": 1,
+          "initiator_data.mission_id": 1,
+          "initiator_data.object_category": 1,
+          "initiator_data.object_id": 1,
+          "initiator_data.unit_name": 1,
+          "initiator_data.unit_type": 1,
+          "time": 1,
+          "weapon_name": 1
+        }
+      },
+      "forwarded": {
+        "INITIATOR": 1,
+        "INITIATOR_CATEGORY": 1,
+        "TIME": 1,
+        "WEAPON_NAME": 1
+      },
+      "forwarded_over_present": [],
+      "forwarded_under_present": [],
+      "forwarded_unexpected": [],
+      "id": 24,
+      "name": "S_EVENT_SHOOTING_END",
+      "records": 1,
+      "seen_unread": [
+        "id",
+        "initiator_data.coalition",
+        "initiator_data.mission_id",
+        "initiator_data.object_id",
+        "initiator_data.unit_name",
+        "initiator_data.unit_type"
+      ],
+      "stream_only": false,
+      "time_skew_by_cause": {
+        "air-defense": 0.0
+      },
+      "values": {
+        "initiator_data.object_category": {
+          "1": 1
+        }
+      },
+      "values_by_cause": {
+        "air-defense": {
+          "initiator_data.object_category": {
+            "1": 1
+          }
+        }
+      }
+    },
+    {
+      "allow": [
+        "TIME",
+        "INITIATOR",
+        "INITIATOR_CATEGORY",
+        "TARGET",
+        "TARGET_CATEGORY",
+        "WEAPON_NAME"
+      ],
+      "allowed_unseen": [],
+      "causes": {
+        "air-defense": 1
+      },
+      "count": 1,
+      "fields": [
+        {
+          "path": "id",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "object:Unit": 1
+          }
+        },
+        {
+          "path": "initiator.id_",
+          "present": 1,
+          "read_as": "INITIATOR",
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator_data",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "table": 1
+          }
+        },
+        {
+          "path": "initiator_data.coalition",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator_data.mission_id",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "string": 1
+          }
+        },
+        {
+          "path": "initiator_data.object_category",
+          "present": 1,
+          "read_as": "INITIATOR_CATEGORY",
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator_data.object_id",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator_data.unit_name",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "string": 1
+          }
+        },
+        {
+          "path": "initiator_data.unit_type",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "string": 1
+          }
+        },
+        {
+          "path": "target",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "object:Unit": 1
+          }
+        },
+        {
+          "path": "target.id_",
+          "present": 1,
+          "read_as": "TARGET",
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "target_data",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "table": 1
+          }
+        },
+        {
+          "path": "target_data.coalition",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "target_data.mission_id",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "string": 1
+          }
+        },
+        {
+          "path": "target_data.object_category",
+          "present": 1,
+          "read_as": "TARGET_CATEGORY",
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "target_data.object_id",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "target_data.unit_name",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "string": 1
+          }
+        },
+        {
+          "path": "target_data.unit_type",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "string": 1
+          }
+        },
+        {
+          "path": "time",
+          "present": 1,
+          "read_as": "TIME",
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "weapon_name",
+          "present": 1,
+          "read_as": "WEAPON_NAME",
+          "shapes": {
+            "string": 1
+          }
+        }
+      ],
+      "fields_by_cause": {
+        "air-defense": {
+          "id": 1,
+          "initiator": 1,
+          "initiator.id_": 1,
+          "initiator_data": 1,
+          "initiator_data.coalition": 1,
+          "initiator_data.mission_id": 1,
+          "initiator_data.object_category": 1,
+          "initiator_data.object_id": 1,
+          "initiator_data.unit_name": 1,
+          "initiator_data.unit_type": 1,
+          "target": 1,
+          "target.id_": 1,
+          "target_data": 1,
+          "target_data.coalition": 1,
+          "target_data.mission_id": 1,
+          "target_data.object_category": 1,
+          "target_data.object_id": 1,
+          "target_data.unit_name": 1,
+          "target_data.unit_type": 1,
+          "time": 1,
+          "weapon_name": 1
+        }
+      },
+      "forwarded": {
+        "INITIATOR": 1,
+        "INITIATOR_CATEGORY": 1,
+        "TARGET": 1,
+        "TARGET_CATEGORY": 1,
+        "TIME": 1,
+        "WEAPON_NAME": 1
+      },
+      "forwarded_over_present": [],
+      "forwarded_under_present": [],
+      "forwarded_unexpected": [],
+      "id": 23,
+      "name": "S_EVENT_SHOOTING_START",
+      "records": 1,
+      "seen_unread": [
+        "id",
+        "initiator_data.coalition",
+        "initiator_data.mission_id",
+        "initiator_data.object_id",
+        "initiator_data.unit_name",
+        "initiator_data.unit_type",
+        "target_data.coalition",
+        "target_data.mission_id",
+        "target_data.object_id",
+        "target_data.unit_name",
+        "target_data.unit_type"
+      ],
+      "stream_only": false,
+      "time_skew_by_cause": {
+        "air-defense": 0.0
+      },
+      "values": {
+        "initiator_data.object_category": {
+          "1": 1
+        },
+        "target_data.object_category": {
+          "1": 1
+        }
+      },
+      "values_by_cause": {
+        "air-defense": {
+          "initiator_data.object_category": {
+            "1": 1
+          },
+          "target_data.object_category": {
+            "1": 1
+          }
+        }
+      }
+    },
+    {
+      "allow": [
+        "TIME",
+        "INITIATOR",
+        "INITIATOR_CATEGORY",
+        "TARGET",
+        "TARGET_CATEGORY",
+        "WEAPON",
+        "WEAPON_NAME"
+      ],
+      "allowed_unseen": [],
+      "causes": {
+        "air-defense": 2,
+        "combat": 5
+      },
+      "count": 7,
+      "fields": [
+        {
+          "path": "id",
+          "present": 7,
+          "read_as": null,
+          "shapes": {
+            "number": 7
+          }
+        },
+        {
+          "path": "initiator",
+          "present": 7,
+          "read_as": null,
+          "shapes": {
+            "object:Unit": 7
+          }
+        },
+        {
+          "path": "initiator.id_",
+          "present": 7,
+          "read_as": "INITIATOR",
+          "shapes": {
+            "number": 7
+          }
+        },
+        {
+          "path": "initiator_data",
+          "present": 7,
+          "read_as": null,
+          "shapes": {
+            "table": 7
+          }
+        },
+        {
+          "path": "initiator_data.coalition",
+          "present": 7,
+          "read_as": null,
+          "shapes": {
+            "number": 7
+          }
+        },
+        {
+          "path": "initiator_data.mission_id",
+          "present": 7,
+          "read_as": null,
+          "shapes": {
+            "string": 7
+          }
+        },
+        {
+          "path": "initiator_data.object_category",
+          "present": 7,
+          "read_as": "INITIATOR_CATEGORY",
+          "shapes": {
+            "number": 7
+          }
+        },
+        {
+          "path": "initiator_data.object_id",
+          "present": 7,
+          "read_as": null,
+          "shapes": {
+            "number": 7
+          }
+        },
+        {
+          "path": "initiator_data.unit_name",
+          "present": 7,
+          "read_as": null,
+          "shapes": {
+            "string": 7
+          }
+        },
+        {
+          "path": "initiator_data.unit_type",
+          "present": 7,
+          "read_as": null,
+          "shapes": {
+            "string": 7
+          }
+        },
+        {
+          "path": "target",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "object:Unit": 2
+          }
+        },
+        {
+          "path": "target.id_",
+          "present": 2,
+          "read_as": "TARGET",
+          "shapes": {
+            "number": 2
+          }
+        },
+        {
+          "path": "target_data",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "table": 2
+          }
+        },
+        {
+          "path": "target_data.coalition",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "number": 2
+          }
+        },
+        {
+          "path": "target_data.mission_id",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "string": 2
+          }
+        },
+        {
+          "path": "target_data.object_category",
+          "present": 2,
+          "read_as": "TARGET_CATEGORY",
+          "shapes": {
+            "number": 2
+          }
+        },
+        {
+          "path": "target_data.object_id",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "number": 2
+          }
+        },
+        {
+          "path": "target_data.unit_name",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "string": 2
+          }
+        },
+        {
+          "path": "target_data.unit_type",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "string": 2
+          }
+        },
+        {
+          "path": "time",
+          "present": 7,
+          "read_as": "TIME",
+          "shapes": {
+            "number": 7
+          }
+        },
+        {
+          "path": "weapon",
+          "present": 7,
+          "read_as": null,
+          "shapes": {
+            "object:Weapon": 7
+          }
+        },
+        {
+          "path": "weapon.id_",
+          "present": 7,
+          "read_as": "WEAPON",
+          "shapes": {
+            "number": 7
+          }
+        },
+        {
+          "path": "weapon_name",
+          "present": 7,
+          "read_as": "WEAPON_NAME",
+          "shapes": {
+            "string": 7
+          }
+        }
+      ],
+      "fields_by_cause": {
+        "air-defense": {
+          "id": 2,
+          "initiator": 2,
+          "initiator.id_": 2,
+          "initiator_data": 2,
+          "initiator_data.coalition": 2,
+          "initiator_data.mission_id": 2,
+          "initiator_data.object_category": 2,
+          "initiator_data.object_id": 2,
+          "initiator_data.unit_name": 2,
+          "initiator_data.unit_type": 2,
+          "target": 2,
+          "target.id_": 2,
+          "target_data": 2,
+          "target_data.coalition": 2,
+          "target_data.mission_id": 2,
+          "target_data.object_category": 2,
+          "target_data.object_id": 2,
+          "target_data.unit_name": 2,
+          "target_data.unit_type": 2,
+          "time": 2,
+          "weapon": 2,
+          "weapon.id_": 2,
+          "weapon_name": 2
+        },
+        "combat": {
+          "id": 5,
+          "initiator": 5,
+          "initiator.id_": 5,
+          "initiator_data": 5,
+          "initiator_data.coalition": 5,
+          "initiator_data.mission_id": 5,
+          "initiator_data.object_category": 5,
+          "initiator_data.object_id": 5,
+          "initiator_data.unit_name": 5,
+          "initiator_data.unit_type": 5,
+          "time": 5,
+          "weapon": 5,
+          "weapon.id_": 5,
+          "weapon_name": 5
+        }
+      },
+      "forwarded": {
+        "INITIATOR": 7,
+        "INITIATOR_CATEGORY": 7,
+        "TARGET": 2,
+        "TARGET_CATEGORY": 2,
+        "TIME": 7,
+        "WEAPON": 7,
+        "WEAPON_NAME": 7
+      },
+      "forwarded_over_present": [],
+      "forwarded_under_present": [],
+      "forwarded_unexpected": [],
+      "id": 1,
+      "name": "S_EVENT_SHOT",
+      "records": 7,
+      "seen_unread": [
+        "id",
+        "initiator_data.coalition",
+        "initiator_data.mission_id",
+        "initiator_data.object_id",
+        "initiator_data.unit_name",
+        "initiator_data.unit_type",
+        "target_data.coalition",
+        "target_data.mission_id",
+        "target_data.object_id",
+        "target_data.unit_name",
+        "target_data.unit_type"
+      ],
+      "stream_only": false,
+      "time_skew_by_cause": {
+        "air-defense": 0.0,
+        "combat": 0.0
+      },
+      "values": {
+        "initiator_data.object_category": {
+          "1": 7
+        },
+        "target_data.object_category": {
+          "1": 2
+        }
+      },
+      "values_by_cause": {
+        "air-defense": {
+          "initiator_data.object_category": {
+            "1": 2
+          },
+          "target_data.object_category": {
+            "1": 2
+          }
+        },
+        "combat": {
+          "initiator_data.object_category": {
+            "1": 5
+          }
+        }
+      }
+    },
+    {
+      "allow": [
+        "TIME"
+      ],
+      "allowed_unseen": [],
+      "causes": {
+        "air-defense": 5,
+        "land": 3
+      },
+      "count": 8,
+      "fields": [
+        {
+          "path": "id",
+          "present": 8,
+          "read_as": null,
+          "shapes": {
+            "number": 8
+          }
+        },
+        {
+          "path": "time",
+          "present": 8,
+          "read_as": "TIME",
+          "shapes": {
+            "number": 8
+          }
+        }
+      ],
+      "fields_by_cause": {
+        "air-defense": {
+          "id": 5,
+          "time": 5
+        },
+        "land": {
+          "id": 3,
+          "time": 3
+        }
+      },
+      "forwarded": {
+        "TIME": 8
+      },
+      "forwarded_over_present": [],
+      "forwarded_under_present": [],
+      "forwarded_unexpected": [],
+      "id": 57,
+      "name": "S_EVENT_SIMULATION_FREEZE",
+      "records": 8,
+      "seen_unread": [
+        "id"
+      ],
+      "stream_only": false,
+      "time_skew_by_cause": {
+        "air-defense": 0.0,
+        "land": 0.0
+      },
+      "values": {},
+      "values_by_cause": {}
+    },
+    {
+      "allow": [
+        "TIME"
+      ],
+      "allowed_unseen": [],
+      "causes": {},
+      "count": 0,
+      "fields": [],
+      "fields_by_cause": {},
+      "forwarded": {
+        "TIME": 3
+      },
+      "forwarded_over_present": [],
+      "forwarded_under_present": [],
+      "forwarded_unexpected": [],
+      "id": 46,
+      "name": "S_EVENT_SIMULATION_START",
+      "records": 3,
+      "seen_unread": [],
+      "stream_only": true,
+      "time_skew_by_cause": {},
+      "values": {},
+      "values_by_cause": {}
+    },
+    {
+      "allow": [
+        "TIME"
+      ],
+      "allowed_unseen": [],
+      "causes": {
+        "air-defense": 5,
+        "land": 3,
+        "spawn": 1
+      },
+      "count": 9,
+      "fields": [
+        {
+          "path": "id",
+          "present": 9,
+          "read_as": null,
+          "shapes": {
+            "number": 9
+          }
+        },
+        {
+          "path": "time",
+          "present": 9,
+          "read_as": "TIME",
+          "shapes": {
+            "number": 9
+          }
+        }
+      ],
+      "fields_by_cause": {
+        "air-defense": {
+          "id": 5,
+          "time": 5
+        },
+        "land": {
+          "id": 3,
+          "time": 3
+        },
+        "spawn": {
+          "id": 1,
+          "time": 1
+        }
+      },
+      "forwarded": {
+        "TIME": 9
+      },
+      "forwarded_over_present": [],
+      "forwarded_under_present": [],
+      "forwarded_unexpected": [],
+      "id": 58,
+      "name": "S_EVENT_SIMULATION_UNFREEZE",
+      "records": 9,
+      "seen_unread": [
+        "id"
+      ],
+      "stream_only": false,
+      "time_skew_by_cause": {
+        "air-defense": 0.0,
+        "land": 0.0,
+        "spawn": 0.0
+      },
+      "values": {},
+      "values_by_cause": {}
+    },
+    {
+      "allow": [
+        "TIME",
+        "INITIATOR",
+        "INITIATOR_CATEGORY",
+        "PLACE",
+        "SUBPLACE"
+      ],
+      "allowed_unseen": [],
+      "causes": {
+        "cold": 1,
+        "runway": 1
+      },
+      "count": 2,
+      "fields": [
+        {
+          "path": "id",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "number": 2
+          }
+        },
+        {
+          "path": "initiator",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "object:Unit": 2
+          }
+        },
+        {
+          "path": "initiator.id_",
+          "present": 2,
+          "read_as": "INITIATOR",
+          "shapes": {
+            "number": 2
+          }
+        },
+        {
+          "path": "initiator_data",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "table": 2
+          }
+        },
+        {
+          "path": "initiator_data.coalition",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "number": 2
+          }
+        },
+        {
+          "path": "initiator_data.mission_id",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "string": 2
+          }
+        },
+        {
+          "path": "initiator_data.object_category",
+          "present": 2,
+          "read_as": "INITIATOR_CATEGORY",
+          "shapes": {
+            "number": 2
+          }
+        },
+        {
+          "path": "initiator_data.object_id",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "number": 2
+          }
+        },
+        {
+          "path": "initiator_data.unit_name",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "string": 2
+          }
+        },
+        {
+          "path": "initiator_data.unit_type",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "string": 2
+          }
+        },
+        {
+          "path": "place",
+          "present": 2,
+          "read_as": null,
+          "shapes": {
+            "object:Airbase": 2
+          }
+        },
+        {
+          "path": "place.id_",
+          "present": 2,
+          "read_as": "PLACE",
+          "shapes": {
+            "number": 2
+          }
+        },
+        {
+          "path": "subPlace",
+          "present": 2,
+          "read_as": "SUBPLACE",
+          "shapes": {
+            "number": 2
+          }
+        },
+        {
+          "path": "time",
+          "present": 2,
+          "read_as": "TIME",
+          "shapes": {
+            "number": 2
+          }
+        }
+      ],
+      "fields_by_cause": {
+        "cold": {
+          "id": 1,
+          "initiator": 1,
+          "initiator.id_": 1,
+          "initiator_data": 1,
+          "initiator_data.coalition": 1,
+          "initiator_data.mission_id": 1,
+          "initiator_data.object_category": 1,
+          "initiator_data.object_id": 1,
+          "initiator_data.unit_name": 1,
+          "initiator_data.unit_type": 1,
+          "place": 1,
+          "place.id_": 1,
+          "subPlace": 1,
+          "time": 1
+        },
+        "runway": {
+          "id": 1,
+          "initiator": 1,
+          "initiator.id_": 1,
+          "initiator_data": 1,
+          "initiator_data.coalition": 1,
+          "initiator_data.mission_id": 1,
+          "initiator_data.object_category": 1,
+          "initiator_data.object_id": 1,
+          "initiator_data.unit_name": 1,
+          "initiator_data.unit_type": 1,
+          "place": 1,
+          "place.id_": 1,
+          "subPlace": 1,
+          "time": 1
+        }
+      },
+      "forwarded": {
+        "INITIATOR": 2,
+        "INITIATOR_CATEGORY": 2,
+        "PLACE": 2,
+        "SUBPLACE": 2,
+        "TIME": 2
+      },
+      "forwarded_over_present": [],
+      "forwarded_under_present": [],
+      "forwarded_unexpected": [],
+      "id": 3,
+      "name": "S_EVENT_TAKEOFF",
+      "records": 2,
+      "seen_unread": [
+        "id",
+        "initiator_data.coalition",
+        "initiator_data.mission_id",
+        "initiator_data.object_id",
+        "initiator_data.unit_name",
+        "initiator_data.unit_type"
+      ],
+      "stream_only": false,
+      "time_skew_by_cause": {
+        "cold": 0.0,
+        "runway": 0.0
+      },
+      "values": {
+        "initiator_data.object_category": {
+          "1": 2
+        }
+      },
+      "values_by_cause": {
+        "cold": {
+          "initiator_data.object_category": {
+            "1": 1
+          }
+        },
+        "runway": {
+          "initiator_data.object_category": {
+            "1": 1
+          }
+        }
+      }
+    },
+    {
+      "allow": [
+        "TIME",
+        "INITIATOR",
+        "INITIATOR_CATEGORY"
+      ],
+      "allowed_unseen": [],
+      "causes": {
+        "air-defense": 3,
+        "damage": 31,
+        "explosion": 166,
+        "static": 109
+      },
+      "count": 309,
+      "fields": [
+        {
+          "path": "id",
+          "present": 309,
+          "read_as": null,
+          "shapes": {
+            "number": 309
+          }
+        },
+        {
+          "path": "initiator",
+          "present": 309,
+          "read_as": null,
+          "shapes": {
+            "object:SceneryObject": 304,
+            "object:StaticObject": 1,
+            "object:Unit": 4
+          }
+        },
+        {
+          "path": "initiator.id_",
+          "present": 309,
+          "read_as": "INITIATOR",
+          "shapes": {
+            "number": 309
+          }
+        },
+        {
+          "path": "initiator_data",
+          "present": 309,
+          "read_as": null,
+          "shapes": {
+            "table": 309
+          }
+        },
+        {
+          "path": "initiator_data.coalition",
+          "present": 5,
+          "read_as": null,
+          "shapes": {
+            "number": 5
+          }
+        },
+        {
+          "path": "initiator_data.mission_id",
+          "present": 5,
+          "read_as": null,
+          "shapes": {
+            "string": 5
+          }
+        },
+        {
+          "path": "initiator_data.object_category",
+          "present": 309,
+          "read_as": "INITIATOR_CATEGORY",
+          "shapes": {
+            "number": 309
+          }
+        },
+        {
+          "path": "initiator_data.object_id",
+          "present": 309,
+          "read_as": null,
+          "shapes": {
+            "number": 309
+          }
+        },
+        {
+          "path": "initiator_data.unit_name",
+          "present": 5,
+          "read_as": null,
+          "shapes": {
+            "string": 5
+          }
+        },
+        {
+          "path": "initiator_data.unit_type",
+          "present": 309,
+          "read_as": null,
+          "shapes": {
+            "string": 309
+          }
+        },
+        {
+          "path": "time",
+          "present": 309,
+          "read_as": "TIME",
+          "shapes": {
+            "number": 309
+          }
+        }
+      ],
+      "fields_by_cause": {
+        "air-defense": {
+          "id": 3,
+          "initiator": 3,
+          "initiator.id_": 3,
+          "initiator_data": 3,
+          "initiator_data.coalition": 3,
+          "initiator_data.mission_id": 3,
+          "initiator_data.object_category": 3,
+          "initiator_data.object_id": 3,
+          "initiator_data.unit_name": 3,
+          "initiator_data.unit_type": 3,
+          "time": 3
+        },
+        "damage": {
+          "id": 31,
+          "initiator": 31,
+          "initiator.id_": 31,
+          "initiator_data": 31,
+          "initiator_data.object_category": 31,
+          "initiator_data.object_id": 31,
+          "initiator_data.unit_type": 31,
+          "time": 31
+        },
+        "explosion": {
+          "id": 166,
+          "initiator": 166,
+          "initiator.id_": 166,
+          "initiator_data": 166,
+          "initiator_data.coalition": 1,
+          "initiator_data.mission_id": 1,
+          "initiator_data.object_category": 166,
+          "initiator_data.object_id": 166,
+          "initiator_data.unit_name": 1,
+          "initiator_data.unit_type": 166,
+          "time": 166
+        },
+        "static": {
+          "id": 109,
+          "initiator": 109,
+          "initiator.id_": 109,
+          "initiator_data": 109,
+          "initiator_data.coalition": 1,
+          "initiator_data.mission_id": 1,
+          "initiator_data.object_category": 109,
+          "initiator_data.object_id": 109,
+          "initiator_data.unit_name": 1,
+          "initiator_data.unit_type": 109,
+          "time": 109
+        }
+      },
+      "forwarded": {
+        "INITIATOR": 309,
+        "INITIATOR_CATEGORY": 309,
+        "TIME": 309
+      },
+      "forwarded_over_present": [],
+      "forwarded_under_present": [],
+      "forwarded_unexpected": [],
+      "id": 30,
+      "name": "S_EVENT_UNIT_LOST",
+      "records": 309,
+      "seen_unread": [
+        "id",
+        "initiator_data.coalition",
+        "initiator_data.mission_id",
+        "initiator_data.object_id",
+        "initiator_data.unit_name",
+        "initiator_data.unit_type"
+      ],
+      "stream_only": false,
+      "time_skew_by_cause": {
+        "air-defense": 0.0,
+        "damage": 0.0,
+        "explosion": 0.0,
+        "static": 0.0
+      },
+      "values": {
+        "initiator_data.object_category": {
+          "1": 4,
+          "3": 1,
+          "5": 304
+        }
+      },
+      "values_by_cause": {
+        "air-defense": {
+          "initiator_data.object_category": {
+            "1": 3
+          }
+        },
+        "damage": {
+          "initiator_data.object_category": {
+            "5": 31
+          }
+        },
+        "explosion": {
+          "initiator_data.object_category": {
+            "1": 1,
+            "5": 165
+          }
+        },
+        "static": {
+          "initiator_data.object_category": {
+            "3": 1,
+            "5": 108
+          }
+        }
+      }
+    }
+  ],
+  "recorded": {
+    "cut_off": 0,
+    "duplicates": 0,
+    "events": 695,
+    "records": 830,
+    "undecodable": []
+  },
+  "source": {
+    "agent_metrics": {
+      "commands": 3,
+      "ev": "final",
+      "events_dropped": 0,
+      "frame": 58966,
+      "hist_event": [
+        0,
+        369,
+        247,
+        70,
+        6,
+        3,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "hist_pump": [
+        403,
+        37000,
+        20805,
+        124,
+        90,
+        1,
+        5,
+        1,
+        536,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "lifecycle": 4,
+      "over_budget": 0,
+      "t": 1794558320192,
+      "timed": 3
+    },
+    "dcs": "2.9.31.29434 (dcs_server.release)",
+    "facts": [
+      "50-marks: mark_added_time = 29294",
+      "50-marks: model_time = 503.875"
+    ],
+    "failed": [],
+    "kind": "docker-wine",
+    "name_conflicts": [],
+    "probes": [
+      "10-ground",
+      "20-ground-combat",
+      "30-air-defense",
+      "40-airfield",
+      "50-marks"
+    ],
+    "time": "2026-11-13T08:25:03Z",
+    "unforwarded": [],
+    "wine": "wine-10.0 (Debian 10.0~repack-6)"
+  },
+  "unreached": [
+    "S_EVENT_CRASH",
+    "S_EVENT_EJECTION",
+    "S_EVENT_REFUELING",
+    "S_EVENT_PILOT_DEAD",
+    "S_EVENT_TOOK_CONTROL",
+    "S_EVENT_REFUELING_STOP",
+    "S_EVENT_HUMAN_FAILURE",
+    "S_EVENT_DETAILED_FAILURE",
+    "S_EVENT_ENGINE_SHUTDOWN",
+    "S_EVENT_PLAYER_ENTER_UNIT",
+    "S_EVENT_PLAYER_LEAVE_UNIT",
+    "S_EVENT_PLAYER_COMMENT",
+    "S_EVENT_MARK_CHANGE",
+    "S_EVENT_LANDING_AFTER_EJECTION",
+    "S_EVENT_PARATROOPER_LENDING",
+    "S_EVENT_DISCARD_CHAIR_AFTER_EJECTION",
+    "S_EVENT_WEAPON_ADD",
+    "S_EVENT_TRIGGER_ZONE",
+    "S_EVENT_LANDING_QUALITY_MARK",
+    "S_EVENT_AI_ABORT_MISSION",
+    "S_EVENT_DAYNIGHT",
+    "S_EVENT_FLIGHT_TIME",
+    "S_EVENT_PLAYER_SELF_KILL_PILOT",
+    "S_EVENT_PLAYER_CAPTURE_AIRFIELD",
+    "S_EVENT_EMERGENCY_LANDING",
+    "S_EVENT_UNIT_CREATE_TASK",
+    "S_EVENT_UNIT_DELETE_TASK",
+    "S_EVENT_WEAPON_REARM",
+    "S_EVENT_WEAPON_DROP",
+    "S_EVENT_UNIT_TASK_COMPLETE",
+    "S_EVENT_UNIT_TASK_STAGE",
+    "S_EVENT_MAC_EXTRA_SCORE",
+    "S_EVENT_MISSION_WINNER",
+    "S_EVENT_MAC_LMS_RESTART",
+    "S_EVENT_HUMAN_AIRCRAFT_REPAIR_START",
+    "S_EVENT_HUMAN_AIRCRAFT_REPAIR_FINISH",
+    "S_EVENT_GROUP_CHANGE_OPTION"
+  ]
+}

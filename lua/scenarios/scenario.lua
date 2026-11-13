@@ -128,21 +128,26 @@ end
 
 -- One aircraft in the air. `o` holds x, z, alt, speed, heading, fuel (kg)
 -- and gun (percent); the defaults are 5,000 m above the origin, 220 m/s,
--- heading north, 3,000 kg and 50 %. The route is three points ahead of it.
--- Returns the group and the seconds coalition.addGroup took.
+-- heading north, 3,000 kg and 50 %. The route is three points ahead of it,
+-- or `o.points` when given. `o.kind`, `o.category` (a Group.Category),
+-- `o.country` (a country ID) and `o.task` default to an F-15C of the USA
+-- on CAP. Returns the group and the seconds coalition.addGroup took.
 function S.spawn_aircraft(o)
   o = o or {}
   local origin = S.origin()
   local name = o.name or 'np-air'
   local x, z = o.x or origin.x, o.z or (origin.z + 3000)
   local alt, speed, heading = o.alt or 5000, o.speed or 220, o.heading or 0
-  local points = {}
-  for i = 0, 2 do
-    points[#points + 1] = waypoint(x + math.cos(heading) * i * 40000, z + math.sin(heading) * i * 40000, speed, alt)
+  local points = o.points
+  if not points then
+    points = {}
+    for i = 0, 2 do
+      points[#points + 1] = waypoint(x + math.cos(heading) * i * 40000, z + math.sin(heading) * i * 40000, speed, alt)
+    end
   end
   local data = {
     name = name,
-    task = 'CAP',
+    task = o.task or 'CAP',
     start_time = 0,
     x = x,
     y = z,
@@ -157,6 +162,7 @@ function S.spawn_aircraft(o)
         speed = speed,
         heading = heading,
         skill = 'High',
+        parking = o.parking,
         payload = { fuel = o.fuel or 3000, gun = o.gun or 50, flare = 0, chaff = 0, pylons = {} },
         callsign = { 1, 1, 1, name = 'Enfield11' },
       },
@@ -164,10 +170,55 @@ function S.spawn_aircraft(o)
     route = { points = points },
   }
   local t0 = now()
-  local group = coalition.addGroup(country_id('USA'), Group.Category.AIRPLANE, data)
+  local group = coalition.addGroup(o.country or country_id('USA'), o.category or Group.Category.AIRPLANE, data)
   local cost = now() - t0
   S.groups[name] = true
   return group, cost
+end
+
+-- The first airdrome the mission has, as its ID, its point and the object,
+-- or nil when it has none.
+function S.airdrome()
+  for _, base in ipairs(world.getAirbases()) do
+    local desc = base:getDesc()
+    if desc and desc.category == Airbase.Category.AIRDROME then
+      local p = base:getPoint()
+      return { id = base:getID(), x = p.x, y = p.y, z = p.z, base = base }
+    end
+  end
+  return nil
+end
+
+-- A route point for an aircraft at an airdrome: `kind` is `runway` (take
+-- off from the runway), `hot` (from parking, engines running), `cold` (from
+-- parking, engines off) or `land`. The field names are those of a saved
+-- mission's route points (ED-CODE).
+function S.airdrome_point(kind, base, speed, alt)
+  local types = {
+    runway = { 'TakeOff', 'From Runway' },
+    hot = { 'TakeOffParkingHot', 'From Parking Area Hot' },
+    cold = { 'TakeOffParking', 'From Parking Area' },
+    land = { 'Land', 'Landing' },
+  }
+  local t = assert(types[kind], 'airdrome_point: unknown kind')
+  local p = waypoint(base.x, base.z, speed or 0, alt or 0)
+  p.type, p.action, p.airdromeId = t[1], t[2], base.id
+  p.alt_type = 'RADIO'
+  return p
+end
+
+-- A plain turning point for an aircraft.
+function S.air_point(x, z, speed, alt)
+  return waypoint(x, z, speed, alt)
+end
+
+-- Order a group to open fire: ROE option 0, value 2 for a ground group
+-- (ED-CODE, Scripts/UI/RadioCommandDialogPanel/Config/groundUnit.lua).
+-- Returns whether the call went through.
+function S.open_fire(group)
+  return (pcall(function()
+    group:getController():setOption(0, 2)
+  end))
 end
 
 -- A static object `east` metres east and `north` metres north of the

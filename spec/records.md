@@ -77,11 +77,13 @@ a larger one:
 | `LOG` | The same record with nil `data` |
 | `AUTHOR_EVENT` | Nothing: `emit` refuses the payload first (spec/commands.md) |
 | A sample | Nothing. The record is counted in `samples_dropped`. |
+| `EVENT` | The same record with each string value cut to 1,024 bytes, at a character boundary where it is UTF-8, each table or other value that is not a scalar replaced by nil, and numbers and booleans kept |
 | Any other event-class record | The same record with each string cut to 1,024 bytes and each `lv` value nil |
 | Any other | A `LOG` record at `error` naming the kind, and a count in the pending `GAP` of events |
 
 In a record written in place of another, the agent cuts every `str` to 1,024 bytes at
-a character boundary, so the replacement always fits.
+a character boundary, so the replacement always fits. An `EVENT`'s values are `lv`, not
+`str`, and are cut as its row says.
 
 ### Codes: record_kind
 
@@ -313,8 +315,21 @@ asks for another.
 The shim's handler runs wholly inside `pcall`. For each event type it reads only the
 plain fields on that type's allow-list and never calls a method on an event object. An
 event of a type with no allow-list is written with `n` 0. Every field is optional: an
-event of one type does not always carry the same fields. The allow-lists are fixed from
-the event catalogue of step S9.
+event of one type does not always carry the same fields.
+
+The shim reads every field with `rawget`, which calls no metamethod. A field read
+from an object, such as `event.initiator.id_`, is taken as the object's own `id_` key.
+Every path in "Read from" but `ROUNDS`'s was present on some event type in the event
+catalogue, and every object carried its ID as its own `id_` number. On a kill whose
+killer was already dead, `event.initiator` was a plain table, not an object, with
+`id_`, `coalition`, `dead`, `misID` and `unit_type`, and the shim still reads `id_`
+from it (LIVE, `docs/results/2026-11-13-event-catalogue.md`). A value
+whose Lua type is not the type in "Value" below is left out, as is a missing one. The
+agent writes the fields in the order of the allow-list.
+
+The agent counts its time for each event, from the call into the agent to the record
+queued, in `hist_event` (spec/transport.md). The agent takes at most 16 fields per
+event, so a cut `EVENT` always fits (see "Oversized records").
 
 ### Codes: event_field
 
@@ -336,11 +351,100 @@ the event catalogue of step S9.
 | 14 | GROUP_ID | number | `event.groupID` |
 | 15 | COMMENT | string | `event.comment` |
 | 16 | ROUNDS | number | The rounds expended, on a shooting-end event |
+| 17 | INITIATOR_CATEGORY | number | `event.initiator_data.object_category` |
+| 18 | TARGET_CATEGORY | number | `event.target_data.object_category` |
 
-The field names in "Read from" are UNVERIFIED as a set until the S9 catalogue. Whether
-a shooting-end event carries a count of rounds, and under what name, is UNVERIFIED
-(E32, step S16); where it does not, the sidecar fills the value from the ammunition
-difference. Step S9 adds codes and never renumbers one.
+`INITIATOR_CATEGORY` and `TARGET_CATEGORY` are DCS's `Object.Category` numbers. In the
+event catalogue (LIVE, `docs/results/2026-11-13-event-catalogue.md`) a spawned unit's
+events carried 1, the spawned static's 3, and the objects that died around an
+explosion 5, which is DCS's number for a scenery object (PRIOR). They say what kind of
+object the ID in `INITIATOR` or `TARGET` names: an explosion that kills a unit also
+kills scenery near it, and each scenery object is a death event of its own; in that
+run 304 of 309 `S_EVENT_DEAD` events were of category 5 (LIVE, same report).
+
+`TIME` is model time on every type the catalogue's recorder saw but the mark events:
+it was within 0.004 s of model time when the event arrived (LIVE,
+`docs/results/2026-11-13-event-catalogue.md`). On `S_EVENT_MARK_ADDED` it was 28,799.1 s
+ahead of model time, which matches the time of day for a mission that starts at
+28,800 s after midnight, as the shell does (`start_time` in `templates/caucasus.miz`).
+On `S_EVENT_MARK_REMOVED` it was at most 28,796.1 s ahead, 3 s less, and the scenario
+removed the line 3 s after adding it: the removal seems to carry the removed mark's add
+time, not the time of the removal (an inference from the report's per-cause maxima;
+UNVERIFIED).
+
+Whether a shooting-end event carries a count of rounds, and under what name, is
+UNVERIFIED (E32, step S16); where it does not, the sidecar fills the value from the
+ammunition difference. No allow-list holds `ROUNDS` until then. Codes are added and
+never renumbered.
+
+### Allow-lists
+
+The fields the shim reads, by event type. The type is the `world.event` name, whose ID
+the shim reads from `world.event` in the `server` state when it registers its handler; a
+name the running DCS lacks has no allow-list. The lists come from the event catalogue
+(experiment E9, `docs/results/2026-11-13-event-catalogue.md`, and the scripted
+client of experiments E30 and E31, `docs/results/2026-11-13-e31-event-catalogue.md`). "Evidence" says
+whether the catalogue saw the type with its fields on the Wine server (LIVE), saw it
+only as an agent record with no field data (stream only), saw it only in an earlier
+run of the same scenarios whose report is not committed (PRIOR), or did not reach it
+(UNVERIFIED: a lead, to be checked when a step reaches the type). A type with no row,
+which includes every type no run reached, is forwarded with its ID only.
+
+| Event | Fields | Evidence |
+|---|---|---|
+| S_EVENT_SHOT | TIME, INITIATOR, INITIATOR_CATEGORY, TARGET, TARGET_CATEGORY, WEAPON, WEAPON_NAME | LIVE |
+| S_EVENT_HIT | TIME, INITIATOR, INITIATOR_CATEGORY, TARGET, TARGET_CATEGORY, WEAPON, WEAPON_NAME | LIVE |
+| S_EVENT_TAKEOFF | TIME, INITIATOR, INITIATOR_CATEGORY, PLACE, SUBPLACE | LIVE |
+| S_EVENT_LAND | TIME, INITIATOR, INITIATOR_CATEGORY, PLACE, SUBPLACE | LIVE |
+| S_EVENT_CRASH | TIME, INITIATOR, INITIATOR_CATEGORY | PRIOR: an earlier run of the same scenarios on the same server |
+| S_EVENT_EJECTION | TIME, INITIATOR, INITIATOR_CATEGORY, TARGET, TARGET_CATEGORY | PRIOR: an earlier run of the same scenarios on the same server |
+| S_EVENT_REFUELING | TIME, INITIATOR, INITIATOR_CATEGORY | UNVERIFIED |
+| S_EVENT_DEAD | TIME, INITIATOR, INITIATOR_CATEGORY | LIVE |
+| S_EVENT_PILOT_DEAD | TIME, INITIATOR, INITIATOR_CATEGORY | PRIOR: an earlier run of the same scenarios on the same server |
+| S_EVENT_BASE_CAPTURED | TIME, INITIATOR, INITIATOR_CATEGORY, PLACE, SUBPLACE | LIVE |
+| S_EVENT_MISSION_START | TIME | LIVE, stream only |
+| S_EVENT_MISSION_END | TIME | LIVE, stream only |
+| S_EVENT_REFUELING_STOP | TIME, INITIATOR, INITIATOR_CATEGORY | UNVERIFIED |
+| S_EVENT_BIRTH | TIME, INITIATOR, INITIATOR_CATEGORY, PLACE, SUBPLACE | LIVE |
+| S_EVENT_HUMAN_FAILURE | TIME, INITIATOR, INITIATOR_CATEGORY | UNVERIFIED |
+| S_EVENT_ENGINE_STARTUP | TIME, INITIATOR, INITIATOR_CATEGORY, PLACE, SUBPLACE | LIVE |
+| S_EVENT_ENGINE_SHUTDOWN | TIME, INITIATOR, INITIATOR_CATEGORY, PLACE, SUBPLACE | PRIOR: an earlier run of the same scenarios on the same server |
+| S_EVENT_PLAYER_ENTER_UNIT | TIME, INITIATOR, INITIATOR_CATEGORY | UNVERIFIED: not sent for a scripted client that took a slot with `net.set_slot` and spawned with `net.spawn_player` (`docs/results/2026-11-13-e31-event-catalogue.md`) |
+| S_EVENT_PLAYER_LEAVE_UNIT | TIME, INITIATOR, INITIATOR_CATEGORY | LIVE |
+| S_EVENT_PLAYER_COMMENT | TIME, INITIATOR, INITIATOR_CATEGORY, COMMENT | UNVERIFIED |
+| S_EVENT_SHOOTING_START | TIME, INITIATOR, INITIATOR_CATEGORY, TARGET, TARGET_CATEGORY, WEAPON_NAME | LIVE |
+| S_EVENT_SHOOTING_END | TIME, INITIATOR, INITIATOR_CATEGORY, WEAPON_NAME | LIVE |
+| S_EVENT_MARK_ADDED | TIME, INITIATOR, MARK_ID, TEXT, POS_X, POS_Y, POS_Z, COALITION, GROUP_ID | LIVE for a scripted mark, which has no initiator; not seen: INITIATOR |
+| S_EVENT_MARK_CHANGE | TIME, INITIATOR, MARK_ID, TEXT, POS_X, POS_Y, POS_Z, COALITION, GROUP_ID | UNVERIFIED |
+| S_EVENT_MARK_REMOVED | TIME, INITIATOR, MARK_ID, TEXT, POS_X, POS_Y, POS_Z, COALITION, GROUP_ID | LIVE for a scripted mark, which has no initiator; not seen: INITIATOR |
+| S_EVENT_KILL | TIME, INITIATOR, INITIATOR_CATEGORY, TARGET, TARGET_CATEGORY, WEAPON, WEAPON_NAME | LIVE |
+| S_EVENT_SCORE | TIME, INITIATOR, INITIATOR_CATEGORY, COMMENT | LIVE |
+| S_EVENT_UNIT_LOST | TIME, INITIATOR, INITIATOR_CATEGORY | LIVE |
+| S_EVENT_LANDING_AFTER_EJECTION | TIME, INITIATOR, INITIATOR_CATEGORY, PLACE, SUBPLACE | PRIOR: an earlier run of the same scenarios on the same server |
+| S_EVENT_DISCARD_CHAIR_AFTER_EJECTION | TIME, INITIATOR, INITIATOR_CATEGORY, TARGET, TARGET_CATEGORY | PRIOR: an earlier run of the same scenarios on the same server |
+| S_EVENT_WEAPON_ADD | TIME, INITIATOR, INITIATOR_CATEGORY, WEAPON_NAME | LIVE |
+| S_EVENT_LANDING_QUALITY_MARK | TIME, INITIATOR, INITIATOR_CATEGORY, PLACE, COMMENT | UNVERIFIED |
+| S_EVENT_BDA | TIME, INITIATOR, INITIATOR_CATEGORY, TARGET, TARGET_CATEGORY, WEAPON, WEAPON_NAME | LIVE |
+| S_EVENT_AI_ABORT_MISSION | TIME, INITIATOR, INITIATOR_CATEGORY | PRIOR: an earlier run of the same scenarios on the same server |
+| S_EVENT_RUNWAY_TAKEOFF | TIME, INITIATOR, INITIATOR_CATEGORY, PLACE, SUBPLACE | LIVE |
+| S_EVENT_RUNWAY_TOUCH | TIME, INITIATOR, INITIATOR_CATEGORY, PLACE, SUBPLACE | LIVE |
+| S_EVENT_PLAYER_SELF_KILL_PILOT | TIME, INITIATOR, INITIATOR_CATEGORY | UNVERIFIED |
+| S_EVENT_SIMULATION_FREEZE | TIME | LIVE |
+| S_EVENT_SIMULATION_UNFREEZE | TIME | LIVE |
+| S_EVENT_MISSION_RESTART | TIME | LIVE, stream only |
+| S_EVENT_SIMULATION_START | TIME | LIVE, stream only |
+
+The hook loads the shim on the first simulation start of the process, and the shim
+registers its handler then and again on every later simulation start; a shim reload
+registers the new handler at once. An event DCS sends before the handler is registered
+is not seen, and no `GAP` records it. `S_EVENT_MISSION_START` and
+`S_EVENT_SIMULATION_START` of a load arrived as agent records (LIVE,
+`docs/results/2026-11-13-event-catalogue.md`), so they come after the registration;
+whether any other event of a mission load comes before it is UNVERIFIED.
+ED's registry is keyed by
+the handler, so a second add changes nothing (ED-CODE,
+`Scripts/World/EventHandlers.lua`). A shim reload removes the replaced shim's handler
+before it adds its own.
 
 ### Layout: AUTHOR_EVENT
 

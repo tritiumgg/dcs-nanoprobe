@@ -1,5 +1,6 @@
--- The probe suite under the strict mock: every probe in lua/probes runs in
--- each state its header names, no observation differs from what is expected
+-- The probe suite under the strict mock: every probe in lua/probes, and
+-- every catalogue scenario in lua/catalogue, runs in each state its header
+-- names, no observation differs from what is expected
 -- of the mock, and after uninstall nothing is left in any state.
 
 local S = dofile((arg[0]:match('^(.*/)') or './') .. 'support.lua')
@@ -24,16 +25,22 @@ host:run('hook', profile .. 'Scripts/Hooks/nanoprobe-eval.lua')
 -- A server with no client starts its mission paused.
 host:load_mission(profile .. 'nanoprobe/dev/missions/np-shell.miz', { paused = true })
 
--- The probes, in name order.
+-- The probes, in name order, then the catalogue scenarios.
 local files = {}
-local pipe = io.popen('ls ' .. S.quote(root .. 'lua/probes'))
-for name in pipe:lines() do
-  if name:match('%.lua$') then
-    files[#files + 1] = name
+for _, dir in ipairs({ 'lua/probes/', 'lua/catalogue/' }) do
+  local names = {}
+  local pipe = io.popen('ls ' .. S.quote(root .. dir))
+  for name in pipe:lines() do
+    if name:match('%.lua$') then
+      names[#names + 1] = name
+    end
+  end
+  pipe:close()
+  table.sort(names)
+  for _, name in ipairs(names) do
+    files[#files + 1] = dir .. name
   end
 end
-pipe:close()
-table.sort(files)
 assert(#files > 0, 'no probes')
 
 -- A probe's settings: the leading comment lines `-- states:` and
@@ -60,6 +67,8 @@ end
 -- port does that as often as it checks, so the test pauses the mock every 20
 -- seconds, and the probes must resume it.
 local frames, pauses = 0, 0
+-- The catalogue scenarios' results, as `cargo xtask probes` reports them.
+local catalogue_results = {}
 
 local function eval(id, state, source, seconds)
   S.write(base .. 'in/' .. id .. '.' .. state .. '.lua', source)
@@ -72,7 +81,7 @@ local function eval(id, state, source, seconds)
     host:frame(1 / 60)
     local text = S.read(base .. 'out/' .. id .. '.json')
     if text then
-      return S.json(text)
+      return S.json(text), text
     end
   end
   error(id .. ' in ' .. state .. ': no result in ' .. seconds .. ' s')
@@ -86,13 +95,17 @@ local function check(condition, message)
   return condition
 end
 for _, file in ipairs(files) do
-  local source = S.read(root .. 'lua/probes/' .. file)
+  local source = S.read(root .. file)
   local states, timeout = header(source)
   assert(#states > 0, file .. ' names no state')
   for _, state in ipairs(states) do
     serial = serial + 1
-    local label = file:gsub('%.lua$', '') .. '@' .. state
-    local result = eval('p' .. serial, state, source, timeout)
+    local label = file:match('([^/]+)%.lua$') .. '@' .. state
+    local result, raw = eval('p' .. serial, state, source, timeout)
+    if file:match('^lua/catalogue/') then
+      catalogue_results[#catalogue_results + 1] = string.format(
+        '{"probe":"%s","state":"%s","ok":true,"result":%s}', label:match('^[^@]+'), state, raw)
+    end
     if check(result.ok, label .. ': ' .. tostring(result.error))
       and check(result.reply.ok, label .. ': ' .. tostring(result.reply.error)) then
       for _, note in ipairs(result.reply.notes) do
@@ -131,5 +144,33 @@ end
 assert(pauses > 0, 'the test never paused the mock')
 S.ok(string.format('%d probes, %d observations, %d pause(s) survived, and nothing left after uninstall',
   #files, observations, pauses))
+
+-- The catalogue builder reads what the scenarios reported under the mock:
+-- the mock's births and deaths from 10-ground, with the initiator's id_ and
+-- category, and the marks and the observed times from 50-marks.
+local xtask = select(5, ...)
+if xtask then
+  local report = profile .. 'catalogue-probes.json'
+  S.write(report, '{"kind":"mock","dcs":"mock","wine":null,"time":"now","results":['
+    .. table.concat(catalogue_results, ',') .. ']}')
+  local stem = profile .. 'catalogue'
+  local ok = os.execute(S.quote(xtask) .. ' catalogue --build ' .. S.quote(report) .. ' --out ' .. S.quote(stem)
+    .. ' > ' .. S.quote(profile .. 'build.txt') .. ' 2>&1')
+  local md = S.read(stem .. '.md') or ''
+  assert(ok == 0, 'catalogue --build failed:\n' .. (S.read(profile .. 'build.txt') or '') .. md)
+  for _, needle in ipairs({
+    '## S_EVENT_BIRTH (15)',
+    '## S_EVENT_DEAD (8)',
+    '| `initiator.id_` | number ',
+    '## S_EVENT_MARK_ADDED (25)',
+    '## S_EVENT_MARK_REMOVED (27)',
+    '| `idx` | number ',
+    'Values of `initiator_data.object_category`: 1: ',
+    '50-marks: mark_added_time = ',
+  }) do
+    assert(md:find(needle, 1, true), 'the mock catalogue lacks ' .. needle .. ':\n' .. md)
+  end
+  S.ok('catalogue --build reads the scenarios\' own reports from the mock')
+end
 
 S.remove(profile)

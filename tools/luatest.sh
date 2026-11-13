@@ -47,6 +47,10 @@ esac
 (cd "$ROOT" && cargo build -p nanoprobe-fake-agent --bin link-probe -p nanoprobe-cli --bin nanoprobe)
 PROBE="$ROOT/target/debug/link-probe"
 INSPECT="$ROOT/target/debug/nanoprobe"
+# The catalogue builder, which lua/tests/probes.lua runs on the scenarios'
+# reports from the mock.
+(cd "$ROOT" && cargo build -p xtask)
+XTASK="$ROOT/target/debug/xtask"
 
 # The host-native module under the folder $1.
 module() {
@@ -83,6 +87,6 @@ for script in "$ROOT"/lua/tests/*.lua; do
     printf '%s\n' "--- ${script#"$ROOT"/}"
     case ${script##*/} in
         faults.lua) "$LUA" "$script" "$FAULTS_MODULE" "$VERSION" "$PROBE" "$INSPECT" ;;
-        *) "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" ;;
+        *) "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" ;;
     esac
 done

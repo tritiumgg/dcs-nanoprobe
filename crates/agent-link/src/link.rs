@@ -1007,6 +1007,11 @@ impl Link {
         }
     }
 
+    /// Count the agent's time for one world event in `hist_event`.
+    pub fn record_event(&mut self, cost_us: f64) {
+        self.metrics.hist[3][status::bucket(cost_us)] += 1;
+    }
+
     /// Write what the ring has room for: pending gaps, the queue in order,
     /// and the `HELLO` once the queue is empty. Loads and checks the head
     /// first, once per batch (spec/transport.md, "Producing").
@@ -1464,6 +1469,21 @@ mod tests {
         );
         assert!(!link.reading_commands());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Each event's time is counted in `hist_event` and in no other histogram.
+    #[test]
+    fn an_event_s_time_is_counted_in_hist_event() {
+        let (mut link, dir) = open("hist-event");
+        link.begin(Instant::now(), 0.0, 0.0);
+        link.record_event(3.0);
+        link.record_event(3.0);
+        link.end();
+        let m = status::read_metrics(&**link.map()).expect("metrics");
+        assert_eq!(m.hist[3].iter().sum::<u64>(), 2);
+        assert_eq!(m.hist[3][status::bucket(3.0)], 2);
+        assert_eq!(m.hist[2].iter().sum::<u64>(), 0);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A port another socket holds is tried again once a second, and the

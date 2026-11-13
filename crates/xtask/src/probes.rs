@@ -305,6 +305,16 @@ pub fn run_probes(
     name: &str,
     options: &ProbeOptions,
 ) -> Result<ExitCode, String> {
+    run_probes_to(profile, facts, name, options).map(|(code, _)| code)
+}
+
+/// As [`run_probes`], and the path of the report it wrote.
+pub fn run_probes_to(
+    profile: &dyn Profile,
+    facts: &Facts,
+    name: &str,
+    options: &ProbeOptions,
+) -> Result<(ExitCode, std::path::PathBuf), String> {
     let wine = facts.kind == "docker-wine";
     let probes = load_probes(options.dir.as_deref(), options.only.as_deref())?;
     if probes.is_empty() {
@@ -407,11 +417,12 @@ pub fn run_probes(
     let path = folder.join(format!("probes-{name}-{}.json", bundle::stamp()));
     std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
     println!("wrote {}", path.display());
-    Ok(if failed {
+    let code = if failed {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
-    })
+    };
+    Ok((code, path))
 }
 
 /// The lines of an existing dump file, headers aside.

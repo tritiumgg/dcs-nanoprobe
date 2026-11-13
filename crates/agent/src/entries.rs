@@ -119,6 +119,7 @@ entries! {
     frame => work_frame, hot;
     lifecycle => work_lifecycle;
     log => work_log, hot;
+    event => work_event, hot;
     thread => work_thread, hot;
     clock => work_clock, hot;
     qpc_cost => work_qpc_cost;
@@ -314,6 +315,44 @@ unsafe fn work_log(state: *mut State) -> c_int {
         )
     };
     driver::log(level, &target, &message, data);
+    0
+}
+
+/// The most fields `event` takes; pairs past it are ignored.
+const EVENT_FIELDS: c_int = 16;
+
+/// `event(id, code, value, ...)`: queue an `EVENT` record with the DCS event
+/// ID and each `event_field` code and its value (spec/records.md). A code
+/// that is not a whole number from 1 to 65,535 drops its pair. A value is
+/// carried as an `lv` scalar: a table or a function becomes its type name.
+/// Never raises; returns nothing.
+unsafe fn work_event(state: *mut State) -> c_int {
+    let started = std::time::Instant::now();
+    // SAFETY: a live state; reading a value never raises.
+    let id = unsafe { arg_num(state, 1, -1.0) };
+    if !(0.0..=f64::from(u32::MAX)).contains(&id) || id.fract() != 0.0 {
+        return 0;
+    }
+    // SAFETY: as above.
+    let top = unsafe { lua::lua_gettop(state) }.min(1 + 2 * EVENT_FIELDS);
+    let mut fields = Vec::new();
+    let mut i = 2;
+    while i < top {
+        // SAFETY: as above; `i` and `i + 1` are on the stack.
+        let code = unsafe { arg_num(state, i, -1.0) };
+        if (1.0..=65535.0).contains(&code) && code.fract() == 0.0 {
+            // SAFETY: as above.
+            fields.push((code as u16, unsafe { scalar(state, i + 1) }));
+        }
+        i += 2;
+    }
+    driver::event(
+        nanoprobe_transport::records::Event {
+            id: id as u32,
+            fields,
+        },
+        started,
+    );
     0
 }
 

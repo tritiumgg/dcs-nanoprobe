@@ -43,6 +43,13 @@ local TYPES = {
     ammo = { { 'weapons.shells.M2_12_7_T', 104 }, { 'weapons.shells.M2_12_7_T', 404 } },
   },
   ['F-15C'] = { life = 1, air = true, fuel_max = 6103, gun = { 'weapons.shells.M61_20_HE', 940 } },
+  -- The event catalogue's scenarios (lua/catalogue). Their figures are
+  -- UNVERIFIED: the mock only needs the types to exist.
+  ['M-1 Abrams'] = { life = 1 },
+  ['T-72B'] = { life = 1 },
+  ['Osa 9A33 ln'] = { life = 1 },
+  ['ZSU-23-4 Shilka'] = { life = 1 },
+  ['UH-1H'] = { life = 1, air = true, fuel_max = 631 },
 }
 
 local Sim = {}
@@ -51,6 +58,7 @@ Sim.__index = Sim
 function Sim:clear()
   self.units, self.by_name, self.dead = {}, {}, {}
   self.groups, self.statics = {}, {}
+  self.marks = {}
   self.mission_ids, self.group_ids = {}, {}
   self.next_object, self.next_mission, self.next_group = 16777472, 1000000, 1000000
   self.queue = {}
@@ -537,6 +545,17 @@ local function scripting(host, name)
     getCoalition = function(self)
       return airbase_of(self).coalition
     end,
+    -- Every mock airbase is an airdrome with one free fighter spot, in the
+    -- fields a parking entry has (PRIOR).
+    getDesc = function()
+      return { category = state.Airbase.Category.AIRDROME }
+    end,
+    getParking = function(self)
+      local a = airbase_of(self)
+      return {
+        { Term_Index = 1, Term_Type = 104, TO_AC = false, vTerminalPos = { x = a.x + 200, y = 0, z = a.z + 50 } },
+      }
+    end,
     setCoalition = function(self, side)
       airbase_of(self).coalition = side
     end,
@@ -582,10 +601,50 @@ local function scripting(host, name)
     end,
   })
 
+  -- A mark event, dispatched to every state's handlers once: only the
+  -- server state's trigger table sends it.
+  local function mark_event(event_name, id, text, point, side, removed)
+    if not removed then
+      sim.marks[id] = { text = text, point = point, coalition = side }
+    end
+    if name ~= 'server' then
+      return
+    end
+    host:event({
+      id = state.world.event[event_name],
+      idx = id,
+      text = text,
+      pos = { x = point.x, y = point.y, z = point.z },
+      coalition = side,
+      groupID = -1,
+      time = host.start_time + host.model,
+    })
+  end
+
   state.trigger = ns(name, 'trigger', {
     action = {
       explosion = function(point)
         sim:explode(point)
+      end,
+      -- A scripted mark or drawing emits S_EVENT_MARK_ADDED, and its
+      -- removal S_EVENT_MARK_REMOVED, with no initiator, coalition 255 and
+      -- group -1 for one shown to all, and a time that is not model time
+      -- (LIVE, the S9 event catalogue). The mock's time is the time of day.
+      markToAll = function(id, text, point)
+        mark_event('S_EVENT_MARK_ADDED', id, text, point, 255)
+      end,
+      markToCoalition = function(id, text, point, side)
+        mark_event('S_EVENT_MARK_ADDED', id, text, point, side)
+      end,
+      lineToAll = function(side, id, from)
+        mark_event('S_EVENT_MARK_ADDED', id, '', from, side == -1 and 255 or side)
+      end,
+      removeMark = function(id)
+        local mark = sim.marks[id]
+        if mark then
+          sim.marks[id] = nil
+          mark_event('S_EVENT_MARK_REMOVED', id, mark.text, mark.point, mark.coalition, true)
+        end
       end,
     },
   })

@@ -15,6 +15,10 @@
 //! # The agent's mapped file as DCS opens it; deploy writes it to agent.toml.
 //! # Z: is the container's root under Wine, so the sidecar side is /dev/shm.
 //! map_path = 'Z:\dev\shm\nanoprobe.map'
+//! # For `cargo xtask client join`: where a client reaches the server, and a
+//! # file outside the repository that holds only its join password.
+//! client_address = "server.example:10308"
+//! client_password_file = "~/.config/nanoprobe/secrets/test-server-password"
 //!
 //! [targets.this-machine]
 //! kind = "local"                # a profile on this machine's file system
@@ -59,6 +63,15 @@ pub enum Target {
         /// `cargo xtask link` needs it.
         #[serde(default)]
         map_path: Option<String>,
+        /// The address a client joins the server at, `host:port`, as the
+        /// client's network sees it. `cargo xtask client join` needs it.
+        #[serde(default)]
+        client_address: Option<String>,
+        /// A file on this machine that holds only the server's join
+        /// password. `cargo xtask client join` reads it and sends it to the
+        /// client; nothing prints or keeps it.
+        #[serde(default)]
+        client_password_file: Option<String>,
     },
     /// DCS on a Windows machine reached over SSH. DCS runs in the desktop
     /// user's session, started and ended by two scheduled tasks the SSH
@@ -178,6 +191,8 @@ mod tests {
                 profile: None,
                 restart: None,
                 map_path: None,
+                client_address: None,
+                client_password_file: None,
             }
         );
     }

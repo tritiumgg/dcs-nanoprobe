@@ -311,6 +311,114 @@ impl Log {
     }
 }
 
+/// `EVENT`: a DCS world event, its ID and the allow-listed fields the shim
+/// read from it (spec/records.md, "Layout: EVENT").
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Event {
+    /// The DCS event ID.
+    pub id: u32,
+    /// Each an `event_field` code and its value, in the order written. A
+    /// decoder keeps codes it does not know: later steps add codes.
+    pub fields: Vec<(u16, Lv)>,
+}
+
+impl Event {
+    /// The payload.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u32(self.id).u32(self.fields.len() as u32);
+        for (code, value) in &self.fields {
+            w.u16(*code).lv(value);
+        }
+        w.finish()
+    }
+
+    /// Decode a payload.
+    pub fn decode(b: &[u8]) -> Result<Event, DecodeError> {
+        let mut r = Reader::new(b);
+        let id = r.u32()?;
+        let n = r.u32()?;
+        // A field takes at least three bytes, a code and a tag, so a count
+        // the payload cannot hold reserves nothing.
+        let mut fields = Vec::with_capacity((n as usize).min(r.remaining() / 3));
+        for _ in 0..n {
+            let code = r.u16()?;
+            fields.push((code, r.lv()?));
+        }
+        Ok(Event { id, fields })
+    }
+
+    /// The first value with `code`.
+    pub fn get(&self, code: u64) -> Option<&Lv> {
+        self.fields
+            .iter()
+            .find(|(c, _)| u64::from(*c) == code)
+            .map(|(_, v)| v)
+    }
+
+    /// The value with `code` as a number, if it is one.
+    pub fn number(&self, code: u64) -> Option<f64> {
+        match self.get(code) {
+            Some(Lv::Number(n)) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// The value with `code` as a DCS object ID: a number that is a whole,
+    /// non-negative value below 2^53. Anything else is no ID.
+    pub fn object(&self, code: u64) -> Option<u64> {
+        let n = self.number(code)?;
+        (n.is_finite() && n >= 0.0 && n.fract() == 0.0 && n < 9_007_199_254_740_992.0)
+            .then_some(n as u64)
+    }
+
+    /// The value with `code` as text, if it is a string. Bytes that are not
+    /// UTF-8 are replaced.
+    pub fn text(&self, code: u64) -> Option<String> {
+        match self.get(code) {
+            Some(Lv::String(s)) => Some(String::from_utf8_lossy(s).into_owned()),
+            _ => None,
+        }
+    }
+
+    /// The record written in place of one over the payload limit, by the
+    /// `EVENT` row of spec/records.md, "Oversized records": every string cut
+    /// to 1,024 bytes, at a character boundary where it is UTF-8, every
+    /// table or other non-scalar value nil, numbers and booleans kept.
+    pub fn cut(&self) -> Event {
+        let fields = self
+            .fields
+            .iter()
+            .map(|(c, v)| {
+                let v = match v {
+                    Lv::String(s) => Lv::String(cut_utf8(s, 1024).to_vec()),
+                    Lv::Table(_) | Lv::Other(_) => Lv::Nil,
+                    v => v.clone(),
+                };
+                (*c, v)
+            })
+            .collect();
+        Event {
+            id: self.id,
+            fields,
+        }
+    }
+}
+
+/// `bytes` cut to at most `max` bytes, at a UTF-8 character boundary when
+/// the bytes are UTF-8 up to the cut.
+fn cut_utf8(bytes: &[u8], max: usize) -> &[u8] {
+    if bytes.len() <= max {
+        return bytes;
+    }
+    let mut end = max;
+    // Step back over continuation bytes, at most three.
+    while end > max.saturating_sub(3) && bytes[end] & 0xC0 == 0x80 {
+        end -= 1;
+    }
+    &bytes[..end]
+}
+
 /// The command header at the start of every inbound payload.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CommandHeader {
@@ -394,6 +502,7 @@ mod tests {
             data: Lv::Nil,
         };
         assert_eq!(log.encode().len(), fixed("LOG") + 5);
+        assert_eq!(Event::default().encode().len(), fixed("EVENT"));
         let mut w = Writer::new();
         CommandHeader::default().write(&mut w);
         assert_eq!(w.len(), fixed("command"));
@@ -633,5 +742,80 @@ mod tests {
         };
         assert_eq!(Log::decode(&log.encode()), Ok(log));
         assert!(Frame::decode(&[0; 10]).is_err());
+    }
+
+    #[test]
+    fn an_event_round_trips_and_reads_its_fields() {
+        let e = Event {
+            id: 28,
+            fields: vec![
+                (1, Lv::Number(12.5)),
+                (2, Lv::Number(16_777_472.0)),
+                (5, Lv::String(b"AIM_120C".to_vec())),
+                (99, Lv::Bool(true)),
+            ],
+        };
+        let d = Event::decode(&e.encode()).expect("decodes");
+        assert_eq!(d, e);
+        assert_eq!(d.number(1), Some(12.5));
+        assert_eq!(d.object(2), Some(16_777_472));
+        assert_eq!(d.text(5).as_deref(), Some("AIM_120C"));
+        assert_eq!(d.get(99), Some(&Lv::Bool(true)));
+        assert_eq!(d.get(3), None);
+    }
+
+    #[test]
+    fn an_object_id_is_a_whole_non_negative_number() {
+        for bad in [-1.0, 1.5, f64::NAN, f64::INFINITY, 1e300] {
+            let e = Event {
+                id: 1,
+                fields: vec![(2, Lv::Number(bad))],
+            };
+            assert_eq!(e.object(2), None, "{bad}");
+        }
+        let e = Event {
+            id: 1,
+            fields: vec![(2, Lv::String(b"7".to_vec()))],
+        };
+        assert_eq!(e.object(2), None);
+    }
+
+    #[test]
+    fn an_event_count_past_the_payload_fails_without_reserving() {
+        let mut w = Writer::new();
+        w.u32(1).u32(u32::MAX);
+        assert!(Event::decode(&w.finish()).is_err());
+    }
+
+    #[test]
+    fn a_cut_event_has_short_strings_and_no_tables() {
+        // "a" then two-byte characters: byte 1,024 is a continuation byte,
+        // so the cut steps back one byte to 1,023.
+        let text = format!("a{}", "\u{e9}".repeat(1000));
+        // Bytes that are not UTF-8: the cut stops stepping back after three.
+        let raw = vec![0x80u8; 2000];
+        let e = Event {
+            id: 25,
+            fields: vec![
+                (8, Lv::String(text.into_bytes())),
+                (15, Lv::String(raw)),
+                (9, Lv::Number(4.0)),
+                (10, Lv::Table(vec![(Lv::Number(1.0), Lv::Bool(true))])),
+                (11, Lv::Bool(true)),
+            ],
+        };
+        let c = e.cut();
+        let Some(Lv::String(cut)) = c.get(8) else {
+            panic!("no text")
+        };
+        assert_eq!(cut.len(), 1023);
+        assert!(std::str::from_utf8(cut).is_ok());
+        let Some(Lv::String(cut_raw)) = c.get(15) else {
+            panic!("no raw")
+        };
+        assert_eq!(cut_raw.len(), 1021);
+        assert_eq!(c.number(9), Some(4.0));
+        assert_eq!(c.get(10), Some(&Lv::Nil));
+        assert_eq!(c.get(11), Some(&Lv::Bool(true)));
     }
 }

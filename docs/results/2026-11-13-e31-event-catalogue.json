@@ -1,0 +1,785 @@
+{
+  "events": [
+    {
+      "allow": [
+        "TIME",
+        "INITIATOR",
+        "INITIATOR_CATEGORY",
+        "PLACE",
+        "SUBPLACE"
+      ],
+      "allowed_unseen": [],
+      "causes": {
+        "client": 1
+      },
+      "count": 1,
+      "fields": [
+        {
+          "path": "id",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "object:Unit": 1
+          }
+        },
+        {
+          "path": "initiator.id_",
+          "present": 1,
+          "read_as": "INITIATOR",
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator_data",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "table": 1
+          }
+        },
+        {
+          "path": "initiator_data.coalition",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator_data.mission_id",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "string": 1
+          }
+        },
+        {
+          "path": "initiator_data.object_category",
+          "present": 1,
+          "read_as": "INITIATOR_CATEGORY",
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator_data.object_id",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator_data.unit_name",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "string": 1
+          }
+        },
+        {
+          "path": "initiator_data.unit_type",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "string": 1
+          }
+        },
+        {
+          "path": "place",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "object:Airbase": 1
+          }
+        },
+        {
+          "path": "place.id_",
+          "present": 1,
+          "read_as": "PLACE",
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "subPlace",
+          "present": 1,
+          "read_as": "SUBPLACE",
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "time",
+          "present": 1,
+          "read_as": "TIME",
+          "shapes": {
+            "number": 1
+          }
+        }
+      ],
+      "fields_by_cause": {
+        "client": {
+          "id": 1,
+          "initiator": 1,
+          "initiator.id_": 1,
+          "initiator_data": 1,
+          "initiator_data.coalition": 1,
+          "initiator_data.mission_id": 1,
+          "initiator_data.object_category": 1,
+          "initiator_data.object_id": 1,
+          "initiator_data.unit_name": 1,
+          "initiator_data.unit_type": 1,
+          "place": 1,
+          "place.id_": 1,
+          "subPlace": 1,
+          "time": 1
+        }
+      },
+      "forwarded": {
+        "INITIATOR": 1,
+        "INITIATOR_CATEGORY": 1,
+        "PLACE": 1,
+        "SUBPLACE": 1,
+        "TIME": 1
+      },
+      "forwarded_over_present": [],
+      "forwarded_under_present": [],
+      "forwarded_unexpected": [],
+      "id": 15,
+      "name": "S_EVENT_BIRTH",
+      "records": 1,
+      "seen_unread": [
+        "id",
+        "initiator_data.coalition",
+        "initiator_data.mission_id",
+        "initiator_data.object_id",
+        "initiator_data.unit_name",
+        "initiator_data.unit_type"
+      ],
+      "stream_only": false,
+      "time_skew_by_cause": {
+        "client": 0.0
+      },
+      "values": {
+        "initiator_data.object_category": {
+          "1": 1
+        }
+      },
+      "values_by_cause": {
+        "client": {
+          "initiator_data.object_category": {
+            "1": 1
+          }
+        }
+      }
+    },
+    {
+      "allow": [
+        "TIME",
+        "INITIATOR",
+        "INITIATOR_CATEGORY"
+      ],
+      "allowed_unseen": [],
+      "causes": {
+        "client": 1
+      },
+      "count": 1,
+      "fields": [
+        {
+          "path": "id",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "object:Unit": 1
+          }
+        },
+        {
+          "path": "initiator.id_",
+          "present": 1,
+          "read_as": "INITIATOR",
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator_data",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "table": 1
+          }
+        },
+        {
+          "path": "initiator_data.coalition",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator_data.mission_id",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "string": 1
+          }
+        },
+        {
+          "path": "initiator_data.object_category",
+          "present": 1,
+          "read_as": "INITIATOR_CATEGORY",
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator_data.object_id",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "initiator_data.unit_name",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "string": 1
+          }
+        },
+        {
+          "path": "initiator_data.unit_type",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "string": 1
+          }
+        },
+        {
+          "path": "time",
+          "present": 1,
+          "read_as": "TIME",
+          "shapes": {
+            "number": 1
+          }
+        }
+      ],
+      "fields_by_cause": {
+        "client": {
+          "id": 1,
+          "initiator": 1,
+          "initiator.id_": 1,
+          "initiator_data": 1,
+          "initiator_data.coalition": 1,
+          "initiator_data.mission_id": 1,
+          "initiator_data.object_category": 1,
+          "initiator_data.object_id": 1,
+          "initiator_data.unit_name": 1,
+          "initiator_data.unit_type": 1,
+          "time": 1
+        }
+      },
+      "forwarded": {
+        "INITIATOR": 1,
+        "INITIATOR_CATEGORY": 1,
+        "TIME": 1
+      },
+      "forwarded_over_present": [],
+      "forwarded_under_present": [],
+      "forwarded_unexpected": [],
+      "id": 21,
+      "name": "S_EVENT_PLAYER_LEAVE_UNIT",
+      "records": 1,
+      "seen_unread": [
+        "id",
+        "initiator_data.coalition",
+        "initiator_data.mission_id",
+        "initiator_data.object_id",
+        "initiator_data.unit_name",
+        "initiator_data.unit_type"
+      ],
+      "stream_only": false,
+      "time_skew_by_cause": {
+        "client": 0.0
+      },
+      "values": {
+        "initiator_data.object_category": {
+          "1": 1
+        }
+      },
+      "values_by_cause": {
+        "client": {
+          "initiator_data.object_category": {
+            "1": 1
+          }
+        }
+      }
+    },
+    {
+      "allow": [
+        "TIME"
+      ],
+      "allowed_unseen": [],
+      "causes": {
+        "client": 1
+      },
+      "count": 1,
+      "fields": [
+        {
+          "path": "id",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "time",
+          "present": 1,
+          "read_as": "TIME",
+          "shapes": {
+            "number": 1
+          }
+        }
+      ],
+      "fields_by_cause": {
+        "client": {
+          "id": 1,
+          "time": 1
+        }
+      },
+      "forwarded": {
+        "TIME": 1
+      },
+      "forwarded_over_present": [],
+      "forwarded_under_present": [],
+      "forwarded_unexpected": [],
+      "id": 57,
+      "name": "S_EVENT_SIMULATION_FREEZE",
+      "records": 1,
+      "seen_unread": [
+        "id"
+      ],
+      "stream_only": false,
+      "time_skew_by_cause": {
+        "client": 0.0
+      },
+      "values": {},
+      "values_by_cause": {}
+    },
+    {
+      "allow": [
+        "TIME"
+      ],
+      "allowed_unseen": [],
+      "causes": {},
+      "count": 0,
+      "fields": [],
+      "fields_by_cause": {},
+      "forwarded": {
+        "TIME": 1
+      },
+      "forwarded_over_present": [],
+      "forwarded_under_present": [],
+      "forwarded_unexpected": [],
+      "id": 46,
+      "name": "S_EVENT_SIMULATION_START",
+      "records": 1,
+      "seen_unread": [],
+      "stream_only": true,
+      "time_skew_by_cause": {},
+      "values": {},
+      "values_by_cause": {}
+    },
+    {
+      "allow": [
+        "TIME"
+      ],
+      "allowed_unseen": [],
+      "causes": {
+        "client": 1
+      },
+      "count": 1,
+      "fields": [
+        {
+          "path": "id",
+          "present": 1,
+          "read_as": null,
+          "shapes": {
+            "number": 1
+          }
+        },
+        {
+          "path": "time",
+          "present": 1,
+          "read_as": "TIME",
+          "shapes": {
+            "number": 1
+          }
+        }
+      ],
+      "fields_by_cause": {
+        "client": {
+          "id": 1,
+          "time": 1
+        }
+      },
+      "forwarded": {
+        "TIME": 1
+      },
+      "forwarded_over_present": [],
+      "forwarded_under_present": [],
+      "forwarded_unexpected": [],
+      "id": 58,
+      "name": "S_EVENT_SIMULATION_UNFREEZE",
+      "records": 1,
+      "seen_unread": [
+        "id"
+      ],
+      "stream_only": false,
+      "time_skew_by_cause": {
+        "client": 0.0
+      },
+      "values": {},
+      "values_by_cause": {}
+    },
+    {
+      "allow": [
+        "TIME",
+        "INITIATOR",
+        "INITIATOR_CATEGORY",
+        "WEAPON_NAME"
+      ],
+      "allowed_unseen": [],
+      "causes": {
+        "client": 9
+      },
+      "count": 9,
+      "fields": [
+        {
+          "path": "id",
+          "present": 9,
+          "read_as": null,
+          "shapes": {
+            "number": 9
+          }
+        },
+        {
+          "path": "initiator",
+          "present": 9,
+          "read_as": null,
+          "shapes": {
+            "object:Unit": 9
+          }
+        },
+        {
+          "path": "initiator.id_",
+          "present": 9,
+          "read_as": "INITIATOR",
+          "shapes": {
+            "number": 9
+          }
+        },
+        {
+          "path": "initiator_data",
+          "present": 9,
+          "read_as": null,
+          "shapes": {
+            "table": 9
+          }
+        },
+        {
+          "path": "initiator_data.coalition",
+          "present": 9,
+          "read_as": null,
+          "shapes": {
+            "number": 9
+          }
+        },
+        {
+          "path": "initiator_data.mission_id",
+          "present": 9,
+          "read_as": null,
+          "shapes": {
+            "string": 9
+          }
+        },
+        {
+          "path": "initiator_data.object_category",
+          "present": 9,
+          "read_as": "INITIATOR_CATEGORY",
+          "shapes": {
+            "number": 9
+          }
+        },
+        {
+          "path": "initiator_data.object_id",
+          "present": 9,
+          "read_as": null,
+          "shapes": {
+            "number": 9
+          }
+        },
+        {
+          "path": "initiator_data.unit_name",
+          "present": 9,
+          "read_as": null,
+          "shapes": {
+            "string": 9
+          }
+        },
+        {
+          "path": "initiator_data.unit_type",
+          "present": 9,
+          "read_as": null,
+          "shapes": {
+            "string": 9
+          }
+        },
+        {
+          "path": "time",
+          "present": 9,
+          "read_as": "TIME",
+          "shapes": {
+            "number": 9
+          }
+        },
+        {
+          "path": "weapon_name",
+          "present": 9,
+          "read_as": "WEAPON_NAME",
+          "shapes": {
+            "string": 9
+          }
+        }
+      ],
+      "fields_by_cause": {
+        "client": {
+          "id": 9,
+          "initiator": 9,
+          "initiator.id_": 9,
+          "initiator_data": 9,
+          "initiator_data.coalition": 9,
+          "initiator_data.mission_id": 9,
+          "initiator_data.object_category": 9,
+          "initiator_data.object_id": 9,
+          "initiator_data.unit_name": 9,
+          "initiator_data.unit_type": 9,
+          "time": 9,
+          "weapon_name": 9
+        }
+      },
+      "forwarded": {
+        "INITIATOR": 9,
+        "INITIATOR_CATEGORY": 9,
+        "TIME": 9,
+        "WEAPON_NAME": 9
+      },
+      "forwarded_over_present": [],
+      "forwarded_under_present": [],
+      "forwarded_unexpected": [],
+      "id": 34,
+      "name": "S_EVENT_WEAPON_ADD",
+      "records": 9,
+      "seen_unread": [
+        "id",
+        "initiator_data.coalition",
+        "initiator_data.mission_id",
+        "initiator_data.object_id",
+        "initiator_data.unit_name",
+        "initiator_data.unit_type"
+      ],
+      "stream_only": false,
+      "time_skew_by_cause": {
+        "client": 0.0
+      },
+      "values": {
+        "initiator_data.object_category": {
+          "1": 9
+        }
+      },
+      "values_by_cause": {
+        "client": {
+          "initiator_data.object_category": {
+            "1": 9
+          }
+        }
+      }
+    }
+  ],
+  "recorded": {
+    "cut_off": 0,
+    "duplicates": 0,
+    "events": 14,
+    "records": 43,
+    "undecodable": []
+  },
+  "source": {
+    "agent_metrics": {
+      "commands": 3,
+      "ev": "final",
+      "events_dropped": 0,
+      "frame": 43559,
+      "hist_event": [
+        0,
+        3,
+        7,
+        4,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "hist_pump": [
+        3007,
+        34017,
+        6035,
+        86,
+        24,
+        1,
+        0,
+        0,
+        389,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "lifecycle": 4,
+      "over_budget": 0,
+      "t": 1794560123518,
+      "timed": 3
+    },
+    "dcs": "2.9.31.29434 (dcs_server.release)",
+    "facts": [],
+    "failed": [],
+    "kind": "docker-wine",
+    "name_conflicts": [],
+    "probes": [
+      "e31-client"
+    ],
+    "time": "2026-11-13T08:55Z",
+    "unforwarded": [],
+    "wine": "wine-10.0 (Debian 10.0~repack-6)"
+  },
+  "unreached": [
+    "S_EVENT_SHOT",
+    "S_EVENT_HIT",
+    "S_EVENT_TAKEOFF",
+    "S_EVENT_LAND",
+    "S_EVENT_CRASH",
+    "S_EVENT_EJECTION",
+    "S_EVENT_REFUELING",
+    "S_EVENT_DEAD",
+    "S_EVENT_PILOT_DEAD",
+    "S_EVENT_BASE_CAPTURED",
+    "S_EVENT_MISSION_START",
+    "S_EVENT_MISSION_END",
+    "S_EVENT_TOOK_CONTROL",
+    "S_EVENT_REFUELING_STOP",
+    "S_EVENT_HUMAN_FAILURE",
+    "S_EVENT_DETAILED_FAILURE",
+    "S_EVENT_ENGINE_STARTUP",
+    "S_EVENT_ENGINE_SHUTDOWN",
+    "S_EVENT_PLAYER_ENTER_UNIT",
+    "S_EVENT_PLAYER_COMMENT",
+    "S_EVENT_SHOOTING_START",
+    "S_EVENT_SHOOTING_END",
+    "S_EVENT_MARK_ADDED",
+    "S_EVENT_MARK_CHANGE",
+    "S_EVENT_MARK_REMOVED",
+    "S_EVENT_KILL",
+    "S_EVENT_SCORE",
+    "S_EVENT_UNIT_LOST",
+    "S_EVENT_LANDING_AFTER_EJECTION",
+    "S_EVENT_PARATROOPER_LENDING",
+    "S_EVENT_DISCARD_CHAIR_AFTER_EJECTION",
+    "S_EVENT_TRIGGER_ZONE",
+    "S_EVENT_LANDING_QUALITY_MARK",
+    "S_EVENT_BDA",
+    "S_EVENT_AI_ABORT_MISSION",
+    "S_EVENT_DAYNIGHT",
+    "S_EVENT_FLIGHT_TIME",
+    "S_EVENT_PLAYER_SELF_KILL_PILOT",
+    "S_EVENT_PLAYER_CAPTURE_AIRFIELD",
+    "S_EVENT_EMERGENCY_LANDING",
+    "S_EVENT_UNIT_CREATE_TASK",
+    "S_EVENT_UNIT_DELETE_TASK",
+    "S_EVENT_WEAPON_REARM",
+    "S_EVENT_WEAPON_DROP",
+    "S_EVENT_UNIT_TASK_COMPLETE",
+    "S_EVENT_UNIT_TASK_STAGE",
+    "S_EVENT_MAC_EXTRA_SCORE",
+    "S_EVENT_MISSION_RESTART",
+    "S_EVENT_MISSION_WINNER",
+    "S_EVENT_RUNWAY_TAKEOFF",
+    "S_EVENT_RUNWAY_TOUCH",
+    "S_EVENT_MAC_LMS_RESTART",
+    "S_EVENT_HUMAN_AIRCRAFT_REPAIR_START",
+    "S_EVENT_HUMAN_AIRCRAFT_REPAIR_FINISH",
+    "S_EVENT_GROUP_CHANGE_OPTION"
+  ]
+}
