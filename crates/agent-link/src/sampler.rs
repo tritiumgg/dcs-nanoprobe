@@ -537,6 +537,10 @@ struct Budget {
     deadline: Option<Instant>,
     /// Event time since the last frame, µs.
     events_us: f64,
+    /// Commanded-work time this frame, µs: handler take-to-done spans and a
+    /// pump for commands only. It counts against the commanded budget, not
+    /// the debt, the credit or the window (spec/commands.md, "Handlers").
+    commanded_us: f64,
     /// Repayment planned this frame.
     repay: f64,
     /// What the test scale withheld from this frame's budget, µs.
@@ -1104,6 +1108,25 @@ impl Sampler {
 
     fn row_mut(&mut self, slot: u32) -> Option<&mut Row> {
         self.rows.get_mut(slot as usize).and_then(Option::as_mut)
+    }
+
+    /// The mission generation of the table.
+    pub fn generation(&self) -> u32 {
+        self.generation
+    }
+
+    /// Time the pump spent on commands before [`Sampler::begin`]: not the
+    /// cross-state call's, so it does not count in its estimate.
+    pub fn excuse(&mut self, spent: Duration) {
+        if let Some(d) = self.decided.as_mut() {
+            *d += spent;
+        }
+    }
+
+    /// Time this frame spent on commands whose handler runs in Lua: not the
+    /// sampler's, so it is out of the debt, the credit and the window share.
+    pub fn excuse_commanded(&mut self, spent: Duration) {
+        self.budget.commanded_us += spent.as_secs_f64() * 1e6;
     }
 
     /// The mission generation changed: every row of the earlier one is gone,
@@ -2048,7 +2071,8 @@ impl Sampler {
                 self.reserved()
             };
         let b = &mut self.budget;
-        let fixed = now.saturating_duration_since(link.began()).as_secs_f64() * 1e6 + b.events_us;
+        let fixed = now.saturating_duration_since(link.began()).as_secs_f64() * 1e6 + b.events_us
+            - b.commanded_us;
         if fixed - self.sweep_spent >= b.allowance {
             self.starved += 1;
         }
@@ -2304,7 +2328,8 @@ impl Sampler {
         };
         let cap = self.slice_cap();
         let b = &self.budget;
-        let fixed = now.saturating_duration_since(link.began()).as_secs_f64() * 1e6 + b.events_us;
+        let fixed = now.saturating_duration_since(link.began()).as_secs_f64() * 1e6 + b.events_us
+            - b.commanded_us;
         // The most a frame can ever have, with full credit and no debt: no
         // more than the largest slice. A sweep the savings pay for always
         // fits a frame, and the pump is not shut out by savings the sweep
@@ -2659,8 +2684,8 @@ impl Sampler {
         let reserved = if release { 0.0 } else { reserve };
         self.pump_reserve = if release { reserve * k } else { 0.0 };
         let b = &mut self.budget;
-        let fixed = now.saturating_duration_since(link.began()).as_secs_f64() * 1e6
-            + b.events_us
+        let fixed = now.saturating_duration_since(link.began()).as_secs_f64() * 1e6 + b.events_us
+            - b.commanded_us
             + reserved;
         // The one point the test scale applies (spec/faults.md). What it
         // withholds is not spent and never becomes debt.
@@ -4134,7 +4159,8 @@ impl Sampler {
         let share = link.overhead_share();
         let frame_us = now.saturating_duration_since(link.began()).as_secs_f64() * 1e6;
         let b = &mut self.budget;
-        let agent_us = frame_us + std::mem::take(&mut b.events_us);
+        let agent_us = (frame_us - std::mem::take(&mut b.commanded_us)).max(0.0)
+            + std::mem::take(&mut b.events_us);
         let cap = share * SECOND_US;
         let start = *b.syscall_window_start.get_or_insert(now);
         if now.saturating_duration_since(start) >= Duration::from_secs(1) {

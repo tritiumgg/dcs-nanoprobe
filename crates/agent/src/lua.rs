@@ -88,6 +88,13 @@ unsafe extern "C" {
     /// when the table must grow: callers write only slots that exist.
     pub unsafe fn lua_rawseti(state: *mut State, index: c_int, n: c_int);
 
+    /// Make room for `extra` more stack slots; 0 when the stack cannot grow.
+    pub unsafe fn lua_checkstack(state: *mut State, extra: c_int) -> c_int;
+
+    /// A unique address for the table, function, thread or userdata at
+    /// `index`, or null. Never raises.
+    pub unsafe fn lua_topointer(state: *mut State, index: c_int) -> *const c_void;
+
     /// The index of the top of the stack, which is the number of values on it.
     pub unsafe fn lua_gettop(state: *mut State) -> c_int;
 
@@ -122,6 +129,14 @@ unsafe extern "C" {
         nresults: c_int,
         errfunc: c_int,
     ) -> c_int;
+
+    /// Set `t[k] = v` for the table at `index`, the key and value on top,
+    /// with no metamethod; pops both.
+    pub unsafe fn lua_rawset(state: *mut State, index: c_int);
+
+    /// Pop a key and push the next key and value of the table at `index`;
+    /// 0 and nothing pushed at the end.
+    pub unsafe fn lua_next(state: *mut State, index: c_int) -> c_int;
 
     /// Raise the value on top of the stack as an error. Never returns.
     pub unsafe fn lua_error(state: *mut State) -> c_int;

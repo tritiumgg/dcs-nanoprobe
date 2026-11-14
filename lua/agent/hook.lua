@@ -23,7 +23,7 @@ local dir = root .. 'versions/' .. build .. '/'
 local logmodule = assert(loadfile(dir .. 'lua/log.lua'))()
 
 -- The agent's interface version this hook was written for.
-local ABI = '7'
+local ABI = '8'
 -- What agent.frame returns.
 local FRAME_RELOAD, FRAME_DISABLED = 1, 2
 
@@ -330,7 +330,7 @@ end)
 
 callbacks.onSimulationFrame = guard('onSimulationFrame', function()
   if linked then
-    local code, pump = agent.frame(DCS.getRealTime(), DCS.getModelTime(), DCS.getPause(), BY_ID)
+    local code, pump = agent.frame(DCS.getRealTime(), DCS.getModelTime(), DCS.getPause(), BY_ID, shim_loaded)
     -- A frame that does not sample ends inside `frame`.
     if pump then
       if shim_loaded then

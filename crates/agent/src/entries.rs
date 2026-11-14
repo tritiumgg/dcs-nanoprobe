@@ -17,6 +17,7 @@ use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 
 use nanoprobe_transport::codec::Lv;
+use nanoprobe_transport::layout::result;
 use nanoprobe_transport::log::{Level, Value};
 use nanoprobe_transport::map::MappedFile;
 use nanoprobe_transport::mem::Memory;
@@ -118,6 +119,8 @@ entries! {
     start => work_start;
     frame => work_frame, hot;
     finish => work_finish, hot;
+    command => work_command, hot;
+    command_done => work_command_done, hot;
     deaths => work_deaths;
     reads => work_reads;
     spot => work_spot, hot;
@@ -505,13 +508,297 @@ unsafe fn work_frame(state: *mut State) -> c_int {
             Ok(p)
         }
     };
-    let (code, pump) = driver::frame(real, model, paused, getter.then_some(&mut read));
+    // SAFETY: as above.
+    let shim = unsafe { lua::lua_toboolean(state, 5) } != 0;
+    let (code, pump) = driver::frame(real, model, paused, shim, getter.then_some(&mut read));
     // SAFETY: a live state with two free slots.
     unsafe {
         lua::lua_pushinteger(state, code as isize);
         lua::lua_pushboolean(state, c_int::from(pump));
     }
     2
+}
+
+/// The encoded arguments `command` pushes, for [`push_staged`]. Single
+/// threaded: only the sim thread calls the agent.
+static STAGED: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+
+/// `command()`: in the shim's pump, the next command whose handler runs in
+/// Lua, taken and admitted (spec/commands.md, "Handlers"). Returns its
+/// opcode and a table of its arguments, or nothing. The table is built
+/// under `lua_pcall`, so a push that raises leaves the command outstanding,
+/// to be answered `LUA_ERROR` "no result".
+unsafe fn work_command(state: *mut State) -> c_int {
+    let mut args = std::mem::take(&mut *STAGED.lock().unwrap_or_else(|e| e.into_inner()));
+    let opcode = driver::command(&mut args);
+    *STAGED.lock().unwrap_or_else(|e| e.into_inner()) = args;
+    let Some(opcode) = opcode else {
+        return 0;
+    };
+    // SAFETY: a live state with the free slots Lua guarantees a C function;
+    // the table is built under `lua_pcall`.
+    unsafe {
+        lua::lua_settop(state, 0);
+        lua::lua_pushinteger(state, opcode as isize);
+        lua::lua_pushcclosure(state, push_staged, 0);
+        if lua::lua_pcall(state, 0, 1, 0) != 0 {
+            lua::lua_settop(state, 0);
+            return 0;
+        }
+    }
+    2
+}
+
+/// Push the table [`STAGED`] encodes. Called only under `lua_pcall`: a push
+/// may raise, and nothing here owns a value that a raise would skip.
+unsafe extern "C" fn push_staged(state: *mut State) -> c_int {
+    let guard = STAGED.lock().unwrap_or_else(|e| e.into_inner());
+    let bytes: *const [u8] = &guard[..];
+    drop(guard);
+    // SAFETY: the bytes live in the static until the next `command`, which
+    // cannot run during this call; the reader borrows them and owns nothing.
+    let mut rd = nanoprobe_transport::codec::Reader::new(unsafe { &*bytes });
+    // SAFETY: a live state; `push_lv` pushes one value.
+    if unsafe { push_lv(state, &mut rd, 0) } {
+        1
+    } else {
+        0
+    }
+}
+
+/// The most table levels `push_lv` builds: the 16 the codec admits below the
+/// arguments' root, and the `{name, args}` wrapper the driver puts around them.
+const PUSH_DEPTH: u32 = 17;
+
+/// Push the `lv` value at `rd`. False when it does not decode; nothing is
+/// pushed then. Owns nothing: a raise from a push passes through it.
+#[inline(never)]
+unsafe fn push_lv(
+    state: *mut State,
+    rd: &mut nanoprobe_transport::codec::Reader<'_>,
+    depth: u32,
+) -> bool {
+    use nanoprobe_transport::layout::lv_tag;
+    let Ok(tag) = rd.u8() else { return false };
+    // SAFETY: a live state; each branch pushes one value, and a table's
+    // pairs are set as they come, so the stack grows by two at most.
+    unsafe {
+        match u64::from(tag) {
+            lv_tag::NIL => lua::lua_pushnil(state),
+            lv_tag::FALSE => lua::lua_pushboolean(state, 0),
+            lv_tag::TRUE => lua::lua_pushboolean(state, 1),
+            lv_tag::NUMBER => match rd.f64() {
+                Ok(n) => lua::lua_pushnumber(state, n),
+                Err(_) => return false,
+            },
+            lv_tag::STRING => {
+                let Ok(n) = rd.u32() else { return false };
+                let Ok(b) = rd.bytes(n as usize) else {
+                    return false;
+                };
+                lua::lua_pushlstring(state, b.as_ptr().cast(), b.len());
+            }
+            lv_tag::TABLE if depth < PUSH_DEPTH => {
+                let Ok(n) = rd.u32() else { return false };
+                // A level uses 3 slots, 17 levels at most, grown 4 at a
+                // time. Under the caller's `lua_pcall`, so a failed grow is a clean false.
+                if lua::lua_checkstack(state, 4) == 0 {
+                    return false;
+                }
+                lua::lua_createtable(state, 0, 0);
+                for _ in 0..n {
+                    if !push_lv(state, rd, depth + 1) {
+                        lua::lua_settop(state, -2);
+                        return false;
+                    }
+                    if !push_lv(state, rd, depth + 1) {
+                        lua::lua_settop(state, -3);
+                        return false;
+                    }
+                    lua::lua_rawset(state, -3);
+                }
+            }
+            lv_tag::OTHER => {
+                let Ok(name) = rd.str() else { return false };
+                lua::lua_pushlstring(state, name.as_ptr().cast(), name.len());
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// What [`read_done`] read, for [`work_command_done`]: the code, the message,
+/// the value, and whether the value was cut at the read limit. Single
+/// threaded: only the sim thread calls the agent.
+static DONE: Mutex<Option<Done>> = Mutex::new(None);
+
+/// The code, message, value and cut flag of one `command_done`.
+type Done = (Option<u64>, String, Lv, bool);
+
+/// `command_done(code, message, value)`: the shim's handler finished the
+/// command `command` returned. `value` is read as an `lv`, tables included,
+/// 16 deep at most. The read runs under `lua_pcall`: it grows the stack once
+/// and can raise only there, so a failed grow answers `LUA_ERROR`. A value cut
+/// at the read limit is answered `TOO_LARGE` with a nil value.
+unsafe fn work_command_done(state: *mut State) -> c_int {
+    *DONE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    // SAFETY: a live state; `command_done` is called with three arguments,
+    // the closure runs under `lua_pcall` with copies of them, and the stack
+    // has the free slots Lua guarantees a C function.
+    let failed = unsafe {
+        lua::lua_settop(state, 3);
+        lua::lua_pushcclosure(state, read_done, 0);
+        lua::lua_pushvalue(state, 1);
+        lua::lua_pushvalue(state, 2);
+        lua::lua_pushvalue(state, 3);
+        let status = lua::lua_pcall(state, 3, 0, 0);
+        lua::lua_settop(state, 0);
+        status != 0
+    };
+    let read = DONE.lock().unwrap_or_else(|e| e.into_inner()).take();
+    match read {
+        Some((code, message, value, cut)) if !failed => {
+            let code = code.unwrap_or(result::LUA_ERROR);
+            if cut && code == result::APPLIED {
+                let why = format!(
+                    "value over {READ_NODES} table entries or {} KiB of strings",
+                    READ_BYTES / 1024
+                );
+                driver::command_done(result::TOO_LARGE, &why, Lv::Nil);
+            } else {
+                driver::command_done(code, &message, value);
+            }
+        }
+        _ => driver::command_done(result::LUA_ERROR, "the result could not be read", Lv::Nil),
+    }
+    0
+}
+
+/// Read `command_done`'s three arguments into [`DONE`]. Called only under
+/// `lua_pcall`. The one call that can raise, `lua_checkstack` on a failed
+/// grow, comes first, before this function owns a value; the reads after it
+/// allocate nothing in Lua, and the message is read only when it is a string.
+#[inline(never)]
+unsafe extern "C" fn read_done(state: *mut State) -> c_int {
+    // SAFETY: a live state; 3 slots per table level, 16 levels, and the
+    // arguments.
+    unsafe { lua::lua_checkstack(state, 64) };
+    // SAFETY: as above; the stack has room for every read below.
+    let done = unsafe {
+        let code = arg_id(state, 1);
+        let message = if lua::lua_type(state, 2) == lua::TSTRING {
+            lua::to_string(state, 2).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let (value, cut) = read_lv(state, 3, 0);
+        (code, message, value, cut)
+    };
+    *DONE.lock().unwrap_or_else(|e| e.into_inner()) = Some(done);
+    0
+}
+
+/// The most table entries (key and value pairs) `read_lv` reads from one
+/// return value. A table that
+/// contains itself under several keys has k^16 paths, and the read runs on the
+/// sim thread outside any budget. A value past the limit is cut, and the
+/// command is answered `TOO_LARGE` (spec/commands.md, "Handlers").
+const READ_NODES: u32 = 4096;
+/// The most string bytes `read_lv` reads: a string that would pass the total
+/// is not copied, and cuts the value.
+const READ_BYTES: usize = 16 * 1024;
+
+/// What one `read_lv` has read and the tables on its path.
+struct ReadState {
+    nodes: u32,
+    bytes: usize,
+    cut: bool,
+    path: Vec<*const core::ffi::c_void>,
+}
+
+/// The value at `index` as an `lv`: a table by its pairs, 16 deep at most;
+/// deeper tables and keys that are not strings, numbers or booleans read as
+/// their type name or are skipped. A table on its own path reads as its type
+/// name, and the read stops at [`READ_NODES`] values or [`READ_BYTES`] of
+/// strings. The flag is true when the stop cut the value.
+unsafe fn read_lv(state: *mut State, index: c_int, depth: u32) -> (Lv, bool) {
+    let mut rs = ReadState {
+        nodes: 0,
+        bytes: 0,
+        cut: false,
+        path: Vec::new(),
+    };
+    // SAFETY: the caller's contract.
+    let v = unsafe { read_node(state, index, depth, &mut rs) };
+    (v, rs.cut)
+}
+
+/// One value of [`read_lv`]. The caller grew the stack for 16 levels under
+/// `lua_pcall`; `lua_next` runs with a key it returned, and `lua_topointer`
+/// and the type reads allocate nothing.
+unsafe fn read_node(state: *mut State, index: c_int, depth: u32, rs: &mut ReadState) -> Lv {
+    // SAFETY: a live state; `lua_type` accepts any index.
+    if unsafe { lua::lua_type(state, index) } != lua::TTABLE || depth >= 16 {
+        // SAFETY: as above. A string's length is read before it is copied.
+        unsafe {
+            if lua::lua_type(state, index) == lua::TSTRING
+                && rs.bytes.saturating_add(lua::lua_objlen(state, index)) > READ_BYTES
+            {
+                rs.cut = true;
+                return Lv::Nil;
+            }
+        }
+        // SAFETY: as above.
+        let v = unsafe { scalar(state, index) };
+        if let Lv::String(s) = &v {
+            rs.bytes = rs.bytes.saturating_add(s.len());
+        }
+        return v;
+    }
+    // SAFETY: a live state; `index` holds a table. A table index is made
+    // absolute first, since pushes move relative ones.
+    unsafe {
+        let base = lua::lua_gettop(state);
+        let at = if index < 0 { base + index + 1 } else { index };
+        let id = lua::lua_topointer(state, at);
+        if rs.path.contains(&id) {
+            return Lv::Other(lua::type_name(state, lua::TTABLE));
+        }
+        rs.path.push(id);
+        let mut pairs = Vec::new();
+        lua::lua_pushnil(state);
+        while lua::lua_next(state, at) != 0 {
+            if rs.nodes >= READ_NODES || rs.bytes >= READ_BYTES {
+                rs.cut = true;
+                break;
+            }
+            let top = lua::lua_gettop(state);
+            rs.nodes += 1;
+            if lua::lua_type(state, top - 1) == lua::TSTRING
+                && rs.bytes.saturating_add(lua::lua_objlen(state, top - 1)) > READ_BYTES
+            {
+                rs.cut = true;
+                break;
+            }
+            let k = scalar(state, top - 1);
+            if !matches!(k, Lv::Other(_) | Lv::Nil) {
+                if let Lv::String(s) = &k {
+                    rs.bytes = rs.bytes.saturating_add(s.len());
+                }
+                let v = read_node(state, top, depth + 1, rs);
+                pairs.push((k, v));
+            }
+            lua::lua_settop(state, top - 1);
+        }
+        if rs.nodes > READ_NODES || rs.bytes > READ_BYTES {
+            rs.cut = true;
+        }
+        // A cut read leaves the key on the stack.
+        lua::lua_settop(state, base);
+        rs.path.pop();
+        Lv::Table(pairs)
+    }
 }
 
 /// `finish()`: end the frame: account its time, publish its batch and store

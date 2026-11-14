@@ -8,6 +8,7 @@
 
 pub mod config;
 mod link;
+pub mod revisions;
 pub mod sampler;
 
 pub use link::{Admit, Link, Options, Stamps};

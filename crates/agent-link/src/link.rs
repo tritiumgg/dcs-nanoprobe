@@ -28,7 +28,8 @@ use nanoprobe_transport::codec::Lv;
 use nanoprobe_transport::golden::LAYOUT_HASH;
 use nanoprobe_transport::handshake::{Line, LineBuffer, Refusal, VERSION, tokens_equal};
 use nanoprobe_transport::layout::{
-    Class, flags, gap_class, kind, lifecycle, record_class, result, status as s,
+    Class, CommandClass, Rev, flags, gap_class, kind, lifecycle, opcode, opcode_row, record_class,
+    result, status as s,
 };
 use nanoprobe_transport::map::MappedFile;
 use nanoprobe_transport::mem::Memory;
@@ -37,6 +38,7 @@ use nanoprobe_transport::ring::{Consumer, Producer, Ring};
 use nanoprobe_transport::status::{self, Header, Metrics};
 
 use crate::config::AgentToml;
+use crate::revisions::{RevKey, Revisions};
 
 /// How the link runs.
 #[derive(Clone, Debug)]
@@ -129,7 +131,8 @@ pub enum Admit {
     /// A control command (`seq` 0): the host runs it, and answers only a
     /// failure.
     Control,
-    /// Run the handler. `last_applied_seq` already names the command.
+    /// Run the handler. `last_applied_seq` already names the command; the
+    /// host passes the handler's result to [`Link::ran`].
     Run,
     /// Answer with this result code without running the handler.
     Answer(u64),
@@ -273,6 +276,13 @@ pub struct Link {
     last_served: u64,
     epoch: u64,
     last_applied_seq: u64,
+    revisions: Revisions,
+    /// The revision the command being run would apply, for [`Link::ran`].
+    running: Option<(RevKey, u64)>,
+    /// `BURST` is on.
+    burst: bool,
+    /// The note for a `BURST` read outside `PAUSED` was written.
+    burst_noted: bool,
     counters: Counters,
     metrics: Metrics,
     /// The metrics the status block holds, once this link has written them
@@ -375,6 +385,10 @@ impl Link {
             last_served: 0,
             epoch: 0,
             last_applied_seq: 0,
+            revisions: Revisions::default(),
+            running: None,
+            burst: false,
+            burst_noted: false,
             counters: Counters::default(),
             metrics: Metrics::default(),
             metrics_stored: None,
@@ -812,7 +826,9 @@ impl Link {
     }
 
     /// Start a new mission generation: one more than the last. Returns it.
+    /// The entities' applied revisions go with the old generation.
     pub fn new_generation(&mut self) -> u32 {
+        self.revisions.new_generation();
         self.stamps.mission_gen = self.stamps.mission_gen.wrapping_add(1);
         self.map
             .store32(s::MISSION_GEN, self.stamps.mission_gen, Ordering::Relaxed);
@@ -827,6 +843,11 @@ impl Link {
         }
         self.stamps.lifecycle = state;
         self.map.store32(s::LIFECYCLE, state, Ordering::Relaxed);
+        // The burst turns off when the state leaves PAUSED (spec/commands.md,
+        // "Layout: BURST").
+        if state != lifecycle::PAUSED as u32 {
+            self.burst = false;
+        }
         self.names = (theater.into(), mission.into());
         let l = Lifecycle {
             state,
@@ -867,8 +888,12 @@ impl Link {
         self.store_counters();
     }
 
-    /// Set the active campaign, for the stamps of later records.
+    /// Set the active campaign, for the stamps of later records. A switch to
+    /// another campaign discards every applied revision.
     pub fn set_campaign(&mut self, campaign: u64) {
+        if campaign != self.stamps.campaign {
+            self.revisions.new_campaign();
+        }
         self.stamps.campaign = campaign;
         self.map.store(s::CAMPAIGN, campaign, Ordering::Relaxed);
     }
@@ -993,10 +1018,49 @@ impl Link {
         Some(r.kind)
     }
 
+    /// The next command's opcode and payload without taking it: `in_head`
+    /// does not move, and the next [`Link::take_command`] reads the same
+    /// command. `None` under the same conditions as `take_command`.
+    pub fn peek_command(&mut self, payload: &mut Vec<u8>) -> Option<u16> {
+        if self.disabled || !self.attached() || !self.reading_commands {
+            return None;
+        }
+        if !self.inbound_fresh {
+            if let Err(e) = self.inbound.refresh(&*self.map) {
+                self.detach(&format!("inbound ring: {e}"));
+                return None;
+            }
+            self.inbound_fresh = true;
+        }
+        if self.control_count >= self.opts.control_queue {
+            self.flags |= flags::COMMANDS_HELD as u32;
+            return None;
+        }
+        self.flags &= !(flags::COMMANDS_HELD as u32);
+        match self.inbound.clone().next(&*self.map, payload) {
+            Ok(Some(r)) => Some(r.kind),
+            Ok(None) => None,
+            Err(e) => {
+                self.detach(&format!("inbound ring: {e}"));
+                None
+            }
+        }
+    }
+
+    /// Raw Lua is on in `agent.toml`.
+    pub fn raw_lua(&self) -> bool {
+        self.opts.raw_lua
+    }
+
     /// The rows of spec/commands.md that need no opcode table: the epoch,
-    /// the duplicate and the campaign. The host applies the rows that depend
-    /// on the opcode after a [`Admit::Run`].
-    pub fn admit(&mut self, h: &CommandHeader) -> Admit {
+    /// the duplicate and the campaign, then the rows of the opcode table:
+    /// no campaign, the generation and the revision. An opcode the table does
+    /// not hold is answered `UNKNOWN_OPCODE` after the campaign row
+    /// (spec/commands.md, "Unknown opcodes"). `extension` is the name an
+    /// `EXTENSION_SET` or `EXTENSION_INVOKE` carries, `None` when its payload
+    /// does not decode.
+    pub fn admit(&mut self, h: &CommandHeader, opcode: u16, extension: Option<&[u8]>) -> Admit {
+        self.running = None;
         if h.seq == 0 {
             return Admit::Control;
         }
@@ -1014,7 +1078,81 @@ impl Link {
         if h.campaign != self.stamps.campaign {
             return Admit::Answer(result::WRONG_CAMPAIGN);
         }
+        let Some(row) = opcode_row(opcode.into()) else {
+            return Admit::Answer(result::UNKNOWN_OPCODE);
+        };
+        if row.class == CommandClass::Control {
+            // A control opcode with a sequence number: no handler runs it as
+            // a sequenced command.
+            return Admit::Answer(result::UNKNOWN_OPCODE);
+        }
+        if row.needs_campaign && self.stamps.campaign == 0 {
+            return Admit::Answer(result::NO_CAMPAIGN);
+        }
+        if row.gen_bound && h.mission_gen != self.stamps.mission_gen {
+            return Admit::Answer(result::WRONG_GENERATION);
+        }
+        if let Some(rev) = row.rev {
+            if h.rev == 0 {
+                return Admit::Answer(result::BAD_PAYLOAD);
+            }
+            let key = match (rev, u64::from(opcode) == opcode::EXTENSION_SET, extension) {
+                (Rev::Spec, true, Some(name)) => RevKey::Extension(name.to_vec()),
+                (_, true, None) => return Admit::Answer(result::BAD_PAYLOAD),
+                (Rev::Spec, false, _) => RevKey::Spec(h.entity),
+                (Rev::Order, _, _) => RevKey::Order(h.entity),
+            };
+            if h.rev <= self.revisions.get(&key) {
+                return Admit::Answer(result::AT_REVISION);
+            }
+            self.running = Some((key, h.rev));
+        }
         Admit::Run
+    }
+
+    /// The result of the handler [`Link::admit`] let run. The applied
+    /// revision moves only on `APPLIED` or `TOO_LARGE`. [`Link::answer`]
+    /// turns only an `APPLIED` result into `TOO_LARGE`, so the revision and
+    /// the code on the wire agree whichever is called first.
+    pub fn ran(&mut self, code: u64) {
+        if let Some((key, rev)) = self.running.take()
+            && (code == result::APPLIED || code == result::TOO_LARGE)
+        {
+            self.revisions.set(key, rev);
+        }
+    }
+
+    /// Whether an `EXTENSION_SET` of this name has been applied in this
+    /// campaign. The agent answers an `EXTENSION_INVOKE` of any other name
+    /// `LUA_ERROR`, after the raw-Lua and not-ready rows.
+    pub fn has_extension(&self, name: &[u8]) -> bool {
+        self.revisions.get(&RevKey::Extension(name.to_vec())) != 0
+    }
+
+    /// The applied revisions.
+    pub fn revisions(&self) -> &Revisions {
+        &self.revisions
+    }
+
+    /// Forget an extension's revision, when `EXTENSION_REMOVE` removes it.
+    pub fn forget_extension(&mut self, name: &[u8]) {
+        self.revisions.forget_extension(name);
+    }
+
+    /// Turn the restore burst on or off (`BURST`).
+    pub fn set_burst(&mut self, on: bool) {
+        let paused = self.stamps.lifecycle == lifecycle::PAUSED as u32;
+        if on && !paused && !self.burst_noted {
+            self.burst_noted = true;
+            self.note("BURST on read outside PAUSED: ignored".to_owned());
+        }
+        self.burst = on && paused;
+    }
+
+    /// Whether the commanded-work budget is off: the burst is on and the
+    /// state is `PAUSED` (spec/commands.md, "Budget").
+    pub fn unbudgeted(&self) -> bool {
+        self.burst && self.stamps.lifecycle == lifecycle::PAUSED as u32
     }
 
     /// Queue the `RESULT` of a command.
@@ -1042,7 +1180,27 @@ impl Link {
             message: message.into(),
             value,
         };
-        self.enqueue(kind::RESULT as u16, r.encode());
+        let mut payload = r.encode();
+        let max = self.out.ring().max_payload();
+        if payload.len() > max {
+            // Of spec/records.md, "Oversized records": the RESULT again, with
+            // a nil value and what was too large as the message. Only an
+            // `APPLIED` result becomes `TOO_LARGE`; any other code stays, so
+            // the code on the wire is the one `ran` saw.
+            let code = if code == result::APPLIED {
+                result::TOO_LARGE as u16
+            } else {
+                r.code
+            };
+            let r = CommandResult {
+                code,
+                message: format!("the result was over the record limit of {max} bytes"),
+                value: Lv::Nil,
+                ..r
+            };
+            payload = r.encode();
+        }
+        self.enqueue(kind::RESULT as u16, payload);
     }
 
     /// Count a command's time in `hist_command`, and in
@@ -1492,7 +1650,7 @@ mod tests {
     const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     /// A test's folder, removed when dropped, so a failed test leaves none.
-    struct Folder(PathBuf);
+    pub(super) struct Folder(PathBuf);
 
     impl std::ops::Deref for Folder {
         type Target = std::path::Path;
@@ -1514,7 +1672,7 @@ mod tests {
     }
 
     /// A link on a free port in its own folder, and the folder.
-    fn open(name: &str) -> (Link, Folder) {
+    pub(super) fn open(name: &str) -> (Link, Folder) {
         let port = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -2158,3 +2316,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "link_admit_tests.rs"]
+mod admit_tests;
