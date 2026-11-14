@@ -10,7 +10,15 @@ S9, S10 and S15 check each against a running DCS.
 ## Stamps
 
 The first record of every frame's batch is `FRAME`. Every record up to the next `FRAME`
-carries its stamps: the mission generation, the frame sequence number and model time.
+carries its stamps: the mission generation, the campaign, the lifecycle state, the
+frame sequence number, and model and real time.
+
+The agent writes a new `FRAME` before a record whose stamps differ in any field from
+those of the last `FRAME` it wrote, even within one frame. A `CAMPAIGN` command that
+changes the campaign in the middle of a frame therefore puts a `FRAME` with the new
+campaign before the next record, and the records made before the command keep the old
+one. The agent boot is not a stamp: the agent's queue lives in its memory and ends with
+the DCS process, so every record in one ring has the boot in the status block.
 
 Every record the agent writes in a DCS process has a number, counted from 1 through
 `FRAME` and padding records too. `FRAME` carries the number of the record after it.
@@ -30,7 +38,9 @@ A record made in a callback outside a frame (`onMissionLoadBegin`, `onSimulation
 time of the callback.
 
 A record the agent held in its queue is written after a `FRAME` that repeats the stamps
-of the frame it was recorded in, with `replay` set. After the replayed records the
+it was made with, the campaign included, with `replay` set when it was made in an
+earlier frame. A queued record made earlier in the current frame keeps `replay` 0: its
+stamps are current. After the replayed records the
 agent writes a `FRAME` for the current frame before any current record. The sidecar
 takes the current lifecycle state and campaign only from a `FRAME` with `replay` 0.
 
@@ -65,6 +75,16 @@ commands by the `HELLO`'s `in_head` (spec/commands.md).
 record made before it is before it in the ring. The sidecar discards sample-class
 records that come before the `HELLO` of its own attach: they were sampled for the
 sidecar before it.
+
+Right after every `HELLO`, the resync `HELLO` after `CONTROL_LOST` included, the agent
+writes a `LIFECYCLE` of its current state: state, mission generation, theater and
+mission, with an empty theater when none is loaded. The two records go back to back
+under the same stamps, with no `FRAME` between them, and the agent writes both or
+neither: until both fit the ring it writes neither, reads no command, and tries again
+on the next frame. A sidecar that has no store learns the loaded mission from it. The
+order after an attach is: the queued records, `HELLO`, `LIFECYCLE`, then the
+`ENUM_BEGIN` of the enumeration the attach starts. The closing `LIFECYCLE` of the kill
+switch or a caught panic has no `HELLO` before it.
 
 ### Oversized records
 
@@ -207,15 +227,124 @@ The agent keeps a table of the units and statics in the mission, fed by events, 
 own spawns and destroys, and by a full enumeration that is the authority when they
 disagree. The sidecar mirrors it from these records.
 
-A row leaves the table on a death or removal event, on the agent's own destroy, or when
-a full enumeration does not find it. A position read never removes a row (LIVE,
-docs/results/2026-11-11-first-dll-and-spikes.md, E20):
+A row enters the table when the agent resolves a birth event, when it spawns the
+object, or when a full enumeration finds an object the table lacks. No other event adds
+a row. The event handler never calls a method on an event object ("Events" below), so
+for an `S_EVENT_BIRTH` whose initiator's category is a unit (1), a static (3) or a cargo
+static (6),
+the shim keeps the initiator's object table and resolves it on the agent's next
+sampling frame: under `pcall`, it reads the object's group, names, type, coalition,
+country, category and `getLife0()`, and adds the row only if `isExist()` is true. A
+birth that cannot be resolved is left to the next full enumeration.
+
+A row leaves the table when the agent's own destroy removes it, or when an existence
+check finds the object gone. Nothing else removes a row: a read, an event and an
+enumeration each only ask for the check.
+
+**Existence checks.** On each pump the agent has the shim call `isExist`, under `pcall`,
+on at most 20 rows. A row waits in the queue until a pump checks it once; the rest stay
+queued for the next pump, and none is dropped unchecked. A row survives its check when
+`isExist` is true or the call raises, and is not checked again until a trigger names it.
+The triggers are:
+
+- a position read that gave no position or three zeros, or a getter that raised on it;
+- an `S_EVENT_HIT`, `S_EVENT_BDA` or `S_EVENT_KILL` that names the row as target. These
+  events are triggers, never facts: the target's `isExist` is already false when a fatal
+  hit, a BDA or a KILL is delivered (LIVE, 24 of 24 BDA and KILL), and a hit it survives
+  changes nothing. The event handler makes no reads;
+- a death event (below) that names the row;
+- the slow sweep of life visiting the row (spec/sampling.md, "Tiers");
+- a full enumeration that does not find a row that was in the table when it began.
+
+**Death events.** `S_EVENT_DEAD`, `S_EVENT_UNIT_LOST` and `S_EVENT_CRASH` with an
+`INITIATOR_CATEGORY` of unit (1), static (3) or cargo (6). One that names a row in the
+table triggers its check. If the check finds the row gone, the row leaves as `DEAD`
+whatever the reads gave. When the reads gave `REMOVED`, the agent counts a classifier
+fault in `classifier_faults`; when they gave `MISSING` or an anomaly, it counts
+`classifier_anomalies`. A mark whose row `isExist` reports alive at its check is cleared and counted in
+`marks_cleared`. A check that cannot decide (`isExist` raises, or the shim holds no object
+for the ID) keeps the mark, is not counted in `marks_cleared`, and queues no new check. The
+row's next check, by any trigger, leaves it as `DEAD` if it finds the object gone. If the object still exists, the event removes nothing, so a
+late event from before a revival changes nothing. A death event with any other category,
+such as scenery (5), or with no category, changes nothing (LIVE: most deaths near an
+explosion are scenery, docs/results/2026-11-13-event-catalogue.md).
+
+DCS sends a ground unit's death events when its wreck explodes, 0 to 84 s after the unit
+ceased to exist, and none for an object a script removed (LIVE, Windows and Wine). A
+script that destroys a burning wreck cancels its death events (LIVE). A cargo static
+killed by gunfire sends no death event at all (LIVE, 4 of 4). So the agent does not wait
+for an event to learn that an object is gone.
+
+**What the reads decide.** When `isExist` is false the shim makes the reads below at
+once, in the same pump, each under `pcall`, on a plain table holding the object ID. The
+agent removes the row with the reason they give for the row's class:
+
+| Class | Reads | `DEAD` | `REMOVED` | `MISSING` |
+|---|---|---|---|---|
+| Ground unit (`Unit.Category` 2) | `Unit.isDead`, `Unit.getLife` | `isDead` is true and `getLife` is a number | both raise | any other result, counted in `classifier_anomalies` |
+| Static | `StaticObject.getLife` | a number at or below 0 | it raises | any other result, counted in `classifier_anomalies` |
+| Cargo static, aircraft, ship, any other unit | none used | never | never | always, with no anomaly |
+
+Aircraft, ships and cargo statics leave as `MISSING` whatever the reads give. A death
+event corrects them through the memory below, and a death event for a row that was
+still in the table when it arrived makes the row's check leave as `DEAD`.
+
+The limits of the evidence:
+
+- Ground units: 13 of 13 kills and 10 of 10 removals read right on Windows, and 13 and 2
+  on Wine (LIVE). A killed ground unit answers both reads for as long as it was watched
+  (325 s); a removed one raises on both.
+- Statics: right in every case, 7 kills and 4 removals on Windows, 5 and 3 on Wine
+  (LIVE), but on one static type, a fuel depot, and with few weapon kills: tank fire
+  killed 1 of 5 on Windows and 0 of 5 on Wine.
+- Cargo statics: the count is too small (one kill on Wine), and a crate killed by
+  gunfire sends no death event (above). So a crate that gunfire kills has no death fact
+  and stays `MISSING`.
+- Aircraft and ships: the reads raise within seconds of a kill, so a raise cannot be
+  taken for a removal. A ship on Wine never read dead (0 of 5). The death events come at
+  once in every case (LIVE).
+- A kill with no `S_EVENT_HIT`, such as a scripted explosion, followed by a scripted
+  destroy before the 60 s life sweep, reads as a removal. Whether such an explosion sends
+  `S_EVENT_HIT` is UNVERIFIED (none of 5 did on Wine). `REMOVED` is therefore a read, not
+  proof, and the sidecar treats it like `MISSING` (spec/world.md).
+- Slung or carried cargo, and whether the position getter follows it, is UNVERIFIED.
+
+A destroy on a burning wreck: the `DEAD` the reads gave stands, nothing more is written,
+and the ID stays in the dead set (LIVE, 3 of 3 on each platform read dead first). Death
+events that come after a `DEAD` change nothing; the agent still forwards them.
+
+**Late death events.** For the mission generation the agent keeps the object ID,
+`entity` and `group_entity` of each row that left as `MISSING` or `REMOVED`. The first
+later death event (unit, static or cargo category) that names a kept ID writes a second
+`OBJECT_GONE`, with `DEAD` and the kept fields; the ID joins the dead set and is
+forgotten, and later death events change nothing. When the first record said `REMOVED`,
+the second is a classifier fault: the agent counts it in `classifier_faults`. An
+enumeration or a birth that finds a kept ID adds the row again and forgets the ID. A
+change of mission generation clears what is kept. A row that left as `DEAD` by the reads
+may never get a death event.
+
+**Revival.** A script that sets a burning or dead unit's life revives it with the same
+object ID and no event (LIVE: 2 of 2 on each platform for a burning unit, 1 of 1 on Wine
+for one whose death events had come). The agent keeps the IDs that died in the current
+mission generation in a dead set. When an enumeration or a birth finds
+such an ID with `isExist` true and `isDead` false (`StaticObject.getLife` above 0 for a
+static), the ID leaves the dead set and the row is added again with `OBJECT` and the same
+`entity`. The agent counts it in `revivals`. A second death gives a second `DEAD`. A
+revived ID that is still dead, or that does not exist, is not added.
+
+**Position reads.** A position read itself removes no row; the existence check it asks
+for does (LIVE, docs/results/2026-11-11-first-dll-and-spikes.md, E20):
 
 - A dead unit's ID keeps returning the wreck's position, so a position cannot show a
-  death.
+  death. Kills are found by the checks after a hit, a BDA or a KILL, by the slow sweep's
+  checks and by the full enumeration. The wreck's position is established only after a
+  direct explosion's death event.
 - A removed object's ID returns `0, 0, 0`. The agent does not publish a position of
-  exactly `0, 0, 0`; it leaves the row out of the batch until an event or the next
-  full enumeration settles it.
+  exactly `0, 0, 0`; the row's existence check on the next pump removes it.
+
+A static's position, which cannot change, is read when the agent adds its row and at
+each enumeration that finds it, and written in a `POSITIONS` record; a static has no
+periodic positions. A cargo static is read with the units' positions.
 
 An object the agent destroyed stays in a pending-destroy set until DCS has removed it
 (spec/commands.md); the agent ignores it in events and enumerations meanwhile.
@@ -266,18 +395,24 @@ the whole binding from it.
 | 0x0000 | u64 | object | DCS object ID |
 | 0x0008 | u32 | reason | A `gone_reason` code |
 | 0x000C | pad[4] | reserved | |
+| 0x0010 | u64 | entity | The `EntityId` the binding held for the object when the row left, 0 when it held none |
+| 0x0018 | u64 | group_entity | The `EntityId` the binding held for the group when the row left, 0 when it held none |
+
+The agent copies `entity` and `group_entity` from the row before it removes it, so a
+death queued while no sidecar is attached still names its entity when it is written.
 
 ### Codes: gone_reason
 
 | Code | Name | Meaning |
 |---|---|---|
-| 1 | DEAD | A death event named it |
+| 1 | DEAD | A death fact: a death event named it, in the table or after it left as `MISSING` or `REMOVED`, or the reads at its existence check show a kill |
 | 2 | DESTROYED | The agent destroyed it for a command. Written when the destroy is called, which while paused is before DCS removes the object. |
-| 3 | MISSING | A full enumeration did not find it |
-| 4 | REMOVED | A removal event named it |
+| 3 | MISSING | DCS no longer has it and the cause is unknown. A `DEAD` for the same object may follow |
+| 4 | REMOVED | DCS no longer has it, and the reads at its existence check show a removal, not a kill. A `DEAD` for the same object follows if a death event names it later |
 
 Only `DEAD` is a death fact. `MISSING` and `REMOVED` on a managed group lead to `lost`
-(spec/world.md).
+(spec/world.md). One object can have two `OBJECT_GONE` records in a mission generation:
+the second is always `DEAD`.
 
 ### Layout: ENUM_BEGIN
 
@@ -294,13 +429,31 @@ Only `DEAD` is a death fact. `MISSING` and `REMOVED` on a managed group lead to 
 | 0x000C | pad[4] | reserved | |
 
 An enumeration is sliced over frames, and the world changes while it runs. Only a row
-that was in the table at `ENUM_BEGIN` and that the enumeration did not find is
-`MISSING`. A row added after `ENUM_BEGIN`, by an event or a spawn, is never removed by
-that enumeration. The sidecar applies the same rule to its mirror.
+that was in the table at `ENUM_BEGIN` and that the enumeration did not find is a miss. The
+agent checks each miss before it writes `ENUM_END`. A miss found gone gets `OBJECT_GONE`
+(`MISSING`, `REMOVED` or `DEAD`, above). A miss found alive, or whose check could not
+decide, gets an `OBJECT` with that enumeration's number, which `objects` counts. The agent
+writes `ENUM_END` once no miss is pending, and the next `ENUM_BEGIN` waits for it. A row
+added after `ENUM_BEGIN`, by an event or a spawn, is never a miss. So at `ENUM_END` every
+row that was in the table at `ENUM_BEGIN` and has neither an `OBJECT` of that enumeration
+nor an `OBJECT_GONE` is gone, and the sidecar applies that rule to its mirror and its
+binding.
+
+A miss leaves the pending set when its check decides, when its row leaves by another path
+(a death event's check or a HIT check), or when the row is no longer held. A generation
+change, a detach, a new `HELLO` or a sidecar restart drops the hold and writes no
+`ENUM_END`. A hold that lasts one enumeration period is abandoned with no `ENUM_END` and
+counted in `enum_end_abandoned` (spec/sampling.md). The sidecar removes nothing for that
+enumeration. The mirror (`crates/sidecar/src/mirror.rs`) abandons an open enumeration at a
+`HELLO` without counting it; a later `ENUM_BEGIN` that finds one open counts it refused and
+asks for another enumeration. The reconciler replaces its open run on a new `ENUM_BEGIN`
+without counting it, and keeps the run across a `HELLO` of the same agent boot and
+campaign. It drops the run at a `HELLO` of another agent boot or campaign. After an
+abandoned hold the agent's next periodic enumeration follows.
 
 The sidecar uses an enumeration only if it read `ENUM_BEGIN`, `ENUM_END` with a
-matching count of `OBJECT` records, and no `GAP` of events between them. Otherwise it
-asks for another.
+matching count of `OBJECT` records, and no `GAP` of events between them. When an `ENUM_END`
+arrives and the enumeration fails that test, it asks for another.
 
 ## Events
 
@@ -531,10 +684,31 @@ platform calls in that state, such as `DCS.getPause` or `world.addEventHandler`,
 the value `true` when the name is present or `false` when it is absent. The `target`
 says which state: `hook` or `shim` (the server state).
 
+The shim's list includes the names the object table reads: `Object.isExist`,
+`Object.getCategory`, `Unit.isDead`, `Unit.getLife` and `StaticObject.getLife`.
+
 ## Samples
 
 A sample batch is columnar: `n`, then one array per column. Row `i` of every array
 describes the same object.
+
+**What is sampled.** Positions follow the schedule in spec/sampling.md. Life and fuel
+are read for a row once when it is added, after an `S_EVENT_HIT` names it as target, in
+the slow sweep every 60 s at the default `vitals_s`, and at a capture. A `SUBSCRIBE`
+changes that for the rows it names: their life and fuel are read periodically
+(`vitals_s`, 5 s by default), and their ammunition every `ammo_s` (30 s by default).
+Ammunition of any other unit is read only after an `S_EVENT_SHOT` or
+`S_EVENT_SHOOTING_END` names it, and at a capture.
+
+A unit that has not fired and is not subscribed has no `AMMO` record: its load is
+unknown, not full. A rearm sends no event, so it shows at the unit's next shot or at a
+capture.
+
+For a consumer, the life of an AI unit, and the fuel of a ground unit or a ship, is
+current within about 1 s of a hit event that names the unit. Damage that sends no
+event shows within the 60 s life sweep, which takes 98 s under load (LIVE, S10).
+Subscribed rows are current within 5 s. Read the sample's age, not its presence. A
+capture reads life, fuel and ammunition itself.
 
 ### Layout: POSITIONS
 
@@ -555,7 +729,7 @@ describes the same object.
 | 0x0004 | pad[4] | reserved | |
 | + | u64[n] | object | DCS object IDs |
 | + | f32[n] | life | `getLife()`: DCS's absolute value, whose scale depends on the type |
-| + | f32[n] | fuel | `getFuel()`, a fraction of internal fuel |
+| + | f32[n] | fuel | `getFuel()`, a fraction of internal fuel; NaN for a static, which has no fuel |
 
 ### Layout: ATTITUDE
 
@@ -577,6 +751,8 @@ subscribed object, and once when an object stops.
 |---|---|---|---|
 | 0x0000 | u64 | object | DCS object ID |
 | + | lv | ammo | An array of tables, each with `type` (string) and `count` (number) |
+
+No `AMMO` record for a unit means its ammunition is unknown, not full.
 
 ### Layout: WAREHOUSE
 

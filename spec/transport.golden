@@ -65,7 +65,8 @@ layout status fixed=4096
   0x0380 u64[32] hist_interval agent
   0x0480 u64[32] hist_command agent
   0x0580 u64[32] hist_event agent
-  0x0680 pad[2432] reserved4 agent
+  0x0680 u64[32] hist_syscall agent
+  0x0780 pad[2176] reserved4 agent
 codes lifecycle
   1 STARTING
   2 LOADING
@@ -187,10 +188,12 @@ codes object_kind
   1 UNIT
   2 STATIC
   3 GROUP
-layout OBJECT_GONE fixed=16
+layout OBJECT_GONE fixed=32
   0x0000 u64 object
   0x0008 u32 reason
   0x000c pad[4] reserved
+  0x0010 u64 entity
+  0x0018 u64 group_entity
 codes gone_reason
   1 DEAD
   2 DESTROYED
@@ -477,4 +480,4 @@ layout EXTENSION_INVOKE fixed=0
   + lv args
 layout EVAL fixed=0
   + lv source
-hash 820248137281bd3d
+hash de5b03a15471212b

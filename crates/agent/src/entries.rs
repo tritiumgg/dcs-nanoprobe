@@ -117,6 +117,28 @@ entries! {
     configure => work_configure;
     start => work_start;
     frame => work_frame, hot;
+    finish => work_finish, hot;
+    deaths => work_deaths;
+    reads => work_reads;
+    spot => work_spot, hot;
+    pump_begin => work_pump_begin, hot;
+    plan => work_plan, hot;
+    pump_end => work_pump_end, hot;
+    pos => work_pos, hot;
+    att => work_att, hot;
+    stopped => work_stopped, hot;
+    vit => work_vit, hot;
+    ammo => work_ammo, hot;
+    airbase => work_airbase, hot;
+    item => work_item, hot;
+    seen => work_seen, hot;
+    object => work_object, hot;
+    wants => work_wants, hot;
+    enum_done => work_enum_done, hot;
+    suspect => work_suspect, hot;
+    checks => work_checks, hot;
+    gone => work_gone, hot;
+    alive => work_alive, hot;
     lifecycle => work_lifecycle;
     log => work_log, hot;
     event => work_event, hot;
@@ -328,7 +350,8 @@ const EVENT_FIELDS: c_int = 16;
 /// ID and each `event_field` code and its value (spec/records.md). A code
 /// that is not a whole number from 1 to 65,535 drops its pair. A value is
 /// carried as an `lv` scalar: a table or a function becomes its type name.
-/// Never raises; returns nothing.
+/// Never raises. Returns the slot plus one of the table row a death event
+/// removed (spec/records.md, "The object table"), else nothing.
 unsafe fn work_event(state: *mut State) -> c_int {
     let started = std::time::Instant::now();
     // SAFETY: a live state; reading a value never raises.
@@ -349,14 +372,19 @@ unsafe fn work_event(state: *mut State) -> c_int {
         }
         i += 2;
     }
-    driver::event(
+    let freed = driver::event(
         nanoprobe_transport::records::Event {
             id: id as u32,
             fields,
         },
         started,
     );
-    0
+    if freed == 0 {
+        return 0;
+    }
+    // SAFETY: a live state with a free slot.
+    unsafe { lua::lua_pushinteger(state, freed as isize) };
+    1
 }
 
 /// The value at `index` as an `lv` scalar: a string, number, boolean or nil,
@@ -419,9 +447,18 @@ unsafe fn work_start(state: *mut State) -> c_int {
     }
 }
 
-/// `frame(real, model, paused)`: the frame's pump. Returns 0, 1 when the
-/// hook should reload the shim, 2 when the agent is disabled and the hook
-/// stops calling, or 3 when no link is open.
+/// The breadcrumb's high bits while the frame sweeps positions; its low bits
+/// are the first object's ID.
+const SWEEP_CRUMB: u64 = 0x5057 << 32;
+
+/// `frame(real, model, paused, getter)`: the frame's link work and commands,
+/// and, with `DCS.getUnitPositionByObjectId` as `getter`, its sweep of the
+/// units' positions.
+/// Returns 0, 1 when the hook should reload the shim, 2 when the agent is
+/// disabled and the hook stops calling, or 3 when no link is open; and
+/// whether this is a sampling frame, on which the hook calls the shim's pump
+/// and then `finish`. Any other frame ends inside this call
+/// (spec/sampling.md, "The frame").
 unsafe fn work_frame(state: *mut State) -> c_int {
     // SAFETY: a live state.
     let real = unsafe { arg_num(state, 1, 0.0) };
@@ -435,10 +472,54 @@ unsafe fn work_frame(state: *mut State) -> c_int {
         // SAFETY: a live state from the entry, with the free slots Lua guarantees a C function.
         return unsafe { raise_with(state, "injected Lua error") };
     }
-    let code = driver::frame(real, model, paused);
-    // SAFETY: a live state with a free slot.
-    unsafe { lua::lua_pushinteger(state, code as isize) };
-    1
+    // The position getter by object ID, when this state has it: the frame
+    // sweeps the positions it owes with it, each call under `lua_pcall`.
+    // SAFETY: a live state; `lua_type` reads any index.
+    let getter = unsafe { lua::lua_type(state, 4) } == lua::TFUNCTION;
+    let mut crumbed = false;
+    let mut read = |object: u64| -> Result<Option<[f64; 3]>, ()> {
+        if !crumbed {
+            crumbed = true;
+            state::crumb(SWEEP_CRUMB | (object & 0xffff_ffff));
+        }
+        // SAFETY: a live state with the getter at 4 and the free slots Lua
+        // guarantees a C function; the call runs under `lua_pcall`, and the
+        // stack is reset after each row.
+        unsafe {
+            lua::lua_settop(state, 4);
+            lua::lua_pushvalue(state, 4);
+            lua::lua_pushnumber(state, object as f64);
+            if lua::lua_pcall(state, 1, 3, 0) != 0 {
+                lua::lua_settop(state, 4);
+                return Err(());
+            }
+            let p = match (
+                arg_finite(state, -3),
+                arg_finite(state, -2),
+                arg_finite(state, -1),
+            ) {
+                (Some(x), Some(y), Some(z)) => Some([x, y, z]),
+                _ => None,
+            };
+            lua::lua_settop(state, 4);
+            Ok(p)
+        }
+    };
+    let (code, pump) = driver::frame(real, model, paused, getter.then_some(&mut read));
+    // SAFETY: a live state with two free slots.
+    unsafe {
+        lua::lua_pushinteger(state, code as isize);
+        lua::lua_pushboolean(state, c_int::from(pump));
+    }
+    2
+}
+
+/// `finish()`: end the frame: account its time, publish its batch and store
+/// the status block. The hook calls it on a sampling frame, after the
+/// shim's pump; on a frame that `frame` ended it does nothing.
+unsafe fn work_finish(_state: *mut State) -> c_int {
+    driver::finish();
+    0
 }
 
 /// `lifecycle(name, theater, mission, real, model)`: `loading`, `running`,
@@ -619,9 +700,17 @@ unsafe fn work_sink_take(state: *mut State) -> c_int {
     2
 }
 
-/// `csweep(f, list, nres)`: the C-driven shape (E5). For each value in
+/// What `csweep` keeps in mode 2: each row's value and three results, and
+/// each row's last three results for the moved test.
+static ROWS: Mutex<(Vec<f64>, Vec<[f64; 3]>)> = Mutex::new((Vec::new(), Vec::new()));
+
+/// `csweep(f, list, nres, mode)`: the C-driven shape (E5). For each value in
 /// `list`, call `f(value)` under `lua_pcall`, read `nres` numbers, and add
 /// them into the sink. Returns the rows done and the rows whose call raised.
+/// `mode` 0 or absent stores a breadcrumb before each row, which reads the
+/// clock; 1 stores none; 2 stores none and, with three results, does a
+/// position row's work in place of the sum: it checks the three numbers,
+/// compares them with the row's last, and keeps the value and the numbers.
 unsafe fn work_csweep(state: *mut State) -> c_int {
     // SAFETY: a live state; every call that can raise runs under lua_pcall,
     // and the stack is reset to `base` after each row.
@@ -630,16 +719,54 @@ unsafe fn work_csweep(state: *mut State) -> c_int {
             return raise_with(state, "csweep needs a function and a list");
         }
         let nres = arg_num(state, 3, 1.0).clamp(0.0, 8.0) as c_int;
+        let mode = arg_num(state, 4, 0.0) as u8;
         let n = lua::lua_objlen(state, 2);
+        // The arguments only: a fourth argument must not count as a result.
+        lua::lua_settop(state, 3);
         let base = lua::lua_gettop(state);
         let (mut rows, mut errors, mut sum) = (0u64, 0u64, 0.0);
+        let mut kept = if mode == 2 {
+            ROWS.try_lock().ok()
+        } else {
+            None
+        };
+        if let Some(kept) = kept.as_mut() {
+            kept.0.clear();
+            kept.1.resize(n, [0.0; 3]);
+        }
         for i in 1..=n {
-            state::crumb(i as u64);
+            if mode == 0 {
+                state::crumb(i as u64);
+            }
             lua::lua_pushvalue(state, 1);
             lua::lua_rawgeti(state, 2, i as c_int);
+            let id = lua::lua_tonumber(state, -1);
             if lua::lua_pcall(state, 1, nres, 0) == 0 {
-                for k in 1..=nres {
-                    sum += lua::lua_tonumber(state, -k);
+                match kept.as_mut() {
+                    Some(kept) if nres == 3 => {
+                        let p = [
+                            lua::lua_tonumber(state, -3),
+                            lua::lua_tonumber(state, -2),
+                            lua::lua_tonumber(state, -1),
+                        ];
+                        if lua::lua_type(state, -3) == lua::TNUMBER
+                            && p.iter().all(|v| v.is_finite())
+                            && p != [0.0; 3]
+                        {
+                            let last = &mut kept.1[i - 1];
+                            let d2: f64 = last.iter().zip(&p).map(|(a, b)| (a - b) * (a - b)).sum();
+                            if d2 > 0.25 {
+                                sum += 1.0;
+                            }
+                            *last = p;
+                            kept.0.extend_from_slice(&[id, p[0], p[1], p[2]]);
+                        }
+                    }
+                    _ => {
+                        for k in 1..=nres {
+                            sum += lua::lua_tonumber(state, -k);
+                        }
+                    }
                 }
             } else {
                 errors += 1;
@@ -647,6 +774,7 @@ unsafe fn work_csweep(state: *mut State) -> c_int {
             lua::lua_settop(state, base);
             rows += 1;
         }
+        drop(kept);
         if let Ok(mut sink) = SINK.try_lock() {
             sink.0 += rows;
             sink.1 += sum;
@@ -906,6 +1034,633 @@ unsafe fn work_map_load(state: *mut State) -> c_int {
 unsafe fn work_map_close(_state: *mut State) -> c_int {
     if let Ok(mut slot) = MAPPING.try_lock() {
         *slot = None;
+    }
+    0
+}
+
+// ---- sampling (spec/sampling.md) ----------------------------------------
+//
+// The shim's pump calls these from the `server` state. Every slot number
+// that crosses into Lua is the table's slot plus one, so the shim can use it
+// as an array index.
+
+/// The argument at `index` as a whole number from 0 to 2^53, or None.
+unsafe fn arg_id(state: *mut State, index: c_int) -> Option<u64> {
+    // SAFETY: a live state; `lua_type` and `lua_tonumber` never raise.
+    let n = unsafe { arg_num(state, index, -1.0) };
+    ((0.0..9.007_199_254_740_992e15).contains(&n) && n.fract() == 0.0).then_some(n as u64)
+}
+
+/// The argument at `index` as a slot, from the slot plus one Lua holds.
+unsafe fn arg_slot(state: *mut State, index: c_int) -> Option<u32> {
+    // SAFETY: as for `arg_id`.
+    let n = unsafe { arg_id(state, index) }?;
+    (1..=u64::from(u32::MAX))
+        .contains(&n)
+        .then(|| (n - 1) as u32)
+}
+
+/// The argument at `index` as a finite number, or None.
+unsafe fn arg_finite(state: *mut State, index: c_int) -> Option<f64> {
+    // SAFETY: a live state; `lua_type` never raises.
+    if unsafe { lua::lua_type(state, index) } != lua::TNUMBER {
+        return None;
+    }
+    // SAFETY: as above.
+    let n = unsafe { lua::lua_tonumber(state, index) };
+    n.is_finite().then_some(n)
+}
+
+/// Push a boolean and return 1.
+unsafe fn push_bool(state: *mut State, b: bool) -> c_int {
+    // SAFETY: a live state with a free slot.
+    unsafe { lua::lua_pushboolean(state, c_int::from(b)) };
+    1
+}
+
+/// `deaths(id, ...)`: the DCS event IDs whose events remove a table row.
+unsafe fn work_deaths(state: *mut State) -> c_int {
+    // SAFETY: a live state; reading a value never raises.
+    let top = unsafe { lua::lua_gettop(state) }.min(16);
+    let ids = (1..=top)
+        // SAFETY: as above.
+        .filter_map(|i| unsafe { arg_id(state, i) })
+        .filter_map(|n| u32::try_from(n).ok())
+        .collect();
+    driver::set_deaths(ids);
+    0
+}
+
+/// `reads(which, id, ...)`: the DCS event IDs that ask for a read: `which`
+/// 1 for a read of the target's life, 2 for a read of the initiator's
+/// ammunition, 3 for the births the shim keeps for the next pump.
+unsafe fn work_reads(state: *mut State) -> c_int {
+    // SAFETY: a live state; reading a value never raises.
+    let which = unsafe { arg_id(state, 1) }.unwrap_or(0) as u32;
+    // SAFETY: as above.
+    let top = unsafe { lua::lua_gettop(state) }.min(17);
+    let ids = (2..=top)
+        // SAFETY: as above.
+        .filter_map(|i| unsafe { arg_id(state, i) })
+        .filter_map(|n| u32::try_from(n).ok())
+        .collect();
+    driver::set_reads(which, ids);
+    0
+}
+
+/// `spot(id, x, y, z)`: a static's point, read when its row is added and
+/// when an enumeration finds it.
+unsafe fn work_spot(state: *mut State) -> c_int {
+    // SAFETY: a live state; reading a value never raises.
+    unsafe {
+        if let (Some(object), Some(x), Some(y), Some(z)) = (
+            arg_id(state, 1),
+            arg_finite(state, 2),
+            arg_finite(state, 3),
+            arg_finite(state, 4),
+        ) {
+            driver::spot(object, [x, y, z]);
+        }
+    }
+    0
+}
+
+/// `pump_begin(births, airbases, heap_kib)`: the pump begins. Returns the
+/// mission generation and whether to sample, or nothing with no link.
+unsafe fn work_pump_begin(state: *mut State) -> c_int {
+    // SAFETY: a live state.
+    let births = unsafe { arg_id(state, 1) }.unwrap_or(0) as usize;
+    // SAFETY: as above.
+    let airbases = unsafe { arg_id(state, 2) }.unwrap_or(0) as usize;
+    // SAFETY: as above.
+    let heap = unsafe { arg_num(state, 3, -1.0) };
+    let Some((generation, sample)) = driver::pump_begin(births, airbases, heap) else {
+        return 0;
+    };
+    // SAFETY: a live state with two free slots.
+    unsafe {
+        lua::lua_pushinteger(state, generation as isize);
+        lua::lua_pushboolean(state, c_int::from(sample));
+    }
+    2
+}
+
+/// The object IDs `checks` hands out, kept to avoid an allocation.
+static CHECKS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
+/// `checks(buffer)`: the objects whose existence the pump checks now
+/// (spec/records.md, "The object table"). Writes their object IDs into
+/// `buffer`, an array with room for them, and returns how many.
+unsafe fn work_checks(state: *mut State) -> c_int {
+    // SAFETY: a live state.
+    if unsafe { lua::lua_type(state, 1) } != lua::TTABLE {
+        return 0;
+    }
+    // SAFETY: as above; the argument is a table.
+    let room = unsafe { lua::lua_objlen(state, 1) };
+    let Ok(mut ids) = CHECKS.try_lock() else {
+        return 0;
+    };
+    let n = driver::checks(&mut ids).min(room);
+    for (i, id) in ids.iter().take(n).enumerate() {
+        // SAFETY: a live state with a free slot; index i + 1 exists in the
+        // table at 1, so the raw set does not allocate.
+        unsafe {
+            lua::lua_pushnumber(state, *id as f64);
+            lua::lua_rawseti(state, 1, (i + 1) as c_int);
+        }
+    }
+    // SAFETY: a live state with a free slot.
+    unsafe { lua::lua_pushinteger(state, n as isize) };
+    1
+}
+
+/// `gone(id, dead_ok, dead, life_ok, life)`: the object no longer exists.
+/// `dead_ok` and `life_ok` say whether each read returned, and `dead` and
+/// `life` are what it returned: for a unit `Unit.isDead` and `Unit.getLife`,
+/// for a static nothing and `StaticObject.getLife`. Returns the slot plus
+/// one of the row removed, or nothing.
+unsafe fn work_gone(state: *mut State) -> c_int {
+    // SAFETY: a live state; reading a value never raises.
+    unsafe {
+        let Some(object) = arg_id(state, 1) else {
+            return 0;
+        };
+        let dead = if lua::lua_toboolean(state, 2) == 0 {
+            driver::Read::Raised
+        } else if lua::lua_type(state, 3) == lua::TBOOLEAN {
+            driver::Read::Value(Some(lua::lua_toboolean(state, 3) != 0))
+        } else {
+            driver::Read::Value(None)
+        };
+        let life = if lua::lua_toboolean(state, 4) == 0 {
+            driver::Read::Raised
+        } else {
+            driver::Read::Value(arg_finite(state, 5))
+        };
+        let freed = driver::gone(object, dead, life);
+        if freed == 0 {
+            return 0;
+        }
+        lua::lua_pushinteger(state, freed as isize);
+    }
+    1
+}
+
+/// `alive(id, sure)`: the existence check of the object did not find it
+/// gone. `sure` says `isExist` returned true; otherwise it raised, or the
+/// shim holds no object for the ID, and nothing is known.
+unsafe fn work_alive(state: *mut State) -> c_int {
+    // SAFETY: a live state; reading a value never raises.
+    unsafe {
+        if let Some(object) = arg_id(state, 1) {
+            driver::alive(object, lua::lua_toboolean(state, 2) != 0);
+        }
+    }
+    0
+}
+
+/// The slots of the batch `plan` hands out, and the values it writes, kept
+/// to avoid an allocation.
+static PLAN: Mutex<(Vec<u32>, Vec<i64>)> = Mutex::new((Vec::new(), Vec::new()));
+
+/// The tier codes of the batches the DLL reads itself.
+const TIER_SUBSCRIBED: u8 = 3;
+const TIER_POSITIONS: u8 = 4;
+const TIER_VITALS: u8 = 6;
+
+/// The shim's function list, by index: the position getter by object ID
+/// (false when DCS lacks it), a unit's `getLife` and `getFuel`, a static's
+/// `getLife`, and `getPoint`.
+const FN_BY_ID: c_int = 1;
+const FN_UNIT_LIFE: c_int = 2;
+const FN_UNIT_FUEL: c_int = 3;
+const FN_STATIC_LIFE: c_int = 4;
+const FN_POINT: c_int = 5;
+
+/// The number at field `key` of the table on top of the stack.
+///
+/// # Safety
+///
+/// A live state with a table on top and a free slot.
+unsafe fn raw_field(state: *mut State, key: &str) -> Option<f64> {
+    // SAFETY: the caller's contract; a raw read calls no metamethod.
+    unsafe {
+        lua::push_str(state, key);
+        lua::lua_rawget(state, -2);
+        let v = (lua::lua_type(state, -1) == lua::TNUMBER).then(|| lua::lua_tonumber(state, -1));
+        let top = lua::lua_gettop(state);
+        lua::lua_settop(state, top - 1);
+        v
+    }
+}
+
+/// Call the function at `which` of the list at 3 with the value on top of
+/// the stack, which it pops, for `nres` results. False when the call raised;
+/// the error value is then on top.
+///
+/// # Safety
+///
+/// A live state with the function list at 3, one argument on top and free
+/// slots for the results.
+unsafe fn call_listed(state: *mut State, which: c_int, nres: c_int) -> bool {
+    // SAFETY: the caller's contract; the call runs under `lua_pcall`.
+    unsafe {
+        lua::lua_rawgeti(state, 3, which);
+        lua::lua_insert(state, -2);
+        lua::lua_pcall(state, 1, nres, 0) == 0
+    }
+}
+
+/// Read a batch's rows from the DLL: each getter under `lua_pcall`, each
+/// row's values straight to the sampler. For positions without attitude and
+/// for vitals. A read that raises leaves its row out, as the shim's own
+/// loops do, and ends the batch. Returns true when the budget is spent.
+///
+/// # Safety
+///
+/// A live state with the shim's object array at 2 and its function list at
+/// 3; `slots` and `values` are the batch [`driver::plan`] just returned.
+unsafe fn rows_here(state: *mut State, tier: u8, slots: &[u32], values: &[i64]) -> bool {
+    // SAFETY: the caller's contract; every engine call runs under
+    // `lua_pcall`, and the stack is reset to `base` after each row.
+    unsafe {
+        let base = lua::lua_gettop(state);
+        state::crumb(u64::from(tier) << 32 | u64::from(slots.first().copied().unwrap_or(0)));
+        lua::lua_rawgeti(state, 3, FN_BY_ID);
+        let by_id = lua::lua_type(state, -1) == lua::TFUNCTION;
+        lua::lua_settop(state, base);
+        for (&slot, &value) in slots.iter().zip(values) {
+            let stop = if tier == TIER_VITALS {
+                lua::lua_rawgeti(state, 2, slot as c_int + 1);
+                if lua::lua_type(state, -1) != lua::TTABLE {
+                    driver::vitals(slot, None, None)
+                } else {
+                    let unit = value > 0;
+                    lua::lua_pushvalue(state, -1);
+                    let life = if unit { FN_UNIT_LIFE } else { FN_STATIC_LIFE };
+                    if !call_listed(state, life, 1) {
+                        lua::lua_settop(state, base);
+                        driver::suspect(slot);
+                        return false;
+                    }
+                    let life = arg_finite(state, -1);
+                    lua::lua_settop(state, base + 1);
+                    let mut fuel = None;
+                    if unit {
+                        if !call_listed(state, FN_UNIT_FUEL, 1) {
+                            lua::lua_settop(state, base);
+                            driver::suspect(slot);
+                            return false;
+                        }
+                        fuel = arg_finite(state, -1);
+                    }
+                    driver::vitals(slot, life, fuel)
+                }
+            } else if value > 0 && by_id {
+                lua::lua_pushnumber(state, value as f64);
+                if !call_listed(state, FN_BY_ID, 3) {
+                    lua::lua_settop(state, base);
+                    driver::suspect_next();
+                    return false;
+                }
+                let p = match (
+                    arg_finite(state, -3),
+                    arg_finite(state, -2),
+                    arg_finite(state, -1),
+                ) {
+                    (Some(x), Some(y), Some(z)) => Some([x, y, z]),
+                    _ => None,
+                };
+                driver::position(p)
+            } else {
+                lua::lua_rawgeti(state, 2, slot as c_int + 1);
+                let mut p = None;
+                if lua::lua_type(state, -1) == lua::TTABLE {
+                    if !call_listed(state, FN_POINT, 1) {
+                        lua::lua_settop(state, base);
+                        driver::suspect_next();
+                        return false;
+                    }
+                    if lua::lua_type(state, -1) == lua::TTABLE
+                        && let (Some(x), Some(y), Some(z)) = (
+                            raw_field(state, "x"),
+                            raw_field(state, "y"),
+                            raw_field(state, "z"),
+                        )
+                        && x.is_finite()
+                        && y.is_finite()
+                        && z.is_finite()
+                    {
+                        p = Some([x, y, z]);
+                    }
+                }
+                driver::position(p)
+            };
+            lua::lua_settop(state, base);
+            if stop {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// `plan(buf, objs, fns)`: the next batch the shim reads. With the shim's
+/// object array and function list, the DLL reads the batches of positions
+/// without attitude and of vitals itself ([`rows_here`]) and returns the
+/// next batch of another tier. Writes into `buf[1..n]`, for the row tiers,
+/// each row's value ([`nanoprobe_agent_link::Sampler::buffer_values`]: a
+/// unit's object ID for positions without attitude, minus the slot plus one
+/// for a static, else the slot plus one), and returns the tier code, the row count and the
+/// flag; nothing when the budget is spent. `buf` is the shim's array, made
+/// with at least 256 entries: only entries that exist are written, so the
+/// table never grows and the write cannot raise.
+unsafe fn work_plan(state: *mut State) -> c_int {
+    // SAFETY: a live state.
+    if unsafe { lua::lua_type(state, 1) } != lua::TTABLE {
+        return 0;
+    }
+    // SAFETY: as above; the argument is a table.
+    let room = unsafe { lua::lua_objlen(state, 1) };
+    let Ok(mut plan) = PLAN.try_lock() else {
+        return 0;
+    };
+    let (slots, values) = &mut *plan;
+    // SAFETY: a live state; `lua_type` reads any index.
+    let direct =
+        unsafe { lua::lua_type(state, 2) == lua::TTABLE && lua::lua_type(state, 3) == lua::TTABLE };
+    let (tier, mut rows, flag) = loop {
+        let Some((tier, rows, flag)) = driver::plan(slots, values) else {
+            return 0;
+        };
+        let here = direct
+            && (tier == TIER_VITALS
+                || (!flag && (tier == TIER_SUBSCRIBED || tier == TIER_POSITIONS)));
+        if !here {
+            break (tier, rows, flag);
+        }
+        // SAFETY: a live state with the shim's object array at 2 and its
+        // function list at 3.
+        if unsafe { rows_here(state, tier, slots, values) } {
+            // The budget is spent: the pump ends.
+            return 0;
+        }
+    };
+    if !values.is_empty() {
+        // A batch longer than the buffer is cut: the rows not written are
+        // never read, so the sampler counts them as not done.
+        rows = values.len().min(room);
+        for (i, v) in values.iter().take(rows).enumerate() {
+            // SAFETY: a live state with a free slot; index i + 1 exists in
+            // the table at 1, so the raw set does not allocate.
+            unsafe {
+                lua::lua_pushinteger(state, *v as isize);
+                lua::lua_rawseti(state, 1, (i + 1) as c_int);
+            }
+        }
+    }
+    // SAFETY: a live state with three free slots.
+    unsafe {
+        lua::lua_pushinteger(state, isize::from(tier));
+        lua::lua_pushinteger(state, rows as isize);
+        lua::lua_pushboolean(state, c_int::from(flag));
+    }
+    3
+}
+
+/// `pump_end()`: the pump ends.
+unsafe fn work_pump_end(_state: *mut State) -> c_int {
+    driver::pump_end();
+    0
+}
+
+/// `pos(x, y, z)`: the position of the batch's next row; the three numbers
+/// absent when the read failed. Returns true to stop.
+unsafe fn work_pos(state: *mut State) -> c_int {
+    // SAFETY: a live state; every read is of an argument and never raises.
+    let p = unsafe {
+        (
+            arg_finite(state, 1),
+            arg_finite(state, 2),
+            arg_finite(state, 3),
+        )
+    };
+    let p = match p {
+        (Some(x), Some(y), Some(z)) => Some([x, y, z]),
+        _ => None,
+    };
+    // SAFETY: as above.
+    unsafe { push_bool(state, driver::position(p)) }
+}
+
+/// `att(slot, xx, xy, xz, yx, yy, yz)`: attitude from `getPosition()`'s
+/// forward and up vectors.
+unsafe fn work_att(state: *mut State) -> c_int {
+    // SAFETY: a live state.
+    let Some(slot) = (unsafe { arg_slot(state, 1) }) else {
+        return 0;
+    };
+    let mut v = [0.0; 6];
+    for (i, out) in v.iter_mut().enumerate() {
+        // SAFETY: as above.
+        match unsafe { arg_finite(state, i as c_int + 2) } {
+            Some(n) => *out = n,
+            None => return 0,
+        }
+    }
+    driver::attitude(slot, [v[0], v[1], v[2]], [v[3], v[4], v[5]]);
+    0
+}
+
+/// `stopped()`: a stopped row's attitude done. Returns true to stop.
+unsafe fn work_stopped(state: *mut State) -> c_int {
+    // SAFETY: a live state.
+    unsafe { push_bool(state, driver::stopped()) }
+}
+
+/// `vit(slot, life, fuel)`: life and fuel; fuel absent for a static.
+/// Returns true to stop.
+unsafe fn work_vit(state: *mut State) -> c_int {
+    // SAFETY: a live state.
+    let Some(slot) = (unsafe { arg_slot(state, 1) }) else {
+        // SAFETY: as above.
+        return unsafe { push_bool(state, false) };
+    };
+    // SAFETY: as above.
+    let (life, fuel) = unsafe { (arg_finite(state, 2), arg_finite(state, 3)) };
+    // SAFETY: as above.
+    unsafe { push_bool(state, driver::vitals(slot, life, fuel)) }
+}
+
+/// The most ammunition entries `ammo` takes.
+const AMMO_MAX: c_int = 64;
+
+/// `ammo(slot, type, count, ...)`: a unit's ammunition. Returns true to
+/// stop.
+unsafe fn work_ammo(state: *mut State) -> c_int {
+    // SAFETY: a live state.
+    let Some(slot) = (unsafe { arg_slot(state, 1) }) else {
+        // SAFETY: as above.
+        return unsafe { push_bool(state, false) };
+    };
+    // SAFETY: as above.
+    let top = unsafe { lua::lua_gettop(state) }.min(1 + 2 * AMMO_MAX);
+    let mut items = Vec::new();
+    let mut i = 2;
+    while i < top {
+        // SAFETY: as above; `i` and `i + 1` are on the stack.
+        if let (Lv::String(t), Some(c)) = unsafe { (scalar(state, i), arg_finite(state, i + 1)) } {
+            items.push((t, c));
+        }
+        i += 2;
+    }
+    // SAFETY: as above.
+    unsafe { push_bool(state, driver::ammo(slot, &items)) }
+}
+
+/// A table's pairs.
+type Pairs = Vec<(Lv, Lv)>;
+
+/// The most stock entries `airbase` takes.
+const STOCK_MAX: c_int = 4096;
+
+/// `airbase(index, id, coalition, name, has_stock, category, key, value,
+/// ...)`: one airbase of the batch and, when `has_stock` is true, its
+/// warehouse's stock as triples of category (`weapon`, `aircraft`,
+/// `liquids`), name or number, and amount. Returns true to stop.
+unsafe fn work_airbase(state: *mut State) -> c_int {
+    // SAFETY: a live state.
+    let Some(index) = (unsafe { arg_slot(state, 1) }) else {
+        // SAFETY: as above.
+        return unsafe { push_bool(state, false) };
+    };
+    // SAFETY: as above.
+    let object = unsafe { arg_id(state, 2) }.unwrap_or(0);
+    // SAFETY: as above.
+    let coalition = unsafe { arg_id(state, 3) }.unwrap_or(0) as u32;
+    // SAFETY: as above.
+    let name = unsafe { lua::to_string(state, 4) }.unwrap_or_default();
+    // SAFETY: as above; `lua_toboolean` reads any index.
+    let has_stock = unsafe { lua::lua_toboolean(state, 5) } != 0;
+    let stock = has_stock.then(|| {
+        // SAFETY: as above.
+        let top = unsafe { lua::lua_gettop(state) }.min(5 + 3 * STOCK_MAX);
+        let mut cats: Vec<(Vec<u8>, Pairs)> = Vec::new();
+        let mut i = 6;
+        while i + 2 <= top {
+            // SAFETY: as above; `i` to `i + 2` are on the stack.
+            let (cat, key, value) =
+                unsafe { (scalar(state, i), scalar(state, i + 1), scalar(state, i + 2)) };
+            if let (Lv::String(cat), Lv::Number(_) | Lv::String(_), Lv::Number(_)) =
+                (&cat, &key, &value)
+            {
+                match cats.iter_mut().find(|(c, _)| c == cat) {
+                    Some((_, items)) => items.push((key, value)),
+                    None => cats.push((cat.clone(), vec![(key, value)])),
+                }
+            }
+            i += 3;
+        }
+        Lv::Table(
+            cats.into_iter()
+                .map(|(c, items)| (Lv::String(c), Lv::Table(items)))
+                .collect(),
+        )
+    });
+    let a = nanoprobe_transport::records::Airbase {
+        object,
+        coalition,
+        airbase: name,
+    };
+    // SAFETY: as above.
+    unsafe { push_bool(state, driver::airbase(index, a, stock)) }
+}
+
+/// `item()`: a birth or an enumeration item done. Returns true to stop.
+unsafe fn work_item(state: *mut State) -> c_int {
+    // SAFETY: a live state.
+    unsafe { push_bool(state, driver::item()) }
+}
+
+/// `seen(id)`: an object the running enumeration found. Returns its slot
+/// plus one, 0 when the table lacks it, or nil when it died in this
+/// generation or no enumeration runs; and whether to stop. Unless it returns
+/// 0, it also counts the item, so the shim makes one call.
+unsafe fn work_seen(state: *mut State) -> c_int {
+    // SAFETY: a live state.
+    let (found, stop) = match unsafe { arg_id(state, 1) } {
+        Some(id) => driver::seen(id),
+        None => (None, false),
+    };
+    // SAFETY: a live state with two free slots (DCS gives a C function
+    // LUA_MINSTACK).
+    unsafe {
+        match found {
+            Some(slot) => lua::lua_pushinteger(state, slot as isize),
+            None => lua::lua_pushnil(state),
+        }
+        lua::lua_pushboolean(state, c_int::from(stop));
+    }
+    2
+}
+
+/// `object(id, group, kind, category, coalition, country, life0, name,
+/// type, group_name, enumerated, movable)`: add a row; `movable` for a
+/// static that can move (cargo). Returns its slot plus one, or
+/// 0 when the table has it or it died in this generation.
+unsafe fn work_object(state: *mut State) -> c_int {
+    // SAFETY: a live state; every read below is of an argument and never
+    // raises.
+    let found = unsafe {
+        driver::Found {
+            object: arg_id(state, 1).unwrap_or(0),
+            group: arg_id(state, 2).unwrap_or(0),
+            kind: arg_id(state, 3).unwrap_or(0) as u32,
+            category: arg_id(state, 4).unwrap_or(0) as u32,
+            coalition: arg_id(state, 5).unwrap_or(0) as u32,
+            country: arg_id(state, 6).unwrap_or(0) as u32,
+            life0: arg_finite(state, 7).unwrap_or(0.0) as f32,
+            name: lua::to_string(state, 8).unwrap_or_default(),
+            type_name: lua::to_string(state, 9).unwrap_or_default(),
+            group_name: lua::to_string(state, 10).unwrap_or_default(),
+            movable: lua::lua_toboolean(state, 12) != 0,
+        }
+    };
+    // SAFETY: as above.
+    let enumerated = unsafe { lua::lua_toboolean(state, 11) } != 0;
+    let slot = driver::add(found, enumerated);
+    // SAFETY: a live state with a free slot.
+    unsafe { lua::lua_pushinteger(state, slot as isize) };
+    1
+}
+
+/// `wants(id)`: whether the table would take the object, and whether it
+/// died in this generation.
+unsafe fn work_wants(state: *mut State) -> c_int {
+    // SAFETY: a live state.
+    let (wants, died) = unsafe { arg_id(state, 1) }.map_or((false, false), driver::wants);
+    // SAFETY: as above.
+    unsafe {
+        push_bool(state, wants);
+        push_bool(state, died)
+    };
+    2
+}
+
+/// `enum_done()`: the running enumeration read everything.
+unsafe fn work_enum_done(_state: *mut State) -> c_int {
+    driver::enumeration_done();
+    0
+}
+
+/// `suspect([slot])`: a getter raised on the row, or with no slot on the
+/// batch's next row.
+unsafe fn work_suspect(state: *mut State) -> c_int {
+    // SAFETY: a live state.
+    match unsafe { arg_slot(state, 1) } {
+        Some(slot) => driver::suspect(slot),
+        None => driver::suspect_next(),
     }
     0
 }

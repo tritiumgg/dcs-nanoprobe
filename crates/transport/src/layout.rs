@@ -88,6 +88,7 @@ pub mod status {
         HIST_INTERVAL "hist_interval" 0x0380 8 32 Agent;
         HIST_COMMAND "hist_command" 0x0480 8 32 Agent;
         HIST_EVENT "hist_event" 0x0580 8 32 Agent;
+        HIST_SYSCALL "hist_syscall" 0x0680 8 32 Agent;
     }
 
     /// The first agent field after the header line: what Start zeros.
@@ -95,13 +96,13 @@ pub mod status {
     /// The sidecar's line.
     pub const SIDECAR_FIELDS: core::ops::Range<usize> = SIDECAR_BOOT..METRICS_SEQ;
     /// The metrics fields under the sequence lock: `slice_us` to the end of
-    /// `hist_event`.
-    pub const METRICS: core::ops::Range<usize> = SLICE_US..HIST_EVENT + 32 * 8;
+    /// `hist_syscall`.
+    pub const METRICS: core::ops::Range<usize> = SLICE_US..HIST_SYSCALL + 32 * 8;
     /// Buckets in each histogram.
     pub const HIST_BUCKETS: usize = 32;
     /// The agent's `pad` fields: offset and bytes.
     pub const AGENT_PADS: &[(usize, usize)] =
-        &[(0x68, 24), (0x140, 64), (0x248, 56), (0x680, 2432)];
+        &[(0x68, 24), (0x140, 64), (0x248, 56), (0x780, 2176)];
 }
 
 /// The side that writes a status field.

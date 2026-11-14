@@ -133,7 +133,7 @@ local function main()
   local hello = find(function(e)
     return e.ev == 'hello'
   end)
-  assert(hello and hello.interface == 3, 'the HELLO reads interface ' .. tostring(hello and hello.interface))
+  assert(hello and hello.interface == 6, 'the HELLO reads interface ' .. tostring(hello and hello.interface))
   assert(hello.build == BUILD, 'the HELLO reads build ' .. tostring(hello.build))
   assert(find(function(e)
     return e.ev == 'log' and e.target == 'hook' and e.msg == 'capabilities'

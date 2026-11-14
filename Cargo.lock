@@ -384,6 +384,7 @@ name = "nanoprobe-agent-link"
 version = "0.1.0"
 dependencies = [
  "nanoprobe-transport",
+ "proptest",
  "serde",
  "toml",
 ]

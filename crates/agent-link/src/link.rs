@@ -232,6 +232,8 @@ pub struct Link {
     inbound_fresh: bool,
     frame: u64,
     began: Instant,
+    /// This frame made the system calls.
+    syscall_frame: bool,
     stamps: Stamps,
     /// The stamps of the last record written in this batch.
     last: Option<Stamps>,
@@ -241,6 +243,8 @@ pub struct Link {
     gaps: [PendingGap; 2],
     flags: u32,
     hello_due: bool,
+    /// `HELLO` records written in this process.
+    hellos: u64,
     reading_commands: bool,
     /// The ring had no room for the queue this batch.
     blocked: bool,
@@ -254,6 +258,9 @@ pub struct Link {
     last_applied_seq: u64,
     counters: Counters,
     metrics: Metrics,
+    /// The metrics the status block holds, once this link has written them
+    /// all: later frames store only the words that changed.
+    metrics_stored: Option<Metrics>,
     last_pump: Option<Instant>,
     notes: Vec<String>,
     /// The theater and mission of the last `LIFECYCLE`, for the last one
@@ -319,6 +326,7 @@ impl Link {
             next_syscall: now,
             frame: 0,
             began: now,
+            syscall_frame: false,
             stamps: Stamps {
                 frame: 0,
                 model: 0.0,
@@ -334,6 +342,7 @@ impl Link {
             gaps: Default::default(),
             flags: flag_bits,
             hello_due: false,
+            hellos: 0,
             reading_commands: false,
             blocked: false,
             disabled: false,
@@ -345,6 +354,7 @@ impl Link {
             last_applied_seq: 0,
             counters: Counters::default(),
             metrics: Metrics::default(),
+            metrics_stored: None,
             last_pump: None,
             notes,
             names: (String::new(), String::new()),
@@ -453,7 +463,19 @@ impl Link {
                 self.detach("the sidecar's heartbeat stopped for 0.5 s");
             }
         }
-        let syscall = now >= self.next_syscall;
+        // An attach the sidecar confirmed since the last frame is taken
+        // before the frame's socket call: at a frame every 2 s that call
+        // would otherwise find the attach timeout passed and close the
+        // connection (spec/transport.md, "Handshake").
+        self.check_attach(now);
+        // While a sidecar is attached and no handshake is under way, the
+        // frame after a system-call frame is never one. Sampling then goes
+        // on when frames come a second or more apart, and no frame holds
+        // both (spec/transport.md, "Handshake").
+        let follows =
+            self.syscall_frame && self.attached() && matches!(self.conn, Conn::Attached { .. });
+        let syscall = now >= self.next_syscall && !follows;
+        self.syscall_frame = syscall;
         if syscall {
             self.syscall(now);
         }
@@ -1174,14 +1196,43 @@ impl Link {
                 flags: self.flags & !(flags::CONTROL_LOST as u32),
                 dcs_version: self.opts.dcs_version.clone(),
             };
-            if !self.put(self.stamps, kind::HELLO as u16, &hello.encode()) {
+            // The LIFECYCLE right after it tells a sidecar with no store
+            // which mission is loaded (spec/records.md, "Delivery classes").
+            let (theater, mission) = self.names.clone();
+            let state = Lifecycle {
+                state: self.stamps.lifecycle,
+                mission_gen: self.stamps.mission_gen,
+                theater,
+                mission,
+            };
+            if !self.put_pair(
+                self.stamps,
+                (kind::HELLO as u16, &hello.encode()),
+                (kind::LIFECYCLE as u16, &state.encode()),
+            ) {
                 return;
             }
             self.flags &= !(flags::CONTROL_LOST as u32);
             self.hello_due = false;
+            self.hellos += 1;
             self.reading_commands = true;
         }
         self.blocked = false;
+    }
+
+    /// Write two records back to back under `stamps`, with no `FRAME`
+    /// between them: both or neither.
+    fn put_pair(&mut self, stamps: Stamps, a: (u16, &[u8]), b: (u16, &[u8])) -> bool {
+        let (saved, last) = (self.out.clone(), self.last);
+        if !self.put(stamps, a.0, a.1) {
+            return false;
+        }
+        if !self.put(stamps, b.0, b.1) {
+            self.out = saved;
+            self.last = last;
+            return false;
+        }
+        true
     }
 
     /// Write one record, after a `FRAME` when its stamps are not the last
@@ -1283,6 +1334,9 @@ impl Link {
         let began = self.began;
         let pump_us = began.elapsed().as_secs_f64() * 1e6;
         self.metrics.hist[0][status::bucket(pump_us)] += 1;
+        if self.syscall_frame {
+            self.metrics.hist[4][status::bucket(pump_us)] += 1;
+        }
         if let Some(prev) = self.last_pump {
             let interval = began.duration_since(prev).as_secs_f64() * 1e6;
             self.metrics.hist[1][status::bucket(interval)] += 1;
@@ -1293,10 +1347,63 @@ impl Link {
                 *avg * 0.95 + interval * 0.05
             };
         }
-        self.metrics.slice_us =
-            (self.opts.overhead_share * self.metrics.frame_interval_us).min(250.0);
         self.last_pump = Some(began);
-        status::write_metrics(&*self.map, &self.metrics);
+        match self.metrics_stored.as_mut() {
+            Some(stored) => status::write_metrics_changed(&*self.map, &self.metrics, stored),
+            None => {
+                // The file may hold another process's figures: the first
+                // store writes every word.
+                status::write_metrics(&*self.map, &self.metrics);
+                self.metrics_stored = Some(self.metrics.clone());
+            }
+        }
+    }
+
+    /// `HELLO` records written in this process: a sampler starts an
+    /// enumeration when it grows.
+    pub fn hellos(&self) -> u64 {
+        self.hellos
+    }
+
+    /// The boot of the last sidecar that attached, 0 before any.
+    pub fn served_boot(&self) -> u64 {
+        self.last_served
+    }
+
+    /// Store the Lua heap of the `server` state, KiB.
+    pub fn set_lua_heap(&self, kib: u64) {
+        self.map.store(s::LUA_HEAP_KIB, kib, Ordering::Relaxed);
+    }
+
+    /// When the current frame began.
+    pub fn began(&self) -> Instant {
+        self.began
+    }
+
+    /// Whether the current frame made the system calls.
+    pub fn syscall_frame(&self) -> bool {
+        self.syscall_frame
+    }
+
+    /// The running average of the interval between pump calls, in µs, 0
+    /// before the second frame.
+    pub fn frame_interval_us(&self) -> f64 {
+        self.metrics.frame_interval_us
+    }
+
+    /// The sampling figures the status block shows: the frame's slice, the
+    /// tiers' achieved periods and the rows between clock reads
+    /// (spec/sampling.md). Stored with the frame's other metrics in
+    /// [`Link::end`].
+    pub fn set_sampling(&mut self, slice_us: f64, periods: [f64; 5], rows_per_clock: u64) {
+        self.metrics.slice_us = slice_us;
+        self.metrics.periods = periods;
+        self.metrics.rows_per_clock = rows_per_clock;
+    }
+
+    /// The `overhead_share` from `agent.toml`.
+    pub fn overhead_share(&self) -> f64 {
+        self.opts.overhead_share
     }
 
     /// The event queue's bytes and the control queue's records.
@@ -1439,6 +1546,45 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// With frames 2 s apart every frame is due its system calls. While a
+    /// sidecar is attached they come on every second frame, so the frames
+    /// between sample; before the attach every frame makes them.
+    #[test]
+    fn attached_at_half_a_frame_a_second_system_call_frames_alternate() {
+        let step = Duration::from_secs(2);
+        let (mut alone, alone_dir) = open("slow-alone");
+        let mut now = Instant::now();
+        let mut before = Vec::new();
+        for _ in 0..4 {
+            now += step;
+            before.push(alone.begin(now, 0.0, 0.0));
+            alone.flush();
+            alone.end();
+        }
+        assert_eq!(before, [true; 4], "before the attach");
+        drop(alone);
+        std::fs::remove_dir_all(&alone_dir).unwrap();
+        let (mut link, dir) = open("slow");
+        let (_stream, _) = attach(&mut link);
+        // `attach` ran frames on the real clock; these are after them.
+        let mut now = Instant::now();
+        let mut seen = Vec::new();
+        for _ in 0..8 {
+            now += step;
+            beat(&link);
+            seen.push(link.begin(now, 0.0, 0.0));
+            assert_eq!(link.syscall_frame(), *seen.last().unwrap());
+            link.flush();
+            link.end();
+        }
+        assert!(link.attached(), "detached");
+        assert!(
+            seen.windows(2).all(|w| w[0] != w[1]),
+            "system-call frames {seen:?}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[cfg(feature = "faults")]
     #[test]
     fn publish_now_writes_no_hello_after_a_lost_control_record() {
@@ -1512,5 +1658,345 @@ mod tests {
         );
         std::net::TcpStream::connect(("127.0.0.1", port)).expect("the link listens");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Store the sidecar's attach fields for the handshake `hello` made.
+    fn mark_attached(link: &Link, sidecar_boot: u64, attach_id: u64) {
+        let m = link.map().clone();
+        m.store(s::SIDECAR_BOOT, sidecar_boot, Ordering::Release);
+        m.store(s::AGENT_BOOT_SEEN, link.boot(), Ordering::Release);
+        m.store(s::ATTACH_SEEN, attach_id, Ordering::Release);
+    }
+
+    /// Move the sidecar's heartbeat, as a live sidecar does every poll.
+    fn beat(link: &Link) {
+        let m = link.map();
+        let b = m.load(s::SIDECAR_HEARTBEAT, Ordering::Relaxed);
+        m.store(s::SIDECAR_HEARTBEAT, b + 1, Ordering::Release);
+    }
+
+    /// Every record published since `from`, as kind and payload; the reader
+    /// then consumes them, so the ring has room again.
+    fn drain(link: &Link, from: &mut u64) -> Vec<(u64, Vec<u8>)> {
+        let m = &**link.map();
+        let mut c = Consumer::new(link.outbound().ring(), *from);
+        c.refresh(m).unwrap();
+        let mut out = Vec::new();
+        let mut payload = Vec::new();
+        while let Some(r) = c.next(m, &mut payload).unwrap() {
+            out.push((u64::from(r.kind), payload.clone()));
+        }
+        *from = c.head();
+        c.commit(m);
+        out
+    }
+
+    /// The kinds, with each FRAME shown as its campaign and replay flag.
+    fn shape(records: &[(u64, Vec<u8>)]) -> Vec<String> {
+        records
+            .iter()
+            .map(|(k, p)| {
+                if *k == kind::FRAME {
+                    let f = Frame::decode(p).unwrap();
+                    format!("FRAME c{} r{}", f.campaign, f.replay)
+                } else {
+                    format!("{k}")
+                }
+            })
+            .collect()
+    }
+
+    /// One frame with the sidecar alive.
+    fn frame(link: &mut Link) {
+        beat(link);
+        link.begin(Instant::now(), 0.0, 0.0);
+        link.flush();
+        link.end();
+    }
+
+    /// Attach a sidecar and run frames until the agent reads commands.
+    /// Returns the connection, which must stay open, and the ring position
+    /// the sidecar reads from.
+    fn attach(link: &mut Link) -> (TcpStream, u64) {
+        let (stream, sidecar_boot, attach_id) = hello(link);
+        let from = link.map().load(s::OUT_TAIL, Ordering::Acquire);
+        mark_attached(link, sidecar_boot, attach_id);
+        for _ in 0..100 {
+            frame(link);
+            if link.reading_commands() {
+                return (stream, from);
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        panic!("the HELLO was not written");
+    }
+
+    const LOG: u64 = kind::LOG;
+    const HELLO: u64 = kind::HELLO;
+    const LIFECYCLE: u64 = kind::LIFECYCLE;
+
+    fn log_record(link: &mut Link, msg: &str) {
+        let l = nanoprobe_transport::records::Log {
+            level: 3,
+            target: "agent".into(),
+            msg: msg.into(),
+            data: Lv::Nil,
+        };
+        link.enqueue(kind::LOG as u16, l.encode());
+    }
+
+    /// After an attach: the queued records, then HELLO and LIFECYCLE back to
+    /// back, the LIFECYCLE naming the loaded mission.
+    #[test]
+    fn a_lifecycle_follows_the_hello_of_an_attach() {
+        let (mut link, dir) = open("hello-lifecycle");
+        link.lifecycle(lifecycle::RUNNING as u32, "Caucasus", "shell.miz");
+        log_record(&mut link, "queued");
+        let (_stream, mut from) = attach(&mut link);
+        let got = drain(&link, &mut from);
+        let kinds: Vec<u64> = got
+            .iter()
+            .map(|(k, _)| *k)
+            .filter(|k| *k != kind::FRAME)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![LIFECYCLE, LOG, HELLO, LIFECYCLE],
+            "{:?}",
+            shape(&got)
+        );
+        let hello = got.iter().position(|(k, _)| *k == HELLO).unwrap();
+        assert_eq!(
+            got[hello + 1].0,
+            LIFECYCLE,
+            "a FRAME between HELLO and LIFECYCLE"
+        );
+        let l = Lifecycle::decode(&got[hello + 1].1).unwrap();
+        assert_eq!(
+            (l.state, l.theater.as_str(), l.mission.as_str()),
+            (lifecycle::RUNNING as u32, "Caucasus", "shell.miz")
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The resync HELLO after a lost control record is followed by a
+    /// LIFECYCLE too.
+    #[cfg(feature = "faults")]
+    #[test]
+    fn a_lifecycle_follows_the_resync_hello() {
+        let (mut link, dir) = open("resync-lifecycle");
+        link.lifecycle(lifecycle::PAUSED as u32, "Caucasus", "shell.miz");
+        let (_stream, mut from) = attach(&mut link);
+        drain(&link, &mut from);
+        link.faults().lose_control = true;
+        link.lifecycle(lifecycle::RUNNING as u32, "Caucasus", "shell.miz");
+        assert!(!link.reading_commands());
+        log_record(&mut link, "after the loss");
+        frame(&mut link);
+        let got = drain(&link, &mut from);
+        let kinds: Vec<u64> = got
+            .iter()
+            .map(|(k, _)| *k)
+            .filter(|k| *k != kind::FRAME)
+            .collect();
+        assert_eq!(kinds, vec![LOG, HELLO, LIFECYCLE], "{:?}", shape(&got));
+        let hello = got.iter().position(|(k, _)| *k == HELLO).unwrap();
+        assert_eq!(got[hello + 1].0, LIFECYCLE);
+        let l = Lifecycle::decode(&got[hello + 1].1).unwrap();
+        assert_eq!(l.state, lifecycle::RUNNING as u32);
+        assert!(link.reading_commands());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// With room for the HELLO and not for the LIFECYCLE, neither is written
+    /// and no command is read until both fit.
+    #[cfg(feature = "faults")]
+    #[test]
+    fn hello_and_lifecycle_go_in_together_or_not_at_all() {
+        let (mut link, dir) = open("pair");
+        link.lifecycle(lifecycle::RUNNING as u32, "Caucasus", "shell.miz");
+        let (_stream, sidecar_boot, attach_id) = hello(&mut link);
+        let mut from = link.map().load(s::OUT_TAIL, Ordering::Acquire);
+        // Write the queued LIFECYCLE first, then fill the ring.
+        mark_attached(&link, sidecar_boot, attach_id);
+        beat(&link);
+        link.begin(Instant::now(), 0.0, 0.0);
+        assert!(link.attached());
+        // Drop the HELLO the attach owes until the ring is filled.
+        link.hello_due = false;
+        link.flush();
+        link.end();
+        drain(&link, &mut from);
+        let hello_len = Hello {
+            dcs_version: "test".into(),
+            ..Hello::default()
+        }
+        .encode()
+        .len();
+        let state_len = Lifecycle {
+            theater: "Caucasus".into(),
+            mission: "shell.miz".into(),
+            ..Lifecycle::default()
+        }
+        .encode()
+        .len();
+        beat(&link);
+        link.begin(Instant::now(), 0.0, 0.0);
+        let map = link.map().clone();
+        link.out.refresh(&*map).unwrap();
+        let need = link.out.cost(hello_len) + link.out.cost(state_len);
+        let filler = vec![0u8; 8];
+        while link.out.free() >= need {
+            assert!(link.put_raw(kind::LOG as u16, &filler));
+        }
+        // Room for the HELLO alone, and not for both.
+        assert!(link.out.free() < need);
+        assert!(
+            link.out.free() >= link.out.cost(hello_len),
+            "no room for the HELLO either"
+        );
+        let tail = link.out.tail();
+        link.hello_due = true;
+        link.flush();
+        assert_eq!(link.out.tail(), tail, "wrote one of the two");
+        assert!(!link.reading_commands());
+        link.end();
+        // The sidecar reads everything; the next frame writes both.
+        drain(&link, &mut from);
+        frame(&mut link);
+        let got = drain(&link, &mut from);
+        let kinds: Vec<u64> = got
+            .iter()
+            .map(|(k, _)| *k)
+            .filter(|k| *k != kind::FRAME)
+            .collect();
+        assert_eq!(kinds, vec![HELLO, LIFECYCLE], "{:?}", shape(&got));
+        assert!(link.reading_commands());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A campaign change in the middle of a frame puts a FRAME before the
+    /// next record. Records made and written in the same frame have replay 0.
+    #[test]
+    fn a_campaign_change_mid_frame_starts_a_new_frame() {
+        let (mut link, dir) = open("campaign-mid-frame");
+        let (_stream, mut from) = attach(&mut link);
+        drain(&link, &mut from);
+        beat(&link);
+        link.begin(Instant::now(), 1.0, 1.0);
+        log_record(&mut link, "before");
+        link.set_campaign(7);
+        log_record(&mut link, "after");
+        link.flush();
+        link.end();
+        let got = drain(&link, &mut from);
+        assert_eq!(
+            shape(&got),
+            vec!["FRAME c0 r0", "24", "FRAME c7 r0", "24"],
+            "{:?}",
+            shape(&got)
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Records queued while detached are written after FRAMEs that repeat
+    /// their own stamps, with replay 1, wherever any stamp changes: the
+    /// campaign, the generation or the lifecycle state, and not only the frame.
+    #[test]
+    fn queued_records_keep_every_stamp_they_were_made_with() {
+        let (mut link, dir) = open("replay-stamps");
+        link.begin(Instant::now(), 1.0, 1.0);
+        log_record(&mut link, "a");
+        link.set_campaign(7);
+        log_record(&mut link, "b");
+        link.new_generation();
+        log_record(&mut link, "c");
+        link.lifecycle(lifecycle::PAUSED as u32, "Caucasus", "shell.miz");
+        link.end();
+        let (_stream, mut from) = attach(&mut link);
+        let got = drain(&link, &mut from);
+        let frames: Vec<Frame> = got
+            .iter()
+            .filter(|(k, _)| *k == kind::FRAME)
+            .map(|(_, p)| Frame::decode(p).unwrap())
+            .collect();
+        // a; b after the campaign; c after the generation; the LIFECYCLE
+        // after the state; then the current frame for the HELLO.
+        assert_eq!(frames.len(), 5, "{:?}", shape(&got));
+        let replayed: Vec<(u64, u32, u32, u32)> = frames[..4]
+            .iter()
+            .map(|f| (f.campaign, f.mission_gen, f.lifecycle, f.replay))
+            .collect();
+        let starting = lifecycle::STARTING as u32;
+        let paused = lifecycle::PAUSED as u32;
+        assert_eq!(
+            replayed,
+            vec![
+                (0, 0, starting, 1),
+                (7, 0, starting, 1),
+                (7, 1, starting, 1),
+                (7, 1, paused, 1),
+            ]
+        );
+        assert_eq!(frames[4].replay, 0);
+        assert_eq!(frames[4].campaign, 7);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// At 0.5 frames a second (frames 2 s apart) a handshake still ends in
+    /// an attach: every frame before the attach makes the system calls, the
+    /// sidecar answers between two frames, and from the attach on the
+    /// system-call frames alternate with sampling frames, the kill switch's
+    /// check and a reload's included being on system-call frames, so seen
+    /// within two frames.
+    #[test]
+    fn a_handshake_completes_at_half_a_frame_a_second() {
+        let step = Duration::from_secs(2);
+        let (mut link, dir) = open("slow-handshake");
+        let port = link.opts.port;
+        let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let sidecar_boot = 0x5eed;
+        let line = Line::Hello {
+            version: VERSION,
+            token: TOKEN.into(),
+            sidecar_boot,
+        }
+        .encode()
+        .unwrap();
+        (&stream).write_all(line.as_bytes()).unwrap();
+        stream.set_nonblocking(true).unwrap();
+        let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+        let mut now = Instant::now();
+        let mut text = String::new();
+        let mut handshake = Vec::new();
+        let mut marked = false;
+        for _ in 0..12 {
+            now += step;
+            beat(&link);
+            handshake.push(link.begin(now, 0.0, 0.0));
+            link.flush();
+            link.end();
+            if link.reading_commands() {
+                break;
+            }
+            // The sidecar answers between two frames.
+            std::thread::sleep(Duration::from_millis(5));
+            if !marked
+                && reader.read_line(&mut text).is_ok()
+                && text.ends_with('\n')
+                && let Ok(Line::Ok { attach_id, .. }) = Line::parse(text.trim_end().as_bytes())
+            {
+                mark_attached(&link, sidecar_boot, attach_id);
+                marked = true;
+            }
+        }
+        assert!(marked, "no OK in {} frames", handshake.len());
+        assert!(
+            link.reading_commands(),
+            "no attach within {} frames: {:?}",
+            handshake.len(),
+            link.take_notes()
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

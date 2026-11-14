@@ -11,11 +11,13 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use nanoprobe_agent_link::config::{AgentToml, read_token};
+pub use nanoprobe_agent_link::sampler::{Found, Read};
+use nanoprobe_agent_link::sampler::{Rates, Report, Sampler, clock_cost};
 use nanoprobe_agent_link::{Admit, Link, Options};
 use nanoprobe_transport::codec::{Lv, Reader};
 use nanoprobe_transport::layout::{kind, lifecycle, result};
 use nanoprobe_transport::log::{Level, Value};
-use nanoprobe_transport::records::{CommandHeader, Event, Log};
+use nanoprobe_transport::records::{Airbase, Bind, CommandHeader, Event, Log, Subscribe};
 
 use crate::state;
 
@@ -32,8 +34,17 @@ pub enum Frame {
     NoLink = 3,
 }
 
-/// The opcode of `CAMPAIGN` (spec/commands.md).
+/// The control opcodes the agent handles (spec/commands.md).
 const CAMPAIGN: u16 = 1;
+const ENUMERATE: u16 = 2;
+const RATES: u16 = 3;
+const SUBSCRIBE: u16 = 4;
+const BIND: u16 = 5;
+
+/// The `event_field` codes the table reads from a death event.
+const INITIATOR: u16 = 2;
+const TARGET: u16 = 3;
+const INITIATOR_CATEGORY: u16 = 17;
 
 /// Breadcrumb codes for the status block's `crumb` (spec/transport.md,
 /// "Breadcrumbs").
@@ -45,6 +56,18 @@ pub mod crumbs {
 
 struct Driver {
     link: Link,
+    sampler: Sampler,
+    /// The DCS event IDs that remove a row, from the shim.
+    deaths: Vec<u32>,
+    /// The DCS event IDs after which the target's life is read, after which
+    /// the initiator's ammunition is read, and of a birth.
+    life_events: Vec<u32>,
+    ammo_events: Vec<u32>,
+    birth_events: Vec<u32>,
+    /// The DCS event IDs after which the target's existence is checked.
+    watch_events: Vec<u32>,
+    /// A frame began and its `finish` has not run.
+    open: bool,
     root: PathBuf,
     /// The commanded-work budget per frame.
     commanded: Duration,
@@ -54,6 +77,10 @@ struct Driver {
     /// A reload request could not be removed, and that was logged.
     reload_failed: bool,
 }
+
+/// Reads one unit's position by its object ID in the caller's Lua state:
+/// `Ok(None)` when the getter gave no position, `Err` when it raised.
+pub type ReadPosition<'a> = dyn FnMut(u64) -> Result<Option<[f64; 3]>, ()> + 'a;
 
 static DRIVER: Mutex<Option<Driver>> = Mutex::new(None);
 
@@ -184,7 +211,21 @@ pub fn start(root: &Path, dcs_version: &str) -> Result<String, String> {
         Link::open(opts).map_err(|e| format!("could not open the mapped file {path}: {e}"))?;
     state::set_map(link.map().clone(), Instant::now());
     link.lifecycle(lifecycle::STARTING as u32, "", "");
+    let rates = Rates {
+        position_s: config.sampling.position_s,
+        vitals_s: config.sampling.vitals_s,
+        ammo_s: config.sampling.ammo_s,
+        warehouse_s: config.sampling.warehouse_s,
+        enumeration_s: config.sampling.enumeration_s,
+    };
     let mut d = Driver {
+        sampler: Sampler::new(rates, clock_cost()),
+        deaths: Vec::new(),
+        life_events: Vec::new(),
+        ammo_events: Vec::new(),
+        birth_events: Vec::new(),
+        watch_events: Vec::new(),
+        open: false,
         link,
         root: root.to_path_buf(),
         commanded: Duration::from_secs_f64(config.budget.commanded_ms / 1000.0),
@@ -241,8 +282,9 @@ pub mod faults {
     pub const FLOOD_MAX: u64 = 100_000;
 
     /// Arm the fault `name` with `arg`: `raise`, `panic`, `stall` (ms),
-    /// `flood` (records), or `lose-control`, which drops the link's next
-    /// control record.
+    /// `flood` (records), `lose-control`, which drops the link's next
+    /// control record, or `sampling`, which scales the sampling budget by
+    /// `arg` from now on.
     pub fn inject(name: &str, arg: f64) -> Result<(), String> {
         let n = if arg.is_finite() && arg >= 0.0 {
             arg as u64
@@ -252,6 +294,11 @@ pub mod faults {
         if name == "lose-control" {
             return super::with(|d| d.link.faults().lose_control = true)
                 .ok_or_else(|| "no link is open".to_owned());
+        }
+        if name == "sampling" {
+            // A share of the sampling budget, for the tenth-of-the-slice
+            // test (spec/faults.md).
+            return super::set_scale(arg);
         }
         let mut armed = ARMED.lock().map_err(|_| "the fault table is poisoned")?;
         match name {
@@ -331,9 +378,188 @@ fn injected(d: &mut Driver) {
     }
 }
 
-/// One frame: DCS real time, model time, and whether DCS is paused.
-pub fn frame(real: f64, model: f64, paused: bool) -> Frame {
-    with(|d| frame_with(d, real, model, paused)).unwrap_or(Frame::NoLink)
+/// One frame's first part: DCS real time, model time, and whether DCS is
+/// paused. Returns what the hook does next, and whether this is a sampling
+/// frame: the hook then calls the shim's pump, and `finish` after it. A
+/// frame that does not sample ends here (spec/sampling.md, "The frame").
+///
+/// `read`, when the caller's state has a position getter by object ID, reads
+/// one unit's position: `Ok(None)` when the getter gave no position, `Err`
+/// when it raised. The frame then sweeps the positions it owes with it,
+/// before it decides whether to pump (spec/sampling.md, "The frame").
+pub fn frame(
+    real: f64,
+    model: f64,
+    paused: bool,
+    mut read: Option<&mut ReadPosition<'_>>,
+) -> (Frame, bool) {
+    with(|d| {
+        if d.open {
+            // The hook did not call finish for the last frame.
+            end_frame(d);
+        }
+        let code = frame_with(d, real, model, paused);
+        let sampling = d.open
+            && d.link.reading_commands()
+            && [lifecycle::RUNNING as u32, lifecycle::PAUSED as u32]
+                .contains(&d.link.stamps().lifecycle);
+        d.sampler.set_direct(read.is_some());
+        // One clock read serves the slice and the sweep's start, and one
+        // the sweep's end and the gate.
+        let mut now = Instant::now();
+        if !d.link.attached() {
+            d.sampler.detached();
+        }
+        d.sampler.slice(&d.link, now);
+        if sampling && let Some(read) = read.as_mut() {
+            now = d.sampler.sweep(&mut d.link, now, read, Instant::now);
+        }
+        let pump = d.open && d.sampler.gate(&d.link, now) && sampling;
+        if !pump && d.open {
+            // Nothing comes between this and `finish` on a frame that does
+            // not sample, so the frame ends here and the hook makes one
+            // call, not two.
+            end_frame(d);
+        }
+        (code, pump)
+    })
+    .unwrap_or((Frame::NoLink, false))
+}
+
+/// The frame's last part: account its time, publish its batch and store the
+/// status block.
+pub fn finish() {
+    with(|d| {
+        if d.open {
+            end_frame(d);
+        }
+    });
+}
+
+fn end_frame(d: &mut Driver) {
+    d.open = false;
+    if let Some(r) = d.sampler.end_frame(&mut d.link, Instant::now()) {
+        report(d, &r);
+    }
+    d.link.end();
+}
+
+/// The `sampling` LOG (spec/sampling.md, "Reporting").
+fn report(d: &mut Driver, r: &Report) {
+    let gone = d.sampler.gone_counts();
+    let revivals = d.sampler.revivals();
+    let marks_cleared = d.sampler.marks_cleared();
+    let enum_end_abandoned = d.sampler.enum_end_abandoned();
+    record(
+        d,
+        Level::Info,
+        "sampling",
+        &[
+            ("share", Value::Num(r.share)),
+            ("syscall_per_s", Value::Num(r.syscall_per_s)),
+            ("debt_us", Value::Num(r.debt_us)),
+            ("credit_us", Value::Num(r.credit_us)),
+            ("pumps", Value::Int(r.pumps as i64)),
+            ("empty_pumps", Value::Int(r.empty_pumps as i64)),
+            ("frames", Value::Int(r.frames as i64)),
+            ("slice_us", Value::Num(r.slice_us)),
+            ("window_s", Value::Num(r.window_s)),
+            ("events_us", Value::Num(r.events_us)),
+            ("rows", Value::Int(r.rows as i64)),
+            ("births", Value::Int(r.births as i64)),
+            ("position_s", Value::Num(r.periods[0])),
+            ("vitals_s", Value::Num(r.periods[1])),
+            ("ammo_s", Value::Num(r.periods[2])),
+            ("warehouse_s", Value::Num(r.periods[3])),
+            ("enumeration_s", Value::Num(r.periods[4])),
+            ("forgiven_us", Value::Num(r.forgiven_us)),
+            ("scale", Value::Num(r.scale)),
+            ("overrun_us", Value::Num(r.overrun_us)),
+            ("clock_interval_us", Value::Num(r.clock_interval_us)),
+            ("starved", Value::Int(r.starved as i64)),
+            ("lone_rows", Value::Int(r.lone_rows as i64)),
+            (
+                "maintenance_frames",
+                Value::Int(r.maintenance_frames as i64),
+            ),
+            (
+                "maintenance_overrun_us",
+                Value::Num(r.maintenance_overrun_us),
+            ),
+            ("check_pumps", Value::Int(r.check_pumps as i64)),
+            ("check_overrun_us", Value::Num(r.check_overrun_us)),
+            ("row_frames", Value::Int(r.row_frames as i64)),
+            ("overrun_frames", Value::Int(r.overrun_frames as i64)),
+            ("overrun_sum_us", Value::Num(r.overrun_sum_us)),
+            ("cost_births", Value::Num(r.costs[0])),
+            ("cost_enumeration", Value::Num(r.costs[1])),
+            ("cost_subscribed", Value::Num(r.costs[2])),
+            ("cost_positions", Value::Num(r.costs[3])),
+            ("cost_stopped", Value::Num(r.costs[4])),
+            ("cost_vitals", Value::Num(r.costs[5])),
+            ("cost_ammo", Value::Num(r.costs[6])),
+            ("cost_warehouses", Value::Num(r.costs[7])),
+            ("birth_step_p50_us", Value::Num(r.steps[0].0)),
+            ("birth_step_p99_us", Value::Num(r.steps[0].1)),
+            ("birth_step_max_us", Value::Num(r.steps[0].2)),
+            ("enum_step_p50_us", Value::Num(r.steps[1].0)),
+            ("enum_step_p99_us", Value::Num(r.steps[1].1)),
+            ("enum_step_max_us", Value::Num(r.steps[1].2)),
+            ("xcall_us", Value::Num(r.xcall_us)),
+            ("close_us", Value::Num(r.close_us)),
+            ("batch_us", Value::Num(r.batch_us)),
+            ("us_fixed", Value::Num(r.spend.fixed_us)),
+            ("us_xcall", Value::Num(r.spend.xcall_us)),
+            ("us_pump", Value::Num(r.spend.pump_us)),
+            ("us_syscall", Value::Num(r.spend.syscall_us)),
+            ("us_births", Value::Num(r.spend.tier_us[0])),
+            ("us_enumeration", Value::Num(r.spend.tier_us[1])),
+            ("us_subscribed", Value::Num(r.spend.tier_us[2])),
+            ("us_positions", Value::Num(r.spend.tier_us[3])),
+            ("us_stopped", Value::Num(r.spend.tier_us[4])),
+            ("us_vitals", Value::Num(r.spend.tier_us[5])),
+            ("us_ammo", Value::Num(r.spend.tier_us[6])),
+            ("us_warehouses", Value::Num(r.spend.tier_us[7])),
+            ("rows_births", Value::Int(r.spend.tier_rows[0] as i64)),
+            ("rows_enumeration", Value::Int(r.spend.tier_rows[1] as i64)),
+            ("rows_subscribed", Value::Int(r.spend.tier_rows[2] as i64)),
+            ("rows_positions", Value::Int(r.spend.tier_rows[3] as i64)),
+            ("rows_stopped", Value::Int(r.spend.tier_rows[4] as i64)),
+            ("rows_vitals", Value::Int(r.spend.tier_rows[5] as i64)),
+            ("rows_ammo", Value::Int(r.spend.tier_rows[6] as i64)),
+            ("rows_warehouses", Value::Int(r.spend.tier_rows[7] as i64)),
+            ("idle", Value::Int(r.idle as i64)),
+            ("marked_life", Value::Int(r.marked.0 as i64)),
+            ("marked_ammo", Value::Int(r.marked.1 as i64)),
+            ("sweeps", Value::Int(r.sweeps as i64)),
+            ("life_sweep_s", Value::Num(r.slow_periods[0])),
+            ("ammo_sweep_s", Value::Num(r.slow_periods[1])),
+            ("sweep_row_us", Value::Num(r.sweep_row_us)),
+            ("sweep_batch_us", Value::Num(r.sweep_batch_us)),
+            ("sweep_cut", Value::Int(r.sweep_cut as i64)),
+            ("sweep_overruns", Value::Int(r.sweep_overruns as i64)),
+            ("sweep_overrun_us", Value::Num(r.sweep_overrun_us)),
+            ("sweep_forced", Value::Int(r.sweep_forced as i64)),
+            ("gone_dead", Value::Int(gone[0] as i64)),
+            ("gone_removed", Value::Int(gone[1] as i64)),
+            ("gone_missing", Value::Int(gone[2] as i64)),
+            ("classifier_anomalies", Value::Int(gone[3] as i64)),
+            ("classifier_faults", Value::Int(gone[4] as i64)),
+            ("revivals", Value::Int(revivals as i64)),
+            ("marks_cleared", Value::Int(marks_cleared as i64)),
+            ("enum_end_abandoned", Value::Int(enum_end_abandoned as i64)),
+        ],
+    );
+    if r.starved > 0 {
+        // overhead_share is below the floor the fixed work sets
+        // (spec/config.md).
+        record(
+            d,
+            Level::Warn,
+            "fixed work reached the overhead allowance",
+            &[("frames", Value::Int(r.starved as i64))],
+        );
+    }
 }
 
 fn frame_with(d: &mut Driver, real: f64, model: f64, paused: bool) -> Frame {
@@ -409,7 +635,7 @@ fn frame_with(d: &mut Driver, real: f64, model: f64, paused: bool) -> Frame {
     if syscall {
         state::flush_log();
     }
-    d.link.end();
+    d.open = true;
     out
 }
 
@@ -453,15 +679,10 @@ fn run_command(d: &mut Driver, opcode: u16, payload: &[u8]) -> Duration {
         return Duration::ZERO;
     };
     state::crumb_with(crumbs::COMMAND + u64::from(opcode), h.seq);
+    let body = &payload[rd.position()..];
     let code = match d.link.admit(&h) {
-        Admit::Control if opcode == CAMPAIGN => match rd.u64() {
-            Ok(campaign) => {
-                d.link.set_campaign(campaign);
-                None
-            }
-            Err(_) => Some(result::BAD_PAYLOAD),
-        },
-        Admit::Control | Admit::Run => Some(result::UNKNOWN_OPCODE),
+        Admit::Control => control(d, opcode, body),
+        Admit::Run => Some(result::UNKNOWN_OPCODE),
         Admit::Answer(code) => Some(code),
     };
     state::crumb(0);
@@ -474,6 +695,61 @@ fn run_command(d: &mut Driver, opcode: u16, payload: &[u8]) -> Duration {
         d.link.answer(opcode, &h, code, 0, cost, "", Lv::Nil);
     }
     counted
+}
+
+/// A control command: `CAMPAIGN` and the sampling opcodes (spec/sampling.md,
+/// "Commands"). Returns a failure to answer, or None: a control command that
+/// worked has no `RESULT`.
+fn control(d: &mut Driver, opcode: u16, body: &[u8]) -> Option<u64> {
+    match opcode {
+        CAMPAIGN => match Reader::new(body).u64() {
+            Ok(campaign) => {
+                d.link.set_campaign(campaign);
+                d.sampler.set_campaign(campaign);
+                None
+            }
+            Err(_) => Some(result::BAD_PAYLOAD),
+        },
+        ENUMERATE => {
+            d.sampler.request_enumeration();
+            None
+        }
+        RATES => match nanoprobe_transport::records::Rates::decode(body) {
+            Ok(r) => {
+                d.sampler.set_rates(Rates {
+                    position_s: r.position_s,
+                    vitals_s: r.vitals_s,
+                    ammo_s: r.ammo_s,
+                    warehouse_s: r.warehouse_s,
+                    enumeration_s: r.enumeration_s,
+                });
+                None
+            }
+            Err(_) => Some(result::BAD_PAYLOAD),
+        },
+        SUBSCRIBE => match Subscribe::decode(body) {
+            Ok(sub) => {
+                d.sampler
+                    .subscribe(sub.period_s, sub.attitude == 1, &sub.entity);
+                None
+            }
+            Err(_) => Some(result::BAD_PAYLOAD),
+        },
+        BIND => match Bind::decode(body) {
+            Ok(b) if b.entity.len() == b.object.len() => {
+                let pairs: Vec<(u64, u64)> = b
+                    .entity
+                    .iter()
+                    .copied()
+                    .zip(b.object.iter().copied())
+                    .collect();
+                d.sampler.bind(b.kind, &pairs);
+                None
+            }
+            _ => Some(result::BAD_PAYLOAD),
+        },
+        _ => Some(result::UNKNOWN_OPCODE),
+    }
 }
 
 /// A lifecycle change from a callback: `loading` from `onMissionLoadBegin`,
@@ -493,7 +769,8 @@ pub fn lifecycle(name: &str, theater: &str, mission: &str, real: f64, model: f64
         if code == lifecycle::LOADING as u32 {
             // A mission is being loaded and none is loaded yet
             // (spec/records.md, "Layout: LIFECYCLE").
-            d.link.new_generation();
+            let generation = d.link.new_generation();
+            d.sampler.new_generation(generation);
             d.theater.clear();
             d.mission.clear();
         } else if code == lifecycle::STOPPING as u32 {
@@ -523,9 +800,50 @@ pub fn lifecycle(name: &str, theater: &str, mission: &str, real: f64, model: f64
 /// Queue an `EVENT` record from the shim's event handler, and count the
 /// time since `started` in `hist_event`. A record over the payload limit
 /// goes cut (spec/records.md, "Oversized records"); one still over it is a
-/// `LOG` at `error` and a count in the pending `GAP` of events.
-pub fn event(event: Event, started: Instant) {
+/// `LOG` at `error` and a count in the pending `GAP` of events. A death
+/// event of a unit or static in the table asks for a check of its existence
+/// (spec/records.md, "The object table"). Returns the slot plus one of a row
+/// removed: always 0, the check removes it.
+pub fn event(event: Event, started: Instant) -> u32 {
     with(|d| {
+        let mut freed = 0;
+        let field = |code| {
+            event
+                .fields
+                .iter()
+                .find(|(c, _)| *c == code)
+                .and_then(|(_, v)| match v {
+                    Lv::Number(n) => Some(*n),
+                    _ => None,
+                })
+        };
+        if d.deaths.contains(&event.id) {
+            freed = d
+                .sampler
+                .death(&mut d.link, field(INITIATOR), field(INITIATOR_CATEGORY));
+        }
+        // A hit asks for a read of the target's life, and a shot for a read
+        // of the shooter's ammunition (spec/sampling.md, "Tiers").
+        if d.life_events.contains(&event.id) {
+            d.sampler.mark(field(TARGET), true);
+        }
+        if d.ammo_events.contains(&event.id) {
+            d.sampler.mark(field(INITIATOR), false);
+        }
+        // A hit, a damage assessment or a kill asks for one check of
+        // whether the target still exists (spec/records.md, "The object
+        // table").
+        if d.watch_events.contains(&event.id) {
+            d.sampler.watch(field(TARGET));
+        }
+        // The shim keeps the birth of a unit, a static or a cargo static for
+        // the next pump (`forward` in the shim).
+        if d.birth_events.contains(&event.id)
+            && field(INITIATOR).is_some()
+            && field(INITIATOR_CATEGORY).is_some_and(|c| [1.0, 3.0, 6.0].contains(&c))
+        {
+            d.sampler.birth_waits();
+        }
         let max = d.link.outbound().ring().max_payload();
         let mut payload = event.encode();
         if payload.len() > max {
@@ -541,7 +859,29 @@ pub fn event(event: Event, started: Instant) {
         }
         // The link counts a record still over the limit in the pending GAP.
         d.link.enqueue(kind::EVENT as u16, payload);
-        d.link.record_event(started.elapsed().as_secs_f64() * 1e6);
+        let us = started.elapsed().as_secs_f64() * 1e6;
+        d.link.record_event(us);
+        d.sampler.add_event_time(us);
+        freed
+    })
+    .unwrap_or(0)
+}
+
+/// The DCS event IDs that remove a row, from the shim's `world.event`.
+pub fn set_deaths(ids: Vec<u32>) {
+    with(|d| d.deaths = ids);
+}
+
+/// The DCS event IDs that ask for a read, from the shim's `world.event`:
+/// `which` 1 for the target's life, 2 for the initiator's ammunition, 3 for
+/// a birth, 4 for a check of whether the target still exists.
+pub fn set_reads(which: u32, ids: Vec<u32>) {
+    with(|d| match which {
+        1 => d.life_events = ids,
+        2 => d.ammo_events = ids,
+        3 => d.birth_events = ids,
+        4 => d.watch_events = ids,
+        _ => {}
     });
 }
 
@@ -579,4 +919,134 @@ pub fn summary() -> Option<Summary> {
         flags: d.link.flags(),
         frame: d.link.stamps().frame,
     })
+}
+
+/// The shim's pump began (spec/sampling.md): the births and airbases it
+/// holds, and the `server` state's heap. Returns the mission generation and
+/// whether to sample, or None with no link.
+pub fn pump_begin(births: usize, airbases: usize, heap_kib: f64) -> Option<(u32, bool)> {
+    with(|d| {
+        if heap_kib.is_finite() && heap_kib >= 0.0 {
+            d.link.set_lua_heap(heap_kib as u64);
+        }
+        d.sampler.set_pending(births, airbases);
+        let b = d.sampler.begin(&d.link, Instant::now());
+        (b.generation, b.sample)
+    })
+}
+
+/// The objects whose existence the pump checks now, into `out`; how many.
+pub fn checks(out: &mut Vec<u64>) -> usize {
+    with(|d| d.sampler.checks(out)).unwrap_or(0)
+}
+
+/// An object in the table no longer exists, with what the reads that tell a
+/// death from a removal gave. Returns the slot plus one of the row removed,
+/// or 0.
+pub fn gone(object: u64, dead: Read<Option<bool>>, life: Read<Option<f64>>) -> u32 {
+    with(|d| d.sampler.gone(&mut d.link, object, dead, life)).unwrap_or(0)
+}
+
+/// The existence check found the object existing (`sure`), or could not
+/// decide.
+pub fn alive(object: u64, sure: bool) {
+    with(|d| d.sampler.alive(&mut d.link, object, sure));
+}
+
+/// The next batch: its tier code, rows and flag, with the slots in `slots`.
+pub fn plan(slots: &mut Vec<u32>, values: &mut Vec<i64>) -> Option<(u8, usize, bool)> {
+    with(|d| {
+        let p = d.sampler.plan(&mut d.link, Instant::now, slots)?;
+        d.sampler.buffer_values(p.tier, p.flag, slots, values);
+        Some((p.tier as u8, p.rows, p.flag))
+    })
+    .flatten()
+}
+
+/// The pump ended: close the last batch.
+pub fn pump_end() {
+    with(|d| d.sampler.end_pump(&mut d.link, Instant::now));
+}
+
+/// A position for the batch's next row; true to stop.
+pub fn position(p: Option<[f64; 3]>) -> bool {
+    with(|d| d.sampler.position_next(p, Instant::now)).unwrap_or(true)
+}
+
+/// Attitude for a slot of the batch, from `getPosition()`'s `x` and `y`.
+pub fn attitude(slot: u32, x: [f64; 3], y: [f64; 3]) {
+    with(|d| d.sampler.attitude(slot, x, y));
+}
+
+/// A stopped row's attitude done; true to stop.
+pub fn stopped() -> bool {
+    with(|d| d.sampler.stopped_done(Instant::now)).unwrap_or(true)
+}
+
+/// A static's point, read when its row is added and at each enumeration.
+pub fn spot(object: u64, p: [f64; 3]) {
+    with(|d| d.sampler.spot(object, p));
+}
+
+/// Life and fuel for a slot of the batch; true to stop.
+pub fn vitals(slot: u32, life: Option<f64>, fuel: Option<f64>) -> bool {
+    with(|d| d.sampler.vitals(slot, life, fuel, Instant::now)).unwrap_or(true)
+}
+
+/// A unit's ammunition; true to stop.
+pub fn ammo(slot: u32, items: &[(Vec<u8>, f64)]) -> bool {
+    with(|d| d.sampler.ammo(&mut d.link, slot, items, Instant::now)).unwrap_or(true)
+}
+
+/// One airbase of the batch, with its stock; true to stop.
+pub fn airbase(index: u32, airbase: Airbase, stock: Option<Lv>) -> bool {
+    with(|d| {
+        d.sampler
+            .airbase(&mut d.link, index, airbase, stock, Instant::now)
+    })
+    .unwrap_or(true)
+}
+
+/// A birth or an enumeration item done; true to stop.
+pub fn item() -> bool {
+    with(|d| d.sampler.item(Instant::now)).unwrap_or(true)
+}
+
+/// An object the running enumeration found: its slot plus one, 0 when the
+/// table lacks it, None when it died or no enumeration runs; and, unless 0,
+/// the item counted and whether to stop.
+pub fn seen(object: u64) -> (Option<u32>, bool) {
+    with(|d| d.sampler.seen_item(&mut d.link, object, Instant::now)).unwrap_or((None, true))
+}
+
+/// Add a row: its slot plus one, or 0.
+pub fn add(found: Found, enumerated: bool) -> u32 {
+    with(|d| d.sampler.add(&mut d.link, found, enumerated)).unwrap_or(0)
+}
+
+/// Whether the table would take an object, and whether it died in this
+/// generation (the shim then takes it only if it is not dead).
+pub fn wants(object: u64) -> (bool, bool) {
+    with(|d| (d.sampler.wants(object), d.sampler.died(object))).unwrap_or((false, false))
+}
+
+/// The running enumeration read everything.
+pub fn enumeration_done() {
+    with(|d| d.sampler.enumeration_done(&mut d.link, Instant::now()));
+}
+
+/// A getter raised on a slot.
+pub fn suspect(slot: u32) {
+    with(|d| d.sampler.suspect(slot));
+}
+
+/// A getter raised on the batch's next row.
+pub fn suspect_next() {
+    with(|d| d.sampler.suspect_next());
+}
+
+/// Scale the sampling budget (spec/faults.md).
+#[cfg(feature = "faults")]
+pub fn set_scale(scale: f64) -> Result<(), String> {
+    with(|d| d.sampler.set_scale(scale)).ok_or_else(|| "no link is open".to_owned())?
 }

@@ -93,7 +93,7 @@ impl Default for Sampling {
             vitals_s: 5.0,
             ammo_s: 30.0,
             warehouse_s: 60.0,
-            enumeration_s: 30.0,
+            enumeration_s: 60.0,
         }
     }
 }

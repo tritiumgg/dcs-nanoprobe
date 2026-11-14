@@ -19,6 +19,7 @@ struct Previous {
     counters: [u64; 5],
     pump: Option<Hist>,
     interval: Option<Hist>,
+    syscall: Option<Hist>,
     heartbeat: u64,
     heartbeat_since: Duration,
 }
@@ -93,9 +94,9 @@ impl Top {
             rate(prev.map(|p| p.frame), frame, dt)
         );
 
-        let (pump, interval) = match &metrics {
-            Some(m) => (Some(m.hist[0]), Some(m.hist[1])),
-            None => (None, None),
+        let (pump, interval, syscall) = match &metrics {
+            Some(m) => (Some(m.hist[0]), Some(m.hist[1]), Some(m.hist[4])),
+            None => (None, None, None),
         };
         let _ = writeln!(
             out,
@@ -106,6 +107,11 @@ impl Top {
             out,
             "frame interval   {}",
             window(prev.and_then(|p| p.interval.as_ref()), interval.as_ref())
+        );
+        let _ = writeln!(
+            out,
+            "system-call frame {}",
+            window(prev.and_then(|p| p.syscall.as_ref()), syscall.as_ref())
         );
 
         for (label, tail, head, cap) in [
@@ -165,6 +171,7 @@ impl Top {
             counters,
             pump: pump.or_else(|| self.prev.as_ref().and_then(|p| p.pump)),
             interval: interval.or_else(|| self.prev.as_ref().and_then(|p| p.interval)),
+            syscall: syscall.or_else(|| self.prev.as_ref().and_then(|p| p.syscall)),
             heartbeat,
             heartbeat_since,
         });

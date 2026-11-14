@@ -12,26 +12,56 @@
 --     simulation is paused the removal waits, and it finishes after a resume
 --     (LIVE under Wine). Births still reach handlers while paused (LIVE
 --     under Wine).
---   - Every added unit emits S_EVENT_BIRTH (LIVE). A unit killed by an
---     explosion emits S_EVENT_UNIT_LOST and S_EVENT_DEAD, and no
---     S_EVENT_KILL (LIVE).
+--   - Every added unit and every added static emits S_EVENT_BIRTH (LIVE).
+--     The event's object_category is 3 for a static and 6 for a cargo
+--     static (LIVE).
+--   - A unit killed by a weapon or an explosion is doomed: isExist() is false
+--     at once and its group stops listing it (LIVE). Its death events come
+--     later, when the wreck explodes, 0 to 84 s afterward (LIVE). The
+--     mock's `sim.death_delay` is that wait in seconds of model time, 0 by
+--     default. Model time stands still while paused, so a delayed death waits.
+--   - A doomed unit, named by its object ID in a plain table, still answers
+--     Unit.isDead (true), Unit.getLife (a number), Object.getPoint,
+--     Unit.getDesc and Object.getCategory (1), and
+--     DCS.getUnitPositionByObjectId gives the wreck's position (LIVE).
+--   - A unit removed by Unit.destroy or Group.destroy emits no event. Its
+--     isDead, getLife, getPoint and getDesc raise, Object.getCategory gives 0
+--     and the position getter gives three zeros (LIVE). A unit that exists
+--     is not dead (LIVE).
+--   - A static killed by a weapon (Sim:shoot) stops existing at once, reads
+--     StaticObject.getLife 0 and sends the same events as a unit; a static
+--     removed by Object.destroy reads nothing (getLife raises) and sends none
+--     (LIVE, E38). Object.destroy on a doomed unit or static, a burning wreck,
+--     takes it out of the world: its reads then raise, its death events still
+--     come.
+--   - A script that sets a doomed unit's life (a_unit_set_life_percentage
+--     above 0, or Sim:revive) revives it: same object ID, isExist true,
+--     isDead false, listed by its group again, no event (LIVE, E38).
+--   - A weapon kill (Sim:shoot) emits S_EVENT_HIT and S_EVENT_BDA naming the
+--     unit as target at once, then S_EVENT_KILL, S_EVENT_UNIT_LOST and
+--     S_EVENT_DEAD together at the death. An explosion kill emits only
+--     S_EVENT_UNIT_LOST and S_EVENT_DEAD, and no S_EVENT_KILL, HIT or BDA
+--     (LIVE).
 --   - An event with an initiator carries `initiator_data`, a plain table of
 --     coalition, mission_id, object_category, object_id, unit_name and
---     unit_type (LIVE).
+--     unit_type (LIVE). An event with a target carries `target_data`, the
+--     same table for the target.
 --   - A group with a route moves along it and its controller has a task
 --     (LIVE).
 --   - An aircraft's fuel and gun rounds follow its spawn payload (LIVE).
 --   - Unit:getFuel() is 1 for a ground unit (LIVE).
---   - DCS.getUnitPositionByObjectId gives x, y, z for a unit and three
---     zeros for any other ID (LIVE).
+--   - DCS.getUnitPositionByObjectId gives x, y, z for a unit and for a
+--     cargo static, and three zeros for any other ID (LIVE).
+--   - Object.getCategory gives 1 for a unit, 3 for a static and 6 for a
+--     cargo static (LIVE).
 --   - Unit:getID() returns the mission ID as a string for a unit added at
 --     run time (LIVE under Wine).
 --   - a_unit_set_life_percentage in the mission state takes a mission ID and
 --     sets the unit's life (LIVE).
 --   - A mission load removes every runtime object (LIVE).
--- UNVERIFIED choices: births and deaths reach handlers at the next frame;
--- a getter on a unit that no longer exists raises; an explosion kills
--- within 10 m.
+-- UNVERIFIED choices: births reach handlers at the next frame; the other
+-- getters on a unit that no longer exists raise; a static's initiator_data
+-- has no mission_id; an explosion kills within 10 m.
 
 local W = {}
 
@@ -50,15 +80,25 @@ local TYPES = {
   ['Osa 9A33 ln'] = { life = 1 },
   ['ZSU-23-4 Shilka'] = { life = 1 },
   ['UH-1H'] = { life = 1, air = true, fuel_max = 631 },
+  -- The mixed scenario's ship (S10). UNVERIFIED figures.
+  ['speedboat'] = { life = 1 },
+  -- The death probe (lua/sampling/deaths.lua). UNVERIFIED figures.
+  ['A-10A'] = { life = 1, air = true, fuel_max = 5029 },
+  ['Ural-375'] = { life = 1 },
 }
 
 local Sim = {}
 Sim.__index = Sim
 
 function Sim:clear()
-  self.units, self.by_name, self.dead = {}, {}, {}
+  -- `dead` holds killed units, `removed` units that Unit.destroy or
+  -- Group.destroy took out.
+  self.units, self.by_name, self.dead, self.removed = {}, {}, {}, {}
+  -- `dead_statics` holds killed statics, `gone_statics` removed ones.
+  self.dead_statics, self.gone_statics = {}, {}
   self.groups, self.statics = {}, {}
   self.marks = {}
+  self.orders = {}
   self.mission_ids, self.group_ids = {}, {}
   self.next_object, self.next_mission, self.next_group = 16777472, 1000000, 1000000
   self.queue = {}
@@ -81,14 +121,14 @@ function Sim:object_id()
   return self.next_object
 end
 
-function Sim:remove_unit(unit)
+-- Take a unit out of the world: it no longer exists and its group no longer
+-- lists it. A group whose last unit is gone no longer exists.
+local function detach(self, unit)
   self.units[unit.id] = nil
   if self.by_name[unit.name] == unit then
     self.by_name[unit.name] = nil
   end
-  self.dead[unit.id] = unit
   unit.alive = false
-  -- A group whose last unit is gone no longer exists.
   local group = unit.group
   for _, other in ipairs(group.units) do
     if other.alive then
@@ -99,6 +139,73 @@ function Sim:remove_unit(unit)
     self.groups[group.name] = nil
   end
   group.alive = false
+end
+
+-- Remove a unit with no event (Unit.destroy, Group.destroy, a replaced group).
+function Sim:remove_unit(unit)
+  if unit.alive then
+    self.removed[unit.id] = unit
+    detach(self, unit)
+  elseif self.dead[unit.id] then
+    -- A burning wreck: its reads raise from now on.
+    self.dead[unit.id] = nil
+    self.removed[unit.id] = unit
+  end
+end
+
+-- Take a static out of the world with no event (Object.destroy). A killed
+-- static that is destroyed too has nothing left to read.
+function Sim:remove_static(static)
+  static.alive = false
+  if self.statics[static.name] == static then
+    self.statics[static.name] = nil
+  end
+  self.dead_statics[static.id] = nil
+  self.gone_statics[static.id] = static
+end
+
+-- Bring a killed unit back with its full life: the same object ID, listed by
+-- its group again, no event. Returns whether it was dead.
+function Sim:revive(unit)
+  if self.dead[unit.id] ~= unit then
+    return false
+  end
+  self.dead[unit.id] = nil
+  self.units[unit.id] = unit
+  self.by_name[unit.name] = unit
+  unit.alive = true
+  unit.life = unit.kind.life
+  local group = unit.group
+  group.alive = true
+  if not self.groups[group.name] then
+    self.groups[group.name] = group
+  end
+  return true
+end
+
+-- Kill a unit: it stops existing at once, keeps its position and has `life`
+-- (LIVE). Its death events are the caller's to queue.
+function Sim:doom(unit)
+  self.dead[unit.id] = unit
+  unit.life = 0
+  detach(self, unit)
+end
+
+-- Kill a static: it stops existing at once and reads life 0, as a unit does.
+function Sim:doom_static(static)
+  static.alive = false
+  if self.statics[static.name] == static then
+    self.statics[static.name] = nil
+  end
+  self.dead_statics[static.id] = static
+end
+
+-- Seconds of model time from a kill to its death events.
+Sim.death_delay = 0
+
+-- The model time at which a kill made now reaches its death events.
+local function death_time(self)
+  return (self.host.model or 0) + self.death_delay
 end
 
 function Sim:remove_group(group)
@@ -169,7 +276,7 @@ function Sim:add_group(country, category, data)
     self.units[unit.id] = unit
     self.by_name[unit.name] = unit
     group.units[#group.units + 1] = unit
-    self.queue[#self.queue + 1] = { event = 'S_EVENT_BIRTH', unit = unit }
+    self.queue[#self.queue + 1] = { event = 'S_EVENT_BIRTH', initiator = unit }
   end
   self.groups[group.name] = group
   return group
@@ -188,45 +295,106 @@ function Sim:add_static(country, data)
     y = 0,
     z = data.y,
     alive = true,
+    static = true,
+    -- A static of the `Cargos` category can move (LIVE).
+    cargo = data.category == 'Cargos',
   }
   self.statics[static.name] = static
+  self.queue[#self.queue + 1] = { event = 'S_EVENT_BIRTH', initiator = static }
   return static
 end
 
--- Kill every unit within 10 m of the point.
+-- Queue the death events of a doomed unit, for `death_delay` from now. A
+-- weapon kill (`weapon`) also sends S_EVENT_KILL.
+local function queue_deaths(self, unit, weapon, shooter)
+  local at = death_time(self)
+  local q = self.queue
+  if weapon then
+    q[#q + 1] = { event = 'S_EVENT_KILL', initiator = shooter, target = unit, at = at }
+  end
+  q[#q + 1] = { event = 'S_EVENT_UNIT_LOST', initiator = unit, at = at }
+  q[#q + 1] = { event = 'S_EVENT_DEAD', initiator = unit, at = at }
+end
+
+-- Kill every unit and static within 10 m of the point. It sends nothing
+-- until the death events (LIVE).
 function Sim:explode(point)
+  local hit = {}
   for _, unit in pairs(self.units) do
     local dx, dz = unit.x - point.x, unit.z - point.z
-    if unit.alive and not unit.dying and dx * dx + dz * dz <= 100 then
-      unit.dying = true
-      unit.life = 0
-      self.queue[#self.queue + 1] = { event = 'S_EVENT_UNIT_LOST', unit = unit }
-      self.queue[#self.queue + 1] = { event = 'S_EVENT_DEAD', unit = unit, remove = true }
+    if dx * dx + dz * dz <= 100 then
+      hit[#hit + 1] = unit
     end
+  end
+  table.sort(hit, function(a, b)
+    return a.id < b.id
+  end)
+  for _, unit in ipairs(hit) do
+    self:doom(unit)
+    queue_deaths(self, unit)
+  end
+  local statics = {}
+  for _, static in pairs(self.statics) do
+    local dx, dz = static.x - point.x, static.z - point.z
+    if dx * dx + dz * dz <= 100 then
+      statics[#statics + 1] = static
+    end
+  end
+  table.sort(statics, function(a, b)
+    return a.id < b.id
+  end)
+  for _, static in ipairs(statics) do
+    self:doom_static(static)
+    queue_deaths(self, static)
   end
 end
 
+-- Send a HIT that kills nothing, from `shooter` (or nobody) to `unit`.
+function Sim:hit(unit, shooter)
+  self.queue[#self.queue + 1] = { event = 'S_EVENT_HIT', initiator = shooter, target = unit }
+end
+
+-- Kill a unit with a weapon, optionally from the unit `shooter`: S_EVENT_HIT
+-- and S_EVENT_BDA on the next flush, the death events after `death_delay`
+-- (LIVE).
+function Sim:shoot(unit, shooter)
+  if unit.static then
+    if not unit.alive then
+      return
+    end
+  elseif not self.units[unit.id] then
+    return
+  end
+  self.queue[#self.queue + 1] = { event = 'S_EVENT_HIT', initiator = shooter, target = unit }
+  self.queue[#self.queue + 1] = { event = 'S_EVENT_BDA', initiator = shooter, target = unit }
+  if unit.static then
+    self:doom_static(unit)
+  else
+    self:doom(unit)
+  end
+  queue_deaths(self, unit, true, shooter)
+end
+
 -- Deliver queued events and carry out deferred removals. Runs every frame,
--- paused or not; a group's removal waits while `paused`.
+-- paused or not; a group's removal waits while `paused`, and an item with a
+-- model time `at` waits for it.
 function Sim:flush(paused)
   local queue = self.queue
+  local now = self.host.model or 0
   self.queue = {}
   for _, item in ipairs(queue) do
-    if paused and item.destroy_group then
+    if (paused and item.destroy_group) or (item.at and item.at > now + 1e-9) then
       self.queue[#self.queue + 1] = item
     else
       if item.event then
-        self.host:unit_event(item.event, item.unit)
+        self.host:unit_event(item.event, item.initiator, item.target)
       end
       if item.remove then
         self:remove_unit(item.unit)
       elseif item.destroy_group then
         self:remove_group(item.destroy_group)
       elseif item.destroy_static then
-        item.destroy_static.alive = false
-        if self.statics[item.destroy_static.name] == item.destroy_static then
-          self.statics[item.destroy_static.name] = nil
-        end
+        self:remove_static(item.destroy_static)
       end
     end
   end
@@ -307,7 +475,17 @@ local function scripting(host, name)
   -- The thing a handle names, alive or not.
   local function find(self)
     local id = self.id_
-    return sim.units[id] or sim.dead[id]
+    return sim.units[id] or sim.dead[id] or sim.removed[id]
+  end
+
+  -- A unit that exists or was killed, or an error: a unit that Unit.destroy
+  -- or Group.destroy removed has no state to read (LIVE).
+  local function known(self, method)
+    local unit = sim.units[self.id_] or sim.dead[self.id_]
+    if not unit then
+      error('mock: ' .. method .. ' on a unit that was destroyed or never existed', 3)
+    end
+    return unit
   end
 
   local function static_of(self)
@@ -316,6 +494,7 @@ local function scripting(host, name)
         return static
       end
     end
+    return sim.dead_statics[self.id_]
   end
 
   local function airbase_of(self)
@@ -337,11 +516,16 @@ local function scripting(host, name)
   end
 
   local function any(self)
-    return sim.units[self.id_] or static_of(self) or airbase_of(self)
+    return sim.units[self.id_] or sim.dead[self.id_] or static_of(self) or airbase_of(self)
   end
 
   state.Object = ns(name, 'Object', {
     isExist = function(self)
+      -- A test sets `sim.exist_raises[id] = true` to make the call raise for
+      -- one object, as it can in DCS for an object in transition.
+      if sim.exist_raises and sim.exist_raises[self.id_] then
+        error('mock: Object.isExist raises for ' .. tostring(self.id_), 2)
+      end
       local thing = sim.units[self.id_] or static_of(self)
       return thing ~= nil and thing.alive == true
     end,
@@ -354,8 +538,21 @@ local function scripting(host, name)
       return thing and thing.type
     end,
     getPoint = function(self)
+      if sim.removed[self.id_] then
+        error('mock: getPoint on a unit that was destroyed', 2)
+      end
       local thing = any(self) or error('mock: UNVERIFIED: getPoint on an object that no longer exists', 2)
       return { x = thing.x, y = thing.y or 0, z = thing.z }
+    end,
+    getCategory = function(self)
+      if sim.units[self.id_] or sim.dead[self.id_] then
+        return 1
+      end
+      if sim.removed[self.id_] then
+        return 0
+      end
+      local static = static_of(self) or error('mock: UNVERIFIED: getCategory on an object that no longer exists', 2)
+      return static.cargo and 6 or 3
     end,
     getPosition = function(self)
       local unit = live(self, 'getPosition')
@@ -376,7 +573,7 @@ local function scripting(host, name)
       return unit.kind.air == true and unit.y > 0
     end,
     destroy = function(self)
-      local unit = sim.units[self.id_]
+      local unit = sim.units[self.id_] or sim.dead[self.id_]
       if unit then
         sim.queue[#sim.queue + 1] = { remove = true, unit = unit }
         return
@@ -408,8 +605,13 @@ local function scripting(host, name)
     getObjectID = function(self)
       return self.id_
     end,
+    -- False for a unit that exists, true for a killed one (LIVE).
+    isDead = function(self)
+      known(self, 'isDead')
+      return sim.units[self.id_] == nil
+    end,
     getLife = function(self)
-      return live(self, 'getLife').life
+      return known(self, 'getLife').life
     end,
     getFuel = function(self)
       return live(self, 'getFuel').fuel
@@ -429,8 +631,21 @@ local function scripting(host, name)
       return #out > 0 and out or nil
     end,
     getDesc = function(self)
-      local unit = live(self, 'getDesc')
-      return { typeName = unit.type, life = unit.kind.life, fuelMassMax = unit.kind.fuel_max }
+      local unit = known(self, 'getDesc')
+      -- `category` is the unit's: its group's category number, which
+      -- Unit.Category numbers the same way (UNVERIFIED).
+      return {
+        typeName = unit.type,
+        life = unit.kind.life,
+        fuelMassMax = unit.kind.fuel_max,
+        category = unit.group.category,
+      }
+    end,
+    getLife0 = function(self)
+      return live(self, 'getLife0').kind.life
+    end,
+    getCountry = function(self)
+      return live(self, 'getCountry').group.country
     end,
     getGroup = function(self)
       local unit = live(self, 'getGroup')
@@ -455,6 +670,14 @@ local function scripting(host, name)
     hasTask = function(self)
       local group = group_of(self)
       return group ~= nil and #group.route > 1
+    end,
+    -- The world has no AI: orders are kept, in `sim.orders`, and obeyed by
+    -- nothing. A test that wants a kill makes it (Sim:shoot).
+    setTask = function(self, task)
+      sim.orders[#sim.orders + 1] = { group = self.id_, task = task }
+    end,
+    setOption = function(self, option, value)
+      sim.orders[#sim.orders + 1] = { group = self.id_, option = option, value = value }
     end,
   })
 
@@ -519,6 +742,28 @@ local function scripting(host, name)
     end,
     getID = function(self)
       return self.id_
+    end,
+    getTypeName = function(self)
+      local static = static_of(self)
+      return static and static.type
+    end,
+    -- A static's life, country, coalition and description (UNVERIFIED
+    -- figures: a static has life 1 here).
+    getLife = function(self)
+      local static = static_of(self) or error('mock: UNVERIFIED: getLife on a static that no longer exists', 2)
+      return static.alive and 1 or 0
+    end,
+    getCountry = function(self)
+      local static = static_of(self) or error('mock: getCountry on a static that no longer exists', 2)
+      return static.country
+    end,
+    getCoalition = function(self)
+      local static = static_of(self) or error('mock: getCoalition on a static that no longer exists', 2)
+      return side_of(state, static.country)
+    end,
+    getDesc = function(self)
+      local static = static_of(self) or error('mock: getDesc on a static that no longer exists', 2)
+      return { typeName = static.type, category = 0 }
     end,
   })
 
@@ -653,6 +898,11 @@ local function scripting(host, name)
     getHeight = function()
       return 0
     end,
+    -- Water (3) from 20 km south of the origin, land (1) elsewhere: a
+    -- made-up coast, so the mixed scenario finds water. UNVERIFIED.
+    getSurfaceType = function(point)
+      return (point.x or 0) < -20000 and 3 or 1
+    end,
   })
 
   state.coord = ns(name, 'coord', {
@@ -728,21 +978,46 @@ local function scripting(host, name)
     })
   end
 
-  -- The event for a unit, as this state's handlers see it.
-  return function(event_name, unit)
+  -- A handle to a unit or a static.
+  local function handle_of(thing)
+    return thing.static and handle(STATIC, thing.id) or handle(UNIT, thing.id)
+  end
+
+  -- The plain table an event carries for an object. A static has no mission
+  -- ID (UNVERIFIED); its object_category is 3, or 6 for a cargo static (LIVE).
+  local function data_of(thing)
+    if thing.static then
+      return {
+        coalition = side_of(state, thing.country),
+        object_category = thing.cargo and state.Object.Category.CARGO or state.Object.Category.STATIC,
+        object_id = thing.id,
+        unit_name = thing.name,
+        unit_type = thing.type,
+      }
+    end
     return {
-      id = state.world.event[event_name],
-      time = host.model,
-      initiator = handle(UNIT, unit.id),
-      initiator_data = {
-        coalition = side_of(state, unit.group.country),
-        mission_id = unit.mission_id,
-        object_category = state.Object.Category.UNIT,
-        object_id = unit.id,
-        unit_name = unit.name,
-        unit_type = unit.type,
-      },
+      coalition = side_of(state, thing.group.country),
+      mission_id = thing.mission_id,
+      object_category = state.Object.Category.UNIT,
+      object_id = thing.id,
+      unit_name = thing.name,
+      unit_type = thing.type,
     }
+  end
+
+  -- The event for an initiator and a target, either of them a unit or a
+  -- static or nil, as this state's handlers see it.
+  return function(event_name, initiator, target)
+    local event = { id = state.world.event[event_name], time = host.model }
+    if initiator then
+      event.initiator = handle_of(initiator)
+      event.initiator_data = data_of(initiator)
+    end
+    if target then
+      event.target = handle_of(target)
+      event.target_data = data_of(target)
+    end
+    return event
   end
 end
 
@@ -753,8 +1028,13 @@ end
 
 function W.position(sim)
   return function(id)
-    local unit = sim.units[id]
+    local unit = sim.units[id] or sim.dead[id]
     if not unit then
+      for _, static in pairs(sim.statics) do
+        if static.id == id and static.cargo then
+          return static.x, static.y, static.z
+        end
+      end
       return 0, 0, 0
     end
     return unit.x, unit.y, unit.z
@@ -778,11 +1058,12 @@ function W.install(host, name)
   if not host.sim then
     host.sim = new_sim(host)
     host.makers = {}
-    -- Send an event about a unit to the server state and the sandbox.
-    function host:unit_event(event_name, unit)
+    -- Send an event about a unit or static, and optionally a target, to the
+    -- server state and the sandbox.
+    function host:unit_event(event_name, initiator, target)
       for _, state in ipairs({ 'server', 'sse' }) do
         if self.makers[state] and self.states[state] then
-          self.states[state].world.onEvent(self.makers[state](event_name, unit))
+          self.states[state].world.onEvent(self.makers[state](event_name, initiator, target))
         end
       end
     end
@@ -801,6 +1082,12 @@ function W.install(host, name)
     state.a_unit_set_life_percentage = function(mission_id, percent)
       for _, unit in pairs(sim.units) do
         if unit.mission_id == tonumber(mission_id) then
+          unit.life = unit.kind.life * percent / 100
+        end
+      end
+      for _, unit in pairs(sim.dead) do
+        if unit.mission_id == tonumber(mission_id) and percent > 0 then
+          sim:revive(unit)
           unit.life = unit.kind.life * percent / 100
         end
       end

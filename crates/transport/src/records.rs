@@ -1,6 +1,11 @@
-//! The control records, `LOG` and the command header, encoded and decoded by
-//! their layouts (spec/records.md, spec/commands.md). Other kinds are added by
-//! the steps that produce them.
+//! The record payloads the agent writes, the command header, and the payloads
+//! of the `RATES`, `SUBSCRIBE` and `BIND` commands, each encoded and decoded
+//! by its layout (spec/records.md, spec/commands.md). The kinds are the
+//! control records, `LOG`, `EVENT`, the object table (`OBJECT`,
+//! `OBJECT_GONE`, `ENUM_BEGIN`, `ENUM_END`) and the samples (`POSITIONS`,
+//! `VITALS`, `ATTITUDE`, `AMMO`, `WAREHOUSE`, `AIRBASE`). A decoder never
+//! panics, and a count the payload cannot hold is an error that allocates
+//! nothing.
 
 use crate::codec::{DecodeError, Lv, Reader, Writer};
 use crate::layout::command;
@@ -466,6 +471,558 @@ impl CommandHeader {
     }
 }
 
+/// `OBJECT`: a row of the agent's object table (spec/records.md, "Layout:
+/// OBJECT").
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Object {
+    /// DCS object ID.
+    pub object: u64,
+    /// DCS ID of the unit's group, 0 for a static.
+    pub group: u64,
+    /// The `EntityId` the binding holds for the object, 0 for none.
+    pub entity: u64,
+    /// The `EntityId` the binding holds for the group, 0 for none.
+    pub group_entity: u64,
+    /// The enumeration that found it, 0 when an event or a spawn did.
+    pub enumeration: u64,
+    /// An `object_kind` code.
+    pub kind: u32,
+    /// DCS's category number.
+    pub category: u32,
+    /// DCS coalition number.
+    pub coalition: u32,
+    /// DCS country number.
+    pub country: u32,
+    /// The life the object started with.
+    pub life0: f32,
+    /// The object's DCS name.
+    pub name: String,
+    /// The DCS type name.
+    pub type_name: String,
+    /// The group's DCS name, empty for a static.
+    pub group_name: String,
+}
+
+impl Object {
+    /// Where `enumeration` sits in the payload, as a little-endian u64
+    /// (spec/records.md): a cached payload is patched there.
+    pub const ENUMERATION_AT: usize = 0x20;
+
+    /// The payload.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u64(self.object)
+            .u64(self.group)
+            .u64(self.entity)
+            .u64(self.group_entity)
+            .u64(self.enumeration)
+            .u32(self.kind)
+            .u32(self.category)
+            .u32(self.coalition)
+            .u32(self.country)
+            .f32(self.life0)
+            .pad(4)
+            .str(&self.name)
+            .str(&self.type_name)
+            .str(&self.group_name);
+        w.finish()
+    }
+
+    /// Decode a payload.
+    pub fn decode(b: &[u8]) -> Result<Object, DecodeError> {
+        let mut r = Reader::new(b);
+        let o = Object {
+            object: r.u64()?,
+            group: r.u64()?,
+            entity: r.u64()?,
+            group_entity: r.u64()?,
+            enumeration: r.u64()?,
+            kind: r.u32()?,
+            category: r.u32()?,
+            coalition: r.u32()?,
+            country: r.u32()?,
+            life0: r.f32()?,
+            name: String::new(),
+            type_name: String::new(),
+            group_name: String::new(),
+        };
+        r.skip(4)?;
+        Ok(Object {
+            name: r.str()?.to_owned(),
+            type_name: r.str()?.to_owned(),
+            group_name: r.str()?.to_owned(),
+            ..o
+        })
+    }
+}
+
+/// `OBJECT_GONE`: a row left the object table.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ObjectGone {
+    /// DCS object ID.
+    pub object: u64,
+    /// A `gone_reason` code.
+    pub reason: u32,
+    /// The `EntityId` the binding held for the object, 0 for none.
+    pub entity: u64,
+    /// The `EntityId` the binding held for the group, 0 for none.
+    pub group_entity: u64,
+}
+
+impl ObjectGone {
+    /// The payload.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u64(self.object)
+            .u32(self.reason)
+            .pad(4)
+            .u64(self.entity)
+            .u64(self.group_entity);
+        w.finish()
+    }
+
+    /// Decode a payload.
+    pub fn decode(b: &[u8]) -> Result<ObjectGone, DecodeError> {
+        let mut r = Reader::new(b);
+        let object = r.u64()?;
+        let reason = r.u32()?;
+        r.skip(4)?;
+        Ok(ObjectGone {
+            object,
+            reason,
+            entity: r.u64()?,
+            group_entity: r.u64()?,
+        })
+    }
+}
+
+/// `ENUM_BEGIN`: an enumeration started.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EnumBegin {
+    /// The enumeration's number, never 0.
+    pub enumeration: u64,
+}
+
+impl EnumBegin {
+    /// The payload.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u64(self.enumeration);
+        w.finish()
+    }
+
+    /// Decode a payload.
+    pub fn decode(b: &[u8]) -> Result<EnumBegin, DecodeError> {
+        let mut r = Reader::new(b);
+        Ok(EnumBegin {
+            enumeration: r.u64()?,
+        })
+    }
+}
+
+/// `ENUM_END`: an enumeration finished.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EnumEnd {
+    /// The enumeration that finished.
+    pub enumeration: u64,
+    /// `OBJECT` records it wrote.
+    pub objects: u32,
+}
+
+impl EnumEnd {
+    /// The payload.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u64(self.enumeration).u32(self.objects).pad(4);
+        w.finish()
+    }
+
+    /// Decode a payload.
+    pub fn decode(b: &[u8]) -> Result<EnumEnd, DecodeError> {
+        let mut r = Reader::new(b);
+        let enumeration = r.u64()?;
+        let objects = r.u32()?;
+        r.skip(4)?;
+        Ok(EnumEnd {
+            enumeration,
+            objects,
+        })
+    }
+}
+
+/// The row count of a batch, from the length of the shortest column. Encoders
+/// write every column to this length.
+fn rows(lens: &[usize]) -> usize {
+    debug_assert!(lens.windows(2).all(|p| p[0] == p[1]), "unequal columns");
+    lens.iter().copied().min().unwrap_or(0)
+}
+
+/// Read `n` rows of columns that are `row` bytes wide together. The bytes are
+/// taken before anything is allocated, so a count the payload cannot hold is
+/// an error that reserves nothing.
+fn columns<'a>(r: &mut Reader<'a>, n: u32, row: usize) -> Result<&'a [u8], DecodeError> {
+    r.bytes((n as usize).saturating_mul(row))
+}
+
+fn u64_column(b: &[u8]) -> Vec<u64> {
+    let (chunks, _) = b.as_chunks::<8>();
+    chunks.iter().map(|c| u64::from_le_bytes(*c)).collect()
+}
+
+fn f64_column(b: &[u8]) -> Vec<f64> {
+    let (chunks, _) = b.as_chunks::<8>();
+    chunks.iter().map(|c| f64::from_le_bytes(*c)).collect()
+}
+
+fn f32_column(b: &[u8]) -> Vec<f32> {
+    let (chunks, _) = b.as_chunks::<4>();
+    chunks.iter().map(|c| f32::from_le_bytes(*c)).collect()
+}
+
+/// `POSITIONS`: a columnar batch of positions. Every column has one entry
+/// per object.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Positions {
+    /// DCS object IDs.
+    pub object: Vec<u64>,
+    /// DCS `x`, meters.
+    pub x: Vec<f64>,
+    /// DCS `y`, meters.
+    pub y: Vec<f64>,
+    /// DCS `z`, meters.
+    pub z: Vec<f64>,
+}
+
+impl Positions {
+    /// The payload. The columns must have equal lengths; the row count is
+    /// the shortest, and a longer column is cut to it.
+    pub fn encode(&self) -> Vec<u8> {
+        let n = rows(&[self.object.len(), self.x.len(), self.y.len(), self.z.len()]);
+        let mut w = Writer::new();
+        w.u32(n as u32).pad(4);
+        self.object[..n].iter().for_each(|v| _ = w.u64(*v));
+        self.x[..n].iter().for_each(|v| _ = w.f64(*v));
+        self.y[..n].iter().for_each(|v| _ = w.f64(*v));
+        self.z[..n].iter().for_each(|v| _ = w.f64(*v));
+        w.finish()
+    }
+
+    /// Decode a payload.
+    pub fn decode(b: &[u8]) -> Result<Positions, DecodeError> {
+        let mut r = Reader::new(b);
+        let n = r.u32()?;
+        r.skip(4)?;
+        let all = columns(&mut r, n, 32)?;
+        let (object, rest) = all.split_at(n as usize * 8);
+        let (x, rest) = rest.split_at(n as usize * 8);
+        let (y, z) = rest.split_at(n as usize * 8);
+        Ok(Positions {
+            object: u64_column(object),
+            x: f64_column(x),
+            y: f64_column(y),
+            z: f64_column(z),
+        })
+    }
+}
+
+/// `VITALS`: a columnar batch of life and fuel. Every column has one entry
+/// per object.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Vitals {
+    /// DCS object IDs.
+    pub object: Vec<u64>,
+    /// `getLife()`.
+    pub life: Vec<f32>,
+    /// `getFuel()`, NaN for a static.
+    pub fuel: Vec<f32>,
+}
+
+impl Vitals {
+    /// The payload. The columns must have equal lengths; the row count is
+    /// the shortest, and a longer column is cut to it.
+    pub fn encode(&self) -> Vec<u8> {
+        let n = rows(&[self.object.len(), self.life.len(), self.fuel.len()]);
+        let mut w = Writer::new();
+        w.u32(n as u32).pad(4);
+        self.object[..n].iter().for_each(|v| _ = w.u64(*v));
+        self.life[..n].iter().for_each(|v| _ = w.f32(*v));
+        self.fuel[..n].iter().for_each(|v| _ = w.f32(*v));
+        w.finish()
+    }
+
+    /// Decode a payload.
+    pub fn decode(b: &[u8]) -> Result<Vitals, DecodeError> {
+        let mut r = Reader::new(b);
+        let n = r.u32()?;
+        r.skip(4)?;
+        let all = columns(&mut r, n, 16)?;
+        let (object, rest) = all.split_at(n as usize * 8);
+        let (life, fuel) = rest.split_at(n as usize * 4);
+        Ok(Vitals {
+            object: u64_column(object),
+            life: f32_column(life),
+            fuel: f32_column(fuel),
+        })
+    }
+}
+
+/// `ATTITUDE`: a columnar batch of attitudes. Every column has one entry
+/// per object.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Attitude {
+    /// DCS object IDs.
+    pub object: Vec<u64>,
+    /// Heading, radians.
+    pub heading: Vec<f32>,
+    /// Pitch, radians.
+    pub pitch: Vec<f32>,
+    /// Roll, radians.
+    pub roll: Vec<f32>,
+}
+
+impl Attitude {
+    /// The payload. The columns must have equal lengths; the row count is
+    /// the shortest, and a longer column is cut to it.
+    pub fn encode(&self) -> Vec<u8> {
+        let n = rows(&[
+            self.object.len(),
+            self.heading.len(),
+            self.pitch.len(),
+            self.roll.len(),
+        ]);
+        let mut w = Writer::new();
+        w.u32(n as u32).pad(4);
+        self.object[..n].iter().for_each(|v| _ = w.u64(*v));
+        self.heading[..n].iter().for_each(|v| _ = w.f32(*v));
+        self.pitch[..n].iter().for_each(|v| _ = w.f32(*v));
+        self.roll[..n].iter().for_each(|v| _ = w.f32(*v));
+        w.finish()
+    }
+
+    /// Decode a payload.
+    pub fn decode(b: &[u8]) -> Result<Attitude, DecodeError> {
+        let mut r = Reader::new(b);
+        let n = r.u32()?;
+        r.skip(4)?;
+        let all = columns(&mut r, n, 20)?;
+        let (object, rest) = all.split_at(n as usize * 8);
+        let (heading, rest) = rest.split_at(n as usize * 4);
+        let (pitch, roll) = rest.split_at(n as usize * 4);
+        Ok(Attitude {
+            object: u64_column(object),
+            heading: f32_column(heading),
+            pitch: f32_column(pitch),
+            roll: f32_column(roll),
+        })
+    }
+}
+
+/// `AMMO`: the ammunition of one object.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ammo {
+    /// DCS object ID.
+    pub object: u64,
+    /// An array of tables, each with `type` and `count`.
+    pub ammo: Lv,
+}
+
+impl Ammo {
+    /// The payload.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u64(self.object).lv(&self.ammo);
+        w.finish()
+    }
+
+    /// Decode a payload.
+    pub fn decode(b: &[u8]) -> Result<Ammo, DecodeError> {
+        let mut r = Reader::new(b);
+        Ok(Ammo {
+            object: r.u64()?,
+            ammo: r.lv()?,
+        })
+    }
+}
+
+/// `WAREHOUSE`: the inventory of one airbase.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Warehouse {
+    /// The airbase's DCS name.
+    pub airbase: String,
+    /// The inventory as plain tables of names and counts.
+    pub stock: Lv,
+}
+
+impl Warehouse {
+    /// The payload.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.str(&self.airbase).lv(&self.stock);
+        w.finish()
+    }
+
+    /// Decode a payload.
+    pub fn decode(b: &[u8]) -> Result<Warehouse, DecodeError> {
+        let mut r = Reader::new(b);
+        Ok(Warehouse {
+            airbase: r.str()?.to_owned(),
+            stock: r.lv()?,
+        })
+    }
+}
+
+/// `AIRBASE`: an airbase and its owner.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Airbase {
+    /// The airbase's DCS object ID.
+    pub object: u64,
+    /// DCS coalition number of the owner.
+    pub coalition: u32,
+    /// The airbase's DCS name.
+    pub airbase: String,
+}
+
+impl Airbase {
+    /// The payload.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u64(self.object)
+            .u32(self.coalition)
+            .pad(4)
+            .str(&self.airbase);
+        w.finish()
+    }
+
+    /// Decode a payload.
+    pub fn decode(b: &[u8]) -> Result<Airbase, DecodeError> {
+        let mut r = Reader::new(b);
+        let object = r.u64()?;
+        let coalition = r.u32()?;
+        r.skip(4)?;
+        Ok(Airbase {
+            object,
+            coalition,
+            airbase: r.str()?.to_owned(),
+        })
+    }
+}
+
+/// `RATES` command: the bytes after the command header.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Rates {
+    /// Target period of the position tier, seconds.
+    pub position_s: f64,
+    /// Target period of the vitals tier.
+    pub vitals_s: f64,
+    /// Target period of the ammunition tier.
+    pub ammo_s: f64,
+    /// Target period of the warehouse and airbase tier.
+    pub warehouse_s: f64,
+    /// Period of the full enumeration.
+    pub enumeration_s: f64,
+}
+
+impl Rates {
+    /// The bytes after the command header.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.f64(self.position_s)
+            .f64(self.vitals_s)
+            .f64(self.ammo_s)
+            .f64(self.warehouse_s)
+            .f64(self.enumeration_s);
+        w.finish()
+    }
+
+    /// Decode the bytes after the command header.
+    pub fn decode(b: &[u8]) -> Result<Rates, DecodeError> {
+        let mut r = Reader::new(b);
+        Ok(Rates {
+            position_s: r.f64()?,
+            vitals_s: r.f64()?,
+            ammo_s: r.f64()?,
+            warehouse_s: r.f64()?,
+            enumeration_s: r.f64()?,
+        })
+    }
+}
+
+/// `SUBSCRIBE` command: the bytes after the command header.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Subscribe {
+    /// Target period for the listed entities' positions, seconds.
+    pub period_s: f64,
+    /// 1 to sample attitude with each position, else 0.
+    pub attitude: u32,
+    /// The `EntityId`s.
+    pub entity: Vec<u64>,
+}
+
+impl Subscribe {
+    /// The bytes after the command header.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.f64(self.period_s)
+            .u32(self.attitude)
+            .u32(self.entity.len() as u32);
+        self.entity.iter().for_each(|v| _ = w.u64(*v));
+        w.finish()
+    }
+
+    /// Decode the bytes after the command header.
+    pub fn decode(b: &[u8]) -> Result<Subscribe, DecodeError> {
+        let mut r = Reader::new(b);
+        let period_s = r.f64()?;
+        let attitude = r.u32()?;
+        let n = r.u32()?;
+        let entity = u64_column(columns(&mut r, n, 8)?);
+        Ok(Subscribe {
+            period_s,
+            attitude,
+            entity,
+        })
+    }
+}
+
+/// `BIND` command: the bytes after the command header.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Bind {
+    /// An `object_kind` code: what every pair binds.
+    pub kind: u32,
+    /// The `EntityId`s.
+    pub entity: Vec<u64>,
+    /// DCS object IDs, or DCS group IDs for a group. One per entity.
+    pub object: Vec<u64>,
+}
+
+impl Bind {
+    /// The bytes after the command header. The columns must have equal
+    /// lengths; the pair count is the shorter, and a longer column is cut
+    /// to it.
+    pub fn encode(&self) -> Vec<u8> {
+        let n = rows(&[self.entity.len(), self.object.len()]);
+        let mut w = Writer::new();
+        w.u32(n as u32).u32(self.kind);
+        self.entity[..n].iter().for_each(|v| _ = w.u64(*v));
+        self.object[..n].iter().for_each(|v| _ = w.u64(*v));
+        w.finish()
+    }
+
+    /// Decode the bytes after the command header.
+    pub fn decode(b: &[u8]) -> Result<Bind, DecodeError> {
+        let mut r = Reader::new(b);
+        let n = r.u32()?;
+        let kind = r.u32()?;
+        let all = columns(&mut r, n, 16)?;
+        let (entity, object) = all.split_at(n as usize * 8);
+        Ok(Bind {
+            kind,
+            entity: u64_column(entity),
+            object: u64_column(object),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -817,5 +1374,245 @@ mod tests {
         assert_eq!(c.number(9), Some(4.0));
         assert_eq!(c.get(10), Some(&Lv::Nil));
         assert_eq!(c.get(11), Some(&Lv::Bool(true)));
+    }
+
+    fn stock() -> Lv {
+        Lv::Table(vec![(
+            Lv::Number(1.0),
+            Lv::Table(vec![
+                (Lv::String(b"type".to_vec()), Lv::String(b"AIM-9".to_vec())),
+                (Lv::String(b"count".to_vec()), Lv::Number(4.0)),
+            ]),
+        )])
+    }
+
+    /// Every strict prefix of `bytes` fails to decode.
+    fn truncations_fail<T: std::fmt::Debug>(
+        bytes: &[u8],
+        decode: impl Fn(&[u8]) -> Result<T, DecodeError>,
+    ) {
+        for n in 0..bytes.len() {
+            assert!(decode(&bytes[..n]).is_err(), "prefix of {n} bytes decoded");
+        }
+    }
+
+    #[test]
+    fn object_records_round_trip() {
+        let o = Object {
+            object: 1,
+            group: 2,
+            entity: 3,
+            group_entity: 4,
+            enumeration: 5,
+            kind: 1,
+            category: 2,
+            coalition: 3,
+            country: 4,
+            life0: 1.5,
+            name: "Pilot-1".into(),
+            type_name: "F-16C".into(),
+            group_name: "Flight".into(),
+        };
+        let b = o.encode();
+        assert_eq!(Object::decode(&b), Ok(o));
+        truncations_fail(&b, Object::decode);
+        assert_eq!(Object::default().encode().len(), fixed("OBJECT") + 6);
+
+        let g = ObjectGone {
+            object: 1,
+            reason: 3,
+            entity: 4,
+            group_entity: 5,
+        };
+        let b = g.encode();
+        assert_eq!(b.len(), fixed("OBJECT_GONE"));
+        assert_eq!(ObjectGone::decode(&b), Ok(g));
+        truncations_fail(&b, ObjectGone::decode);
+
+        let e = EnumBegin { enumeration: 7 };
+        let b = e.encode();
+        assert_eq!(b.len(), fixed("ENUM_BEGIN"));
+        assert_eq!(EnumBegin::decode(&b), Ok(e));
+        truncations_fail(&b, EnumBegin::decode);
+
+        let e = EnumEnd {
+            enumeration: 7,
+            objects: 9,
+        };
+        let b = e.encode();
+        assert_eq!(b.len(), fixed("ENUM_END"));
+        assert_eq!(EnumEnd::decode(&b), Ok(e));
+        truncations_fail(&b, EnumEnd::decode);
+    }
+
+    #[test]
+    fn sample_batches_round_trip() {
+        let p = Positions {
+            object: vec![1, 2],
+            x: vec![1.0, 2.0],
+            y: vec![3.0, 4.0],
+            z: vec![5.0, 6.0],
+        };
+        let b = p.encode();
+        assert_eq!(b.len(), fixed("POSITIONS") + 2 * 32);
+        assert_eq!(Positions::decode(&b), Ok(p));
+        truncations_fail(&b, Positions::decode);
+        assert_eq!(Positions::default().encode().len(), fixed("POSITIONS"));
+        assert_eq!(
+            Positions::decode(&Positions::default().encode()),
+            Ok(Positions::default())
+        );
+
+        let v = Vitals {
+            object: vec![1, 2, 3],
+            life: vec![1.0, 2.0, 3.0],
+            fuel: vec![0.5, f32::MAX, 0.25],
+        };
+        let b = v.encode();
+        assert_eq!(b.len(), fixed("VITALS") + 3 * 16);
+        assert_eq!(Vitals::decode(&b), Ok(v));
+        truncations_fail(&b, Vitals::decode);
+        assert_eq!(Vitals::default().encode().len(), fixed("VITALS"));
+
+        let a = Attitude {
+            object: vec![9],
+            heading: vec![1.0],
+            pitch: vec![2.0],
+            roll: vec![3.0],
+        };
+        let b = a.encode();
+        assert_eq!(b.len(), fixed("ATTITUDE") + 20);
+        assert_eq!(Attitude::decode(&b), Ok(a));
+        truncations_fail(&b, Attitude::decode);
+        assert_eq!(Attitude::default().encode().len(), fixed("ATTITUDE"));
+    }
+
+    #[test]
+    fn nan_fuel_survives_a_batch() {
+        let v = Vitals {
+            object: vec![1],
+            life: vec![1.0],
+            fuel: vec![f32::NAN],
+        };
+        assert!(Vitals::decode(&v.encode()).unwrap().fuel[0].is_nan());
+    }
+
+    #[test]
+    fn ammo_warehouse_and_airbase_round_trip() {
+        let a = Ammo {
+            object: 5,
+            ammo: stock(),
+        };
+        let b = a.encode();
+        assert_eq!(Ammo::decode(&b), Ok(a));
+        truncations_fail(&b, Ammo::decode);
+        let empty = Ammo {
+            object: 0,
+            ammo: Lv::Nil,
+        };
+        assert_eq!(empty.encode().len(), fixed("AMMO") + 1);
+
+        let w = Warehouse {
+            airbase: "Batumi".into(),
+            stock: stock(),
+        };
+        let b = w.encode();
+        assert_eq!(Warehouse::decode(&b), Ok(w));
+        truncations_fail(&b, Warehouse::decode);
+        let empty = Warehouse {
+            airbase: String::new(),
+            stock: Lv::Nil,
+        };
+        assert_eq!(empty.encode().len(), fixed("WAREHOUSE") + 3);
+
+        let a = Airbase {
+            object: 12,
+            coalition: 2,
+            airbase: "Kutaisi".into(),
+        };
+        let b = a.encode();
+        assert_eq!(Airbase::decode(&b), Ok(a));
+        truncations_fail(&b, Airbase::decode);
+        assert_eq!(Airbase::default().encode().len(), fixed("AIRBASE") + 2);
+    }
+
+    #[test]
+    fn command_payloads_round_trip() {
+        let r = Rates {
+            position_s: 1.0,
+            vitals_s: 2.0,
+            ammo_s: 3.0,
+            warehouse_s: 4.0,
+            enumeration_s: 5.0,
+        };
+        let b = r.encode();
+        assert_eq!(b.len(), fixed("RATES"));
+        assert_eq!(Rates::decode(&b), Ok(r));
+        truncations_fail(&b, Rates::decode);
+
+        let s = Subscribe {
+            period_s: 0.5,
+            attitude: 1,
+            entity: vec![10, 20],
+        };
+        let b = s.encode();
+        assert_eq!(b.len(), fixed("SUBSCRIBE") + 16);
+        assert_eq!(Subscribe::decode(&b), Ok(s));
+        truncations_fail(&b, Subscribe::decode);
+        assert_eq!(Subscribe::default().encode().len(), fixed("SUBSCRIBE"));
+
+        let bind = Bind {
+            kind: 3,
+            entity: vec![1, 2],
+            object: vec![30, 40],
+        };
+        let b = bind.encode();
+        assert_eq!(b.len(), fixed("BIND") + 32);
+        assert_eq!(Bind::decode(&b), Ok(bind));
+        truncations_fail(&b, Bind::decode);
+        assert_eq!(Bind::default().encode().len(), fixed("BIND"));
+    }
+
+    #[test]
+    fn command_payloads_follow_a_header() {
+        let mut w = Writer::new();
+        CommandHeader::default().write(&mut w);
+        w.f64(1.0).u32(0).u32(1).u64(77);
+        let bytes = w.finish();
+        let mut rd = Reader::new(&bytes);
+        CommandHeader::read(&mut rd).unwrap();
+        let s = Subscribe::decode(&bytes[rd.position()..]).unwrap();
+        assert_eq!(s.entity, vec![77]);
+    }
+
+    #[test]
+    fn a_huge_count_is_an_error_that_allocates_nothing() {
+        let mut batch = Writer::new();
+        batch.u32(u32::MAX).pad(4).u64(1);
+        let batch = batch.finish();
+        assert!(Positions::decode(&batch).is_err());
+        assert!(Vitals::decode(&batch).is_err());
+        assert!(Attitude::decode(&batch).is_err());
+
+        let mut sub = Writer::new();
+        sub.f64(1.0).u32(0).u32(u32::MAX).u64(1);
+        assert!(Subscribe::decode(&sub.finish()).is_err());
+
+        let mut bind = Writer::new();
+        bind.u32(u32::MAX).u32(1).u64(1).u64(2);
+        assert!(Bind::decode(&bind.finish()).is_err());
+    }
+
+    #[test]
+    fn a_count_one_row_too_large_is_an_error() {
+        let mut p = Positions {
+            object: vec![1],
+            x: vec![1.0],
+            y: vec![1.0],
+            z: vec![1.0],
+        }
+        .encode();
+        p[0] = 2;
+        assert!(Positions::decode(&p).is_err());
     }
 }

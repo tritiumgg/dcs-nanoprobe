@@ -6,6 +6,7 @@ pub mod ids;
 pub mod intents;
 pub mod lifecycle;
 pub mod link;
+pub mod mirror;
 pub mod reconciler;
 pub mod replay;
 pub mod sim;

@@ -8,10 +8,26 @@ release never carries it.
 
 ## Agent faults
 
-`inject(name[, arg])` on the agent's table arms one fault, which fires once. It returns
+`inject(name[, arg])` on the agent's table arms one fault, which fires once, except
+`sampling`, below. It returns
 true, or nil and why: an unknown name, an argument out of range, or for `lose-control`
 no open link. A build without the `faults` feature returns nil and `this build has no
 fault injection`. The agent logs `fault armed` when it arms one.
+
+`sampling` is the one fault that persists: it holds from when it is armed until it is
+set again or the agent reloads with DCS. It sets the sampling budget's scale `k`
+(spec/sampling.md, "Slice"), which the agent applies once on each path that samples:
+it multiplies the pump's budget `B` by `k` after it computes `B`, and the savings of the
+sweep in `frame` by `k` before it plans the sweep's rows. Each path samples within what
+is left, plus at most the rows between two clock reads. The sweep's savings hold `1 / k`
+of a sweep's cost, so one frame's sweep can spend up to its slice, and the bound holds
+as a mean over a second. Every later sampling frame samples within `k` times its budget as a mean over a second; the
+slice still bounds each frame. A sweep that takes one row because its fixed part alone
+passes its budget (spec/sampling.md, "The sweep") may pass that budget by the fixed part.
+The `sampling` LOG counts it apart, in `sweep_forced`, and the bound leaves it out. What
+`k` withholds is not used; it counts as spent, so it never returns as credit. In a build without the `faults`
+feature `k` is the constant 1. It is for the S10 test that forces the sampling budget
+to a tenth; the `sampling` LOG reports `k` as `scale`.
 
 `raise`, `stall`, `flood` and `panic` are taken by the next `frame` call, which logs
 `injected fault: <name>` as it fires one. `lose-control` is armed on the link and taken
@@ -24,6 +40,7 @@ log line is the drop's.
 | `stall` | 1 to 10,000 ms | Sleeps for the argument after the link's `begin`, then logs `injected fault: stall ended after <ms> ms`. | The sidecar stays attached: the agent dates the heartbeat's change when it reads it (spec/transport.md, "Detaching"). |
 | `flood` | 1 to 100,000 records | Queues that many `LOG` records of about 1 KiB. | The ring fills and the queue overflows. Log records are dropped first, oldest first, so the flood's own record is often among them. The sidecar reads a `GAP` of class 2 and stays attached. |
 | `lose-control` | none | The link drops its next control record. | `dropped a control record of kind <k>`, then a second `HELLO` in the same attach (spec/records.md, "Delivery classes"). |
+| `sampling` | above 0 and at most 1 | From then on the agent samples within `k` times its budget, as a mean over a second. One frame's slice still bounds each frame. | Rates fall in the order of spec/sampling.md, "Tiers", and the agent's share falls with them. |
 | `panic` | none | Panics after the link's `begin`, holding the driver. | The entry catches it. The agent is disabled and sends `disabled: a caught panic` and a last `LIFECYCLE` of `DISABLED`. The hook logs `the agent is disabled; the hook goes on without it`. DCS runs on. |
 
 ## Sidecar faults

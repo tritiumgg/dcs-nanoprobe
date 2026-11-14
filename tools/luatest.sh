@@ -80,6 +80,14 @@ VERSION=$(awk '
     exit 1
 }
 
+# The tests' scratch folders (lua/tests/support.lua, S.scratch) go under one
+# folder that this run removes when it exits, however it exits.
+NANOPROBE_SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/nanoprobe-luatest.XXXXXX")
+export NANOPROBE_SCRATCH
+trap 'rm -rf "$NANOPROBE_SCRATCH"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 # Every script under lua/tests, in name order, except the support files. The
 # first failure stops the run.
 for script in "$ROOT"/lua/tests/*.lua; do
@@ -87,6 +95,14 @@ for script in "$ROOT"/lua/tests/*.lua; do
     printf '%s\n' "--- ${script#"$ROOT"/}"
     case ${script##*/} in
         faults.lua) "$LUA" "$script" "$FAULTS_MODULE" "$VERSION" "$PROBE" "$INSPECT" ;;
+        # The mirror tests on the shipping build, then the tenth of the
+        # sampling budget on the build with fault injection (spec/faults.md).
+        sampling.lua)
+            "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" match
+            "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" deaths
+            "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" sweep
+            "$LUA" "$script" "$FAULTS_MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" tenth
+            ;;
         *) "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" ;;
     esac
 done

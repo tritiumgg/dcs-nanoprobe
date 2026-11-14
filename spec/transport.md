@@ -127,9 +127,11 @@ records that are consumed.
 | 0x0380 | u64[32] | hist_interval | agent | Interval between pump calls |
 | 0x0480 | u64[32] | hist_command | agent | DCS time per command |
 | 0x0580 | u64[32] | hist_event | agent | Agent time per event handled |
-| 0x0680 | pad[2432] | reserved4 | agent | |
+| 0x0680 | u64[32] | hist_syscall | agent | Agent time per system-call frame, also counted in `hist_pump` |
+| 0x0780 | pad[2176] | reserved4 | agent | |
 
-A period is 0 until the tier completes its first sweep.
+A period is 0 only for a tier that has never owed rows (spec/sampling.md, "Achieved
+period").
 
 **Breadcrumbs.** `crumb` 0 means no risky call is in progress. `crumb` 0x10000 plus an
 opcode means that command's handler runs, and `crumb_arg` is its `seq`. The agent
@@ -158,7 +160,7 @@ adds codes for later risky calls here.
 
 ### Metrics
 
-The metrics fields are every field from `slice_us` to `hist_event`, the histograms
+The metrics fields are every field from `slice_us` to `hist_syscall`, the histograms
 included. The agent changes them at most once per frame:
 
 1. Store `metrics_seq + 1` (odd), then a release fence, so no field write is seen
@@ -342,13 +344,25 @@ frame, except the one that finds the kill switch, which also closes the connecti
 the listener. Outside a handshake such a frame comes once a second, so the kill switch
 is seen within a second (spec/install.md).
 
+While a sidecar is attached, the frame after a system-call frame is never one, however
+long ago the last one was. When frames come a second or more apart, as when DCS stalls,
+every frame is due its system calls; with this rule every second frame makes them and
+the frames between sample. The kill switch and the reload request are then seen within
+two frames, and a close waits for the next system-call frame. Before the attach and
+during a handshake every frame that is due makes its call.
+
+A system-call frame does no sampling (spec/sampling.md). Its time counts toward the
+agent's mean overhead, which never exceeds `overhead_share`: the agent repays it
+spread over the frames that follow, never by skipping them (spec/sampling.md,
+"Slice"). Its time is counted in `hist_syscall` as well as in `hist_pump`.
+
 | State | Socket call | At most |
 |---|---|---|
 | No connection | one `accept` | once a second; 100 ms after closing a connection |
 | A connection to close | one close | on the next frame |
 | A connection, before `OK` or `ERR` | one `recv` or one `send` | once every 100 ms |
 | After `OK`, not yet attached | none: the agent watches `attach_seen` in the file | |
-| Attached | one `recv`, which shows whether the sidecar closed the connection | once a second |
+| Attached | one `recv`, which shows whether the sidecar closed the connection | once a second, and never on two frames in a row |
 
 The agent closes a connection on the frame after it decides to, as that frame's one
 call, whatever the reason: a refused `HELLO`, a timeout, a refused attach, a detach.
@@ -417,7 +431,9 @@ the attach: it logs it and closes the connection. Otherwise:
    `in_head`, with no tail kept from before.
 3. Writes its queued records in the order they were made, with their `GAP` records
    (spec/records.md). This may take several frames. It reads no command meanwhile.
-4. Writes a `HELLO` record, then starts a full enumeration and reads commands again.
+4. Writes a `HELLO` record and, right after it under the same stamps, a `LIFECYCLE` of
+   its current state (spec/records.md, "Delivery classes"); both or neither. It then
+   starts a full enumeration and reads commands again.
 
 The sidecar writes only control commands until it has read that `HELLO`. Its first
 command is `CAMPAIGN` (spec/commands.md). The `HELLO` of this attach is the first

@@ -108,7 +108,8 @@ name is reported, not fatal.
 If `<profile>/nanoprobe/disable` exists when DCS starts, the loader runs nothing.
 
 While the agent's link is open, the agent looks for the file on its system-call frame,
-which comes at least once a second, also while a sidecar is attaching
+which comes at least once a second, also while a sidecar is attaching, or on every
+second frame when frames are over a second apart and a sidecar is attached
 (spec/transport.md, "Handshake"). When it appears the agent stores `DISABLED` in the
 status block, sends the reason and a last `LIFECYCLE` record if a sidecar is attached,
 closes the connection and the listener on that frame, and makes no further call. The

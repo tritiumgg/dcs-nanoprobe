@@ -204,9 +204,15 @@ fn metrics(out: &mut String, live: &impl Memory) {
         let _ = writeln!(out, "  {name:<20} {v}");
     }
     let _ = writeln!(out, "  rows_per_clock       {}", m.rows_per_clock);
-    for (name, h) in ["hist_pump", "hist_interval", "hist_command", "hist_event"]
-        .iter()
-        .zip(&m.hist)
+    for (name, h) in [
+        "hist_pump",
+        "hist_interval",
+        "hist_command",
+        "hist_event",
+        "hist_syscall",
+    ]
+    .iter()
+    .zip(&m.hist)
     {
         let total: u128 = h.iter().map(|&c| u128::from(c)).sum();
         let _ = writeln!(out, "  {name:<20} {total} samples  {}", hist_summary(h));

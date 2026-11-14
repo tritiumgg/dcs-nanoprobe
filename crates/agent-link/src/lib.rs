@@ -2,10 +2,13 @@
 //! that it runs in host tests. The agent DLL drives a [`Link`] from DCS's
 //! frames; the fake agent drives one from a timer and breaks it on purpose.
 //!
-//! [`config`] reads `agent.toml` and the token (spec/config.md).
+//! [`config`] reads `agent.toml` and the token (spec/config.md). [`sampler`]
+//! keeps the object table and plans the sampling within the frame's slice
+//! (spec/sampling.md).
 
 pub mod config;
 mod link;
+pub mod sampler;
 
 pub use link::{Admit, Link, Options, Stamps};
 

@@ -363,7 +363,7 @@ mod tests {
     #[test]
     fn trailing_bytes_show_as_hex() {
         let mut w = Writer::new();
-        w.u64(1).u32(0).pad(4);
+        w.u64(1).u32(0).pad(4).u64(0).u64(0);
         w.u8(0xaa);
         let text = record(Some("OBJECT_GONE"), &w.finish());
         assert!(text.ends_with("trailing[1]=aa"), "{text}");
