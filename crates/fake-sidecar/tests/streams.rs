@@ -543,22 +543,47 @@ async fn lost_policies_take_effect() {
     until_state(&hub, c, b.group_id, EntityState::Live).await;
     vanish(&hub, c, &a.unit_ids);
     vanish(&hub, c, &b.unit_ids);
-    // B, with the default, is marked dead; A is spawned again at a new spec
-    // revision.
+    // B, with the default, is marked dead. A's members left with no death
+    // fact, so the respawn gate holds A as `lost` for this mission generation
+    // (spec/world.md "Respawn gate"); the next mission load materializes it.
     until_state(&hub, c, b.group_id, EntityState::Dead).await;
-    let again = tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            if let Some((EntityState::Live, rev)) = group_of(&hub, c, a.group_id)
-                && rev > rev_a
-            {
-                return rev;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("A respawns");
-    assert!(again > rev_a);
+    let lost_rev = until_state(&hub, c, a.group_id, EntityState::Lost).await;
+    {
+        let g = hub.lock();
+        let id = EntityId(a.group_id);
+        assert!(g.rec.as_ref().expect("reconciler").held().contains(&id));
+        assert!(g.campaigns[&c].store.gate_shut(id));
+        assert!(g.rec.as_ref().expect("reconciler").counters().respawns_held >= 1);
+    }
+    // Hold for 1 s of sidecar steps. A silent removal leaves
+    // `enumerated` true (no gap, no HELLO), so the respawn branch runs on every
+    // step of the window: if the gate failed, the reconciler would respawn A
+    // within a few steps. The count of enumerations does not matter.
+    let hold = tokio::time::Instant::now() + Duration::from_secs(1);
+    while tokio::time::Instant::now() < hold {
+        let (s, rev) = group_of(&hub, c, a.group_id).expect("a");
+        assert_eq!(
+            (s, rev),
+            (EntityState::Lost, lost_rev),
+            "the gate lets A go"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // The reload returns A by the generation change, not by the policy.
+    {
+        let mut g = hub.lock();
+        g.backend
+            .as_any()
+            .and_then(|a| a.downcast_mut::<FakeSim>())
+            .expect("the fake sim")
+            .load_mission();
+    }
+    let again = until_state(&hub, c, a.group_id, EntityState::Live).await;
+    assert!(again >= rev_a);
+    assert_eq!(
+        group_of(&hub, c, b.group_id).map(|(s, _)| s),
+        Some(EntityState::Dead)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -803,6 +803,8 @@ impl Reconciler {
                 self.counters.after_dead += 1;
             } else if store.revive(row.unit, o.object) {
                 self.counters.revivals += 1;
+                // A revived member brings back the DCS group that refused the order.
+                self.order_refused.remove(&row.group);
             }
         }
         store.set_missing(row.unit, false);

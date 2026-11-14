@@ -76,17 +76,10 @@ local PROBES = {
 -- mock does not implement. Any other failed step fails the test, and so
 -- does a listed step that succeeds.
 local EXPECTED_FAILURES = {
-  ['coverage.lua'] = { orders = true }, -- Controller.setTask
   ['others.lua'] = { fighter_kill = true }, -- the mock's first explosion kills the fighter
   ['classify.lua'] = {
-    orders = { 'fire at point', 'fire at point' }, -- Controller.setTask
     removals = { 'da1', 'da2', 'da3' }, -- trigger.action.deactivateGroup
     destroy_the_wrecks = { 'xd1', 'xd2', 'xd3' }, -- Unit.destroy on a plain table
-  },
-  ['rearm.lua'] = { fire = true, late_truck = true }, -- Controller.setTask, setOption value 4
-  ['rules.lua'] = { -- Unit.getLife0
-    lives_before = 'Unit.getLife0', lives_after_explosion = 'Unit.getLife0',
-    lives_after_set_50 = 'Unit.getLife0', lives_after_set_100 = 'Unit.getLife0',
   },
 }
 

@@ -324,6 +324,57 @@ fn a_refused_destroy_stops_at_the_limit() {
     assert!(w.sim.platform_groups(w.store.campaign().0).is_empty());
 }
 
+/// An order that DCS refused because it held none of the group's members is
+/// sent again once a member is revived under its object ID, although the
+/// group stayed `live`: the revived member brings the DCS group back.
+#[test]
+fn a_refused_order_is_sent_again_when_a_member_is_revived() {
+    use nanoprobe_sidecar::sim::wire::opcode;
+    use nanoprobe_sidecar::store::{Entry, Outcome};
+    use nanoprobe_sim_fake::harness::Op;
+
+    let mut w = World::new(1, 0, LostPolicy::Report);
+    w.settle().unwrap();
+    let id = w.store.groups().next().unwrap().id;
+    // All members but one die and the last is removed with an event: the
+    // group stays `live` and DCS holds none of its members.
+    let objects: Vec<u64> = w
+        .sim
+        .objects()
+        .into_iter()
+        .filter(|(_, _, entity)| *entity != 0)
+        .map(|(o, _, _)| o)
+        .collect();
+    let (last, dead) = objects.split_last().unwrap();
+    w.sim.remove_with_event(*last);
+    w.apply(&Op::Frames(2)).unwrap();
+    for o in dead {
+        w.sim.kill(*o);
+        w.apply(&Op::Frames(2)).unwrap();
+    }
+    w.apply(&Op::Order(0)).unwrap();
+    assert_eq!(w.store.group(id).unwrap().state, State::Live);
+    w.apply(&Op::Frames(4)).unwrap();
+    assert_eq!(w.sim.applied_order(id.0), 0);
+    assert!(
+        w.store.entries().iter().any(|e| matches!(
+            e,
+            Entry::Outcome {
+                outcome: Outcome::Refused,
+                ..
+            }
+        )),
+        "DCS held no group, so it refused the order"
+    );
+    let rev = w.store.group(id).unwrap().order_rev;
+    let sent = commands(&w, id, opcode::GROUP_ORDER);
+    assert!(w.sim.revive(dead[0]));
+    w.apply(&Op::Frames(4)).unwrap();
+    assert!(commands(&w, id, opcode::GROUP_ORDER) > sent);
+    assert_eq!(w.sim.applied_order(id.0), rev);
+    assert_eq!(w.store.group(id).unwrap().state, State::Live);
+}
+
 /// An attack order sent while its target is spawned again in the same
 /// generation is compiled again at a new revision and aims at the new DCS
 /// group.
