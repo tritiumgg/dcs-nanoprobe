@@ -7,7 +7,7 @@
 | DCS | 2.9.31.29434, branch `dcs_server.release`, dedicated server (LIVE, from `target check` in each run) |
 | Platform | Server: Linux, Wine `wine-10.0 (Debian 10.0~repack-6)` in Docker, the runner and the probe in the game container. Host: macOS 26.6.2 on arm64, Rust 1.99.1, the strict mock with the host-native agent. |
 | Builds | Chaos: `365d33e8c837e512`, the shipping DLL (`deploy --dev`). Faults: `d5c28d45310cfa86`, the same code with fault injection (`deploy --dev --faults`). |
-| Script | `cargo xtask chaos gameserver --cycles 100` and `cargo xtask chaos host --cycles 100` (`crates/xtask/src/chaos.rs`, `crates/fake-agent/src/bin/chaos-runner.rs`, `lua/chaos/host.lua`); `cargo xtask faults gameserver` (`crates/xtask/src/faults.rs`) |
+| Script | `cargo xtask chaos <target> --cycles 100` and `cargo xtask chaos host --cycles 100` (`crates/xtask/src/chaos.rs`, `crates/fake-agent/src/bin/chaos-runner.rs`, `lua/chaos/host.lua`); `cargo xtask faults <target>` (`crates/xtask/src/faults.rs`) |
 | Rehearsal | `lua/tests/faults.lua` and `crates/fake-agent/tests/chaos.rs`, in `mise run check` |
 | Code | The commit that adds this document |
 | Result | PASS |
