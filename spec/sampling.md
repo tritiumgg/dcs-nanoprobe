@@ -87,9 +87,17 @@ pump, the closing and `finish`.
 
 Each tier keeps a cursor over the table and a credit: the rows it is owed. Every
 sampling frame each tier's credit grows by the rows one of its sweeps reads times the
-real time since the last frame over its target period, up to one sweep's rows. The
-budget goes to the tiers in this order; each takes the rows its credit allows, and what
-is left goes on:
+real time since the last frame over its target period.
+
+The cap is one sweep's rows for every tier except vitals. The cap of vitals is every
+row once, a full slow cycle, `max(n, rows)`, with `n` one sweep's rows and `rows` the
+rows in the table. A stall or a hold
+by a higher tier can take more than one sweep from vitals, a twelfth of its cycle, and
+vitals repays it. Until it is repaid, vitals reads above its rate, with ammunition and
+warehouses behind it, apart from the starvation guard's one row.
+
+The budget goes to the tiers in this order; each takes the rows its credit allows, and
+what is left goes on:
 
 | Order | Tier | Rows | Target period | Calls |
 |---|---|---|---|---|
@@ -324,6 +332,13 @@ reported in the `sampling` LOG in the same way: the longer of the last slow swee
 and the time the running one has taken, and 0 before any such row was owed. Ammunition
 has no slow sweep, and its key reads 0.
 
+A tier that reads a row only on its turn, in one of every `every` of its sweeps (an idle
+unit's position, a row's slow life and fuel), decides each place once per sweep. A batch
+that passes the end of the list reads the places after the end in the next sweep: the
+batch's close completes the sweep, and those places are decided against the new count.
+So every row is read once in each `every` consecutive sweeps, and the slow sweep's period
+is the time `every` sweeps took, in which every row was read once.
+
 The status block has no period for subscribed positions. A sidecar measures it from
 the samples of the subscribed objects. The agent bounds the
 age of every subscribed row at 1.2 s plus one pump wait.
@@ -351,12 +366,21 @@ sidecar then has an `ENUM_BEGIN` with no end, and uses nothing from it (spec/rec
 It reads `coalition.getGroups(side, category)` for each coalition and group category,
 then `coalition.getStaticObjects(side)` for each coalition, one call at a time, then
 each group's units. Each call is one row of the tier's cost, and each unit one more.
-For each unit and static it writes one `OBJECT` with the enumeration's number: from the
-row when the table has the object, or from a new row it adds as a birth would. A known
-object costs the shim one call into the agent, which also counts the item and reads the
-clock every `rows_per_clock` items. The agent keeps each row's `OBJECT` payload encoded,
-and patches the enumeration's number into it; it encodes the payload again when the
-row's entities change.
+For each unit and static it reports the row: a new row it adds as a birth would gets an
+`OBJECT`; a row the table has gets an `OBJECT` with the enumeration's number or its ID
+in a `SEEN` record (spec/records.md, "Layout: SEEN"). A known object costs the shim one
+call into the agent, which also counts the item and reads the clock every
+`rows_per_clock` items. The agent keeps each row's `OBJECT` payload encoded, and patches
+the enumeration's number into it; it encodes the payload again when the row's entities
+change, and an empty payload makes the row's next report a full `OBJECT`.
+
+An enumeration that took the `full` flag writes `OBJECT` for every row. The flag is set
+by an `ENUMERATE` command, by every `HELLO` and by every event-class record other than a
+`LOG` that the link drops, at the moment of the drop, and the next `ENUM_BEGIN` takes it. A `HELLO` that
+arrives while an enumeration runs does not change the enumeration's mode, and the
+running enumeration continues: it writes `OBJECT`, not `SEEN`, for each row it has not
+sent in the new attach, because no `OBJECT` for the row was queued since that `HELLO`.
+The enumeration the `HELLO` queued starts after it and takes the flag.
 
 ## Commands
 
@@ -383,6 +407,8 @@ message `sampling` and these `data` keys:
 | `syscall_per_s` | `C` |
 | `debt_us`, `credit_us` | `D` when above 0, and the credit when `D` is below 0 |
 | `pumps`, `frames` | Frames in the window that called the shim's pump, and all frames |
+| `frames_over_250`, `syscall_over_250`, `frame_max_us` | Frames whose agent time passed 250 µs, the per-frame cap, counted exactly since the last report, and of those the system-call frames; and the longest frame, µs. The histograms' bucket edge is 256 µs, so they cannot place a p99 against 250 µs. A report counts frames up to the one before it |
+| `gap_max_s` | The longest real time, s, between the starts of two consecutive frames the agent pumped in the window. A gap that spans a report boundary counts in the window where it ends; the first frame after attach adds none. The positions check uses it to find stall windows, which a frame count cannot show |
 | `empty_pumps` | Pumps in the window that planned no row. They are in no frame count below |
 | `check_pumps`, `check_overrun_us` | Of those, the pumps that made existence checks, and the most one ran past `B`. At least one check goes out whatever the budget, so such a pump may pass it |
 | `slice_us` | `S` of the last frame |

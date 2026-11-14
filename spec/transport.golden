@@ -112,6 +112,7 @@ codes record_kind
   22 PLAYER class=event
   23 MENU class=event
   24 LOG class=event
+  25 SEEN class=event
   32 POSITIONS class=sample
   33 VITALS class=sample
   34 ATTITUDE class=sample
@@ -204,7 +205,12 @@ layout ENUM_BEGIN fixed=8
 layout ENUM_END fixed=16
   0x0000 u64 enumeration
   0x0008 u32 objects
+  0x000c u32 seen
+layout SEEN fixed=16
+  0x0000 u64 enumeration
+  0x0008 u32 count
   0x000c pad[4] reserved
+  + u64[count] objects
 layout EVENT fixed=8
   0x0000 u32 id
   0x0004 u32 n
@@ -480,4 +486,4 @@ layout EXTENSION_INVOKE fixed=0
   + lv args
 layout EVAL fixed=0
   + lv source
-hash de5b03a15471212b
+hash 45f9f774eccb534e

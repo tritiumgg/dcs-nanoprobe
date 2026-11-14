@@ -132,6 +132,15 @@ struct Pair {
     stall: Arc<AtomicBool>,
 }
 
+/// The folder goes even when a test fails before `finish`.
+impl Drop for Pair {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.sidecar_stop.store(true, Ordering::Relaxed);
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
 impl Pair {
     fn start(name: &str, misbehave: &[Misbehavior], stall: Duration) -> Pair {
         Pair::with(
@@ -273,9 +282,7 @@ impl Pair {
         if let Some(h) = self.sidecar.take() {
             h.join().expect("the sidecar did not panic");
         }
-        let report = verify::verify(&self.dir.join("journal")).expect("verify");
-        let _ = std::fs::remove_dir_all(&self.dir);
-        report
+        verify::verify(&self.dir.join("journal")).expect("verify")
     }
 }
 

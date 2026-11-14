@@ -29,6 +29,25 @@ The `sampling` LOG counts it apart, in `sweep_forced`, and the bound leaves it o
 feature `k` is the constant 1. It is for the S10 test that forces the sampling budget
 to a tenth; the `sampling` LOG reports `k` as `scale`.
 
+Below 1 the gate has two more checks. Both use the scaled budget `k` × (what the frame
+has left, less the call), and both require that no subscribed row is wanted and, for the
+first, that no urgent row waits.
+
+The first applies to a maintenance pump: births are pending, or the enumeration is due or
+running. The step is chosen as follows. While rows are owed and the maintenance balance is
+under a batch, the step is the cheapest owed row; with no row to read the pump is held
+back. Otherwise the step is the enumeration's measured cost when it is due or running, and
+the births' cost if not (0 while unmeasured). The budget is checked only when the sampler
+is in debt, or when the balance is short and no row tier with a measured cost is owed credit and no stopped row waits. It must pay the step,
+a batch's fixed part and the close with twice its deviation; if it does not, the pump is
+held back. In every other case the pump goes, so with no debt a measured step still goes
+alone.
+
+The second applies to every other pump while the sampler is in debt: if a row is owed,
+the budget must pay the cheapest owed row or maintenance step, a batch's fixed part and the close with twice
+its deviation, or the pump is held back. A held-back pump does not run, so it pays no
+call.
+
 `raise`, `stall`, `flood` and `panic` are taken by the next `frame` call, which logs
 `injected fault: <name>` as it fires one. `lose-control` is armed on the link and taken
 by the next control record the link queues, which may be many frames later; its only

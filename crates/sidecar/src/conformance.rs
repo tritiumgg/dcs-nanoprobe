@@ -324,18 +324,26 @@ fn enumeration_counts_its_objects(s: &mut Session<'_>) -> R {
     })?;
     let (end, found) = s.until(from, "ENUM_END", |x| {
         let end = x.iter().find_map(|i| match i {
-            Input::EnumEnd(e) if e.enumeration == id => Some(e.objects),
+            Input::EnumEnd(e) if e.enumeration == id => Some((e.objects, e.seen)),
             _ => None,
         })?;
-        let found = x
+        let objects = x
             .iter()
             .filter(|i| matches!(i, Input::Object(o) if o.enumeration == id))
             .count();
-        Some((end, found))
+        let seen: usize = x
+            .iter()
+            .map(|i| match i {
+                Input::Seen(r) if r.enumeration == id => r.objects.len(),
+                _ => 0,
+            })
+            .sum();
+        Some((end, (objects, seen)))
     })?;
-    if end as usize != found {
+    if (end.0 as usize, end.1 as usize) != found {
         return Err(format!(
-            "ENUM_END says {end}, the enumeration wrote {found}"
+            "ENUM_END says {} OBJECT and {} SEEN, the enumeration wrote {} and {}",
+            end.0, end.1, found.0, found.1
         ));
     }
     if id == 0 {

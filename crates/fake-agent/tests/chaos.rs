@@ -85,8 +85,26 @@ impl Run {
 
 impl Drop for Run {
     fn drop(&mut self) {
+        // A process left from this run could hold another test's output
+        // pipe and block it; stop any before the folder goes.
+        let _ = Command::new("pkill")
+            .args(["-KILL", "-f"])
+            .arg(&self.dir)
+            .status();
         let _ = std::fs::remove_dir_all(&self.dir);
     }
+}
+
+/// Fail when a process started for `r` is still running after the runner
+/// exited: every command line the run starts names its folder.
+fn assert_nothing_left(r: &Run) {
+    let out = Command::new("pgrep")
+        .arg("-fl")
+        .arg(&r.dir)
+        .output()
+        .unwrap();
+    let left = String::from_utf8_lossy(&out.stdout);
+    assert!(left.trim().is_empty(), "left running: {left}");
 }
 
 /// A seed whose first cycle keeps the pair attached for at least 1.95 s and
@@ -117,6 +135,7 @@ fn sh(dir: &Path, script: &str) -> String {
 fn a_run_with_nothing_wrong_passes() {
     let r = Run::new("pass");
     let (ok, out) = r.run(&r.agent(""), 4, 1, &[]);
+    assert_nothing_left(&r);
     assert!(ok, "{out}");
     assert!(out.contains("\"ev\":\"end\""), "{out}");
 }
@@ -132,6 +151,7 @@ fn a_dcs_that_stops_pumping_fails_the_run() {
         long_first_cycle(),
         &["--dcs-gap", "10"],
     );
+    assert_nothing_left(&r);
     assert!(!ok, "{out}");
     assert!(out.contains("DCS stopped pumping with no kill"), "{out}");
 }
@@ -147,6 +167,7 @@ fn a_dcs_that_restarts_by_itself_fails_the_run() {
         &format!("{agent} & p=$!\nsleep 2.2\nkill -9 $p\nwait $p\nexec {agent}\n"),
     );
     let (ok, out) = r.run(&dcs, 1, long_first_cycle(), &[]);
+    assert_nothing_left(&r);
     assert!(!ok, "{out}");
     assert!(out.contains("DCS restarted with no kill"), "{out}");
 }
@@ -178,6 +199,7 @@ fn a_slow_reconnect_fails_the_run() {
         first_cycle_kills(1),
         &[],
     );
+    assert_nothing_left(&r);
     assert!(!ok, "{out}");
     assert!(out.contains("to reconnect after killing sidecar"), "{out}");
 }

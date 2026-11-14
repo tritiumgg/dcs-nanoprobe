@@ -487,6 +487,11 @@ pub struct Judge<'a> {
     /// compare then sets the intervals between an object's samples against
     /// the periods the agent reported.
     pub recording: Option<&'a Path>,
+    /// The positions interval is reported, not judged against the period
+    /// the agent reported at the dump: the live parts judge it over
+    /// stall-free windows ([`positions`]). A reported period at one instant
+    /// can be an enumeration's or a stall's.
+    pub positions_by_window: bool,
 }
 
 /// The median, over the objects in `ids`, of the interval between an
@@ -638,6 +643,7 @@ pub fn compare_files(oracle: &Path, mirror: &Path, judge: Judge<'_>) -> Result<V
             // the period the agent reports then grows past the intervals
             // of the sweeps before it.
             if judge.ages
+                && !(positions && judge.positions_by_window)
                 && n >= INTERVALS_MIN
                 && (median - reported).abs() > INTERVAL_SHARE * reported
             {
@@ -648,11 +654,12 @@ pub fn compare_files(oracle: &Path, mirror: &Path, judge: Judge<'_>) -> Result<V
     Ok(v)
 }
 
-const USAGE: &str = "usage: cargo xtask sampling compare <oracle.json> <mirror.json> [--no-ages] [--strict] [--recording FILE] [--out FILE]\n       cargo xtask sampling deaths <probe.json> <recording.jsonl> [--catch-s N] [--hit-s N]\n       cargo xtask sampling <name> [--part mirror|mirror500|tenth|probes|design|deaths]";
+const USAGE: &str = "usage: cargo xtask sampling compare <oracle.json> <mirror.json> [--no-ages] [--strict] [--recording FILE] [--out FILE]\n       cargo xtask sampling deaths <probe.json> <recording.jsonl> [--catch-s N] [--hit-s N]\n       cargo xtask sampling --rejudge <bundle dir>\n       cargo xtask sampling <name> [--part mirror|mirror500|tenth|probes|design|deaths|windows]";
 
 /// `cargo xtask sampling ...`.
 pub fn command(repo: &Path, args: &[&str]) -> Result<ExitCode, String> {
     match args {
+        ["--rejudge", dir] => live::rejudge(Path::new(dir)),
         [name] => live::run(repo, name, Part::Both),
         [name, "--part", "mirror"] => live::run(repo, name, Part::Mirror),
         [name, "--part", "mirror500"] => live::run(repo, name, Part::Mirror500),
@@ -660,6 +667,7 @@ pub fn command(repo: &Path, args: &[&str]) -> Result<ExitCode, String> {
         [name, "--part", "probes"] => live::run(repo, name, Part::Probes),
         [name, "--part", "design"] => live::run(repo, name, Part::Design),
         [name, "--part", "deaths"] => live::run(repo, name, Part::Deaths),
+        [name, "--part", "windows"] => live::run(repo, name, Part::Windows),
         ["deaths", probe, recording, rest @ ..] => {
             let (mut catch_s, mut hit_s) = (None, None);
             let mut rest = rest;
@@ -757,6 +765,10 @@ pub enum Part {
     /// unit or static to cease to exist, the events each sends, and the
     /// reason each row leaves the agent's table with.
     Deaths,
+    /// On a windows-ssh target: DCS started through its task, a hosted
+    /// private session, 1,200 and 2,000 objects measured for three minutes
+    /// each. The default part of such a target.
+    Windows,
 }
 
 fn unhex(s: &str) -> Option<Vec<u8>> {
@@ -1131,7 +1143,11 @@ pub fn deaths(
 }
 
 #[path = "sampling_live.rs"]
-mod live;
+pub(crate) mod live;
+#[path = "sampling_positions.rs"]
+pub(crate) mod positions;
+#[path = "sampling_windows.rs"]
+mod win;
 
 #[cfg(test)]
 mod tests {

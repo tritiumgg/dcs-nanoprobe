@@ -339,6 +339,18 @@ mod tests {
     }
 
     #[test]
+    fn seen_and_the_enumeration_end_decode() {
+        let mut w = Writer::new();
+        w.u64(4).u32(3).pad(4).u64(10).u64(11).u64(12);
+        let text = record(Some("SEEN"), &w.finish());
+        assert_eq!(text, "enumeration=4 count=3 objects=[10, 11, 12]");
+        let mut w = Writer::new();
+        w.u64(4).u32(1).u32(3);
+        let text = record(Some("ENUM_END"), &w.finish());
+        assert_eq!(text, "enumeration=4 objects=1 seen=3");
+    }
+
+    #[test]
     fn a_short_or_wrong_payload_falls_back_to_hex() {
         let text = record(Some("GAP"), &[1, 0, 0, 0, 2, 0]);
         assert!(text.contains("class=EVENTS(1)"), "{text}");

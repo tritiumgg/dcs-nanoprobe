@@ -18,7 +18,7 @@ use nanoprobe_transport::codec::{DecodeError, Lv};
 use nanoprobe_transport::layout::{gap_class, kind};
 use nanoprobe_transport::records::{
     Airbase, Ammo, Attitude, EnumBegin, EnumEnd, Frame, Gap, Hello, Lifecycle, Object, ObjectGone,
-    Positions, Vitals, Warehouse,
+    Positions, Seen, Vitals, Warehouse,
 };
 
 /// The stamps of the `FRAME` a record follows (spec/records.md, "Stamps").
@@ -98,6 +98,12 @@ pub struct Counters {
     pub enumerations_used: u64,
     /// Enumerations the mirror could not use.
     pub enumerations_refused: u64,
+    /// `SEEN` IDs of an open enumeration that the mirror holds no row for.
+    /// Each makes the enumeration refused.
+    pub seen_unknown: u64,
+    /// Enumerations refused for holding `SEEN` IDs after a `GAP` of events,
+    /// before one with none was applied.
+    pub seen_guarded: u64,
     /// Rows an applied enumeration removed because it did not find them.
     pub missing_by_rule: u64,
     /// Rows the agent's `OBJECT_GONE` records had not removed by `ENUM_END`
@@ -115,6 +121,10 @@ struct Open {
     found: BTreeSet<u64>,
     /// `OBJECT` records of this enumeration.
     count: u64,
+    /// `SEEN` IDs of this enumeration.
+    seen: u64,
+    /// A `SEEN` ID named a row the mirror does not hold.
+    unknown: bool,
     /// A `GAP` of events came after `ENUM_BEGIN`.
     gap: bool,
 }
@@ -130,6 +140,9 @@ pub struct Mirror {
     rows: BTreeMap<u64, Row>,
     bases: BTreeMap<String, Base>,
     open: Option<Open>,
+    /// A `GAP` of events was read, and no enumeration without `SEEN` IDs
+    /// has been applied since: an enumeration with `SEEN` IDs is refused.
+    guard: bool,
     counters: Counters,
 }
 
@@ -168,6 +181,12 @@ impl Mirror {
                 let g = ObjectGone::decode(payload)?;
                 if self.current() {
                     self.gone(g);
+                }
+            }
+            kind::SEEN => {
+                let s = Seen::decode(payload)?;
+                if self.current() {
+                    self.seen(s);
                 }
             }
             kind::ENUM_BEGIN => {
@@ -305,6 +324,7 @@ impl Mirror {
     fn gap(&mut self, g: Gap) {
         if u64::from(g.class) == gap_class::EVENTS {
             self.wants = true;
+            self.guard = true;
             if let Some(open) = &mut self.open {
                 open.gap = true;
             }
@@ -370,6 +390,28 @@ impl Mirror {
         }
     }
 
+    /// `SEEN`: the rows are in the open enumeration's found set. It never
+    /// adds a row, and a record outside the open enumeration is ignored. An
+    /// ID the mirror holds no row for makes the enumeration refused.
+    fn seen(&mut self, s: Seen) {
+        let Some(open) = self.open.as_mut().filter(|o| o.number == s.enumeration) else {
+            return;
+        };
+        for id in s.objects {
+            open.seen += 1;
+            match self.rows.get_mut(&id) {
+                Some(row) => {
+                    row.found_in = open.number;
+                    open.found.insert(id);
+                }
+                None => {
+                    open.unknown = true;
+                    self.counters.seen_unknown += 1;
+                }
+            }
+        }
+    }
+
     /// `OBJECT_GONE`: remove the row. An open enumeration forgets it, so a row
     /// added again later is not one the enumeration could remove.
     fn gone(&mut self, g: ObjectGone) {
@@ -391,6 +433,8 @@ impl Mirror {
             snapshot: self.rows.keys().copied().collect(),
             found: BTreeSet::new(),
             count: 0,
+            seen: 0,
+            unknown: false,
             gap: false,
         });
     }
@@ -408,10 +452,25 @@ impl Mirror {
                 return;
             }
         };
-        if open.count != u64::from(e.objects) || open.gap {
+        if open.count != u64::from(e.objects)
+            || open.seen != u64::from(e.seen)
+            || open.gap
+            || open.unknown
+        {
             self.counters.enumerations_refused += 1;
             self.wants = true;
             return;
+        }
+        if self.guard && e.seen > 0 {
+            // After a lost record, only an enumeration of whole `OBJECT`
+            // records can be trusted to repair the table.
+            self.counters.enumerations_refused += 1;
+            self.counters.seen_guarded += 1;
+            self.wants = true;
+            return;
+        }
+        if e.seen == 0 {
+            self.guard = false;
         }
         self.counters.enumerations_used += 1;
         for id in open.snapshot.difference(&open.found) {
@@ -576,14 +635,27 @@ mod tests {
     }
 
     fn end(n: u64, objects: u32) -> (u64, Vec<u8>) {
+        end_seen(n, objects, 0)
+    }
+
+    fn end_seen(n: u64, objects: u32, seen: u32) -> (u64, Vec<u8>) {
         (
             kind::ENUM_END,
             EnumEnd {
                 enumeration: n,
                 objects,
+                seen,
             }
             .encode(),
         )
+    }
+
+    fn seen(n: u64, ids: &[u64]) -> (u64, Vec<u8>) {
+        let s = Seen {
+            enumeration: n,
+            objects: ids.to_vec(),
+        };
+        (kind::SEEN, s.encode())
     }
 
     fn gap(class: u32) -> (u64, Vec<u8>) {
@@ -949,6 +1021,160 @@ mod tests {
         assert_eq!(m.counters().samples_unknown_object, 1);
     }
 
+    /// A mirror at generation 1 holding units 1 to 3 from a whole enumeration.
+    fn holding_three() -> Mirror {
+        let mut m = Mirror::new();
+        m.attached();
+        feed(
+            &mut m,
+            &[
+                frame(1, 1.0),
+                hello(),
+                begin(1),
+                object(1, 1),
+                object(2, 1),
+                object(3, 1),
+                end(1, 3),
+            ],
+        );
+        assert_eq!(m.counters().enumerations_used, 1);
+        m
+    }
+
+    #[test]
+    fn seen_ids_count_as_found() {
+        let mut m = holding_three();
+        // Unit 3 is in neither list: the rule removes it. 1 and 2 are found,
+        // one by an OBJECT and one by a SEEN ID.
+        feed(
+            &mut m,
+            &[begin(2), seen(2, &[1]), object(2, 2), end_seen(2, 1, 1)],
+        );
+        assert_eq!(ids(&m), vec![1, 2]);
+        assert_eq!(m.counters().enumerations_used, 2);
+        assert_eq!(m.counters().missing_by_rule, 1);
+        assert_eq!(m.get(1).unwrap().found_in, 2);
+        assert!(!m.wants_enumeration());
+    }
+
+    #[test]
+    fn a_seen_id_of_no_row_refuses_the_enumeration() {
+        let mut m = holding_three();
+        feed(
+            &mut m,
+            &[begin(2), seen(2, &[1, 2, 3, 9]), end_seen(2, 0, 4)],
+        );
+        // A SEEN never adds a row, and the enumeration is not applied.
+        assert_eq!(ids(&m), vec![1, 2, 3]);
+        assert_eq!(m.counters().seen_unknown, 1);
+        assert_eq!(m.counters().enumerations_refused, 1);
+        assert_eq!(m.counters().enumerations_used, 1);
+        assert!(m.wants_enumeration());
+        m.clear_wants();
+        // The whole enumeration the request brings is applied.
+        feed(
+            &mut m,
+            &[
+                begin(3),
+                object(1, 3),
+                object(2, 3),
+                object(3, 3),
+                end(3, 3),
+            ],
+        );
+        assert_eq!(m.counters().enumerations_used, 2);
+        assert!(!m.wants_enumeration());
+    }
+
+    #[test]
+    fn objects_and_seen_are_compared_with_enum_end_separately() {
+        for (objects, seen_ids) in [(1, 2), (2, 1), (0, 3), (3, 0)] {
+            let mut m = holding_three();
+            feed(
+                &mut m,
+                &[
+                    begin(2),
+                    object(1, 2),
+                    seen(2, &[2, 3]),
+                    end_seen(2, objects, seen_ids),
+                ],
+            );
+            let ok = (objects, seen_ids) == (1, 2);
+            assert_eq!(m.counters().enumerations_used, 1 + u64::from(ok));
+            assert_eq!(m.wants_enumeration(), !ok, "{objects} {seen_ids}");
+        }
+    }
+
+    #[test]
+    fn a_seen_outside_the_open_enumeration_or_of_an_old_generation_is_ignored() {
+        let mut m = holding_three();
+        // No enumeration open, then one with another number.
+        feed(&mut m, &[seen(2, &[9])]);
+        feed(&mut m, &[begin(2), seen(7, &[9]), seen(2, &[1, 2, 3])]);
+        feed(&mut m, &[end_seen(2, 0, 3)]);
+        assert_eq!(m.counters().seen_unknown, 0);
+        assert_eq!(m.counters().enumerations_used, 2);
+        // A SEEN stamped with an older generation.
+        feed(
+            &mut m,
+            &[frame(2, 2.0), begin(3), frame(1, 3.0), seen(3, &[9])],
+        );
+        assert_eq!(m.counters().old_generation, 1);
+        assert_eq!(m.counters().seen_unknown, 0);
+    }
+
+    #[test]
+    fn after_a_gap_of_events_an_enumeration_with_seen_ids_is_refused() {
+        let mut m = holding_three();
+        feed(&mut m, &[gap(1)]);
+        assert!(m.wants_enumeration());
+        m.clear_wants();
+        // The gap came before the enumeration, so only the guard refuses it.
+        feed(&mut m, &[begin(2), seen(2, &[1, 2, 3]), end_seen(2, 0, 3)]);
+        assert_eq!(m.counters().enumerations_refused, 1);
+        assert_eq!(m.counters().seen_guarded, 1);
+        assert!(m.wants_enumeration());
+        m.clear_wants();
+        // A gap of logs sets no guard, and one with `seen` 0 lifts it.
+        feed(
+            &mut m,
+            &[
+                begin(3),
+                object(1, 3),
+                object(2, 3),
+                object(3, 3),
+                end(3, 3),
+            ],
+        );
+        assert_eq!(m.counters().enumerations_used, 2);
+        feed(&mut m, &[begin(4), seen(4, &[1, 2, 3]), end_seen(4, 0, 3)]);
+        assert_eq!(m.counters().enumerations_used, 3);
+        assert_eq!(m.counters().seen_guarded, 1);
+        feed(&mut m, &[gap(2)]);
+        feed(&mut m, &[begin(5), seen(5, &[1, 2, 3]), end_seen(5, 0, 3)]);
+        assert_eq!(m.counters().enumerations_used, 4);
+    }
+
+    #[test]
+    fn a_death_and_seen_in_one_enumeration() {
+        let mut m = holding_three();
+        // Row 2 is in the open batch when it dies: the agent writes the
+        // batch first, so the SEEN ID names a row the mirror still holds.
+        feed(
+            &mut m,
+            &[
+                begin(2),
+                seen(2, &[1, 2]),
+                gone(2),
+                seen(2, &[3]),
+                end_seen(2, 0, 3),
+            ],
+        );
+        assert_eq!(ids(&m), vec![1, 3]);
+        assert_eq!(m.counters().enumerations_used, 2);
+        assert_eq!(m.counters().disagreements, 0);
+    }
+
     #[test]
     fn decode_error_leaves_state_unchanged() {
         let mut m = Mirror::new();
@@ -962,6 +1188,7 @@ mod tests {
             kind::GAP,
             kind::OBJECT,
             kind::OBJECT_GONE,
+            kind::SEEN,
             kind::ENUM_BEGIN,
             kind::ENUM_END,
             kind::POSITIONS,
@@ -1010,7 +1237,7 @@ mod tests {
 
         #[test]
         fn arbitrary_valid_streams_never_panic(
-            steps in proptest::collection::vec((0u8..9, 0u64..6, 0u32..4), 0..60)
+            steps in proptest::collection::vec((0u8..10, 0u64..6, 0u32..4), 0..60)
         ) {
             let mut m = Mirror::new();
             m.attached();
@@ -1024,6 +1251,7 @@ mod tests {
                     5 => end(u64::from(n) + 1, n),
                     6 => gap(n),
                     7 => pos(&[id, id + 1], f64::from(n)),
+                    8 => seen(u64::from(n) + 1, &[id, id + 1]),
                     _ => vitals(&[id]),
                 };
                 m.record(k as u16, &p).unwrap();

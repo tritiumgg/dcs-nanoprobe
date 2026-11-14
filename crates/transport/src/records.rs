@@ -627,23 +627,73 @@ pub struct EnumEnd {
     pub enumeration: u64,
     /// `OBJECT` records it wrote.
     pub objects: u32,
+    /// IDs it wrote in `SEEN` records.
+    pub seen: u32,
 }
 
 impl EnumEnd {
     /// The payload.
     pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
-        w.u64(self.enumeration).u32(self.objects).pad(4);
+        w.u64(self.enumeration).u32(self.objects).u32(self.seen);
         w.finish()
     }
 
     /// Decode a payload.
     pub fn decode(b: &[u8]) -> Result<EnumEnd, DecodeError> {
         let mut r = Reader::new(b);
-        let enumeration = r.u64()?;
-        let objects = r.u32()?;
-        r.skip(4)?;
         Ok(EnumEnd {
+            enumeration: r.u64()?,
+            objects: r.u32()?,
+            seen: r.u32()?,
+        })
+    }
+}
+
+/// `SEEN`: rows an enumeration found whose `OBJECT` is unchanged.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Seen {
+    /// The enumeration that found them.
+    pub enumeration: u64,
+    /// DCS object IDs.
+    pub objects: Vec<u64>,
+}
+
+impl Seen {
+    /// Bytes of the fixed part.
+    pub const FIXED: usize = 16;
+
+    /// The most IDs a payload of `max_payload` bytes holds.
+    pub const fn capacity(max_payload: usize) -> usize {
+        max_payload.saturating_sub(Self::FIXED) / 8
+    }
+
+    /// The payload.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(Self::FIXED + 8 * self.objects.len());
+        Self::encode_into(self.enumeration, &self.objects, &mut out);
+        out
+    }
+
+    /// Write the payload for `objects` into `out`, which is cleared first.
+    pub fn encode_into(enumeration: u64, objects: &[u64], out: &mut Vec<u8>) {
+        out.clear();
+        out.extend_from_slice(&enumeration.to_le_bytes());
+        out.extend_from_slice(&(objects.len() as u32).to_le_bytes());
+        out.extend_from_slice(&[0; 4]);
+        for o in objects {
+            out.extend_from_slice(&o.to_le_bytes());
+        }
+    }
+
+    /// Decode a payload.
+    pub fn decode(b: &[u8]) -> Result<Seen, DecodeError> {
+        let mut r = Reader::new(b);
+        let enumeration = r.u64()?;
+        let count = r.u32()?;
+        r.skip(4)?;
+        let objects = u64_column(columns(&mut r, count, 8)?);
+        Ok(Seen {
             enumeration,
             objects,
         })
@@ -1438,11 +1488,27 @@ mod tests {
         let e = EnumEnd {
             enumeration: 7,
             objects: 9,
+            seen: 1_990,
         };
         let b = e.encode();
         assert_eq!(b.len(), fixed("ENUM_END"));
         assert_eq!(EnumEnd::decode(&b), Ok(e));
         truncations_fail(&b, EnumEnd::decode);
+
+        let s = Seen {
+            enumeration: 7,
+            objects: vec![3, 1 << 40, u64::MAX],
+        };
+        let b = s.encode();
+        assert_eq!(b.len(), fixed("SEEN") + 24);
+        assert_eq!(Seen::decode(&b), Ok(s));
+        truncations_fail(&b, Seen::decode);
+        assert_eq!(Seen::default().encode().len(), Seen::FIXED);
+        assert_eq!(Seen::capacity(Seen::FIXED + 80), 10);
+        // A count the payload cannot hold is an error that reserves nothing.
+        let mut lie = b.clone();
+        lie[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(Seen::decode(&lie).is_err());
     }
 
     #[test]

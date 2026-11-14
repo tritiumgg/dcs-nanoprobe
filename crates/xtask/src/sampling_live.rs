@@ -23,8 +23,9 @@
 //!   rate, the enumeration period holds, the share stays under
 //!   `overhead_share`, no debt is forgiven, debt stays under a second's
 //!   budget, sampling runs past `k·B` by more than one clock interval in at
-//!   most 1 % of the frames that only swept rows, and the pump's p99 is under
-//!   256 µs (the histogram's bucket edge).
+//!   most 1 % of the frames that only swept rows, and the frames over 250 µs
+//!   are at most 1 % of the frames (the agent's exact count, `tail`; the
+//!   histogram's 256 µs bucket edge is reported, not judged).
 //!
 //! Everything goes under `bundles/sampling-<name>-<time>/`: every mirror and
 //! oracle dump, the verdicts, the probe's output and the recording, and
@@ -41,13 +42,14 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::Part;
+use super::positions;
 use crate::install::Profile as _;
 use crate::profile::Target;
 use crate::remote::Remote;
 use crate::{bundle, eval, link, live, miz};
 
 /// Where the probe goes in the container.
-const DIR: &str = "/tmp/nanoprobe-sampling";
+pub(crate) const DIR: &str = "/tmp/nanoprobe-sampling";
 /// How long the probe may take to attach.
 const ATTACH_S: u64 = 90;
 /// Units the tenth part subscribes.
@@ -55,26 +57,26 @@ const SUBSCRIBED: usize = 20;
 /// The share of ground groups that move at 1,200 and 2,000 objects: with
 /// every group moving, 2,000 objects held DCS under 2 fps (LIVE, S10), so
 /// by the S10 ruling one in five moves and the rest stay alive and halted.
-const MOVING: f64 = 0.2;
+pub(crate) const MOVING: f64 = 0.2;
 /// The share in the shipping `agent.toml`.
-const SHARE: f64 = 0.003;
+pub(crate) const SHARE: f64 = 0.003;
 /// Model seconds between the oracle's early read and the compare: a slow
 /// position period and one more (6 s at the targets), and a second.
-const EARLY_S: f64 = 7.0;
+pub(crate) const EARLY_S: f64 = 7.0;
 /// Bytes of the recording's tail a compare reads.
-const TAIL_BYTES: u64 = 12_000_000;
+pub(crate) const TAIL_BYTES: u64 = 12_000_000;
 
-struct Run {
-    remote: Remote,
-    folder: PathBuf,
+pub(crate) struct Run {
+    pub(crate) remote: Remote,
+    pub(crate) folder: PathBuf,
     map: String,
     port: String,
     token: String,
-    repository: PathBuf,
+    pub(crate) repository: PathBuf,
 }
 
 impl Run {
-    fn sh(&self, script: &str, args: &[&str]) -> Result<Vec<u8>, String> {
+    pub(crate) fn sh(&self, script: &str, args: &[&str]) -> Result<Vec<u8>, String> {
         let o = self.remote.shell(script, args, b"")?;
         if o.code != Some(0) {
             return Err(format!("`{script}` failed: {}", o.stderr));
@@ -83,7 +85,13 @@ impl Run {
     }
 
     /// Run Lua in a state through the eval channel; its first value.
-    fn eval(&self, state: &str, stem: &str, source: &str, timeout_s: u64) -> Result<Value, String> {
+    pub(crate) fn eval(
+        &self,
+        state: &str,
+        stem: &str,
+        source: &str,
+        timeout_s: u64,
+    ) -> Result<Value, String> {
         let r = eval::run(
             &self.remote,
             state,
@@ -98,33 +106,30 @@ impl Run {
     }
 
     /// Run model time for `seconds`, resuming the simulation if paused.
-    fn hold(&self, seconds: f64) -> Result<(), String> {
-        let source = format!(
-            "local E = ...\n\
-             local t0 = DCS.getModelTime()\n\
-             return E.wait(function()\n  \
-               if DCS.getModelTime() - t0 >= {seconds} then return 'done' end\n\
-             end, {}, 'running')\n",
-            seconds * 4.0 + 60.0
-        );
-        self.eval("hook", "s10-hold", &source, (seconds * 4.0) as u64 + 120)?;
+    pub(crate) fn hold(&self, seconds: f64) -> Result<(), String> {
+        self.eval(
+            "hook",
+            "s10-hold",
+            &hold_source(seconds),
+            hold_timeout(seconds),
+        )?;
         Ok(())
     }
 
     /// Spawn the mixed scenario. Returns its summary.
-    fn spawn(&self, n: usize, label: &str, moving: f64) -> Result<Value, String> {
-        let source = format!(
-            "local E = ...\n\
-             local S = E.lib('scenario')\n\
-             return S.spawn_mixed({n}, {{ label = '{label}', moving = {moving} }})\n"
-        );
-        let summary = self.eval("server", &format!("s10-spawn-{label}"), &source, 300)?;
+    pub(crate) fn spawn(&self, n: usize, label: &str, moving: f64) -> Result<Value, String> {
+        let summary = self.eval(
+            "server",
+            &format!("s10-spawn-{label}"),
+            &spawn_source(n, label, moving),
+            300,
+        )?;
         println!("  spawned {label}: {summary}");
         Ok(summary)
     }
 
     /// Destroy every object the scenario library added.
-    fn clear(&self) -> Result<Value, String> {
+    pub(crate) fn clear(&self) -> Result<Value, String> {
         self.eval(
             "server",
             "s10-clear",
@@ -136,18 +141,35 @@ impl Run {
     /// DCS's own frame rate (`lua/sampling/fps.lua`): settle 30 s, then 60 s
     /// of one-second windows, the simulation running. Returns the mean,
     /// the p5 and model/real.
-    fn fps(&self, label: &str) -> Result<Value, String> {
-        let source = std::fs::read_to_string(self.repository.join("lua/sampling/fps.lua"))
-            .map_err(|e| format!("lua/sampling/fps.lua: {e}"))?
-            .replace("@SETTLE@", "30")
-            .replace("@MEASURE@", "60");
-        let v = self.eval("hook", "s10-fps", &source, 300)?;
+    pub(crate) fn fps(&self, label: &str) -> Result<Value, String> {
+        self.fps_window(label, 30, 60)
+    }
+
+    /// [`Run::fps`] with the settle and measure seconds given. The record
+    /// also carries `moving`: the share of the scenario's ground groups and
+    /// ships that moved more than 20 m over the whole settle and measure
+    /// span (`lua/scenarios/movers.lua`), which says what the rate was
+    /// measured against. It is left out when the count fails.
+    pub(crate) fn fps_window(
+        &self,
+        label: &str,
+        settle: u32,
+        measure: u32,
+    ) -> Result<Value, String> {
+        let source = fps_source(&self.repository, settle, measure)?;
+        let baseline = crate::meter::movers(self);
+        let mut v = self.eval("hook", "s10-fps", &source, 300)?;
+        if baseline.is_some()
+            && let Some(moving) = crate::meter::movers(self)
+        {
+            v["moving"] = moving;
+        }
         println!("  fps {label}: {v}");
         Ok(v)
     }
 
     /// Explosions at `count` units of the groups a spawn summary names.
-    fn churn(&self, summary: &Value, count: usize) -> Result<Value, String> {
+    pub(crate) fn churn(&self, summary: &Value, count: usize) -> Result<Value, String> {
         let groups: Vec<String> = summary["groups"]
             .as_array()
             .into_iter()
@@ -165,20 +187,8 @@ impl Run {
 
     /// The objects that exist in DCS now, counted in the server state: the
     /// oracle's own count, independent of the agent.
-    fn live_count(&self) -> Result<u64, String> {
-        let source = "local n = 0\n\
-             for side = 0, 2 do\n  \
-               for _, g in ipairs(coalition.getGroups(side) or {}) do\n    \
-                 for _, u in ipairs(g:getUnits() or {}) do\n      \
-                   if u:isExist() then n = n + 1 end\n    \
-                 end\n  \
-               end\n  \
-               for _, o in ipairs(coalition.getStaticObjects(side) or {}) do\n    \
-                 if o:isExist() then n = n + 1 end\n  \
-               end\n\
-             end\n\
-             return n\n";
-        let v = self.eval("server", "s10-count", source, 60)?;
+    pub(crate) fn live_count(&self) -> Result<u64, String> {
+        let v = self.eval("server", "s10-count", LIVE_COUNT_SOURCE, 60)?;
         v.as_u64()
             .ok_or_else(|| format!("the live count is not a number: {v}"))
     }
@@ -191,17 +201,9 @@ impl Run {
     /// `k` under 1 new objects may enter only through the enumeration, so the
     /// expected time is at least the last reported enumeration period.
     /// Returns whether it filled in time and the seconds it took.
-    fn fill(&self, mark: usize, births: usize, k: f64) -> Result<(bool, f64), String> {
+    pub(crate) fn fill(&self, mark: usize, births: usize, k: f64) -> Result<(bool, f64), String> {
         let last = self.reports(mark)?.last().cloned().unwrap_or(Value::Null);
-        let cost = last["cost_births"]
-            .as_f64()
-            .filter(|c| *c > 0.0)
-            .unwrap_or(37.0);
-        let mut expected = births as f64 * cost / (0.25 * SHARE * 1e6 * k);
-        if k < 1.0 {
-            expected = expected.max(last["enumeration_s"].as_f64().unwrap_or(0.0));
-        }
-        let limit = 2.0 * expected.max(10.0);
+        let limit = fill_limit(&last, births, k);
         let start = Instant::now();
         loop {
             let live = self.live_count()?;
@@ -224,7 +226,7 @@ impl Run {
     }
 
     /// Ask the probe for a dump of the mirror.
-    fn mirror(&self) -> Result<Vec<u8>, String> {
+    pub(crate) fn mirror(&self) -> Result<Vec<u8>, String> {
         self.sh(
             &format!("rm -f {DIR}/mirror.json; touch {DIR}/mirror.req"),
             &[],
@@ -284,6 +286,8 @@ impl Run {
                 ages: label != "k01",
                 strict: label == "500",
                 recording: Some(&r),
+                // Judged over stall-free windows (`positions_checks`).
+                positions_by_window: label == "2000" || label == "k1",
             },
         )?;
         let v = verdict.json();
@@ -297,7 +301,7 @@ impl Run {
         Ok((v, mirror))
     }
 
-    fn start_probe(&self, probe: &Path, subscribe: usize) -> Result<(), String> {
+    pub(crate) fn start_probe(&self, probe: &Path, subscribe: usize) -> Result<(), String> {
         self.sh(
             &format!("pkill -f '[l]ink-probe --map' || true; rm -rf {DIR}"),
             &[],
@@ -328,7 +332,7 @@ impl Run {
         }
     }
 
-    fn lines(&self) -> Result<Vec<Value>, String> {
+    pub(crate) fn lines(&self) -> Result<Vec<Value>, String> {
         let o = self.remote.shell(
             &format!("cat {DIR}/probe.jsonl 2>/dev/null || true"),
             &[],
@@ -339,7 +343,7 @@ impl Run {
 
     /// Stop the probe through its stop file, and copy its files to
     /// `part`-named files in the folder.
-    fn stop_probe(&self, part: &str) {
+    pub(crate) fn stop_probe(&self, part: &str) {
         let _ = self.remote.shell(&format!("touch {DIR}/stop"), &[], b"");
         let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
@@ -367,7 +371,7 @@ impl Run {
     }
 
     /// The agent's `sampling` reports the probe read, from line `from`.
-    fn reports(&self, from: usize) -> Result<Vec<Value>, String> {
+    pub(crate) fn reports(&self, from: usize) -> Result<Vec<Value>, String> {
         Ok(self
             .lines()?
             .into_iter()
@@ -378,7 +382,7 @@ impl Run {
     }
 
     /// Deploy, restart DCS, and load a fresh shell mission, running.
-    fn fresh(&self, name: &str, faults: bool, shell: &[u8]) -> Result<(), String> {
+    pub(crate) fn fresh(&self, name: &str, faults: bool, shell: &[u8]) -> Result<(), String> {
         empty(&self.remote, "deploy")?;
         println!("== deploy{}", if faults { " --faults" } else { "" });
         crate::deploy(name, None, true, faults)?;
@@ -388,6 +392,71 @@ impl Run {
         live::load(&self.remote, "np-shell.miz", shell)?;
         Ok(())
     }
+}
+
+/// Lua for `Run::hold`: run model time for `seconds`.
+pub(crate) fn hold_source(seconds: f64) -> String {
+    format!(
+        "local E = ...\n\
+         local t0 = DCS.getModelTime()\n\
+         return E.wait(function()\n  \
+           if DCS.getModelTime() - t0 >= {seconds} then return 'done' end\n\
+         end, {}, 'running')\n",
+        seconds * 4.0 + 60.0
+    )
+}
+
+/// The eval timeout for [`hold_source`], seconds.
+pub(crate) fn hold_timeout(seconds: f64) -> u64 {
+    (seconds * 4.0) as u64 + 120
+}
+
+/// Lua that spawns the mixed scenario.
+pub(crate) fn spawn_source(n: usize, label: &str, moving: f64) -> String {
+    format!(
+        "local E = ...\n\
+         local S = E.lib('scenario')\n\
+         return S.spawn_mixed({n}, {{ label = '{label}', moving = {moving} }})\n"
+    )
+}
+
+/// Lua that counts the objects that exist in DCS now, in the server state.
+pub(crate) const LIVE_COUNT_SOURCE: &str = "local n = 0\n\
+     for side = 0, 2 do\n  \
+       for _, g in ipairs(coalition.getGroups(side) or {}) do\n    \
+         for _, u in ipairs(g:getUnits() or {}) do\n      \
+           if u:isExist() then n = n + 1 end\n    \
+         end\n  \
+       end\n  \
+       for _, o in ipairs(coalition.getStaticObjects(side) or {}) do\n    \
+         if o:isExist() then n = n + 1 end\n  \
+       end\n\
+     end\n\
+     return n\n";
+
+/// `lua/sampling/fps.lua` with the settle and measure seconds filled in.
+pub(crate) fn fps_source(repository: &Path, settle: u32, measure: u32) -> Result<String, String> {
+    Ok(
+        std::fs::read_to_string(repository.join("lua/sampling/fps.lua"))
+            .map_err(|e| format!("lua/sampling/fps.lua: {e}"))?
+            .replace("@SETTLE@", &settle.to_string())
+            .replace("@MEASURE@", &measure.to_string()),
+    )
+}
+
+/// How long a mirror may take to fill after a spawn of `births` objects, at
+/// scale `k`: twice the births' expected time (see [`Run::fill`]), and at
+/// least 20 s. `last` is the last `sampling` report, or null.
+pub(crate) fn fill_limit(last: &Value, births: usize, k: f64) -> f64 {
+    let cost = last["cost_births"]
+        .as_f64()
+        .filter(|c| *c > 0.0)
+        .unwrap_or(37.0);
+    let mut expected = births as f64 * cost / (0.25 * SHARE * 1e6 * k);
+    if k < 1.0 {
+        expected = expected.max(last["enumeration_s"].as_f64().unwrap_or(0.0));
+    }
+    2.0 * expected.max(10.0)
 }
 
 /// Wait until no player is connected before `step`, up to 30 minutes.
@@ -432,7 +501,7 @@ fn quantile(hist: &[Value], q: f64) -> Option<f64> {
 /// fixed before the run by a line mark (S10 ruling: total agent time over
 /// total real time, not a mean of the windows). Passes when the mean is
 /// within `overhead_share` and no debt was forgiven in the span.
-fn span(reports: &[Value]) -> (bool, Value) {
+pub(crate) fn span(reports: &[Value]) -> (bool, Value) {
     let (mut agent, mut real, mut forgiven, mut events) = (0.0, 0.0, 0.0, 0.0);
     let mut windows = Vec::new();
     for r in reports {
@@ -473,14 +542,14 @@ fn span(reports: &[Value]) -> (bool, Value) {
 
 /// The worst position period the reports show (S10 ruling 3c: at most 3 s
 /// while a spawn fills the table).
-fn worst_position(reports: &[Value]) -> f64 {
+pub(crate) fn worst_position(reports: &[Value]) -> f64 {
     reports
         .iter()
         .filter_map(|r| r["position_s"].as_f64())
         .fold(0.0f64, f64::max)
 }
 
-fn pump(lines: &[Value]) -> Value {
+pub(crate) fn pump(lines: &[Value]) -> Value {
     let Some(last) = lines.iter().rfind(|l| l["ev"] == "final") else {
         return Value::Null;
     };
@@ -511,10 +580,140 @@ fn pump(lines: &[Value]) -> Value {
     })
 }
 
+/// The frames past 250 µs across the reports, counted exactly by the agent
+/// (`frames_over_250`): the p99 meets the cap when they are at most 1 % of
+/// the frames. The histogram's 256 µs bucket edge cannot show it. A report
+/// without `frames` or `frames_over_250` (an agent built before the count
+/// existed) is counted in `missing`, and any such report fails the check.
+pub(crate) fn tail(reports: &[Value]) -> Value {
+    let sum = |k: &str| reports.iter().filter_map(|r| r[k].as_u64()).sum::<u64>();
+    let (frames, over) = (sum("frames"), sum("frames_over_250"));
+    let max = reports
+        .iter()
+        .filter_map(|r| r["frame_max_us"].as_f64())
+        .fold(0.0f64, f64::max);
+    let missing = reports
+        .iter()
+        .filter(|r| r["frames"].as_u64().is_none() || r["frames_over_250"].as_u64().is_none())
+        .count();
+    let share = if frames > 0 {
+        over as f64 / frames as f64
+    } else {
+        0.0
+    };
+    json!({
+        "frames": frames, "over_250": over, "syscall_over_250": sum("syscall_over_250"),
+        "over_share": share, "missing": missing,
+        "p99_within_250": frames > 0 && missing == 0 && share <= 0.01, "max_us": max,
+    })
+}
+
+/// The frames over 250 µs at k = 1 and at a tenth, apart: the p99 is judged
+/// over the k = 1 reports, and the tail at k = 0.1 is reported. A report
+/// without a `scale` counts as k = 1.
+pub(crate) fn tail_by_scale(reports: &[Value]) -> (Value, Value) {
+    let k1: Vec<Value> = reports
+        .iter()
+        .filter(|r| r["scale"].as_f64().is_none_or(|k| k == 1.0))
+        .cloned()
+        .collect();
+    let rest: Vec<Value> = reports
+        .iter()
+        .filter(|r| r["scale"].as_f64().is_some_and(|k| k != 1.0))
+        .cloned()
+        .collect();
+    (tail(&k1), tail(&rest))
+}
+
+/// The `sampling` reports among the probe's lines from line `from`.
+fn reports_in(lines: &[Value], from: usize) -> Vec<Value> {
+    lines
+        .iter()
+        .skip(from)
+        .filter(|l| l["ev"] == "log" && l["msg"] == "sampling")
+        .map(|l| l["data"].clone())
+        .collect()
+}
+
+/// The positions measure ([`positions`]) over `reports` from `settled` on,
+/// with the intervals between samples of the objects moving in the oracle
+/// dump `oracle-<label>.json`, from the recording `recording-<label>.jsonl`,
+/// both in `folder`. Returns the checks and their detail.
+fn positions_checks(
+    folder: &Path,
+    label: &str,
+    reports: &[(f64, Value)],
+    settled: usize,
+    proxy: bool,
+    suffix: &str,
+) -> Result<(Vec<Value>, Value), String> {
+    let read = |file: String| {
+        std::fs::read_to_string(folder.join(&file)).map_err(|e| format!("{file}: {e}"))
+    };
+    let oracle: Value = serde_json::from_str(&read(format!("oracle-{label}.json"))?)
+        .map_err(|e| format!("oracle-{label}.json: {e}"))?;
+    let (_, truth, _) = super::read_oracle(&oracle)?;
+    // The objects moving at the oracle read, as the compare takes them.
+    let moving = truth
+        .iter()
+        .filter(|t| (t.kind == 1 || t.cargo) && t.speed > super::MOVING_M_S)
+        .map(|t| t.id)
+        .collect();
+    let samples = positions::intervals(&read(format!("recording-{label}.jsonl"))?, &moving);
+    Ok(positions::judge(reports, settled, &samples, proxy, suffix))
+}
+
+/// `sampling --rejudge <bundle dir>`: apply the positions measure to a stored
+/// run, from `mirror-probe.jsonl` (the reports with their times),
+/// `oracle-2000.json` and `recording-2000.jsonl`, and the tail split to
+/// `tenth-probe.jsonl`. A report without `gap_max_s` has its stall windows
+/// found by a proxy (fewer frames than seconds in the window, or a window
+/// over 1 s past 10 s), and the result says it was judged by proxy: a stall
+/// with many frames around it is missed.
+pub(crate) fn rejudge(dir: &Path) -> Result<ExitCode, String> {
+    let file = |name: &str| {
+        std::fs::read(dir.join(name))
+            .map(|b| link::parse_lines(&b))
+            .map_err(|e| format!("{}: {e}", dir.join(name).display()))
+    };
+    let mut ok = true;
+    let mut out = json!({ "bundle": dir.display().to_string() });
+    if dir.join("mirror-probe.jsonl").exists() {
+        let timed = positions::timed(&file("mirror-probe.jsonl")?, 0);
+        let (checks, detail) = positions_checks(
+            dir,
+            "2000",
+            &timed,
+            positions::settled_from(&timed),
+            true,
+            " at 2,000, settled",
+        )?;
+        ok &= checks.iter().all(|c| c["ok"] == json!(true));
+        println!("{}", json!({"mirror": {"checks": checks}}));
+        out["mirror"] = detail;
+    }
+    if dir.join("tenth-probe.jsonl").exists() {
+        let lines = file("tenth-probe.jsonl")?;
+        let reports = reports_in(&lines, 0);
+        let (k1, k01) = tail_by_scale(&reports);
+        ok &= k1["p99_within_250"] == json!(true);
+        println!(
+            "{}",
+            json!({"tenth": {"tail_k1_judged": k1, "tail_k01_reported": k01}})
+        );
+    }
+    println!("== {}", if ok { "PASS" } else { "FAIL" });
+    Ok(if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
 /// The birth and enumeration steps across the reports: the last p50 and
 /// p99 bucket edges, the largest step, and whether one passed 250 µs, which
 /// is a finding for S11 (the step is one DCS call the budget cannot split).
-fn steps(reports: &[Value]) -> Value {
+pub(crate) fn steps(reports: &[Value]) -> Value {
     let last = |k: &str| {
         reports
             .iter()
@@ -678,6 +877,7 @@ fn part_mirror(
             "fps_500": fps500,
             "periods": m500["periods"],
             "steps": steps(&reports),
+            "tail": tail(&reports),
             "reports": reports,
             "pump": pump(&lines),
         }));
@@ -713,7 +913,16 @@ fn part_mirror(
     let pump = pump(&lines_final);
     // The ruled checks at 2,000 (S10 ruling on the pump's credit).
     let sum = |k: &str| at2000.iter().filter_map(|r| r[k].as_f64()).sum::<f64>();
-    let position = m["periods"][0].as_f64().unwrap_or(0.0);
+    let exact_tail = tail(&reports);
+    let timed_reports = positions::timed(&lines_final, 0);
+    let (position_checks, _) = positions_checks(
+        &run.folder,
+        "2000",
+        &timed_reports,
+        positions::settled_from(&timed_reports),
+        false,
+        " at 2,000, settled",
+    )?;
     let p99 = pump["p99_under_us"].as_f64().unwrap_or(f64::INFINITY);
     let p99_rest = pump["p99_without_syscall_under_us"]
         .as_f64()
@@ -721,10 +930,8 @@ fn part_mirror(
     let all_match = [&v500, &v1200, &v2000]
         .iter()
         .all(|v| v["matches"] == json!(true));
-    let checks = vec![
+    let mut checks = vec![
         json!({"check": "mirror matches at 500, 1,200 and 2,000", "ok": all_match}),
-        json!({"check": "position period <= 1 s at 2,000", "ok": position > 0.0 && position <= 1.0,
-               "detail": format!("{position:.3} s")}),
         // The budget holds the mean over a span, not each 10 s window: a
         // window can spend credit earned before it, or run up debt that the
         // next one repays (spec/sampling.md, "Slice").
@@ -736,12 +943,15 @@ fn part_mirror(
                "detail": format!("{fill2000_s:.0} s for 800 births")}),
         json!({"check": "position period <= 3 s while the table fills", "ok": burst_positions > 0.0 && burst_positions <= 3.0,
                "detail": format!("worst {burst_positions:.2} s")}),
-        json!({"check": "pump p99 <= 250 µs", "ok": p99 <= 256.0,
-               "detail": format!("under {p99} µs; without system-call frames under {p99_rest} µs")}),
+        json!({"check": "pump p99 <= 250 µs (frames over 250 µs at most 1 %, counted exactly)",
+               "ok": exact_tail["p99_within_250"] == json!(true),
+               "detail": format!("{} of {} frames over; histogram: under {p99} µs, without system-call frames under {p99_rest} µs",
+                                 exact_tail["over_250"], exact_tail["frames"])}),
         json!({"check": "pump rate reported", "ok": sum("frames") > 0.0,
                "detail": format!("{} pumps in {} frames: one every {:.2}", sum("pumps"), sum("frames"),
                                  sum("frames") / sum("pumps").max(1.0))}),
     ];
+    checks.splice(1..1, position_checks);
     let ok = checks.iter().all(|c| c["ok"] == json!(true));
     Ok(json!({
         "ok": ok,
@@ -762,6 +972,7 @@ fn part_mirror(
         "periods_1200": m1200["periods"],
         "periods": m["periods"],
         "steps": steps(&reports),
+        "tail": tail(&reports),
         "reports": reports,
         "checks": checks,
         "xcall": xcall,
@@ -888,6 +1099,10 @@ fn part_tenth(run: &Run, name: &str, shell: &[u8], probe: &Path) -> Result<Value
         .map(|b| link::parse_lines(&b))
         .unwrap_or(lines);
     let pump = pump(&lines_final);
+    // Read from the probe's own copy: `stop_probe` removed the files on the
+    // target, so `run.reports` after it returns nothing.
+    let all_reports = reports_in(&lines_final, mark0);
+    let timed_all = positions::timed(&lines_final, mark0);
 
     let at = |m: &Value, i: usize| m["periods"][i].as_f64().unwrap_or(0.0);
     let subscribed: Vec<u64> = m2["subscribed"]
@@ -932,11 +1147,41 @@ fn part_tenth(run: &Run, name: &str, shell: &[u8], probe: &Path) -> Result<Value
     );
     // The window of the first k = 0.1 report straddles the change, and the
     // first reports at k = 1 hold the spawn burst.
-    let k1: Vec<Value> = run
-        .reports(mark0)?
-        .into_iter()
+    let k1: Vec<Value> = all_reports
+        .iter()
         .take_while(|r| r["scale"].as_f64() == Some(1.0))
+        .cloned()
         .collect();
+    // The positions target at k = 1 by the stall-free measure, over the k = 1
+    // windows after the table filled; the last window alone can be an
+    // enumeration's.
+    let k1_timed: Vec<(f64, Value)> = timed_all
+        .iter()
+        .take_while(|(_, r)| r["scale"].as_f64() == Some(1.0))
+        .cloned()
+        .collect();
+    let (position_checks, _) = positions_checks(
+        &run.folder,
+        "k1",
+        &k1_timed,
+        positions::settled_from(&k1_timed),
+        false,
+        " at k = 1, settled",
+    )?;
+    // The stall-free window ceiling is judged in the mirror part, the judged
+    // scenario. Here the budget runs at its cap at k = 1, and the host's
+    // positions sweep waits while an enumeration is due or running
+    // (`higher_waits`), so a window holding an enumeration reads several
+    // seconds with no stall. The ceiling is reported; the per-object median
+    // is judged (coordinator ruling, 2026-11-14, on the tenth part's k = 1).
+    for c in position_checks {
+        let name = c["check"].as_str().unwrap_or_default();
+        if name.starts_with("no stall-free window's position period") {
+            check(&format!("{name}, reported"), true, c["detail"].to_string());
+        } else {
+            check(name, c["ok"] == json!(true), c["detail"].to_string());
+        }
+    }
     let k1 = &k1[k1.len().saturating_sub(2)..];
     let k01_all: Vec<Value> = reports
         .iter()
@@ -967,7 +1212,6 @@ fn part_tenth(run: &Run, name: &str, shell: &[u8], probe: &Path) -> Result<Value
     // abandoned no hold in any report of this part (the log also holds
     // reports of builds before the deploy), and the mirror's rule removed no
     // row the agent still holds.
-    let all_reports = run.reports(mark0)?;
     let abandoned_vals: Vec<u64> = all_reports
         .iter()
         .filter_map(|r| r["enum_end_abandoned"].as_u64())
@@ -991,7 +1235,7 @@ fn part_tenth(run: &Run, name: &str, shell: &[u8], probe: &Path) -> Result<Value
             && counter(&m2, "disagreements") == 0,
         format!(
             "enum_end_abandoned {abandoned}{}, missing_by_rule {}, disagreements {}{}; \
-             enumerations used {}, refused {}",
+             enumerations used {}, refused {} (SEEN ID unknown to the mirror {}, guarded {})",
             if abandoned_present {
                 ""
             } else {
@@ -1005,7 +1249,9 @@ fn part_tenth(run: &Run, name: &str, shell: &[u8], probe: &Path) -> Result<Value
                 " (key missing)"
             },
             used(&m2),
-            counter(&m2, "enumerations_refused")
+            counter(&m2, "enumerations_refused"),
+            counter(&m2, "seen_unknown"),
+            counter(&m2, "seen_guarded")
         ),
     );
     let reps: Vec<&Value> = reports
@@ -1040,9 +1286,13 @@ fn part_tenth(run: &Run, name: &str, shell: &[u8], probe: &Path) -> Result<Value
         filled_k1,
         format!("{fill_k1_s:.0} s for 2,000 births"),
     );
+    // Reported, not judged: here the table fills from empty, so the reported
+    // period (the time since the last completed lap) equals the fill's
+    // duration by definition. The mirror part judges the fill onto a
+    // populated table, and the fill time above stays judged.
     check(
-        "position period <= 3 s while the table fills at k = 1",
-        burst_k1_positions > 0.0 && burst_k1_positions <= 3.0,
+        "position period while the table fills at k = 1, reported",
+        true,
         format!("worst {burst_k1_positions:.2} s"),
     );
     check(
@@ -1077,16 +1327,31 @@ fn part_tenth(run: &Run, name: &str, shell: &[u8], probe: &Path) -> Result<Value
     check(
         "the sweep <= its budget + the rows between two clock reads",
         sweeps > 0.0 && sweeps_over <= 0.01 * sweeps,
+        // A forced one-row sweep (its fixed part alone passed its budget)
+        // is counted apart by the agent, in `sweep_forced`, and is in
+        // neither count (spec/sampling.md, "Reporting").
         format!(
-            "{sweeps_over} of {sweeps} sweeps past it; largest overrun {:.1} µs",
-            max("sweep_overrun_us")
+            "{sweeps_over} of {sweeps} sweeps past it; largest overrun {:.1} µs; \
+             {} forced one-row sweeps counted apart{}",
+            max("sweep_overrun_us"),
+            sum("sweep_forced"),
+            if reps.iter().all(|r| r["sweep_forced"].is_null()) {
+                " (key absent from these reports)"
+            } else {
+                ""
+            }
         ),
     );
     let p99 = pump["p99_under_us"].as_f64().unwrap_or(f64::INFINITY);
+    // Judged over the reports at k = 1; the tail at k = 0.1 is reported.
+    let (exact_tail, tail_k01) = tail_by_scale(&all_reports);
     check(
-        "pump p99 <= 250 µs",
-        p99 <= 256.0,
-        format!("p99 under {p99} µs"),
+        "pump p99 <= 250 µs at k = 1 (frames over 250 µs at most 1 %, counted exactly)",
+        exact_tail["p99_within_250"] == json!(true),
+        format!(
+            "{} of {} frames over; histogram: p99 under {p99} µs; at k = 0.1, reported: {} of {} over",
+            exact_tail["over_250"], exact_tail["frames"], tail_k01["over_250"], tail_k01["frames"]
+        ),
     );
     let ok = checks.iter().all(|c| c["ok"] == json!(true));
     Ok(json!({
@@ -1102,16 +1367,29 @@ fn part_tenth(run: &Run, name: &str, shell: &[u8], probe: &Path) -> Result<Value
         "periods_k1": m1["periods"],
         "periods_k01": m2["periods"],
         "steps": steps(&reports),
+        "tail": tail(&reports),
+        "tail_k1": exact_tail,
+        "tail_k01": tail_k01,
         "reports": reports,
         "pump": pump,
     }))
 }
 
 /// `sampling <name> [--part ...]`.
-pub fn run(repository: &Path, name: &str, part: Part) -> Result<ExitCode, String> {
+/// What a live run needs: the connection, the shell mission and the probe.
+pub(crate) struct Opened {
+    pub(crate) run: Run,
+    pub(crate) shell: Vec<u8>,
+    pub(crate) probe: PathBuf,
+}
+
+/// Check the target, build the shell mission and the Linux probe, and make
+/// the run's bundle folder `bundles/<kind>-<name>-<time>/`. Refuses a server
+/// with players.
+pub(crate) fn open(repository: &Path, name: &str, kind: &str) -> Result<Opened, String> {
     let target = crate::target(name)?;
     if !matches!(target, Target::DockerWine { .. }) {
-        return Err("sampling runs on a docker-wine target".into());
+        return Err(format!("{kind} runs on a docker-wine target"));
     }
     let template = std::fs::read(repository.join("templates/caucasus.miz"))
         .map_err(|e| format!("templates/caucasus.miz: {e}"))?;
@@ -1124,7 +1402,7 @@ pub fn run(repository: &Path, name: &str, part: Part) -> Result<ExitCode, String
     let probe = link::build_linux_bins(&[("nanoprobe-fake-agent", "link-probe")])?
         .pop()
         .ok_or("link-probe was not built")?;
-    let folder = bundle::folder().join(format!("sampling-{name}-{}", bundle::stamp()));
+    let folder = bundle::folder().join(format!("{kind}-{name}-{}", bundle::stamp()));
     std::fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
     let toml = remote
         .read(crate::install::AGENT_TOML)?
@@ -1135,19 +1413,45 @@ pub fn run(repository: &Path, name: &str, part: Part) -> Result<ExitCode, String
         port: config.transport.port.to_string(),
         token: remote.full_path(crate::install::TOKEN),
         remote,
-        folder: folder.clone(),
+        folder,
         repository: repository.to_path_buf(),
     };
+    Ok(Opened { run, shell, probe })
+}
+
+/// The part to run on a target: a windows-ssh target runs the windows part,
+/// which is also its default, and the others run on docker-wine only.
+pub(crate) fn resolve_part(part: Part, windows: bool) -> Result<Part, String> {
+    match (part, windows) {
+        (Part::Both | Part::Windows, true) => Ok(Part::Windows),
+        (Part::Windows, false) => Err("--part windows runs on a windows-ssh target".into()),
+        (_, true) => Err("this part runs on a docker-wine target; use --part windows".into()),
+        (part, false) => Ok(part),
+    }
+}
+
+pub fn run(repository: &Path, name: &str, part: Part) -> Result<ExitCode, String> {
+    let part = resolve_part(
+        part,
+        matches!(crate::target(name)?, Target::WindowsSsh { .. }),
+    )?;
+    if part == Part::Windows {
+        return super::win::run(repository, name);
+    }
+    let Opened { run, shell, probe } = open(repository, name, "sampling")?;
+    let folder = run.folder.clone();
     let started = bundle::utc_now();
     let mut out = json!({ "target": name, "started": started });
     let mut ok = true;
     if part == Part::Probes {
         println!("== part: probes, release build, no sidecar");
         out["probes"] = part_probes(&run, name, &shell)?;
+        out["probes"]["agent_build"] = crate::soak::agent_build(name);
     }
     if part == Part::Design {
         println!("== part: design, release build, no sidecar");
         out["design"] = part_design(&run, name, &shell)?;
+        out["design"]["agent_build"] = crate::soak::agent_build(name);
     }
     if part == Part::Deaths {
         println!("== part: deaths, release build");
@@ -1155,8 +1459,10 @@ pub fn run(repository: &Path, name: &str, part: Part) -> Result<ExitCode, String
         if r.is_err() {
             run.stop_probe("deaths");
         }
-        let r = r?;
+        let mut r = r?;
         ok &= r["ok"] == json!(true);
+        // Read before the next part deploys, so it names this part's build.
+        r["agent_build"] = crate::soak::agent_build(name);
         out["deaths"] = r;
     }
     if matches!(part, Part::Both | Part::Mirror | Part::Mirror500) {
@@ -1165,8 +1471,10 @@ pub fn run(repository: &Path, name: &str, part: Part) -> Result<ExitCode, String
         if r.is_err() {
             run.stop_probe("mirror");
         }
-        let r = r?;
+        let mut r = r?;
         ok &= r["ok"] == json!(true);
+        // Read before the next part deploys, so it names this part's build.
+        r["agent_build"] = crate::soak::agent_build(name);
         out["mirror"] = r;
     }
     if matches!(part, Part::Both | Part::Tenth) {
@@ -1175,10 +1483,13 @@ pub fn run(repository: &Path, name: &str, part: Part) -> Result<ExitCode, String
         if r.is_err() {
             run.stop_probe("tenth");
         }
-        let r = r?;
+        let mut r = r?;
         ok &= r["ok"] == json!(true);
+        // Read before the next part deploys, so it names this part's build.
+        r["agent_build"] = crate::soak::agent_build(name);
         out["tenth"] = r;
     }
+    out["provenance"] = crate::soak::platform_provenance(name);
     out["ok"] = json!(ok);
     out["ended"] = json!(bundle::utc_now());
     let path = folder.join("sampling.json");
@@ -1202,6 +1513,64 @@ pub fn run(repository: &Path, name: &str, part: Part) -> Result<ExitCode, String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_windows_target_runs_the_windows_part_by_default() {
+        assert_eq!(resolve_part(Part::Both, true), Ok(Part::Windows));
+        assert_eq!(resolve_part(Part::Windows, true), Ok(Part::Windows));
+        assert!(resolve_part(Part::Mirror, true).is_err());
+        assert!(resolve_part(Part::Windows, false).is_err());
+        assert_eq!(resolve_part(Part::Both, false), Ok(Part::Both));
+        assert_eq!(resolve_part(Part::Tenth, false), Ok(Part::Tenth));
+    }
+
+    #[test]
+    fn the_tail_passes_at_one_percent_and_fails_above_it() {
+        let report = |frames: u64, over: u64| {
+            json!({ "frames": frames, "frames_over_250": over, "syscall_over_250": 0,
+                    "frame_max_us": 400.0 })
+        };
+        let t = tail(&[report(5_000, 50), report(5_000, 50)]);
+        assert_eq!(t["over_250"], json!(100));
+        assert_eq!(t["frames"], json!(10_000));
+        assert_eq!(t["p99_within_250"], json!(true));
+        assert_eq!(t["max_us"], json!(400.0));
+        // 2 % of the frames over 250 µs fails, though the bucket says 256.
+        let t = tail(&[report(5_000, 100), report(5_000, 100)]);
+        assert_eq!(t["p99_within_250"], json!(false));
+        let t = tail(&[report(10_000, 101)]);
+        assert_eq!(t["p99_within_250"], json!(false));
+    }
+
+    #[test]
+    fn the_tail_is_judged_over_k_one_and_reported_at_a_tenth() {
+        let report = |scale: f64, over: u64| {
+            json!({ "scale": scale, "frames": 1_000, "frames_over_250": over,
+                    "syscall_over_250": 0, "frame_max_us": 400.0 })
+        };
+        // 1.5 % over at k = 0.1 does not fail the k = 1 judgement.
+        let (k1, k01) = tail_by_scale(&[report(1.0, 5), report(1.0, 5), report(0.1, 30)]);
+        assert_eq!(k1["p99_within_250"], json!(true));
+        assert_eq!(k1["frames"], json!(2_000));
+        assert_eq!(k01["over_250"], json!(30));
+        // Over 1 % at k = 1 fails.
+        let (k1, _) = tail_by_scale(&[report(1.0, 25), report(0.1, 0)]);
+        assert_eq!(k1["p99_within_250"], json!(false));
+    }
+
+    #[test]
+    fn a_report_without_the_exact_count_is_not_a_pass() {
+        let old = json!({ "frames": 5_000 });
+        let t = tail(&[
+            old.clone(),
+            json!({ "frames": 5_000, "frames_over_250": 0 }),
+        ]);
+        assert_eq!(t["missing"], json!(1));
+        assert_eq!(t["p99_within_250"], json!(false));
+        assert_eq!(tail(&[old])["p99_within_250"], json!(false));
+        // No reports at all is no pass either.
+        assert_eq!(tail(&[])["p99_within_250"], json!(false));
+    }
 
     #[test]
     fn a_quantile_is_its_bucket_s_upper_edge() {

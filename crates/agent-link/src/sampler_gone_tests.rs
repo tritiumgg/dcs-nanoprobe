@@ -8,6 +8,7 @@ struct Rec {
     records: Vec<(u64, Vec<u8>)>,
     began: Instant,
     hellos: u64,
+    drops: u64,
 }
 
 impl Rec {
@@ -16,6 +17,7 @@ impl Rec {
             records: Vec::new(),
             began: Instant::now(),
             hellos: 1,
+            drops: 0,
         }
     }
 
@@ -55,6 +57,9 @@ impl Port for Rec {
     }
     fn hellos(&self) -> u64 {
         self.hellos
+    }
+    fn event_drops(&self) -> u64 {
+        self.drops
     }
     fn served_boot(&self) -> u64 {
         1

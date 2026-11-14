@@ -774,6 +774,7 @@ fn a_row_gone_and_bound_again_inside_an_enumeration_is_not_missing() {
         Input::EnumBegin(Enumeration {
             enumeration: 900,
             objects: 0,
+            seen: 0,
         }),
         4,
     );
@@ -799,6 +800,7 @@ fn a_row_gone_and_bound_again_inside_an_enumeration_is_not_missing() {
         Input::EnumEnd(Enumeration {
             enumeration: 900,
             objects: 0,
+            seen: 0,
         }),
         1,
     );
@@ -808,4 +810,282 @@ fn a_row_gone_and_bound_again_inside_an_enumeration_is_not_missing() {
     let unit = w.store.group(id).unwrap().members[0];
     assert!(!w.store.unit(unit).unwrap().missing);
     assert_eq!(w.store.group(id).unwrap().state, State::Live);
+}
+
+/// What the `SEEN` tests feed the reconciler: records of the agent boot the
+/// fake sim runs, applied in order.
+struct Feed {
+    boot: u64,
+    next: u64,
+}
+
+impl Feed {
+    fn new(w: &World) -> Feed {
+        Feed {
+            boot: w.sim.agent_boot(),
+            next: u64::MAX - 1_000,
+        }
+    }
+
+    fn apply(&mut self, w: &mut World, input: nanoprobe_sidecar::sim::wire::Input) {
+        let (kind, payload) = input.encode();
+        self.next += 1;
+        let r = nanoprobe_sidecar::sim::RawRecord {
+            agent_boot: self.boot,
+            number: self.next,
+            kind,
+            payload,
+        };
+        w.rec.record(&mut w.store, &r);
+    }
+
+    fn begin(&mut self, w: &mut World, n: u64) {
+        use nanoprobe_sidecar::sim::wire::{Enumeration, Input};
+        self.apply(
+            w,
+            Input::EnumBegin(Enumeration {
+                enumeration: n,
+                ..Enumeration::default()
+            }),
+        );
+    }
+
+    fn seen(&mut self, w: &mut World, n: u64, ids: &[u64]) {
+        use nanoprobe_sidecar::sim::wire::{Input, Seen};
+        self.apply(
+            w,
+            Input::Seen(Seen {
+                enumeration: n,
+                objects: ids.to_vec(),
+            }),
+        );
+    }
+
+    fn end(&mut self, w: &mut World, n: u64, objects: u32, seen: u32) {
+        use nanoprobe_sidecar::sim::wire::{Enumeration, Input};
+        self.apply(
+            w,
+            Input::EnumEnd(Enumeration {
+                enumeration: n,
+                objects,
+                seen,
+            }),
+        );
+    }
+
+    fn gap(&mut self, w: &mut World) {
+        use nanoprobe_sidecar::sim::wire::Input;
+        self.apply(
+            w,
+            Input::Gap(nanoprobe_transport::records::Gap {
+                class: nanoprobe_transport::layout::gap_class::EVENTS as u32,
+                count: 1,
+                ..Default::default()
+            }),
+        );
+    }
+}
+
+/// A settled world with one static (an entity with one member), and that
+/// member's DCS object.
+fn one_group() -> (World, nanoprobe_sidecar::ids::EntityId, u64) {
+    let mut w = World::new(0, 1, LostPolicy::Report);
+    let id = w.store.groups().next().unwrap().id;
+    w.settle().unwrap();
+    let (object, _) = w
+        .units_in_dcs()
+        .into_iter()
+        .find(|(_, e)| *e == id.0)
+        .expect("in DCS");
+    (w, id, object)
+}
+
+/// A `SEEN` ID the reconciler binds counts as found: the member is not
+/// missing at `ENUM_END`. With no ID, the enumeration finds nothing.
+#[test]
+fn a_seen_id_counts_as_found_at_enum_end() {
+    let (mut w, id, object) = one_group();
+    let unit = w.store.group(id).unwrap().members[0];
+    let used = w.rec.counters().enumerations;
+    let mut f = Feed::new(&w);
+    f.begin(&mut w, 900);
+    f.seen(&mut w, 900, &[object, object + 1_000_000]);
+    f.end(&mut w, 900, 0, 2);
+    assert_eq!(w.rec.counters().enumerations, used + 1);
+    assert!(!w.store.unit(unit).unwrap().missing);
+    assert_eq!(w.store.group(id).unwrap().state, State::Live);
+    // An enumeration that names no ID does not find the member.
+    f.begin(&mut w, 901);
+    f.end(&mut w, 901, 0, 0);
+    assert!(w.store.unit(unit).unwrap().missing);
+}
+
+/// `objects` and `seen` are compared with `ENUM_END` separately; a mismatch
+/// discards the enumeration and asks for another.
+#[test]
+fn a_seen_count_that_differs_discards_the_enumeration() {
+    let (mut w, _, object) = one_group();
+    let before = (
+        w.rec.counters().enumerations,
+        w.rec.counters().enumerations_discarded,
+    );
+    let mut f = Feed::new(&w);
+    f.begin(&mut w, 900);
+    f.seen(&mut w, 900, &[object]);
+    f.end(&mut w, 900, 1, 0);
+    f.begin(&mut w, 901);
+    f.seen(&mut w, 901, &[object]);
+    f.end(&mut w, 901, 0, 2);
+    // A `SEEN` of another enumeration counts for neither.
+    f.begin(&mut w, 902);
+    f.seen(&mut w, 899, &[object]);
+    f.end(&mut w, 902, 0, 1);
+    assert_eq!(
+        (
+            w.rec.counters().enumerations,
+            w.rec.counters().enumerations_discarded
+        ),
+        (before.0, before.1 + 3)
+    );
+}
+
+/// After a `GAP` of events an enumeration with `SEEN` IDs is discarded, until
+/// one with none is used.
+#[test]
+fn after_a_gap_of_events_an_enumeration_with_seen_ids_is_discarded() {
+    let (mut w, _, object) = one_group();
+    let mut f = Feed::new(&w);
+    f.gap(&mut w);
+    let (used, discarded) = (
+        w.rec.counters().enumerations,
+        w.rec.counters().enumerations_discarded,
+    );
+    f.begin(&mut w, 900);
+    f.seen(&mut w, 900, &[object]);
+    f.end(&mut w, 900, 0, 1);
+    assert_eq!(w.rec.counters().enumerations_discarded, discarded + 1);
+    assert_eq!(w.rec.counters().enumerations, used);
+    // A whole enumeration is used, and lifts the guard.
+    f.begin(&mut w, 901);
+    f.end(&mut w, 901, 0, 0);
+    assert_eq!(w.rec.counters().enumerations, used + 1);
+    // Its `OBJECT` records are the agent's; the next one may use `SEEN`.
+    f.begin(&mut w, 902);
+    f.seen(&mut w, 902, &[object]);
+    f.end(&mut w, 902, 0, 1);
+    assert_eq!(w.rec.counters().enumerations, used + 2);
+}
+
+/// A `SEEN` stamped under another campaign marks the run's gap, as an
+/// `OBJECT` does.
+#[test]
+fn a_seen_under_another_campaign_discards_the_enumeration() {
+    use nanoprobe_sidecar::sim::wire::Input;
+    use nanoprobe_transport::records::Frame;
+    let (mut w, _, object) = one_group();
+    let mut f = Feed::new(&w);
+    let loaded = w.store.loaded().cloned().expect("loaded");
+    let campaign = w.store.campaign().0;
+    let used = w.rec.counters().enumerations;
+    f.begin(&mut w, 900);
+    f.apply(
+        &mut w,
+        Input::Frame(Frame {
+            mission_gen: loaded.mission_gen,
+            campaign: campaign + 1,
+            ..Frame::default()
+        }),
+    );
+    f.seen(&mut w, 900, &[object]);
+    f.end(&mut w, 900, 0, 1);
+    assert_eq!(w.rec.counters().enumerations, used);
+}
+
+/// An `OBJECT` for `object` that names `entity`, in enumeration `n`.
+fn object_for(f: &mut Feed, w: &mut World, n: u64, object: u64, entity: u64) {
+    use nanoprobe_sidecar::sim::wire::{Input, Object};
+    f.apply(
+        w,
+        Input::Object(Object {
+            object,
+            entity,
+            enumeration: n,
+            ..Object::default()
+        }),
+    );
+}
+
+/// An object whose `OBJECT` names a unit the store never gains stays in DCS
+/// over many periodic enumerations: none of its `SEEN` records asks for an
+/// `ENUMERATE`, because a repeated `OBJECT` cannot resolve it. An ID the
+/// reconciler does not manage asks for nothing either, and no enumeration is
+/// discarded.
+#[test]
+fn an_object_that_cannot_resolve_does_not_ask_for_enumerations() {
+    let (mut w, _, object) = one_group();
+    let mut f = Feed::new(&w);
+    let (ghost, stranger) = (777_000u64, 888_000u64);
+    let used = w.rec.counters().enumerations;
+    let asked = w.rec.counters().enumerate_requests;
+    f.begin(&mut w, 900);
+    object_for(&mut f, &mut w, 900, ghost, 9_999_999);
+    f.seen(&mut w, 900, &[object]);
+    f.end(&mut w, 900, 1, 1);
+    for n in 901..904 {
+        f.begin(&mut w, n);
+        f.seen(&mut w, n, &[object, ghost, stranger]);
+        f.end(&mut w, n, 0, 3);
+        w.tick().unwrap();
+    }
+    let c = w.rec.counters();
+    assert!(c.enumerations >= used + 4, "every enumeration is used");
+    assert_eq!(c.enumerate_requests, asked);
+}
+
+/// Once the store holds the unit an unresolved object named, its `SEEN` asks
+/// for one `ENUMERATE`, not one for every periodic enumeration after it.
+#[test]
+fn an_unresolved_object_asks_once_when_its_unit_appears() {
+    use nanoprobe_sidecar::ids::EntityId;
+    use nanoprobe_sidecar::store::{Authority, NewGroup, NewUnit, UnitState};
+    let (mut w, id, object) = one_group();
+    let top = w
+        .store
+        .group(id)
+        .unwrap()
+        .members
+        .iter()
+        .map(|u| u.0)
+        .max()
+        .unwrap()
+        .max(id.0);
+    let mut f = Feed::new(&w);
+    let ghost = 777_000u64;
+    // A static's unit is its entity: the next static takes the next ID.
+    let future = top + 1;
+    f.begin(&mut w, 900);
+    object_for(&mut f, &mut w, 900, ghost, future);
+    f.seen(&mut w, 900, &[object]);
+    f.end(&mut w, 900, 1, 1);
+    // The unit appears in the store.
+    let spec = NewGroup {
+        theater: w.store.loaded().unwrap().theater.clone(),
+        country: 2,
+        category: 0,
+        coalition: 2,
+        units: vec![NewUnit::new("Tent", UnitState::default())],
+        authority: Authority::Sim,
+        label: "late".into(),
+        extra: nanoprobe_sidecar::sim::wire::lv::obj(vec![]),
+    };
+    let late = w.store.create_static(spec).unwrap();
+    assert_eq!(w.store.group(late).unwrap().members[0], EntityId(future));
+    let asked = w.rec.counters().enumerate_requests;
+    for n in 901..904 {
+        f.begin(&mut w, n);
+        f.seen(&mut w, n, &[object, ghost]);
+        f.end(&mut w, n, 0, 2);
+        w.tick().unwrap();
+    }
+    assert_eq!(w.rec.counters().enumerate_requests, asked + 1);
 }
