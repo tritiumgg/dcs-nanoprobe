@@ -82,8 +82,19 @@ pub struct Unit {
     pub state: UnitState,
     /// A death fact names it. Final.
     pub dead: bool,
-    /// Missing from DCS without a death fact, in this mission generation.
+    /// Missing from DCS without a death fact, in this mission generation:
+    /// it left as `MISSING` or `REMOVED` and has not been found since.
     pub missing: bool,
+    /// It left as `REMOVED` (DCS no longer has it and the read shows a
+    /// removal, not a kill). Implies `missing`.
+    pub removed: bool,
+    /// A `Left` fact is journalled for the present `missing` mark. Not set
+    /// by `set_missing`, which journals nothing.
+    left_logged: bool,
+    /// The DCS object ID it was last bound to, 0 for none known. A member
+    /// keeps the ID it left with, so a death event for an object from before
+    /// a respawn is told apart from one for the respawned member.
+    pub object: u64,
     /// The author's label. Never sent to DCS, where names hold only numbers
     /// (spec/world.md, "Names").
     pub label: String,
@@ -161,6 +172,15 @@ pub struct Loaded {
     pub theater: String,
 }
 
+/// How a unit left DCS without a death fact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LeftAs {
+    /// DCS no longer has it and the cause is unknown: a death may follow.
+    Missing,
+    /// DCS no longer has it and the read shows a removal, not a kill.
+    Removed,
+}
+
 /// A command's outcome (spec/errors.md, "Command outcomes").
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Outcome {
@@ -224,6 +244,40 @@ pub enum Entry {
     Death {
         /// The unit.
         unit: EntityId,
+    },
+    /// A unit left DCS as `MISSING` or `REMOVED`: it holds its group's
+    /// respawn gate for the mission generation.
+    Left {
+        /// The unit.
+        unit: EntityId,
+        /// The DCS object ID it left with.
+        object: u64,
+        /// How it left.
+        how: LeftAs,
+    },
+    /// A death fact for an object from before a respawn: it names a member
+    /// that is bound to another object now, so it marks nothing.
+    StaleDeath {
+        /// The unit.
+        unit: EntityId,
+        /// The DCS object ID the record named.
+        object: u64,
+    },
+    /// A death fact corrected a `REMOVED`: the agent's classifier called a
+    /// kill a removal.
+    ClassifierFault {
+        /// The unit.
+        unit: EntityId,
+        /// The DCS object ID it left with.
+        object: u64,
+    },
+    /// An `OBJECT` for the object ID of a unit with a death fact showed it
+    /// alive again. The death stays a fact in the journal.
+    Revived {
+        /// The unit.
+        unit: EntityId,
+        /// The DCS object ID.
+        object: u64,
     },
     /// A loaded mission was seen.
     Loaded(Loaded),
@@ -442,6 +496,9 @@ impl Store {
                     state,
                     dead: false,
                     missing: false,
+                    removed: false,
+                    left_logged: false,
+                    object: 0,
                     label: u.label,
                     skill: u.skill,
                     extra: u.extra,
@@ -789,6 +846,8 @@ impl Store {
         }
         u.dead = true;
         u.missing = false;
+        u.removed = false;
+        u.left_logged = false;
         self.grid.remove(unit);
         self.journal(Entry::Death { unit });
         self.touch(unit);
@@ -801,28 +860,121 @@ impl Store {
             .is_some_and(|g| g.members.iter().all(|m| self.units[m].dead))
     }
 
-    /// Mark a unit missing or found. A dead unit stays as it is.
+    /// Mark a unit missing or found. A dead unit stays as it is. A unit
+    /// that is found is no longer `removed` either.
     pub fn set_missing(&mut self, unit: EntityId, missing: bool) {
         if let Some(u) = self.units.get_mut(&unit)
             && !u.dead
-            && u.missing != missing
+            && (u.missing != missing || (!missing && u.removed))
         {
             u.missing = missing;
+            if !missing {
+                u.removed = false;
+                u.left_logged = false;
+            }
             self.touch(unit);
         }
     }
 
-    /// Clear every unit's missing mark: a new mission generation.
+    /// A unit left DCS as `MISSING` or `REMOVED`, with the object ID it left
+    /// with. A dead unit stays as it is. `REMOVED` is kept once set. Returns
+    /// whether anything changed; a change is journalled, including the first
+    /// `Left` for a unit that `set_missing` already marked.
+    pub fn left(&mut self, unit: EntityId, object: u64, how: LeftAs) -> bool {
+        let Some(u) = self.units.get_mut(&unit) else {
+            return false;
+        };
+        let removed = u.removed || how == LeftAs::Removed;
+        if u.dead || (u.left_logged && u.removed == removed && u.object == object) {
+            return false;
+        }
+        u.missing = true;
+        u.left_logged = true;
+        u.removed = removed;
+        if object != 0 {
+            u.object = object;
+        }
+        self.journal(Entry::Left { unit, object, how });
+        self.touch(unit);
+        true
+    }
+
+    /// Record the DCS object ID a unit is bound to.
+    pub fn set_object(&mut self, unit: EntityId, object: u64) {
+        if let Some(u) = self.units.get_mut(&unit)
+            && u.object != object
+        {
+            u.object = object;
+        }
+    }
+
+    /// Journal a death fact for an object from before a respawn.
+    pub fn stale_death(&mut self, unit: EntityId, object: u64) {
+        self.journal(Entry::StaleDeath { unit, object });
+    }
+
+    /// Journal that a death fact corrected a `REMOVED`.
+    pub fn classifier_fault(&mut self, unit: EntityId, object: u64) {
+        self.journal(Entry::ClassifierFault { unit, object });
+    }
+
+    /// A unit with a death fact is alive again, bound to `object`: it is no
+    /// longer dead and holds nothing.
+    /// The death stays in the journal. Returns whether the unit was dead.
+    pub fn revive(&mut self, unit: EntityId, object: u64) -> bool {
+        let Some(u) = self.units.get_mut(&unit) else {
+            return false;
+        };
+        if !u.dead {
+            return false;
+        }
+        u.dead = false;
+        u.missing = false;
+        u.removed = false;
+        u.left_logged = false;
+        u.object = object;
+        let (gid, at) = (u.group, u.state.at);
+        self.journal(Entry::Revived { unit, object });
+        self.touch(unit);
+        if let Some(g) = self.groups.get(&gid) {
+            self.grid.set(unit, &g.theater, at.x, at.z);
+        }
+        true
+    }
+
+    /// Whether a member of the group left DCS as `MISSING` or `REMOVED` in
+    /// this mission generation and has not been found or named by a death
+    /// fact since: its fate is unexplained. A group with such a member is
+    /// never respawned (spec/world.md, "Respawn gate"). A member with a death
+    /// fact does not hold it: the spawn leaves that member out.
+    pub fn gate_shut(&self, id: EntityId) -> bool {
+        self.group(id).is_some_and(|g| {
+            g.members.iter().any(|m| {
+                let u = &self.units[m];
+                !u.dead && (u.missing || u.removed)
+            })
+        })
+    }
+
+    /// Clear every unit's marks of the mission generation: missing, removed
+    /// and the DCS object ID. A new mission generation.
     pub fn clear_missing(&mut self) {
         let marked: Vec<EntityId> = self
             .units
             .values()
-            .filter(|u| u.missing)
+            .filter(|u| u.missing || u.removed || u.object != 0)
             .map(|u| u.id)
             .collect();
         for id in marked {
-            self.units.get_mut(&id).expect("unit").missing = false;
-            self.touch(id);
+            let u = self.units.get_mut(&id).expect("unit");
+            let changed = u.missing || u.removed;
+            u.missing = false;
+            u.removed = false;
+            u.left_logged = false;
+            u.object = 0;
+            if changed {
+                self.touch(id);
+            }
         }
     }
 
@@ -979,6 +1131,56 @@ mod tests {
             Err(StoreError::NoTransition(..))
         ));
         assert_eq!(s.entries().len(), n);
+    }
+
+    #[test]
+    fn the_gate_is_shut_by_an_unexplained_member_only() {
+        let mut s = Store::new(CampaignId(1), 10);
+        let a = s.create_group(spec(3)).unwrap();
+        let m = s.group(a).unwrap().members.clone();
+        assert!(!s.gate_shut(a));
+        assert!(s.left(m[0], 7, LeftAs::Removed));
+        assert!(s.gate_shut(a));
+        // A death fact explains the member and releases its hold.
+        s.death(m[0]).unwrap();
+        assert!(!s.gate_shut(a));
+        // A revived member holds nothing; a dead one never does.
+        assert!(s.revive(m[0], 7));
+        assert!(!s.gate_shut(a));
+        assert!(s.left(m[1], 8, LeftAs::Missing));
+        assert!(s.gate_shut(a));
+        s.set_missing(m[1], false);
+        assert!(!s.gate_shut(a));
+        assert!(s.left(m[2], 9, LeftAs::Missing));
+        s.clear_missing();
+        assert!(!s.gate_shut(a));
+    }
+
+    #[test]
+    fn a_left_after_an_enumeration_miss_is_journalled_once() {
+        let mut s = Store::new(CampaignId(1), 10);
+        let a = s.create_group(spec(2)).unwrap();
+        let u = s.group(a).unwrap().members[0];
+        let lefts = |s: &Store| {
+            s.entries()
+                .iter()
+                .filter(|e| matches!(e, Entry::Left { .. }))
+                .count()
+        };
+        // The enumeration's end marks the member; no journal entry.
+        s.set_missing(u, true);
+        assert_eq!(lefts(&s), 0);
+        // The agent's OBJECT_GONE for the same object is journalled.
+        assert!(s.left(u, 7, LeftAs::Missing));
+        assert_eq!(lefts(&s), 1);
+        assert!(s.gate_shut(a));
+        // An exact repeat is not.
+        assert!(!s.left(u, 7, LeftAs::Missing));
+        assert_eq!(lefts(&s), 1);
+        // Found again, it can leave again.
+        s.set_missing(u, false);
+        assert!(s.left(u, 7, LeftAs::Missing));
+        assert_eq!(lefts(&s), 2);
     }
 
     #[test]

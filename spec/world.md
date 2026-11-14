@@ -165,7 +165,7 @@ a group of one.
 | `live` | `materializing` | The mission generation changes (a reload or a DCS restart), the theater is still the entity's and the authority is DCS |
 | `lost` | `live` | A later full enumeration finds the group |
 | `lost` | `materializing` or `virtual` | The mission generation changes: `materializing` if the new mission's theater is the entity's and the authority is DCS, else `virtual` |
-| `lost` | `materializing` | The author's policy is respawn, the authority is DCS, and a full enumeration used since the sidecar started, since the last `HELLO` and since the last `GAP` of events finds no object of the entity. Until then the binding mirror may lack objects DCS holds, such as those of an entity that went `lost` after its destroys failed. The spawn carries a new spec revision: the agent still holds the old one for this generation and would answer `AT_REVISION`. |
+| `lost` | `materializing` | The author's policy is respawn, the authority is DCS, a full enumeration used since the sidecar started, since the last `HELLO` and since the last `GAP` of events finds no object of the entity, and the respawn gate is open (see "Respawn gate"). Until the enumeration the binding mirror may lack objects DCS holds, such as those of an entity that went `lost` after its destroys failed. The spawn carries a new spec revision: the agent still holds the old one for this generation and would answer `AT_REVISION`. |
 | `lost` | `dead` | The author's policy is mark dead |
 | `unspawnable` | `virtual` | The author changes the spec; its last error is cleared. It materializes from `virtual` by the level condition above. |
 
@@ -181,7 +181,9 @@ a group of one.
   answered `AT_REVISION`, which is `applied` (spec/errors.md): sending a spawn twice
   never makes two groups.
 - A death fact comes from an `OBJECT_GONE` with reason `DEAD` (spec/records.md), so
-  only units and statics in the agent's table have one, never scenery. It counts only
+  only units and statics in the agent's table have one, never scenery. The agent may
+  write it after the object left the table as `MISSING` or `REMOVED`: DCS sends a death
+  event up to about a minute after the object stops existing. It counts only
   when it is stamped with the loaded generation and the store's campaign, and its
   binding names a unit of the group (or the static). A death of an earlier
   generation, of another campaign (campaign 0 included), or for an object the
@@ -195,11 +197,44 @@ a group of one.
   entity DCS should not hold (spec/config.md).
 - When the last death fact arrives while the group is `materializing`, the spawn
   that is not yet answered ran: it resolves `applied`.
-- `lost` -> `dead` and `virtual` -> `dead` by death facts cannot happen in order: an
-  enumeration that finds no row of a group leaves no row for a later `OBJECT_GONE` to
-  name, and an entity becomes `virtual` only once DCS no longer holds it. The rows
-  keep the rule total.
+- `lost` -> `dead` by death facts happens in order: the members left as `MISSING` or
+  `REMOVED`, the group went `lost`, and the death events that follow make each a
+  death fact. `virtual` -> `dead` cannot happen in order, because an entity becomes
+  `virtual` only once DCS no longer holds it. The row keeps the rule total.
+- A death fact for a member that left as `MISSING` or `REMOVED` counts as any other.
+  When it corrects a `REMOVED`, the sidecar also counts a classifier fault, journals
+  it and reports it. A death fact that makes the last member dead moves the group to
+  `dead`, and a spawn it has not yet written is never written.
+- The sidecar keeps, per member, the DCS object ID it was last bound to or left with.
+  A death fact (and a `MISSING` or `REMOVED`) for another object ID is about an object
+  from before a respawn: the sidecar journals and counts a death fact, and it marks
+  no member.
+- A death can be undone in DCS: a script that sets a unit's life revives it under the
+  same object ID and entity, and the agent writes an `OBJECT` for it. When the object
+  ID is the one the member's death fact named, the sidecar keeps the death journalled
+  and counted, journals a `revived` fact, binds the object again and marks the member
+  alive. It holds nothing. A group that is already `dead` stays `dead`. A revival is
+  not a spawn. A later death is a new death fact.
 - Every transition is journalled before the command that causes it is sent.
+
+## Respawn gate
+
+The respawn policy (`on_lost`, spec/config.md) does not respawn a `lost` group while
+any member that is not found left DCS as `MISSING` or `REMOVED` in this mission
+generation and no death fact explains it.
+
+`MISSING` means DCS no longer has the object and the cause is unknown, so a death
+event may still follow. `REMOVED` means DCS no longer has it and the read shows a
+removal, not a kill. A scripted kill that is removed before the slow sweep can read as
+`REMOVED`, so `REMOVED` holds the gate exactly as `MISSING` does, for good: no timer
+and no enumeration opens it. A death fact for the member releases its hold: the member
+is dead, and the spawn leaves it out (a dead member is never spawned again). A member
+that is found again holds nothing either. A group that the gate holds stays `lost`,
+appears in the reconciler's held set and is counted. A mission generation change
+clears the marks. A weapon kill is never respawned as a `MISSING` or `REMOVED` member.
+A group that a script removed is not respawned either; the policy then acts as
+report, and a mission change materializes it again. A member with a death fact never
+holds the gate, and a revived member holds nothing.
 
 ## Events and the store
 

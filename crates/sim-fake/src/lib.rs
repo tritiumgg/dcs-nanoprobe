@@ -5,11 +5,18 @@
 //! records spec/records.md describes. It follows spec/commands.md for epochs,
 //! de-duplication, revisions and generations, and spec/records.md for the
 //! object table, enumerations, the event queue and `GAP`. Time moves only
-//! when the caller runs [`FakeSim::frame`], and nothing in it is random: a
-//! test that drives it from a seed replays exactly.
+//! when the caller runs [`FakeSim::frame`], and nothing in it is random but
+//! the death delay, which a seed draws: a test that drives it from a seed
+//! replays exactly.
 //!
 //! Faults are methods: kill a unit, remove an object with or without an
-//! event, detach and attach the sidecar, load a mission, restart DCS. The
+//! event, detach and attach the sidecar, load a mission, restart DCS. A kill
+//! can send its death event late (`Config::death_delay_max`, up to about 83 s
+//! of model time, LIVE): the row leaves the agent's table as `MISSING` or
+//! `REMOVED` at once, and the agent, which keeps the object ID, entity and
+//! group entity of every row that left so, writes a second `OBJECT_GONE`
+//! `DEAD` when the event arrives. A killed object can come alive again
+//! ([`FakeSim::revive`]) under the same object ID. The
 //! [`Ledger`] records the ground truth that the reconciler's tests check
 //! against.
 //!
@@ -73,6 +80,12 @@ pub struct Config {
     pub step_m: f64,
     /// The first agent boot; each restart adds one.
     pub first_boot: u64,
+    /// The longest a death event comes after a kill, in model seconds. 0
+    /// sends it at once, with the row's `DEAD`. Otherwise each kill draws a
+    /// delay from 0 to this, from `death_seed`.
+    pub death_delay_max: f64,
+    /// The seed of the death delays.
+    pub death_seed: u64,
 }
 
 impl Default for Config {
@@ -87,6 +100,8 @@ impl Default for Config {
             load_frames: 3,
             step_m: 100.0,
             first_boot: 0x1000,
+            death_delay_max: 0.0,
+            death_seed: 0,
         }
     }
 }
@@ -119,8 +134,14 @@ pub struct Ledger {
     /// cleared whenever DCS removes the entity's group.
     pub failed_destroys: HashMap<(u64, u32, u64, u64), u32>,
     /// Unit entities that left DCS without a death: agent boot, generation,
-    /// campaign, entity.
+    /// campaign, entity. A kill whose death event is late is here too: it
+    /// left as `MISSING` or `REMOVED` first.
     pub removed: BTreeSet<(u64, u32, u64, u64)>,
+    /// Unit entities that left DCS without a death event yet, in a
+    /// generation: removed, or killed with the event late, and not revived.
+    /// Agent boot, generation, campaign, entity. A group with one that the
+    /// sidecar has no death fact for is never respawned in that generation.
+    pub left_in: BTreeSet<(u64, u32, u64, u64)>,
     /// Unit entities whose death or removal no record names: the agent's
     /// event queue dropped it, or the agent held no binding for the row (it
     /// was made under another campaign). Agent boot, generation, campaign,
@@ -140,6 +161,26 @@ struct FObject {
     campaign: u64,
     kind: u32,
     at: Position,
+}
+
+/// How a killed row leaves the agent's table before its death event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Left {
+    /// `MISSING`: the cause is unknown.
+    Missing,
+    /// `REMOVED`: the classifier read a removal.
+    Removed,
+}
+
+/// A row that left the table as `MISSING` or `REMOVED`, which the agent
+/// keeps until a death event names it.
+#[derive(Clone, Debug)]
+struct Late {
+    due: f64,
+    object: u64,
+    entity: u64,
+    group_entity: u64,
+    category: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -168,6 +209,8 @@ struct Stamp {
 struct Run {
     id: u64,
     rows: VecDeque<u64>,
+    /// Rows the enumeration did not find, checked before it ends.
+    misses: Vec<u64>,
     written: u32,
 }
 
@@ -207,6 +250,12 @@ pub struct FakeSim {
     /// The agent's object table: each row's unit entity and group entity.
     table: BTreeMap<u64, (u64, u64)>,
     run: Option<Run>,
+    /// Rows that left as `MISSING` or `REMOVED` and await a death event.
+    late: Vec<Late>,
+    /// Objects that left DCS, with their group as it was, for a revival.
+    graves: BTreeMap<u64, (FObject, FGroup)>,
+    /// The state of the death delays' generator.
+    rng: u64,
     /// The loaded mission's theater.
     theater: String,
     /// Drop the next `RESULT` of the next frame.
@@ -221,6 +270,8 @@ pub struct FakeSim {
     losing: bool,
     enumerations: u64,
     next_enum: u64,
+    /// Objects the enumeration does not find although they exist.
+    hidden: BTreeSet<u64>,
 }
 
 impl FakeSim {
@@ -228,6 +279,7 @@ impl FakeSim {
     /// sidecar is attached.
     pub fn new(cfg: Config) -> FakeSim {
         let boot = cfg.first_boot;
+        let cfg_seed = cfg.death_seed;
         let mut f = FakeSim {
             cfg,
             ledger: Ledger::default(),
@@ -257,6 +309,9 @@ impl FakeSim {
             objects: BTreeMap::new(),
             table: BTreeMap::new(),
             run: None,
+            late: Vec::new(),
+            graves: BTreeMap::new(),
+            rng: cfg_seed,
             theater: String::new(),
             lose_result: false,
             written_stamp: (0, 0),
@@ -265,6 +320,7 @@ impl FakeSim {
             losing: false,
             enumerations: 0,
             next_enum: 0,
+            hidden: BTreeSet::new(),
         };
         f.load_mission();
         f
@@ -518,6 +574,9 @@ impl FakeSim {
         self.objects.clear();
         self.table.clear();
         self.run = None;
+        // A generation change clears the agent's memory of rows that left.
+        self.late.clear();
+        self.graves.clear();
         self.applied_spec.clear();
         self.applied_order.clear();
         self.lifecycle = lc::LOADING as u32;
@@ -609,6 +668,9 @@ impl FakeSim {
         self.campaign = c;
         self.applied_spec.clear();
         self.applied_order.clear();
+        // The binding the kept rows were made under is gone: a death event
+        // after the switch names no entity of either campaign.
+        self.late.clear();
         // Groups in DCS whose applied revision the agent no longer holds: a
         // spawn under one of their names replaces it, as spec/commands.md
         // allows between a switch and the next load.
@@ -755,29 +817,184 @@ impl FakeSim {
     /// A unit or static dies: a death event, and the row leaves the table.
     /// Scenery dies with it, [`SCENERY_PER_DEATH`] objects, each its own
     /// death event and never in the table (S9's catalogue: 300 of 306
-    /// deaths were scenery, LIVE).
+    /// deaths were scenery, LIVE). With `Config::death_delay_max` above 0 the
+    /// event is late, as [`FakeSim::kill_late`] with a drawn delay.
     pub fn kill(&mut self, object: u64) {
+        if self.cfg.death_delay_max > 0.0 {
+            let delay = self.draw_delay();
+            return self.kill_late(object, delay, Left::Missing);
+        }
         let Some(o) = self.remove_object(object) else {
             return;
         };
-        if o.entity != 0 {
-            self.ledger.deaths.insert((o.campaign, o.entity));
-        }
+        self.kill_ledger(&o);
         self.unattributed(object, &o);
-        let category = if o.kind == object_kind::STATIC {
+        let category = Self::category(&o);
+        self.scenery_deaths(object);
+        if self.table.contains_key(&object) {
+            self.emit(Input::Event(dead_event(object, category)));
+            self.gone(object, gone_reason::DEAD);
+        }
+    }
+
+    /// A unit or static dies and its death event comes `delay` model seconds
+    /// later. The object leaves DCS now, and its row leaves the agent's table
+    /// at once as `MISSING` or as `REMOVED` (the classifier reading a kill as
+    /// a removal). The agent keeps the object ID, entity and group entity;
+    /// when the event is due it writes the death event and a second
+    /// `OBJECT_GONE` with `DEAD` and the kept fields. A generation change or
+    /// a DCS restart in the gap writes nothing.
+    pub fn kill_late(&mut self, object: u64, delay: f64, left: Left) {
+        let Some(o) = self.remove_object(object) else {
+            return;
+        };
+        self.kill_ledger(&o);
+        // The row left DCS without a death fact, so far.
+        self.ledger
+            .removed
+            .insert((self.agent_boot, self.mission_gen_, o.campaign, o.entity));
+        self.ledger
+            .left_in
+            .insert((self.agent_boot, self.mission_gen_, o.campaign, o.entity));
+        self.unattributed(object, &o);
+        self.scenery_deaths(object);
+        if let Some((entity, group_entity)) = self.table.get(&object).copied() {
+            let reason = match left {
+                Left::Missing => gone_reason::MISSING,
+                Left::Removed => gone_reason::REMOVED,
+            };
+            self.gone(object, reason);
+            self.late.push(Late {
+                due: self.model_time + delay.max(0.0),
+                object,
+                entity,
+                group_entity,
+                category: Self::category(&o),
+            });
+        }
+    }
+
+    /// A killed object comes alive again, as a script setting its life does:
+    /// the same object ID, entity and group, and the agent writes an `OBJECT`
+    /// for the row. A late death event that has not come is forgotten.
+    /// Returns whether the object was one that left DCS.
+    pub fn revive(&mut self, object: u64) -> bool {
+        if self.objects.contains_key(&object) {
+            return false;
+        }
+        let Some((o, group)) = self.graves.remove(&object) else {
+            return false;
+        };
+        // DCS holds a group of that name now: the object has nothing to
+        // come back to.
+        if self
+            .groups
+            .iter()
+            .any(|(id, g)| g.name == group.name && *id != o.group)
+        {
+            self.graves.insert(object, (o, group));
+            return false;
+        }
+        self.late.retain(|l| l.object != object);
+        self.ledger
+            .left_in
+            .remove(&(self.agent_boot, self.mission_gen_, o.campaign, o.entity));
+        let gid = if o.kind == object_kind::STATIC {
+            object
+        } else {
+            o.group
+        };
+        match self.groups.get_mut(&gid) {
+            Some(g) => g.members.push(object),
+            None => {
+                let mut g = group;
+                g.members = vec![object];
+                self.groups.insert(gid, g);
+            }
+        }
+        let bound = if o.campaign == self.campaign && self.campaign != 0 {
+            (o.entity, o.group_entity)
+        } else {
+            (0, 0)
+        };
+        self.objects.insert(object, o);
+        self.table.insert(object, bound);
+        let r = self.object_record(object, 0);
+        self.emit(r);
+        true
+    }
+
+    /// The objects that left DCS and can be revived.
+    pub fn graves(&self) -> Vec<u64> {
+        self.graves.keys().copied().collect()
+    }
+
+    /// How many model seconds the latest pending death event is away, 0 for
+    /// none.
+    pub fn late_horizon(&self) -> f64 {
+        self.late
+            .iter()
+            .map(|l| l.due - self.model_time)
+            .fold(0.0, f64::max)
+    }
+
+    /// Death events the agent has yet to write.
+    pub fn late_pending(&self) -> usize {
+        self.late.len()
+    }
+
+    fn draw_delay(&mut self) -> f64 {
+        // SplitMix64, as the harness's schedules use.
+        self.rng = self.rng.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.rng;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^= z >> 31;
+        (z >> 11) as f64 / (1u64 << 53) as f64 * self.cfg.death_delay_max
+    }
+
+    fn category(o: &FObject) -> f64 {
+        if o.kind == object_kind::STATIC {
             3.0
         } else {
             1.0
-        };
+        }
+    }
+
+    fn kill_ledger(&mut self, o: &FObject) {
+        if o.entity != 0 {
+            self.ledger.deaths.insert((o.campaign, o.entity));
+        }
+    }
+
+    fn scenery_deaths(&mut self, object: u64) {
         for i in 0..SCENERY_PER_DEATH {
             self.emit(Input::Event(dead_event(
                 SCENERY_BASE + object * 100 + i,
                 5.0,
             )));
         }
-        if self.table.contains_key(&object) {
-            self.emit(Input::Event(dead_event(object, category)));
-            self.gone(object, gone_reason::DEAD);
+    }
+
+    /// Write the death events that are due: the event itself, and the
+    /// second `OBJECT_GONE` with `DEAD` for the row that left earlier.
+    fn fire_late(&mut self) {
+        if self.late.is_empty() {
+            return;
+        }
+        let now = self.model_time;
+        let (due, rest): (Vec<Late>, Vec<Late>) = std::mem::take(&mut self.late)
+            .into_iter()
+            .partition(|l| l.due <= now);
+        self.late = rest;
+        for l in due {
+            self.emit(Input::Event(dead_event(l.object, l.category)));
+            self.emit(Input::ObjectGone(ObjectGone {
+                object: l.object,
+                reason: gone_reason::DEAD,
+                entity: l.entity,
+                group_entity: l.group_entity,
+            }));
         }
     }
 
@@ -814,7 +1031,23 @@ impl FakeSim {
             self.ledger
                 .removed
                 .insert((self.agent_boot, self.mission_gen_, o.campaign, o.entity));
+            self.ledger
+                .left_in
+                .insert((self.agent_boot, self.mission_gen_, o.campaign, o.entity));
         }
+    }
+
+    /// Full enumerations do not find this object while it exists, as when a
+    /// group's `getUnits` fails. The agent checks each miss before it ends
+    /// the enumeration: an object that still exists is written with that
+    /// enumeration's number, one that is gone leaves as `MISSING`.
+    pub fn hide_from_enumeration(&mut self, object: u64) {
+        self.hidden.insert(object);
+    }
+
+    /// Full enumerations find this object again.
+    pub fn show_in_enumeration(&mut self, object: u64) {
+        self.hidden.remove(&object);
     }
 
     /// An object leaves DCS with a removal event.
@@ -824,6 +1057,9 @@ impl FakeSim {
         };
         self.ledger
             .removed
+            .insert((self.agent_boot, self.mission_gen_, o.campaign, o.entity));
+        self.ledger
+            .left_in
             .insert((self.agent_boot, self.mission_gen_, o.campaign, o.entity));
         self.unattributed(object, &o);
         self.gone(object, gone_reason::REMOVED);
@@ -836,6 +1072,9 @@ impl FakeSim {
         } else {
             o.group
         };
+        if let Some(g) = self.groups.get(&gid) {
+            self.graves.insert(object, (o.clone(), g.clone()));
+        }
         if let Some(g) = self.groups.get_mut(&gid) {
             g.members.retain(|m| *m != object);
             if g.members.is_empty() {
@@ -922,6 +1161,7 @@ impl FakeSim {
         self.run = Some(Run {
             id,
             rows: self.table.keys().copied().collect(),
+            misses: Vec::new(),
             written: 0,
         });
         self.next_enum = self.frame + self.cfg.enum_period;
@@ -938,15 +1178,26 @@ impl FakeSim {
             if !self.table.contains_key(&row) {
                 continue;
             }
-            if self.objects.contains_key(&row) {
+            if self.objects.contains_key(&row) && !self.hidden.contains(&row) {
                 let r = self.object_record(row, run.id);
                 self.emit(r);
                 run.written += 1;
             } else {
-                self.gone(row, gone_reason::MISSING);
+                run.misses.push(row);
             }
         }
         if run.rows.is_empty() {
+            // Each miss is checked before the end: alive, it is written
+            // with this enumeration's number; gone, it leaves.
+            for row in std::mem::take(&mut run.misses) {
+                if self.objects.contains_key(&row) {
+                    let r = self.object_record(row, run.id);
+                    self.emit(r);
+                    run.written += 1;
+                } else {
+                    self.gone(row, gone_reason::MISSING);
+                }
+            }
             self.emit(Input::EnumEnd(Enumeration {
                 enumeration: run.id,
                 objects: run.written,
@@ -984,9 +1235,14 @@ impl FakeSim {
         }
         self.frame += 1;
         self.model_time += 0.1;
+        if !self.attached {
+            // The events queue for the next attach.
+            self.fire_late();
+        }
         if self.attached {
             let s = self.stamp();
             self.frame_record(&s, false);
+            self.fire_late();
             for _ in 0..self.cfg.commands_per_frame {
                 let Some((pos, op, payload)) = self.inbound.pop_front() else {
                     break;
@@ -1265,6 +1521,7 @@ impl FakeSim {
         is_static: bool,
     ) {
         let h = &cmd.header;
+        self.graves.retain(|_, (_, g)| g.name != name);
         if let Some(old) = self
             .groups
             .iter()
@@ -1344,6 +1601,9 @@ impl FakeSim {
         let Some(g) = self.groups.remove(&gid) else {
             return;
         };
+        // A group DCS destroyed leaves nothing to revive.
+        self.graves
+            .retain(|id, (o, _)| o.group != gid && *id != gid);
         self.ledger.failed_destroys.remove(&(
             self.agent_boot,
             self.mission_gen_,

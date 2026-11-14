@@ -31,6 +31,8 @@ fn op() -> impl Strategy<Value = Op> {
         1 => Just(Op::LoadOtherTheater),
         1 => (1..6u8).prop_map(Op::RefuseDestroys),
         1 => Just(Op::ForeignCampaign),
+        2 => any::<u16>().prop_map(Op::KillRemoved),
+        2 => any::<u16>().prop_map(Op::Revive),
     ]
 }
 
@@ -71,6 +73,32 @@ proptest! {
     ) {
         if let Err(e) = run(groups, statics, on_lost, &ops) {
             prop_assert!(false, "{}", e);
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: cases(48), ..ProptestConfig::default() })]
+
+    /// Kills draw death delays of up to 83 s. No respawn names a group with a
+    /// member that left DCS unexplained in its generation, no spawn names a
+    /// member with a death fact, and every reported death is a fact.
+    #[test]
+    fn the_gate_holds_with_late_deaths_removals_and_revivals(
+        seed in any::<u64>(),
+        groups in 1..7usize,
+        statics in 0..3usize,
+        on_lost in policy(),
+        ops in prop::collection::vec(op(), 1..200),
+    ) {
+        let mut w = World::new_late(groups, statics, on_lost, seed);
+        for (i, op) in ops.iter().enumerate() {
+            if let Err(Violation(v)) = w.apply(op) {
+                prop_assert!(false, "op {} {:?}: {}", i, op, v);
+            }
+        }
+        if let Err(Violation(v)) = w.settle() {
+            prop_assert!(false, "settling: {}", v);
         }
     }
 }
@@ -127,10 +155,8 @@ fn a_group_whose_units_all_die_is_dead_and_never_spawned_again() {
     assert!(w.sim.platform_groups(w.store.campaign().0).is_empty());
 }
 
-/// `lost` -> `dead` by deaths is unreachable under the protocol's ordering:
-/// a valid enumeration that finds no row of a group leaves no row to name in
-/// a later `OBJECT_GONE`. This drives the reconciler with such records
-/// directly, so the row is still checked.
+/// `lost` -> `dead` by deaths: the members left as `MISSING`, and their death
+/// events come after. This drives the reconciler with the records directly.
 #[test]
 fn a_lost_group_whose_members_die_is_dead() {
     use nanoprobe_sidecar::sim::RawRecord;
@@ -315,14 +341,16 @@ fn an_attack_order_follows_its_target_when_the_target_respawns() {
     w.tick().unwrap();
     let rev = w.store.group(attacker).unwrap().order_rev;
     let (old, _) = w.sim.attack_of(w.store.campaign().0, target.0).unwrap();
-    for (o, e) in w.units_in_dcs() {
-        if w.store
-            .unit(nanoprobe_sidecar::ids::EntityId(e))
-            .is_some_and(|u| u.group == target)
-        {
-            w.sim.remove_silently(o);
-        }
-    }
+    // The target leaves DCS and comes back under DCS authority in the same
+    // generation: new DCS object IDs. A removal the respawn policy would
+    // answer is held by the respawn gate, so the policy is not the way back.
+    w.store
+        .set_authority(target, nanoprobe_sidecar::store::Authority::Campaign)
+        .unwrap();
+    w.settle().unwrap();
+    w.store
+        .set_authority(target, nanoprobe_sidecar::store::Authority::Sim)
+        .unwrap();
     w.settle().unwrap();
     let (new, _) = w.sim.attack_of(w.store.campaign().0, target.0).unwrap();
     assert_ne!(old, new, "the target is a new DCS group");
@@ -578,14 +606,16 @@ fn an_attack_order_never_sent_keeps_its_revision_when_the_target_respawns() {
     w.settle().unwrap();
     let rev = w.store.group(attacker).unwrap().order_rev;
     let (old, _) = w.sim.attack_of(w.store.campaign().0, target.0).unwrap();
-    for (o, e) in w.units_in_dcs() {
-        if w.store
-            .unit(nanoprobe_sidecar::ids::EntityId(e))
-            .is_some_and(|u| u.group == target)
-        {
-            w.sim.remove_silently(o);
-        }
-    }
+    // The target leaves DCS and comes back under DCS authority in the same
+    // generation: new DCS object IDs. A removal the respawn policy would
+    // answer is held by the respawn gate, so the policy is not the way back.
+    w.store
+        .set_authority(target, nanoprobe_sidecar::store::Authority::Campaign)
+        .unwrap();
+    w.settle().unwrap();
+    w.store
+        .set_authority(target, nanoprobe_sidecar::store::Authority::Sim)
+        .unwrap();
     w.settle().unwrap();
     let (new, _) = w.sim.attack_of(w.store.campaign().0, target.0).unwrap();
     assert_ne!(old, new, "the target respawned");
@@ -659,5 +689,72 @@ fn a_gap_of_events_holds_a_respawn_until_the_next_enumeration() {
         "no respawn before an enumeration"
     );
     w.settle().unwrap();
+    assert_eq!(w.store.group(id).unwrap().state, State::Live);
+}
+
+/// A row the agent reports gone inside an enumeration, and that an event
+/// binds again before ENUM_END, is not missing at ENUM_END (spec/records.md,
+/// "Layout: ENUM_END"): the mirror agrees with the agent's table.
+#[test]
+fn a_row_gone_and_bound_again_inside_an_enumeration_is_not_missing() {
+    use nanoprobe_sidecar::sim::RawRecord;
+    use nanoprobe_sidecar::sim::wire::{Enumeration, Input, ObjectGone, gone_reason};
+    use nanoprobe_transport::records::Object;
+
+    let mut w = World::new(0, 1, LostPolicy::Respawn);
+    let id = w.store.groups().next().unwrap().id;
+    w.settle().unwrap();
+    let (object, entity) = w
+        .units_in_dcs()
+        .into_iter()
+        .find(|(_, e)| *e == id.0)
+        .expect("in DCS");
+    let boot = w.sim.agent_boot();
+    let record = |input: Input, n: u64| {
+        let (kind, payload) = input.encode();
+        RawRecord {
+            agent_boot: boot,
+            number: u64::MAX - n,
+            kind,
+            payload,
+        }
+    };
+    let begin = record(
+        Input::EnumBegin(Enumeration {
+            enumeration: 900,
+            objects: 0,
+        }),
+        4,
+    );
+    let gone = record(
+        Input::ObjectGone(ObjectGone {
+            object,
+            reason: gone_reason::MISSING,
+            entity: 0,
+            group_entity: 0,
+        }),
+        3,
+    );
+    let again = record(
+        Input::Object(Object {
+            object,
+            entity,
+            enumeration: 0,
+            ..Object::default()
+        }),
+        2,
+    );
+    let end = record(
+        Input::EnumEnd(Enumeration {
+            enumeration: 900,
+            objects: 0,
+        }),
+        1,
+    );
+    for r in [&begin, &gone, &again, &end] {
+        w.rec.record(&mut w.store, r);
+    }
+    let unit = w.store.group(id).unwrap().members[0];
+    assert!(!w.store.unit(unit).unwrap().missing);
     assert_eq!(w.store.group(id).unwrap().state, State::Live);
 }

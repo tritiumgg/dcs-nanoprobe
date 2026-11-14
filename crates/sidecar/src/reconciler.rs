@@ -30,7 +30,8 @@ use crate::lifecycle::{State, Trigger};
 use crate::sim::wire::{Body, Command, Input, Object, ObjectGone, gone_reason, lv, opcode};
 use crate::sim::{RawRecord, SimAdapter};
 use crate::store::{
-    Authority, Entry, Journalled, Kind, Loaded, LostPolicy, Outcome, Point, Store, UnitState,
+    Authority, Entry, Journalled, Kind, LeftAs, Loaded, LostPolicy, Outcome, Point, Store,
+    UnitState,
 };
 
 /// The reconciler's settings (spec/config.md, `[world]`).
@@ -84,6 +85,22 @@ pub struct Counters {
     /// `OBJECT_GONE` records whose binding names no unit of the group it
     /// gives.
     pub bad_binding: u64,
+    /// Death facts for a member that had left as `MISSING` or `REMOVED`.
+    pub late_deaths: u64,
+    /// Death facts that corrected a `REMOVED`: the agent's classifier called
+    /// a kill a removal.
+    pub classifier_faults: u64,
+    /// Death facts for an object from before a respawn: journalled, and they
+    /// mark nothing.
+    pub stale_deaths: u64,
+    /// `MISSING` and `REMOVED` records for an object from before a respawn.
+    pub stale_leaves: u64,
+    /// Units a death fact named that an `OBJECT` showed alive again.
+    pub revivals: u64,
+    /// Lost groups the respawn policy held back: a member left as `MISSING`
+    /// or `REMOVED` and nothing explains it. One count per group each time it
+    /// begins to be held.
+    pub respawns_held: u64,
 }
 
 impl Counters {
@@ -100,6 +117,12 @@ impl Counters {
         self.after_dead += o.after_dead;
         self.bad_binding += o.bad_binding;
         self.other_campaign += o.other_campaign;
+        self.late_deaths += o.late_deaths;
+        self.classifier_faults += o.classifier_faults;
+        self.stale_deaths += o.stale_deaths;
+        self.stale_leaves += o.stale_leaves;
+        self.revivals += o.revivals;
+        self.respawns_held += o.respawns_held;
     }
 }
 
@@ -161,6 +184,8 @@ pub struct Reconciler {
     /// last `HELLO` and since the last `GAP` of events: until then the mirror
     /// may lack objects DCS holds.
     enumerated: bool,
+    /// Lost groups the respawn policy is holding back now.
+    held: BTreeSet<EntityId>,
     counters: Counters,
 }
 
@@ -210,6 +235,7 @@ impl Reconciler {
             spawn_rejected: HashMap::new(),
             campaign_sent: false,
             enumerated: false,
+            held: BTreeSet::new(),
             counters: Counters::default(),
         }
     }
@@ -217,6 +243,13 @@ impl Reconciler {
     /// What the reconciler counted.
     pub fn counters(&self) -> Counters {
         self.counters
+    }
+
+    /// The lost groups the respawn policy is holding back: a member left as
+    /// `MISSING` or `REMOVED` and nothing explains it (spec/world.md,
+    /// "Respawn gate"). They stay `lost` and are reported by this set.
+    pub fn held(&self) -> &BTreeSet<EntityId> {
+        &self.held
     }
 
     /// The binding mirror, by DCS object ID.
@@ -411,6 +444,7 @@ impl Reconciler {
         self.order_refused.clear();
         self.spawn_rejected.clear();
         self.drift_destroy_failures.clear();
+        self.held.clear();
         self.run = None;
         store.clear_missing();
         let ids: Vec<EntityId> = store.groups().map(|g| g.id).collect();
@@ -753,7 +787,26 @@ impl Reconciler {
         let Some(row) = self.resolve_object(store, o) else {
             return;
         };
+        // An object ID that had a death fact, seen alive again: the same
+        // entity under the same object ID. A different object ID is a new
+        // object and leaves the death as it is.
+        let revival = store
+            .unit(row.unit)
+            .is_some_and(|u| u.dead && o.object != 0 && u.object == o.object);
+        if revival {
+            if store
+                .group(row.group)
+                .is_some_and(|g| g.state == State::Dead)
+            {
+                // `dead` is final: the entity stays dead, and DCS holding
+                // its object is drift the plan corrects.
+                self.counters.after_dead += 1;
+            } else if store.revive(row.unit, o.object) {
+                self.counters.revivals += 1;
+            }
+        }
         store.set_missing(row.unit, false);
+        store.set_object(row.unit, o.object);
         self.binding.insert(o.object, row);
     }
 
@@ -786,6 +839,11 @@ impl Reconciler {
 
     fn gone(&mut self, store: &mut Store, g: ObjectGone) {
         let row = self.binding.remove(&g.object);
+        // The agent reported the row gone: ENUM_END does not count it
+        // missing again (spec/records.md, "Layout: ENUM_END").
+        if let Some(run) = &mut self.run {
+            run.before.remove(&g.object);
+        }
         if self.stamp.2 != store.campaign().0 {
             self.counters.other_campaign += 1;
             if let Some(run) = &mut self.run {
@@ -797,14 +855,38 @@ impl Reconciler {
             return;
         };
         let state = store.group(group).expect("group").state;
+        // The member's object ID when it left: a record for an older object,
+        // from before a respawn, is about no member that DCS holds now.
+        let known = store.unit(unit).map_or(0, |u| u.object);
+        let stale = known != 0 && g.object != 0 && known != g.object;
         match g.reason {
             gone_reason::DEAD if state == State::Dead => self.counters.after_dead += 1,
+            gone_reason::DEAD if stale => {
+                store.stale_death(unit, g.object);
+                self.counters.stale_deaths += 1;
+            }
             gone_reason::DEAD => {
-                if !store.death(unit).unwrap_or(false) || !store.all_dead(group) {
+                let (was_missing, was_removed) = store
+                    .unit(unit)
+                    .map_or((false, false), |u| (u.missing, u.removed));
+                if !store.death(unit).unwrap_or(false) {
+                    return;
+                }
+                store.set_object(unit, g.object);
+                if was_missing || was_removed {
+                    // A death that follows a `MISSING` or a `REMOVED`.
+                    self.counters.late_deaths += 1;
+                }
+                if was_removed {
+                    store.classifier_fault(unit, g.object);
+                    self.counters.classifier_faults += 1;
+                }
+                if !store.all_dead(group) {
                     return;
                 }
                 // A death fact while the spawn is unanswered shows the spawn
-                // ran: resolve it applied.
+                // ran: resolve it applied. A spawn not yet written is
+                // cancelled by the move to `dead`.
                 let pending: Vec<Journalled> = if state == State::Materializing {
                     let loaded = store.loaded().cloned();
                     self.inflight
@@ -822,6 +904,7 @@ impl Reconciler {
                     Vec::new()
                 };
                 if store.transition(group, Trigger::AllDead).is_ok() {
+                    self.held.remove(&group);
                     for c in pending {
                         self.inflight.remove(&(c.epoch, c.seq));
                         store.journal(Entry::Outcome {
@@ -832,7 +915,15 @@ impl Reconciler {
                     }
                 }
             }
-            gone_reason::MISSING | gone_reason::REMOVED => store.set_missing(unit, true),
+            gone_reason::MISSING | gone_reason::REMOVED if stale => {
+                self.counters.stale_leaves += 1;
+            }
+            gone_reason::MISSING => {
+                store.left(unit, g.object, LeftAs::Missing);
+            }
+            gone_reason::REMOVED => {
+                store.left(unit, g.object, LeftAs::Removed);
+            }
             _ => {}
         }
     }
@@ -881,6 +972,9 @@ impl Reconciler {
                     store.transition(id, Trigger::EnumMissing).expect("live");
                 }
                 State::Lost if found.contains(&id) => {
+                    // An order refused while DCS held no group (a revived
+                    // member brings one back) may be taken now.
+                    self.order_refused.remove(&id);
                     store.transition(id, Trigger::EnumFound).expect("lost");
                 }
                 State::Dead if found.contains(&id) => self.counters.after_dead += 1,
@@ -985,6 +1079,8 @@ impl Reconciler {
             self.enum_wanted = false;
         }
         let loaded = store.loaded().expect("ready").clone();
+        self.held
+            .retain(|id| store.group(*id).is_some_and(|g| g.state == State::Lost));
         let mut bound: HashMap<EntityId, u64> = HashMap::new();
         for row in self.binding.values() {
             let e = bound.entry(row.group).or_default();
@@ -1067,6 +1163,22 @@ impl Reconciler {
                 State::Lost => match g.on_lost.unwrap_or(self.cfg.on_lost) {
                     LostPolicy::Report => {}
                     LostPolicy::Respawn => {
+                        // The gate: a group with a member that left as
+                        // `MISSING` or `REMOVED`, and has no death fact, is
+                        // never respawned in this generation. A member with
+                        // a death fact is left out of the spawn. A weapon
+                        // kill can come as `MISSING`
+                        // with its death event up to a minute later, and a
+                        // scripted removal can read as a kill or the other
+                        // way round. No timer opens it (spec/world.md,
+                        // "Respawn gate").
+                        if store.gate_shut(id) {
+                            if self.held.insert(id) {
+                                self.counters.respawns_held += 1;
+                            }
+                            continue;
+                        }
+                        self.held.remove(&id);
                         // Objects DCS may still hold (a destroy that failed to
                         // its limit) are settled by an enumeration first: one
                         // used since the last HELLO, so the mirror is whole.
