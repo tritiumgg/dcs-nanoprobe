@@ -10,6 +10,7 @@ mod check;
 mod client;
 mod eval;
 mod faults;
+mod hello;
 mod install;
 mod link;
 mod live;
@@ -17,6 +18,7 @@ mod miz;
 mod peerkill;
 mod probes;
 mod profile;
+mod proto;
 mod remote;
 mod sampling;
 mod spec;
@@ -124,6 +126,15 @@ commands:
                             client_address and client_password_file; the password
                             goes to the client through SSH's standard input and is
                             never printed, logged or kept.
+  hello [<name>]            Run the Rust hello campaign against the API server
+                            over the fake sim: here, or built for the target and
+                            run on its system (the SSH host of a docker-wine
+                            target, outside the container; the SSH account of a
+                            windows-ssh target), in a temporary folder that is
+                            removed after
+  proto [--check]           Write the generated API code in crates/proto/src/gen/
+                            from proto/ with buf, or with --check fail when it
+                            is out of date
   spec [--check]            Write spec/transport.golden from the layout and code tables
                             of the transport specification, or with --check fail
                             when it is out of date
@@ -174,6 +185,10 @@ fn main() -> ExitCode {
         ["catalogue", rest @ ..] => catalogue::command(&repository(), rest),
         ["sampling", rest @ ..] => sampling::command(&repository(), rest),
         ["client", rest @ ..] => client::command(rest),
+        ["hello"] => hello::command(None),
+        ["hello", name] => hello::command(Some(name)),
+        ["proto"] => proto::command(&repository(), false),
+        ["proto", "--check"] => proto::command(&repository(), true),
         ["spec"] => spec::command(&repository(), false),
         ["spec", "--check"] => spec::command(&repository(), true),
         ["help" | "-h" | "--help"] | [] => {

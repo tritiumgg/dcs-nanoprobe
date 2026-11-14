@@ -17,4 +17,7 @@ name = "nanoprobe"
 path = "src/main.rs"
 
 [dependencies]
+nanoprobe-proto = { path = "../proto" }
 nanoprobe-transport = { path = "../transport" }
+tokio = { version = "1.54.1", features = ["rt"] }
+tonic = { version = "0.14.9", default-features = false, features = ["channel", "codegen", "transport"] }

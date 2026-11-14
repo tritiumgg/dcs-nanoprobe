@@ -8,3 +8,4 @@
 *.miz binary
 *.dll binary
 *.pdb binary
+*.binpb binary

@@ -83,6 +83,8 @@ Every failed call returns a gRPC status whose details hold one `ErrorDetail`: a
 | `PERMISSION_DENIED` | `ROLE_REQUIRED` | The token's role does not allow the call |
 | `OUT_OF_RANGE` | `SEQUENCE_EXPIRED` | An event sequence number is older than the retained history |
 | `OUT_OF_RANGE` | `REVISION_EXPIRED` | A watch starts at a revision older than the changes the store keeps. The consumer lists again. |
+| `UNAVAILABLE` | none (`UNSPECIFIED`) | The server is stopping. A stream ends with it, and a changing call that arrives is refused with it; the client connects again and resumes from its last revision or sequence number |
+| `UNIMPLEMENTED` | none (`UNSPECIFIED`) | The call is in the schema and this server does not build it yet. The detail's `field` names the method |
 | `INTERNAL` | `INTERNAL` | A fault in the sidecar |
 
 A set-state call succeeds when the desired state is journalled. It does not wait for
@@ -123,7 +125,16 @@ nothing else; while the first call is still waiting, the repeat waits with it. A
 is remembered in the server-scoped store, with the campaign the call resolved to, for
 `idempotency_keep_h` hours (spec/config.md). A key is therefore one key on the whole
 server: a repeat sent after the active campaign changed still finds the first call.
-After the time passes a repeat is a new call.
+After the time passes a repeat is a new call. A call that fails is not remembered: a
+repeat of it after the cause is fixed, such as a new lease or an active campaign, runs
+as a new call.
+
+`GetOutcome` reads a remembered call by its key and returns the campaign the call acted
+on. For an effect or a query it also returns the outcome and the value. A set-state call
+has no outcome of its own, so for one `result` is absent: what DCS did with it shows in
+the World service as the entity's applied revisions and last error. Repeating a
+set-state call with the same key returns its first response, revisions included. A key
+that is unknown or no longer remembered is `OUTCOME_NOT_FOUND`.
 
 A subscription that asks for positions faster than the cap gets them at the cap; that
 is not an error. A stream that falls behind is ended with `CONSUMER_TOO_SLOW`, and the

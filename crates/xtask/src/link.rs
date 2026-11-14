@@ -563,7 +563,7 @@ pub(crate) fn linux_path(windows: &str) -> Result<String, String> {
 
 /// Build `bins`, each a package and a binary, for `target`, with cargo-xwin
 /// for Windows. Returns their paths, in order.
-fn build_for(
+pub(crate) fn build_for(
     target: &str,
     xwin: bool,
     dir: &str,
