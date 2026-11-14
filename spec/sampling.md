@@ -22,7 +22,9 @@ A sampling frame is one where:
 - the lifecycle state is `running` or `paused`. Sampling goes on while paused, because
   a restore happens before the resume.
 
-Only a sampling frame sweeps, and only a sampling frame with the shim loaded pumps. A
+Only a sampling frame sweeps, and only a sampling frame with the shim loaded pumps for
+sampling. `frame` also asks for a pump when a command with a `server` handler waits at
+the head of the inbound ring (spec/commands.md, "Handlers"). A
 detached agent therefore samples nothing and enumerates nothing. Its event handler
 still queues the existence checks that events ask for, but no pump runs them, so no row
 leaves the table. The shim keeps at most 4,096 unresolved births; the full enumeration
@@ -46,7 +48,7 @@ clock (`QueryPerformanceCounter` on Windows).
 | `D` | Debt: agent time spent past the allowances, at most one second's budget (`overhead_share` × 10⁶). Below 0 it is credit: allowance earned on frames that spent less, at most 150 µs |
 | `r` | The repayment planned this frame: the smaller of `D` and `A` / 2, when `D` is above 0 |
 | `S` | The frame's slice, `slice_us`: the smaller of `A` − `c` − `r` + credit and the cap. The cap is 250 less what the frame's finish takes: the frame's fixed part already spent, and an estimate of closing the last batch and writing its record (`close_us` + the batch tail + 2 × the closing's mean deviation, at least 6 µs). No frame passes 250 µs. The cap binds only below about 12 frames a second. After a frame interval over 2 × `I`, such as a stall, the frame takes no credit |
-| `F` | Fixed work: agent time from the start of `frame` to the point of the decision, plus the agent time of the events handled since the last frame. For the pump it includes the frame's sweep |
+| `F` | Fixed work: agent time from the start of `frame` to the point of the decision, plus the agent time of the events handled since the last frame, less commanded work done so far (spec/commands.md, "Handlers"). For the pump it includes the frame's sweep |
 | `m` | The share of the allowance for births and the enumeration: 0.5, and 0.75 while an enumeration has run longer than `enumeration_s` |
 | `R` | The sweep's savings that the pump leaves alone ("The sweep"), `k` times what the sweep has saved. 0 when the pump reads the positions |
 | `x` | The running estimate of the cross-state call: the time from `frame`'s decision to the start of the shim's pump, each new call weighing 0.1, one call counting at most 62.5 µs. It decays by 1 % on each pump, and on a frame where 3 × `x` is above the gate's cap and the pump has work worth the call ("The pump's worth"), at most once a frame, so an estimate that is too high cannot keep the pump shut |
@@ -65,7 +67,9 @@ forward as credit until a sweep or a pump spends it.
 
 At the end of a frame that is not a system-call frame, the agent takes the frame's
 agent time `T` (from the start of `frame` to its end, or to the end of `finish`, plus
-the events since the last frame) and sets `D` to `D` + `T` + `W` − (`A` − `c`), held
+the events since the last frame, less commanded work: the span of each command handler
+from take to done, and the whole of a pump asked for only for commands, spec/commands.md
+"Handlers") and sets `D` to `D` + `T` + `W` − (`A` − `c`), held
 between −150 µs and its cap. `W` is what the scale `k` withheld from the frame: of the
 pump's budget, (`S` − `F` − `R`) × (1 − `k`), and of the sweep's, the cost of the rows
 `k` kept it from reading. It counts as spent, so it never returns as credit. A frame
@@ -401,7 +405,7 @@ message `sampling` and these `data` keys:
 
 | Key | Meaning |
 |---|---|
-| `share` | The agent's time over real time in the window, system-call frames and events included |
+| `share` | The agent's time over real time in the window, system-call frames and events included, commanded work excluded |
 | `events_us` | The agent time of the events handled in the window, µs, which `share` includes: a spawn's births arrive as events in the frame that spawns |
 | `window_s` | The window's real time, seconds. Over a span, the agent's mean is the sum of `share` × `window_s` over the sum of `window_s` |
 | `syscall_per_s` | `C` |

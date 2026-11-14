@@ -201,7 +201,115 @@ codes! {
         APPLIED = 0, AT_REVISION = 2, DUPLICATE = 3, STALE_EPOCH = 16, NO_CAMPAIGN = 17,
         NOT_BOUND = 18, BAD_PAYLOAD = 19, UNKNOWN_OPCODE = 20, RAW_LUA_OFF = 21,
         DCS_REFUSED = 22, LUA_ERROR = 23, WRONG_CAMPAIGN = 24, TOO_LARGE = 25,
-        WRONG_GENERATION = 26,
+        WRONG_GENERATION = 26, NOT_READY = 27,
+    }
+}
+
+codes! {
+    /// Command opcodes, the `kind` of an inbound record (spec/commands.md).
+    opcode "opcode" {
+        PADDING = 0, CAMPAIGN = 1, ENUMERATE = 2, RATES = 3, SUBSCRIBE = 4, BIND = 5,
+        BURST = 6, GROUP_SPAWN = 16, GROUP_ORDER = 17, GROUP_DESTROY = 18,
+        GROUP_CAPTURE_DESTROY = 19, GROUP_OPTION = 20, STATIC_SPAWN = 21,
+        STATIC_DESTROY = 22, AIRBASE_OWNER = 23, WAREHOUSE_SET = 24, MARK_SET = 25,
+        MARK_REMOVE = 26, DRAWING_SET = 27, DRAWING_REMOVE = 28, MENU_SET = 29,
+        MENU_REMOVE = 30, EXTENSION_SET = 31, EXTENSION_REMOVE = 32, EXPLOSION = 48,
+        MESSAGE = 49, SOUND = 50, SMOKE = 51, FLARE = 52, ILLUMINATION = 53, DAMAGE = 54,
+        CHAT = 55, MISSION_LOAD = 56, EXTENSION_INVOKE = 57, EVAL = 58, CAPTURE = 64,
+    }
+}
+
+/// The delivery class of a command (spec/commands.md, "Delivery classes").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommandClass {
+    /// In order, not sequenced.
+    Control,
+    /// At least once, de-duplicated.
+    SetState,
+    /// At most once.
+    Effect,
+    /// At least once; changes nothing.
+    Query,
+}
+
+/// The revision a command carries: the opcode table's Rev column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rev {
+    /// Compared with the applied spec revision of the entity, or of the
+    /// named extension for `EXTENSION_SET`.
+    Spec,
+    /// Compared with the applied order revision of the entity.
+    Order,
+}
+
+/// One row of the opcode table (spec/commands.md, "Codes: opcode").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Opcode {
+    /// The delivery class.
+    pub class: CommandClass,
+    /// The revision it carries, if any.
+    pub rev: Option<Rev>,
+    /// The Campaign column is `active`: it needs an active campaign.
+    pub needs_campaign: bool,
+    /// The Gen column is `bound`: it is refused in another generation.
+    pub gen_bound: bool,
+    /// The State column: the Lua state its handler runs in, `None` for a
+    /// control command.
+    pub state: Option<HandlerState>,
+}
+
+/// The Lua state a command's handler runs in (spec/commands.md, "Handlers").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandlerState {
+    /// The hook's own state.
+    Hook,
+    /// The mission scripting state, through the shim.
+    Server,
+}
+
+/// The row of an opcode, `None` for padding or an unknown opcode.
+pub const fn opcode_row(code: u64) -> Option<Opcode> {
+    use CommandClass::*;
+    const fn row(
+        class: CommandClass,
+        rev: Option<Rev>,
+        needs_campaign: bool,
+        gen_bound: bool,
+    ) -> Option<Opcode> {
+        let state = match class {
+            Control => None,
+            _ => Some(HandlerState::Server),
+        };
+        Some(Opcode {
+            class,
+            rev,
+            needs_campaign,
+            gen_bound,
+            state,
+        })
+    }
+    match code {
+        1..=6 => row(Control, None, false, false),
+        16 | 21 | 25 | 27 | 29 => row(SetState, Some(Rev::Spec), true, true),
+        17 => row(SetState, Some(Rev::Order), true, true),
+        18..=20 | 22..=24 | 26 | 28 | 30 => row(SetState, None, true, true),
+        31 => row(SetState, Some(Rev::Spec), true, false),
+        32 => row(SetState, None, true, false),
+        48 | 51..=54 => row(Effect, None, true, true),
+        49 | 50 => row(Effect, None, false, false),
+        55 | 56 => Some(Opcode {
+            state: Some(HandlerState::Hook),
+            ..Opcode {
+                class: Effect,
+                rev: None,
+                needs_campaign: false,
+                gen_bound: false,
+                state: None,
+            }
+        }),
+        57 | 58 => row(Effect, None, true, false),
+        64 => row(Query, None, true, true),
+        _ => None,
     }
 }
 
@@ -321,6 +429,57 @@ mod tests {
         same_codes(gap_class::SECTION, gap_class::ALL);
         same_codes(lv_tag::SECTION, lv_tag::ALL);
         same_codes(result::SECTION, result::ALL);
+        same_codes(opcode::SECTION, opcode::ALL);
+    }
+
+    #[test]
+    fn the_layout_version_matches_the_golden_file() {
+        assert_eq!(golden::layout_version(), Some(status::LAYOUT_VERSION_VALUE));
+    }
+
+    #[test]
+    fn the_opcode_rows_match_the_golden_file() {
+        for c in golden::codes("opcode") {
+            let Some(row) = opcode_row(c.code) else {
+                assert_eq!(c.code, opcode::PADDING, "{}", c.name);
+                continue;
+            };
+            let class = match c.attr("class") {
+                Some("control") => CommandClass::Control,
+                Some("set-state") => CommandClass::SetState,
+                Some("effect") => CommandClass::Effect,
+                Some("query") => CommandClass::Query,
+                other => panic!("{}: class {other:?}", c.name),
+            };
+            let rev = match c.attr("rev") {
+                None => None,
+                Some("spec") => Some(Rev::Spec),
+                Some("order") => Some(Rev::Order),
+                Some(other) => panic!("{}: rev {other}", c.name),
+            };
+            assert_eq!(row.class, class, "{}", c.name);
+            assert_eq!(row.rev, rev, "{}", c.name);
+            assert_eq!(
+                row.needs_campaign,
+                c.attr("campaign") == Some("active"),
+                "{}",
+                c.name
+            );
+            assert_eq!(row.gen_bound, c.attr("gen") == Some("bound"), "{}", c.name);
+            let state = match c.attr("state") {
+                None => None,
+                Some("hook") => Some(HandlerState::Hook),
+                Some("server") => Some(HandlerState::Server),
+                Some(other) => panic!("{}: state {other}", c.name),
+            };
+            assert_eq!(row.state, state, "{}", c.name);
+        }
+        let golden: Vec<u64> = golden::codes("opcode").iter().map(|c| c.code).collect();
+        for code in 0..=u64::from(u16::MAX) {
+            if opcode_row(code).is_some() {
+                assert!(golden.contains(&code), "{code} is not in the golden file");
+            }
+        }
     }
 
     #[test]

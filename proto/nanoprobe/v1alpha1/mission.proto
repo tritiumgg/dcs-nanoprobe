@@ -61,6 +61,9 @@ message ServerStatus {
   bool attached = 15;
   // The reason of the last refused handshake, empty for none.
   string attach_error = 16;
+  // The agent DLL's interface version from its last HELLO, 0 before one: the
+  // ABI between the DLL and its Lua hook and shim. Reported, not checked.
+  uint32 agent_interface = 17;
 }
 
 message GetServerStatusRequest {}

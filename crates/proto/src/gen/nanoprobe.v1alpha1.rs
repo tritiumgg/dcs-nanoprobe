@@ -291,6 +291,7 @@ pub enum ResultCode {
     WrongCampaign = 25,
     TooLarge = 26,
     WrongGeneration = 27,
+    NotReady = 28,
 }
 impl ResultCode {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -314,6 +315,7 @@ impl ResultCode {
             Self::WrongCampaign => "RESULT_CODE_WRONG_CAMPAIGN",
             Self::TooLarge => "RESULT_CODE_TOO_LARGE",
             Self::WrongGeneration => "RESULT_CODE_WRONG_GENERATION",
+            Self::NotReady => "RESULT_CODE_NOT_READY",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -334,6 +336,7 @@ impl ResultCode {
             "RESULT_CODE_WRONG_CAMPAIGN" => Some(Self::WrongCampaign),
             "RESULT_CODE_TOO_LARGE" => Some(Self::TooLarge),
             "RESULT_CODE_WRONG_GENERATION" => Some(Self::WrongGeneration),
+            "RESULT_CODE_NOT_READY" => Some(Self::NotReady),
             _ => None,
         }
     }
@@ -6733,6 +6736,10 @@ pub struct ServerStatus {
     /// The reason of the last refused handshake, empty for none.
     #[prost(string, tag = "16")]
     pub attach_error: ::prost::alloc::string::String,
+    /// The agent DLL's interface version from its last HELLO, 0 before one: the
+    /// ABI between the DLL and its Lua hook and shim. Reported, not checked.
+    #[prost(uint32, tag = "17")]
+    pub agent_interface: u32,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetServerStatusRequest {}

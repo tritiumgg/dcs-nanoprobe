@@ -65,7 +65,7 @@ records that are consumed.
 |---|---|---|---|---|
 | 0x0000 | u64 | magic | agent | ASCII `npmap`, then three zero bytes |
 | 0x0008 | u32 | layout_version | agent | 1 |
-| 0x000C | u32 | interface | agent | The agent DLL's interface version |
+| 0x000C | u32 | interface | agent | The agent DLL's interface version: the ABI between the DLL and its Lua hook and shim, which the hook checks. The sidecar logs it and does not check it. |
 | 0x0010 | u64 | layout_hash | agent | The 16 hex digits of the hash line of `spec/transport.golden`, read as one hexadecimal number |
 | 0x0018 | u64 | file_size | agent | 4,096 + `out_capacity` + `in_capacity`: the bytes in use, at most the file's length |
 | 0x0020 | u64 | agent_boot | agent | A random non-zero value chosen once per DCS process |
@@ -132,6 +132,12 @@ records that are consumed.
 
 A period is 0 only for a tier that has never owed rows (spec/sampling.md, "Achieved
 period").
+
+**Layout version.** `cargo xtask spec` writes `layout_version` into
+spec/transport.golden, so it is part of `layout_hash`, and a sidecar refuses an agent
+whose hash differs from its own. The golden file changes with every table here, in
+spec/records.md and in spec/commands.md. When agent behavior the sidecar reads
+changes and no table does, `layout_version` goes up by one.
 
 **Breadcrumbs.** `crumb` 0 means no risky call is in progress. `crumb` 0x10000 plus an
 opcode means that command's handler runs, and `crumb_arg` is its `seq`. The agent

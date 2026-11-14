@@ -87,6 +87,9 @@ matches decides:
 | The opcode is bound to a generation and `mission_gen` is not the agent's | `WRONG_GENERATION` | no |
 | The opcode's Rev column names a revision and `rev` is 0 | `BAD_PAYLOAD` | no |
 | The opcode's Rev column names a revision and `rev` is at or below the applied one | `AT_REVISION` | no |
+| The opcode needs raw Lua and `agent.toml` has it off | `RAW_LUA_OFF` | no |
+| No shim is loaded in the handler's state and the lifecycle state is not `LOADING` | `NOT_READY` | no |
+| The opcode is `EXTENSION_INVOKE` and no extension of the name has an applied revision in the campaign | `LUA_ERROR`, message `no extension of that name` | no |
 | Otherwise | the handler's result | yes |
 
 The Rev column of the opcode table says which revision a command carries: `spec` is
@@ -105,7 +108,8 @@ not made for: a spawn compiled for another map, an order for a group that is gon
 The Gen column of the opcode table marks the opcodes this applies to, and the agent
 answers them `WRONG_GENERATION`.
 
-A set-state command answered `STALE_EPOCH`, `WRONG_CAMPAIGN` or `WRONG_GENERATION` is
+A set-state command answered `STALE_EPOCH`, `WRONG_CAMPAIGN`, `WRONG_GENERATION` or
+`NOT_READY` is
 not lost: the sidecar derives what DCS still needs from the store's desired state and
 sends that under the current epoch and generation. It never sends an old payload
 again.
@@ -131,20 +135,20 @@ query the sidecar itself needs (the `CAPTURE` of a dematerialization), the sidec
 derives what DCS still needs from the store (spec/errors.md).
 
 **After `CONTROL_LOST`** the ring is untouched: a command after the `HELLO`'s `in_head`
-is still there and stays `pending`.
+is still there and stays `pending`. A `HELLO` is a resync, and not an attach, when it is
+not the first `HELLO` the sidecar read since its handshake.
 
-**After DCS dies** no `HELLO` comes from the old process. The sidecar uses the
-largest `in_head` it read from the status block for that `agent_boot`: a command at or
-before it is `unknown`, one after it was never taken. `in_head` moves before each
-command runs, so a command that was running when DCS died, and may be why it died, is
-`unknown` and never `not_sent`. The breadcrumb names it (`crumb_arg`), and the sidecar
-reports it as the command DCS died in. If the sidecar was not running when DCS died
-and finds a new `agent_boot`, every unanswered command is `unknown`.
+**After DCS dies** no `HELLO` comes from the old process, and DCS may have taken
+commands after the last `in_head` the sidecar read. Every unanswered command of an
+`agent_boot` other than the current `HELLO`'s stays `pending` until the first `HELLO` of
+a new `agent_boot`, and then resolves `unknown`, whatever its position, whether or not
+the sidecar was running when DCS died. The breadcrumb (`crumb_arg`) names the command
+that was running when DCS died; it is in `crash.log` (spec/install.md) and in the
+status block, which the command-line inspector shows.
 
-**After the kill switch** the agent writes no further `HELLO`, so the sidecar resolves
-its commands as after DCS dies, by the largest `in_head` it read for that
-`agent_boot`. `CONTROL_LOST` stays set in the status block if a control record was
-lost.
+**After the kill switch** the agent writes no further `HELLO` until the process exits,
+so the sidecar resolves its commands as after DCS dies. `CONTROL_LOST` stays set in
+the status block if a control record was lost.
 
 What the sidecar does about `unknown` is in spec/errors.md. After a DCS restart the
 agent's memory is empty, and the sidecar starts a new epoch and materializes from the
@@ -162,8 +166,58 @@ does not apply.
 
 Each handler runs inside `pcall`, with `crumb` set to 0x10000 plus the opcode and
 `crumb_arg` to the command's `seq` (spec/transport.md, "Breadcrumbs").
-`cost_us` in the result is the time around the handler. A command over the budget is
-counted in `commands_over_budget`.
+`cost_us` in the result is the time from the agent taking the command to `command_done`.
+A command over the budget is counted in `commands_over_budget`.
+
+### Handlers
+
+The agent reads the ring in the hook's state, in `frame`. Control commands, and every
+command the admission rows answer, are handled there in Rust. A command that passes
+them runs its handler in the Lua state the State column names.
+
+`frame` looks at the command at the ring's head before it takes it. When that command
+is sequenced and has a `server` handler, `frame` stops reading: the command is not
+taken, not admitted, and `in_head` does not move. `frame` then asks the hook for a pump,
+on a sampling frame or not, but never on the frame that makes the agent's system calls.
+In the pump, the shim calls the agent's `command`, which takes commands in ring order
+under the same budget. It handles control commands and admission answers in Rust, and
+returns the opcode and the decoded arguments of the next admitted command with a
+`server` handler. It returns nothing when the ring is empty, the budget is spent, or
+the head has a `hook` handler. The shim runs the handler under `pcall` and passes its
+result to the agent's `command_done`; a raise is `LUA_ERROR` with the error text, and an
+opcode the shim has no handler for is `UNKNOWN_OPCODE`. A `hook` handler runs the same
+way from the hook, in `frame`'s place, with no cross-state call. No command is held
+from one frame to the next.
+
+A pump begins with the generation check, then the commands, then sampling. A pump that
+`frame` asked for only for commands samples nothing, and its time, the cross-state call
+included, counts against the commanded-work budget only.
+
+Every command the agent takes gets exactly one `RESULT`. A command taken and not
+answered by `command_done` before the pump ends (or, failing that, before `finish` or
+the next `frame`) is answered `LUA_ERROR` with the message `no result`, and the
+breadcrumb is cleared. A `command_done` with no command outstanding is logged and
+ignored. The applied revision moves only in `command_done`.
+
+When no shim is loaded, a command with a `server` handler waits at the head of the
+ring while the lifecycle state is `LOADING`. In any other state the agent takes it and
+answers `NOT_READY`. A pump that `frame` asked for and that never called `command`, such
+as one whose shim is gone or whose `pump_begin` returned nil, also ends with `NOT_READY`
+for the `server` command at the head, from `finish`. A command a pump left untaken
+because the budget ran out stays in the ring for the next frame.
+
+No frame sees the lifecycle state `LOADING` today: `frame` moves `STARTING` and
+`LOADING` to `RUNNING` or `PAUSED` before it reads commands, so the wait is a defense.
+Whether DCS runs a frame before `onSimulationStart` is UNVERIFIED (S16 checks it).
+
+The agent reads at most 4,096 table entries (key and value pairs, at every depth) and
+16 KiB of strings from the value `command_done` receives, 16 tables deep. A string that
+would pass the byte limit is not copied. A value that passes either limit is not sent:
+an `APPLIED` result becomes `TOO_LARGE`, with a nil `value` and a message naming the
+limit; any other code stays, with a nil `value`. The agent cuts every
+`RESULT` message to 1,024 bytes at a UTF-8 boundary. A `command_done` with a code that
+`result` does not define is answered `LUA_ERROR` with a message naming the code, and the
+message is read only when it is a string.
 
 ### Unknown opcodes
 
@@ -174,44 +228,49 @@ other, is answered `UNKNOWN_OPCODE`, and sets `last_applied_seq`.
 
 ### Codes: opcode
 
-| Code | Name | Class | Entity | Rev | Campaign | Gen | Payload | Meaning |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 0 | PADDING |  |  |  |  |  |  | Fills the end of the ring |
-| 1 | CAMPAIGN | control |  |  |  |  | layout | Announce the active campaign |
-| 2 | ENUMERATE | control |  |  |  |  | none | Start a full enumeration now, which writes an `OBJECT` for every row |
-| 3 | RATES | control |  |  |  |  | layout | Set the target period of each sampling tier |
-| 4 | SUBSCRIBE | control |  |  |  |  | layout | Replace the set of objects sampled at a higher rate |
-| 5 | BIND | control |  |  |  |  | layout | Give `EntityId`s to unmanaged objects |
-| 6 | BURST | control |  |  |  |  | layout | Turn the restore burst on or off |
-| 16 | GROUP_SPAWN | set-state | group | spec | active | bound | layout | Spawn a group |
-| 17 | GROUP_ORDER | set-state | group | order | active | bound | layout | Give a group its order |
-| 18 | GROUP_DESTROY | set-state | group |  | active | bound | none | Destroy a group |
-| 19 | GROUP_CAPTURE_DESTROY | set-state | group |  | active | bound | none | Read a group's final state, return it, and destroy the group, in one frame |
-| 20 | GROUP_OPTION | set-state | group |  | active | bound | layout | Set one controller option |
-| 21 | STATIC_SPAWN | set-state | static | spec | active | bound | layout | Spawn a static |
-| 22 | STATIC_DESTROY | set-state | static |  | active | bound | none | Destroy a static |
-| 23 | AIRBASE_OWNER | set-state |  |  | active | bound | layout | Set an airbase's owner |
-| 24 | WAREHOUSE_SET | set-state |  |  | active | bound | layout | Set a warehouse's stock |
-| 25 | MARK_SET | set-state | mark | spec | active | bound | layout | Add or replace a map mark |
-| 26 | MARK_REMOVE | set-state | mark |  | active | bound | none | Remove a map mark |
-| 27 | DRAWING_SET | set-state | drawing | spec | active | bound | layout | Add or replace a map drawing |
-| 28 | DRAWING_REMOVE | set-state | drawing |  | active | bound | none | Remove a map drawing |
-| 29 | MENU_SET | set-state | menu item | spec | active | bound | layout | Add or replace an F10 menu item |
-| 30 | MENU_REMOVE | set-state | menu item |  | active | bound | none | Remove an F10 menu item |
-| 31 | EXTENSION_SET | set-state |  | spec | active |  | layout | Register or replace a Lua extension |
-| 32 | EXTENSION_REMOVE | set-state |  |  | active |  | layout | Remove a Lua extension |
-| 48 | EXPLOSION | effect |  |  | active | bound | layout | An explosion at a point |
-| 49 | MESSAGE | effect |  |  | any |  | layout | Text on screen |
-| 50 | SOUND | effect |  |  | any |  | layout | Play a sound file from the mission |
-| 51 | SMOKE | effect |  |  | active | bound | layout | A smoke marker at a point |
-| 52 | FLARE | effect |  |  | active | bound | layout | A signal flare at a point |
-| 53 | ILLUMINATION | effect |  |  | active | bound | layout | An illumination bomb at a point |
-| 54 | DAMAGE | effect | unit |  | active | bound | layout | Set a unit's life |
-| 55 | CHAT | effect |  |  | any |  | layout | A chat message from the server |
-| 56 | MISSION_LOAD | effect |  |  | any |  | layout | Load a mission file |
-| 57 | EXTENSION_INVOKE | effect |  |  | active |  | layout | Run a registered extension |
-| 58 | EVAL | effect |  |  | active |  | layout | Run Lua source in the `server` state |
-| 64 | CAPTURE | query | group or static |  | active | bound | none | Read an entity's full state and return it |
+| Code | Name | Class | Entity | Rev | Campaign | Gen | State | Payload | Meaning |
+| --- | --- | --- | --- | --- | --- | --- |---| --- | --- |
+| 0 | PADDING |  |  |  |  |  |  |  | Fills the end of the ring |
+| 1 | CAMPAIGN | control |  |  |  |  |  | layout | Announce the active campaign |
+| 2 | ENUMERATE | control |  |  |  |  |  | none | Start a full enumeration now, which writes an `OBJECT` for every row |
+| 3 | RATES | control |  |  |  |  |  | layout | Set the target period of each sampling tier |
+| 4 | SUBSCRIBE | control |  |  |  |  |  | layout | Replace the set of objects sampled at a higher rate |
+| 5 | BIND | control |  |  |  |  |  | layout | Give `EntityId`s to unmanaged objects |
+| 6 | BURST | control |  |  |  |  |  | layout | Turn the restore burst on or off |
+| 16 | GROUP_SPAWN | set-state | group | spec | active | bound | server | layout | Spawn a group |
+| 17 | GROUP_ORDER | set-state | group | order | active | bound | server | layout | Give a group its order |
+| 18 | GROUP_DESTROY | set-state | group |  | active | bound | server | none | Destroy a group |
+| 19 | GROUP_CAPTURE_DESTROY | set-state | group |  | active | bound | server | none | Read a group's final state, return it, and destroy the group, in one frame |
+| 20 | GROUP_OPTION | set-state | group |  | active | bound | server | layout | Set one controller option |
+| 21 | STATIC_SPAWN | set-state | static | spec | active | bound | server | layout | Spawn a static |
+| 22 | STATIC_DESTROY | set-state | static |  | active | bound | server | none | Destroy a static |
+| 23 | AIRBASE_OWNER | set-state |  |  | active | bound | server | layout | Set an airbase's owner |
+| 24 | WAREHOUSE_SET | set-state |  |  | active | bound | server | layout | Set a warehouse's stock |
+| 25 | MARK_SET | set-state | mark | spec | active | bound | server | layout | Add or replace a map mark |
+| 26 | MARK_REMOVE | set-state | mark |  | active | bound | server | none | Remove a map mark |
+| 27 | DRAWING_SET | set-state | drawing | spec | active | bound | server | layout | Add or replace a map drawing |
+| 28 | DRAWING_REMOVE | set-state | drawing |  | active | bound | server | none | Remove a map drawing |
+| 29 | MENU_SET | set-state | menu item | spec | active | bound | server | layout | Add or replace an F10 menu item |
+| 30 | MENU_REMOVE | set-state | menu item |  | active | bound | server | none | Remove an F10 menu item |
+| 31 | EXTENSION_SET | set-state |  | spec | active |  | server | layout | Register or replace a Lua extension |
+| 32 | EXTENSION_REMOVE | set-state |  |  | active |  | server | layout | Remove a Lua extension |
+| 48 | EXPLOSION | effect |  |  | active | bound | server | layout | An explosion at a point |
+| 49 | MESSAGE | effect |  |  | any |  | server | layout | Text on screen |
+| 50 | SOUND | effect |  |  | any |  | server | layout | Play a sound file from the mission |
+| 51 | SMOKE | effect |  |  | active | bound | server | layout | A smoke marker at a point |
+| 52 | FLARE | effect |  |  | active | bound | server | layout | A signal flare at a point |
+| 53 | ILLUMINATION | effect |  |  | active | bound | server | layout | An illumination bomb at a point |
+| 54 | DAMAGE | effect | unit |  | active | bound | server | layout | Set a unit's life |
+| 55 | CHAT | effect |  |  | any |  | hook | layout | A chat message from the server |
+| 56 | MISSION_LOAD | effect |  |  | any |  | hook | layout | Load a mission file |
+| 57 | EXTENSION_INVOKE | effect |  |  | active |  | server | layout | Run a registered extension |
+| 58 | EVAL | effect |  |  | active |  | server | layout | Run Lua source in the `server` state |
+| 64 | CAPTURE | query | group or static |  | active | bound | server | none | Read an entity's full state and return it |
+
+The State column names the Lua state the handler runs in: `server`, the mission
+scripting state, through the shim; `hook`, the hook's own state. A control command has
+no Lua handler. That `CHAT` and `MISSION_LOAD` run in the hook's state is UNVERIFIED
+(step S16).
 
 The Campaign column: `active` means the command needs an active campaign; `any` means
 it also runs with campaign 0, for a server that runs a plain mission between
@@ -237,6 +296,7 @@ the opcode has a layout below; `none` means nothing follows the command header.
 | 24 | WRONG_CAMPAIGN | failure | The command was written for a campaign that is not the active one |
 | 25 | TOO_LARGE | | The command ran and its value does not fit a record (spec/records.md). Whether that is a failure depends on the command's class (spec/errors.md). |
 | 26 | WRONG_GENERATION | failure | The command was written for another mission generation |
+| 27 | NOT_READY | failure | The Lua state its handler runs in has no shim loaded outside a mission load, or the pump asked for it never called `command` |
 
 ## Control commands
 
@@ -344,6 +404,10 @@ unit.
 | Offset | Type | Field | Meaning |
 |---|---|---|---|
 | + | lv | task | The task table for the group's controller |
+
+An order that resolves `refused` is not sent again at the same revision while DCS holds
+none of the group's members. It is sent again when DCS gets back a member it lacked: a
+revived member, a `MISSING` or `REMOVED` member found again, or a `lost` group found.
 
 `GROUP_DESTROY`, `GROUP_CAPTURE_DESTROY`, `STATIC_DESTROY`, `MARK_REMOVE`,
 `DRAWING_REMOVE` and `MENU_REMOVE` have no payload after the header. Destroying or

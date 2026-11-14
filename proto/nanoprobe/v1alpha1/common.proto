@@ -116,6 +116,7 @@ enum ResultCode {
   RESULT_CODE_WRONG_CAMPAIGN = 25;
   RESULT_CODE_TOO_LARGE = 26;
   RESULT_CODE_WRONG_GENERATION = 27;
+  RESULT_CODE_NOT_READY = 28;
 }
 
 // The result of a command sent to DCS.

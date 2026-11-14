@@ -19,7 +19,8 @@ what the layer below refused.
 - A Rust panic is caught at the entry point. The agent logs it, sets the lifecycle
   state to `DISABLED`, and does no more work in this DCS process.
 - A native exception is recorded in `crash.log` with the breadcrumb (spec/install.md).
-  The status block keeps the breadcrumb for the sidecar to read after DCS dies.
+  The status block keeps the breadcrumb for the command-line inspector to read after
+  DCS dies.
 - Bytes from the sidecar that fail a check are refused: a bad payload is the result
   `BAD_PAYLOAD`; a bad ring position detaches the agent (spec/transport.md).
 
@@ -32,8 +33,8 @@ The sidecar journals every command and resolves it to one outcome:
 | `pending` | no result yet | Journalled, and not yet written or not yet answered |
 | `applied` | result `APPLIED` or `AT_REVISION`; result `TOO_LARGE` for a set-state command or an effect | DCS is in the commanded state. After `TOO_LARGE` the command ran and the value it returned is lost; the message says so. |
 | `refused` | result `DCS_REFUSED`, `NOT_BOUND` or `LUA_ERROR`; result `TOO_LARGE` for a query | The command reached DCS and failed, or a query's value does not fit a record. The message says why. |
-| `rejected` | result `STALE_EPOCH`, `WRONG_CAMPAIGN`, `WRONG_GENERATION`, `NO_CAMPAIGN`, `BAD_PAYLOAD`, `UNKNOWN_OPCODE` or `RAW_LUA_OFF` | The agent did not try it |
-| `unknown` | no result, and the agent's `in_head` is past the command (spec/commands.md, "Unanswered commands") | The agent took it, and its result was lost |
+| `rejected` | result `STALE_EPOCH`, `WRONG_CAMPAIGN`, `WRONG_GENERATION`, `NOT_READY`, `NO_CAMPAIGN`, `BAD_PAYLOAD`, `UNKNOWN_OPCODE` or `RAW_LUA_OFF` | The agent did not try it |
+| `unknown` | no result, and the agent's `in_head` is past the command, or the command's `agent_boot` ended before it answered (spec/commands.md, "Unanswered commands") | The agent may have taken it; its result is lost |
 | `not_sent` | a command the agent never took | It did not happen. An effect or a client's query is not sent again. For a set-state command, or a query the sidecar itself needs (the `CAPTURE` of a dematerialization), what DCS still needs is derived from the store and sent as a new command. |
 
 `DUPLICATE` says only that the agent handled the sequence number before. The command's
@@ -44,7 +45,7 @@ What the sidecar does with an outcome:
 
 | Class | `refused` | `rejected` | `unknown` |
 |---|---|---|---|
-| set-state | A spawn becomes `unspawnable`. A destroy is sent again (destroying nothing is `APPLIED`) up to `destroy_retries` (spec/config.md); a dematerializing entity then goes `lost` with the error. Any other is reported and not sent again until its revision changes. | After `STALE_EPOCH`, `WRONG_CAMPAIGN` or `WRONG_GENERATION`, what DCS still needs is derived from the store and sent under the current epoch. Others are reported. | What DCS needs is derived again from the store's desired state and sent as new commands; the old payload is never sent again. For a spawn, `AT_REVISION` then shows it was applied. A destroy is sent again up to `destroy_retries`, as for `refused`. A capture-and-destroy is not sent again, nor after `refused` or `TOO_LARGE`: the sidecar takes the last checkpointed state and sends a destroy. |
+| set-state | A spawn becomes `unspawnable`. A destroy is sent again (destroying nothing is `APPLIED`) up to `destroy_retries` (spec/config.md); a dematerializing entity then goes `lost` with the error. Any other is reported and not sent again until its revision changes. | After `STALE_EPOCH`, `WRONG_CAMPAIGN`, `WRONG_GENERATION` or `NOT_READY`, what DCS still needs is derived from the store and sent under the current epoch. Others are reported. | What DCS needs is derived again from the store's desired state and sent as new commands; the old payload is never sent again. For a spawn, `AT_REVISION` then shows it was applied. A destroy is sent again up to `destroy_retries`, as for `refused`. A capture-and-destroy is not sent again, nor after `refused` or `TOO_LARGE`: the sidecar takes the last checkpointed state and sends a destroy. |
 | effect | Reported | Reported | Reported. Never sent again. |
 | query | Reported, and not sent again | Reported | Sent again under a new sequence number |
 

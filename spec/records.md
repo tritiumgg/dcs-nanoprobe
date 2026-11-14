@@ -93,7 +93,7 @@ a larger one:
 
 | Record | Written in its place |
 |---|---|
-| `RESULT` | The same record with a nil `value`, the code `TOO_LARGE`, and what was too large as the message |
+| `RESULT` | The same record with a nil `value` and what was too large as the message. An `APPLIED` result becomes `TOO_LARGE`; any other code stays. A value from Lua is read to at most 4,096 table entries (key and value pairs) and 16 KiB of strings first; an `APPLIED` result with a value past that limit is answered `TOO_LARGE` the same way (spec/commands.md, "Handlers") |
 | `LOG` | The same record with nil `data` |
 | `AUTHOR_EVENT` | Nothing: `emit` refuses the payload first (spec/commands.md) |
 | A sample | Nothing. The record is counted in `samples_dropped`. |
@@ -162,7 +162,7 @@ a character boundary, so the replacement always fits. An `EVENT`'s values are `l
 | 0x0020 | u64 | epoch | Command epoch |
 | 0x0028 | u64 | last_applied_seq | Highest sequence number handled in `epoch` |
 | 0x0030 | u64 | in_head | The inbound read position: every command before it was handled, and its `RESULT` is before this record |
-| 0x0038 | u32 | interface | The agent's interface version |
+| 0x0038 | u32 | interface | The agent DLL's interface version, as in the status block: the DLL-to-shim ABI, which the sidecar logs and does not check |
 | 0x003C | u32 | flags | `agent_flags` bits |
 | + | str | dcs_version | The DCS version string, read once by the hook |
 
@@ -194,7 +194,7 @@ one.
 | 0x0030 | u32 | cost_us | Time DCS spent on the command, microseconds |
 | 0x0034 | u16 | opcode | The command's opcode |
 | 0x0036 | u16 | code | A `result` code (spec/commands.md) |
-| + | str | message | The error text for a failure, otherwise empty |
+| + | str | message | The error text for a failure, otherwise empty; at most 1,024 bytes, cut at a UTF-8 boundary |
 | + | lv | value | What the command returned: a captured state, an extension's return value, or nil |
 
 `code` and `opcode` come from spec/commands.md. A `RESULT` for a command of an epoch
