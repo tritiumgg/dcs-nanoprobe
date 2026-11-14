@@ -115,7 +115,7 @@ a character boundary, so the replacement always fits. An `EVENT`'s values are `l
 | 3 | LIFECYCLE | control | The lifecycle state changed |
 | 4 | RESULT | control | A command was handled |
 | 5 | GAP | control | Records were dropped |
-| 16 | OBJECT | event | A unit or static entered the agent's table, or a full enumeration found it |
+| 16 | OBJECT | event | A unit or static entered the agent's table, or an enumeration found it changed or wrote every row whole |
 | 17 | OBJECT_GONE | event | A unit or static left the agent's table |
 | 18 | ENUM_BEGIN | event | A full enumeration started |
 | 19 | ENUM_END | event | A full enumeration finished |
@@ -124,6 +124,7 @@ a character boundary, so the replacement always fits. An `EVENT`'s values are `l
 | 22 | PLAYER | event | A player connected, left, changed slot or chatted |
 | 23 | MENU | event | A player selected a menu item |
 | 24 | LOG | event | A log line from the hook, the shim or the agent |
+| 25 | SEEN | event | Rows an enumeration found whose `OBJECT` is unchanged |
 | 32 | POSITIONS | sample | Positions of a batch of objects |
 | 33 | VITALS | sample | Life and fuel of a batch of objects |
 | 34 | ATTITUDE | sample | Heading, pitch and roll of a batch of objects |
@@ -375,8 +376,9 @@ only: a reused ID is an `OBJECT_GONE` and then an `OBJECT`.
 
 The agent fills `entity` and `group_entity` from platform names (spec/world.md) or from
 `BIND` commands.
-A full enumeration writes one `OBJECT` for every row, so a sidecar that attaches reads
-the whole binding from it.
+An enumeration reports every row it finds, with an `OBJECT` or with the row's ID in a
+`SEEN` record (below). The first enumeration after a `HELLO` is all `OBJECT`, so a sidecar
+that attaches reads the whole binding from it.
 
 ### Codes: object_kind
 
@@ -426,7 +428,41 @@ the second is always `DEAD`.
 |---|---|---|---|
 | 0x0000 | u64 | enumeration | The enumeration that finished |
 | 0x0008 | u32 | objects | `OBJECT` records it wrote |
+| 0x000C | u32 | seen | IDs it wrote in `SEEN` records |
+
+### Layout: SEEN
+
+| Offset | Type | Field | Meaning |
+|---|---|---|---|
+| 0x0000 | u64 | enumeration | The enumeration that found the rows |
+| 0x0008 | u32 | count | IDs that follow |
 | 0x000C | pad[4] | reserved | |
+| + | u64[count] | objects | DCS object IDs |
+
+An ID in `SEEN` means: the row is in the table, and every field of its last `OBJECT` the
+agent queued in this attach (layout above, the `enumeration` number aside) is what the
+`OBJECT` would say now. A `SEEN` holds the IDs of one batch of enumeration items, at most
+what the payload limit takes. It carries no data a sidecar can use to add a row.
+
+An enumeration reports each row it finds with an `OBJECT` or a `SEEN` ID. The agent
+writes a full `OBJECT` when any of these holds:
+
+- the enumeration is a full one. The agent keeps one flag, `full`. `ENUMERATE`, every
+  `HELLO` and every dropped event-class record other than a `LOG` (at the moment of the drop)
+  set it. A dropped `LOG` cannot leave the mirror or the binding stale. The
+  next `ENUM_BEGIN` takes it, so that enumeration writes `OBJECT` for every row and no
+  `SEEN`. An enumeration that two triggers share, such as a periodic one merged with a
+  request, keeps it. A drop while an enumeration runs sets the flag for the next one;
+  the enumeration it interrupts is refused by its `GAP`.
+- the row's encoded `OBJECT` payload is empty: a `BIND`, a campaign change or a row
+  that no enumeration has encoded yet.
+- no `OBJECT` for the row was queued since the last `HELLO`. This rule holds for the
+  rows a running enumeration has not sent when a `HELLO` arrives mid-enumeration
+  (spec/sampling.md).
+
+The agent queues an open `SEEN` batch before any other event-class record, within the
+same pump, and every `SEEN` of an enumeration before its `ENUM_END`. So a death
+(`OBJECT_GONE`) or a binding that follows a row's `SEEN` in time follows it in the ring.
 
 An enumeration is sliced over frames, and the world changes while it runs. Only a row
 that was in the table at `ENUM_BEGIN` and that the enumeration did not find is a miss. The
@@ -435,9 +471,9 @@ agent checks each miss before it writes `ENUM_END`. A miss found gone gets `OBJE
 decide, gets an `OBJECT` with that enumeration's number, which `objects` counts. The agent
 writes `ENUM_END` once no miss is pending, and the next `ENUM_BEGIN` waits for it. A row
 added after `ENUM_BEGIN`, by an event or a spawn, is never a miss. So at `ENUM_END` every
-row that was in the table at `ENUM_BEGIN` and has neither an `OBJECT` of that enumeration
-nor an `OBJECT_GONE` is gone, and the sidecar applies that rule to its mirror and its
-binding.
+row that was in the table at `ENUM_BEGIN` and has neither an `OBJECT` nor a `SEEN` ID of
+that enumeration nor an `OBJECT_GONE` is gone, and the sidecar applies that rule to its
+mirror and its binding. A `SEEN` ID counts as found.
 
 A miss leaves the pending set when its check decides, when its row leaves by another path
 (a death event's check or a HIT check), or when the row is no longer held. A generation
@@ -452,8 +488,20 @@ campaign. It drops the run at a `HELLO` of another agent boot or campaign. After
 abandoned hold the agent's next periodic enumeration follows.
 
 The sidecar uses an enumeration only if it read `ENUM_BEGIN`, `ENUM_END` with a
-matching count of `OBJECT` records, and no `GAP` of events between them. When an `ENUM_END`
-arrives and the enumeration fails that test, it asks for another.
+matching count of `OBJECT` records and a matching count of `SEEN` IDs (each compared
+separately), and no `GAP` of events between them. When an `ENUM_END` arrives and the
+enumeration fails that test, it asks for another, and the agent's answer to `ENUMERATE`
+is an enumeration of `OBJECT` records only.
+
+A `SEEN` outside the open enumeration, or stamped with an older mission generation, is
+ignored. A `SEEN` never adds a row. A `SEEN` ID that the sidecar's mirror does not hold,
+in the open enumeration of the current generation, makes the sidecar refuse the
+enumeration and send `ENUMERATE`. After the sidecar reads a `GAP` of events it refuses
+every enumeration whose `seen` is over 0, until it applies one whose `seen` is 0. The
+reconciler counts `SEEN` IDs and adds those it binds to its run. An ID it does not bind
+is no refusal. A `SEEN` stamped under another campaign marks the run's gap, as an
+`OBJECT` does. A reader that needs a repeated `OBJECT` to resolve a row sends
+`ENUMERATE`.
 
 ## Events
 

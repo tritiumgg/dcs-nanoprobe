@@ -23,7 +23,7 @@ local dir = root .. 'versions/' .. build .. '/'
 local logmodule = assert(loadfile(dir .. 'lua/log.lua'))()
 
 -- The agent's interface version this hook was written for.
-local ABI = '6'
+local ABI = '7'
 -- What agent.frame returns.
 local FRAME_RELOAD, FRAME_DISABLED = 1, 2
 

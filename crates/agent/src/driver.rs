@@ -446,6 +446,7 @@ fn end_frame(d: &mut Driver) {
 
 /// The `sampling` LOG (spec/sampling.md, "Reporting").
 fn report(d: &mut Driver, r: &Report) {
+    let tail = d.link.take_frame_tail();
     let gone = d.sampler.gone_counts();
     let revivals = d.sampler.revivals();
     let marks_cleared = d.sampler.marks_cleared();
@@ -462,6 +463,10 @@ fn report(d: &mut Driver, r: &Report) {
             ("pumps", Value::Int(r.pumps as i64)),
             ("empty_pumps", Value::Int(r.empty_pumps as i64)),
             ("frames", Value::Int(r.frames as i64)),
+            ("frames_over_250", Value::Int(tail.over as i64)),
+            ("syscall_over_250", Value::Int(tail.syscall_over as i64)),
+            ("frame_max_us", Value::Num(tail.max_us)),
+            ("gap_max_s", Value::Num(tail.gap_max_s)),
             ("slice_us", Value::Num(r.slice_us)),
             ("window_s", Value::Num(r.window_s)),
             ("events_us", Value::Num(r.events_us)),

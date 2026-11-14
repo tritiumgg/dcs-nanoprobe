@@ -27,7 +27,7 @@ use nanoprobe_transport::records::{CommandHeader, CommandResult, Hello};
 use crate::ids::{self, CampaignId, EntityId, NameKind};
 use crate::intents::{self, Compiled, Intent};
 use crate::lifecycle::{State, Trigger};
-use crate::sim::wire::{Body, Command, Input, Object, ObjectGone, gone_reason, lv, opcode};
+use crate::sim::wire::{Body, Command, Input, Object, ObjectGone, Seen, gone_reason, lv, opcode};
 use crate::sim::{RawRecord, SimAdapter};
 use crate::store::{
     Authority, Entry, Journalled, Kind, LeftAs, Loaded, LostPolicy, Outcome, Point, Store,
@@ -101,6 +101,9 @@ pub struct Counters {
     /// or `REMOVED` and nothing explains it. One count per group each time it
     /// begins to be held.
     pub respawns_held: u64,
+    /// `ENUMERATE` commands sent because the reconciler asked for whole
+    /// `OBJECT` records (a `SEEN` of an object it could not resolve).
+    pub enumerate_requests: u64,
 }
 
 impl Counters {
@@ -123,6 +126,7 @@ impl Counters {
         self.stale_leaves += o.stale_leaves;
         self.revivals += o.revivals;
         self.respawns_held += o.respawns_held;
+        self.enumerate_requests += o.enumerate_requests;
     }
 }
 
@@ -143,7 +147,10 @@ struct EnumRun {
     id: u64,
     before: BTreeSet<u64>,
     found: BTreeSet<u64>,
+    /// `OBJECT` records of the enumeration.
     count: u32,
+    /// `SEEN` IDs of the enumeration.
+    seen: u32,
     gap: bool,
 }
 
@@ -166,6 +173,16 @@ pub struct Reconciler {
     /// The binding mirror, by DCS object ID, for the loaded mission.
     binding: HashMap<u64, Binding>,
     run: Option<EnumRun>,
+    /// Objects whose `OBJECT` named a unit the store does not hold, with the
+    /// unit and whether an enumeration was asked for since. A `SEEN` for one
+    /// cannot resolve it. Once the store holds the unit, the first `SEEN` of
+    /// the object asks for an enumeration of whole `OBJECT` records, once. An
+    /// object whose unit the store never gains asks for nothing: a repeated
+    /// `OBJECT` cannot resolve it.
+    unresolved: BTreeMap<u64, (EntityId, bool)>,
+    /// A `GAP` of events was read and no enumeration without `SEEN` IDs was
+    /// used since: an enumeration with `SEEN` IDs is discarded.
+    guard: bool,
     enum_wanted: bool,
     /// The order revision the agent holds per group, as far as the reconciler
     /// knows, in the loaded generation.
@@ -228,6 +245,8 @@ impl Reconciler {
             inflight,
             binding: HashMap::new(),
             run: None,
+            unresolved: BTreeMap::new(),
+            guard: false,
             enum_wanted: false,
             order_held: HashMap::new(),
             order_refused: HashMap::new(),
@@ -330,6 +349,7 @@ impl Reconciler {
             Input::Gap(g) => {
                 if u64::from(g.class) == gap_class::EVENTS {
                     self.enum_wanted = true;
+                    self.guard = true;
                     // The lost records may be OBJECT rows: the mirror may
                     // lack objects DCS holds until the next enumeration.
                     self.enumerated = false;
@@ -348,6 +368,11 @@ impl Reconciler {
                     self.gone(store, g);
                 }
             }
+            Input::Seen(s) => {
+                if self.current(store, r.agent_boot) {
+                    self.seen(store, &s);
+                }
+            }
             Input::EnumBegin(e) => {
                 if self.current(store, r.agent_boot) {
                     self.run = Some(EnumRun {
@@ -355,6 +380,7 @@ impl Reconciler {
                         before: self.binding.keys().copied().collect(),
                         found: BTreeSet::new(),
                         count: 0,
+                        seen: 0,
                         // An enumeration made under another campaign says
                         // nothing of this campaign's objects.
                         gap: self.stamp.2 != store.campaign().0,
@@ -363,7 +389,7 @@ impl Reconciler {
             }
             Input::EnumEnd(e) => {
                 if self.current(store, r.agent_boot) {
-                    self.enum_end(store, e.enumeration, e.objects);
+                    self.enum_end(store, e.enumeration, e.objects, e.seen);
                 }
             }
             Input::Positions(rows) => {
@@ -440,6 +466,7 @@ impl Reconciler {
             theater: theater.clone(),
         });
         self.binding.clear();
+        self.unresolved.clear();
         self.order_held.clear();
         self.order_refused.clear();
         self.spawn_rejected.clear();
@@ -488,6 +515,7 @@ impl Reconciler {
             // another campaign discards the binding and every applied
             // revision when this sidecar's CAMPAIGN reaches it.
             self.binding.clear();
+            self.unresolved.clear();
             self.order_held.clear();
             self.order_refused.clear();
             self.run = None;
@@ -761,7 +789,10 @@ impl Reconciler {
             self.counters.unmanaged += 1;
             return None;
         };
-        let u = store.unit(unit)?;
+        let Some(u) = store.unit(unit) else {
+            self.unresolved.entry(o.object).or_insert((unit, false)).0 = unit;
+            return None;
+        };
         Some(Binding {
             unit,
             group: u.group,
@@ -809,7 +840,38 @@ impl Reconciler {
         }
         store.set_missing(row.unit, false);
         store.set_object(row.unit, o.object);
+        self.unresolved.remove(&o.object);
         self.binding.insert(o.object, row);
+    }
+
+    /// `SEEN`: the rows the agent found whose `OBJECT` is unchanged. The ones
+    /// the reconciler binds are found in the run. An ID it does not bind is no
+    /// refusal: the object is unmanaged, or another campaign's. A `SEEN`
+    /// stamped under another campaign marks the run's gap, as an `OBJECT`
+    /// does. An ID whose `OBJECT` the reconciler could not resolve, and whose
+    /// unit the store now holds, asks once for an enumeration of whole
+    /// `OBJECT` records.
+    fn seen(&mut self, store: &Store, s: &Seen) {
+        let other = self.stamp.2 != store.campaign().0;
+        let Some(run) = &mut self.run else {
+            return;
+        };
+        if s.enumeration != run.id {
+            return;
+        }
+        run.seen = run.seen.saturating_add(s.objects.len() as u32);
+        run.gap |= other;
+        for id in &s.objects {
+            if self.binding.contains_key(id) {
+                run.found.insert(*id);
+            } else if let Some((unit, asked)) = self.unresolved.get_mut(id)
+                && !*asked
+                && store.unit(*unit).is_some()
+            {
+                *asked = true;
+                self.enum_wanted = true;
+            }
+        }
     }
 
     /// The unit and group an `OBJECT_GONE` is about: from the binding it
@@ -841,6 +903,7 @@ impl Reconciler {
 
     fn gone(&mut self, store: &mut Store, g: ObjectGone) {
         let row = self.binding.remove(&g.object);
+        self.unresolved.remove(&g.object);
         // The agent reported the row gone: ENUM_END does not count it
         // missing again (spec/records.md, "Layout: ENUM_END").
         if let Some(run) = &mut self.run {
@@ -930,15 +993,25 @@ impl Reconciler {
         }
     }
 
-    fn enum_end(&mut self, store: &mut Store, id: u64, objects: u32) {
+    fn enum_end(&mut self, store: &mut Store, id: u64, objects: u32, seen: u32) {
         let Some(run) = self.run.take() else {
             self.enum_wanted = true;
             return;
         };
-        if run.id != id || run.count != objects || run.gap {
+        if run.id != id || run.count != objects || run.seen != seen || run.gap {
             self.counters.enumerations_discarded += 1;
             self.enum_wanted = true;
             return;
+        }
+        if self.guard && seen > 0 {
+            // After a lost record, only an enumeration of whole `OBJECT`
+            // records can be trusted to repair the binding.
+            self.counters.enumerations_discarded += 1;
+            self.enum_wanted = true;
+            return;
+        }
+        if seen == 0 {
+            self.guard = false;
         }
         self.counters.enumerations += 1;
         self.enumerated = true;
@@ -1079,6 +1152,7 @@ impl Reconciler {
                 return;
             }
             self.enum_wanted = false;
+            self.counters.enumerate_requests += 1;
         }
         let loaded = store.loaded().expect("ready").clone();
         self.held

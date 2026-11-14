@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 use nanoprobe_transport::codec::Lv;
 use nanoprobe_transport::layout::kind;
 use nanoprobe_transport::records::{
-    Airbase, Ammo, Attitude, EnumBegin, EnumEnd, Object, ObjectGone, Positions, Vitals, Warehouse,
+    Airbase, Ammo, Attitude, EnumBegin, EnumEnd, Object, ObjectGone, Positions, Seen, Vitals,
+    Warehouse,
 };
 
 use crate::link::Link;
@@ -41,6 +42,9 @@ pub trait Port {
     fn syscall_frame(&self) -> bool;
     /// `HELLO` records written so far.
     fn hellos(&self) -> u64;
+    /// Event-class records the link has dropped so far, counted at the
+    /// moment of each drop.
+    fn event_drops(&self) -> u64;
     /// The boot of the last sidecar that attached.
     fn served_boot(&self) -> u64;
     /// Store the slice, periods and rows per clock read for the status block.
@@ -74,6 +78,9 @@ impl Port for Link {
     }
     fn hellos(&self) -> u64 {
         Link::hellos(self)
+    }
+    fn event_drops(&self) -> u64 {
+        Link::event_drops(self)
     }
     fn served_boot(&self) -> u64 {
         Link::served_boot(self)
@@ -222,6 +229,10 @@ struct Row {
     /// whether that enumeration found it.
     enum_member: u64,
     enum_seen: bool,
+    /// The `HELLO` count plus one when the row's last `OBJECT` was queued:
+    /// an `OBJECT` the current attach's sidecar may not have read has a
+    /// different value. 0 when none was queued.
+    sent: u64,
     /// Left out of every tier until an event or an enumeration settles it.
     suspect: bool,
     last: Option<[f64; 3]>,
@@ -263,6 +274,7 @@ impl Row {
             bound_group: false,
             enum_member: 0,
             enum_seen: false,
+            sent: 0,
             suspect: false,
             last: None,
             moving: false,
@@ -477,6 +489,9 @@ struct Batch {
     versions: Vec<u32>,
     /// The tier's cursor place after each slot.
     after: Vec<usize>,
+    /// How many of the batch's slots come before the end of the list, when
+    /// its places pass it: the rest are the next pass's.
+    wrap: Option<usize>,
     done: usize,
     started: Option<Instant>,
     /// The clock at the first row's sink, and at the last clock check with
@@ -638,6 +653,20 @@ pub struct Sampler {
     enum_due: bool,
     enum_last_begin: Option<Instant>,
     enum_queued: bool,
+    /// The `full` flag: the next enumeration writes `OBJECT` for every row.
+    /// `ENUMERATE`, every `HELLO` and every dropped event-class record set it
+    /// (spec/records.md, "Layout: SEEN"); `ENUM_BEGIN` takes it.
+    full: bool,
+    /// Whether the running enumeration took the flag.
+    enum_full: bool,
+    /// The link's count of dropped event-class records at the last
+    /// `ENUM_BEGIN`.
+    drops_seen: u64,
+    /// The IDs of the open `SEEN` batch, and the enumeration it belongs to.
+    seen_ids: Vec<u64>,
+    seen_n: u64,
+    /// IDs the running enumeration wrote in `SEEN` records, queued or open.
+    enum_seen_ids: u32,
     /// Begins of the last two enumerations that ended.
     enum_ended_begins: (Option<Instant>, Option<Instant>),
     /// Subscriptions: entities, their period, the attitude flag, and the
@@ -696,6 +725,10 @@ pub struct Sampler {
     /// A test switches the starvation guard off.
     #[cfg(test)]
     no_guard: bool,
+    /// A test caps vitals' credit at one sweep's rows, to measure what the
+    /// full-cycle cap changes.
+    #[cfg(test)]
+    vitals_cap_one_sweep: bool,
     /// When a batch of each tier was last planned.
     last_planned: [Option<Instant>; 8],
     /// The tier the pump's planning runs late, which takes one row.
@@ -934,6 +967,12 @@ impl Sampler {
             enum_due: true,
             enum_last_begin: None,
             enum_queued: false,
+            full: true,
+            enum_full: true,
+            drops_seen: 0,
+            seen_ids: Vec::new(),
+            seen_n: 0,
+            enum_seen_ids: 0,
             enum_ended_begins: (None, None),
             sub_entities: HashSet::new(),
             sub_period: 1.0,
@@ -963,6 +1002,8 @@ impl Sampler {
             unaffordable: [false; 8],
             #[cfg(test)]
             no_guard: false,
+            #[cfg(test)]
+            vitals_cap_one_sweep: false,
             last_planned: [None; 8],
             late_tier: None,
             x_decayed: false,
@@ -1099,6 +1140,8 @@ impl Sampler {
         self.enumeration = None;
         self.enum_queued = false;
         self.enum_due = true;
+        // The open batch names rows of the generation that ended.
+        self.seen_ids.clear();
         self.births = 0;
         self.airbases = 0;
         self.batch = Batch::default();
@@ -1162,8 +1205,42 @@ impl Sampler {
         if std::mem::take(&mut row.suspect) {
             self.recount = true;
         }
-        self.enqueue_known(link, slot, n);
+        // An unchanged row the sidecar has this attach's `OBJECT` of goes in
+        // a `SEEN` batch; every other row gets its `OBJECT` whole.
+        if self.enum_full || row.encoded.is_empty() || row.sent != link.hellos() + 1 {
+            self.enqueue_known(link, slot, n);
+        } else {
+            if self.seen_ids.is_empty() {
+                self.seen_n = n;
+            }
+            self.seen_ids.push(object);
+            self.enum_seen_ids += 1;
+            if self.seen_ids.len() >= Seen::capacity(link.max_payload()).max(1) {
+                self.flush_seen(link);
+            }
+        }
         Some(slot + 1)
+    }
+
+    /// Queue the open `SEEN` batch, if any.
+    fn flush_seen(&mut self, link: &mut impl Port) {
+        if self.seen_ids.is_empty() {
+            return;
+        }
+        let payload = Seen {
+            enumeration: self.seen_n,
+            objects: std::mem::take(&mut self.seen_ids),
+        }
+        .encode();
+        link.enqueue(kind::SEEN as u16, payload);
+        self.dirty = true;
+    }
+
+    /// Queue an event-class record behind the open `SEEN` batch, which goes
+    /// before every other event-class record (spec/records.md, "Layout: SEEN").
+    fn put(&mut self, link: &mut impl Port, kind: u16, payload: Vec<u8>) {
+        self.flush_seen(link);
+        link.enqueue(kind, payload);
     }
 
     /// Queue the `OBJECT` of the row in `slot` with enumeration `n`'s number,
@@ -1178,11 +1255,12 @@ impl Sampler {
         if row.encoded.is_empty() {
             row.encoded = object_record(row, 0).encode();
         }
+        row.sent = link.hellos() + 1;
         let mut payload = row.encoded.clone();
         let at = Object::ENUMERATION_AT;
         payload[at..at + 8].copy_from_slice(&n.to_le_bytes());
         self.enum_objects += 1;
-        link.enqueue(kind::OBJECT as u16, payload);
+        self.put(link, kind::OBJECT as u16, payload);
         self.dirty = true;
     }
 
@@ -1231,6 +1309,7 @@ impl Sampler {
         self.rows[slot as usize] = Some(Row {
             version,
             life_marked: true,
+            sent: link.hellos() + 1,
             ..row
         });
         self.by_object.insert(object, slot);
@@ -1248,7 +1327,7 @@ impl Sampler {
     }
 
     fn enqueue_object(&mut self, link: &mut impl Port, record: Object) {
-        link.enqueue(kind::OBJECT as u16, record.encode());
+        self.put(link, kind::OBJECT as u16, record.encode());
         self.dirty = true;
     }
 
@@ -1294,7 +1373,7 @@ impl Sampler {
             if kept.reason == gone::REMOVED {
                 self.classifier_faults += 1;
             }
-            link.enqueue(kind::OBJECT_GONE as u16, record.encode());
+            self.put(link, kind::OBJECT_GONE as u16, record.encode());
         }
         0
     }
@@ -1426,11 +1505,13 @@ impl Sampler {
 
     /// Queue `ENUM_END` for enumeration `n`.
     fn finish_enumeration(&mut self, link: &mut impl Port, n: u64) {
-        link.enqueue(
+        self.put(
+            link,
             kind::ENUM_END as u16,
             EnumEnd {
                 enumeration: n,
                 objects: self.enum_objects,
+                seen: self.enum_seen_ids,
             }
             .encode(),
         );
@@ -1634,7 +1715,7 @@ impl Sampler {
         self.stopped.retain(|s| *s != slot);
         self.life_marks.retain(|s| *s != slot);
         self.ammo_marks.retain(|s| *s != slot);
-        link.enqueue(kind::OBJECT_GONE as u16, gone_record.encode());
+        self.put(link, kind::OBJECT_GONE as u16, gone_record.encode());
         self.resolve_miss(link, object, false);
         slot + 1
     }
@@ -1778,6 +1859,9 @@ impl Sampler {
 
     /// `ENUMERATE`: start an enumeration, or one more after the one running.
     pub fn request_enumeration(&mut self) {
+        // An enumeration that follows a request, a `HELLO` or a drop writes
+        // every row whole; the flag holds until `ENUM_BEGIN` takes it.
+        self.full = true;
         if self.enumeration.is_some() || self.end_hold.is_some() {
             self.enum_queued = true;
         } else {
@@ -1993,7 +2077,62 @@ impl Sampler {
         if 3.0 * self.xcall_us > reach && !std::mem::replace(&mut self.x_decayed, true) {
             self.xcall_us *= 0.99;
         }
-        b.slice - fixed - reserved >= gate
+        let left = b.slice - fixed - reserved;
+        if left < gate {
+            return false;
+        }
+        // Below scale 1 the pump's budget is `k` of what is left
+        // (`Sampler::begin`), which can be less than a batch's fixed part,
+        // its close and one row. With no debt the first batch then takes a
+        // row anyway, and the overrun becomes debt (`Sampler::affordable`).
+        // In debt it takes none, so a pump comes only when the budget pays
+        // for a row (the tenth-overrun ruling; S10's debug mock at k = 0.1
+        // planned no row on 30 to 50 % of pumps, all of them in debt).
+        // A pump for the subscribed rows is not held back by debt.
+        let in_debt = self.budget.debt > 0.0;
+        let k = self.scale();
+        let maintenance = self.births > 0 || self.enum_due || self.enumeration.is_some();
+        if k < 1.0 && maintenance && !self.sub_wanted() && self.urgent.is_empty() {
+            // A pump that comes for maintenance (births pending, or the
+            // enumeration) pays the call and plans nothing when the budget
+            // cannot pay its first step (LIVE, S11: 50 births pending for
+            // over 2 minutes at k = 0.1, about 8 such pumps a second). While
+            // rows are owed, maintenance goes only on a balance of a batch
+            // (`Sampler::maintenance_may`). On a short one it plans no step
+            // and the pump comes for the owed rows alone; with only event
+            // marks owed, which may not be ripe, or a tier whose cost is
+            // unmeasured, it plans nothing unless the budget pays a row.
+            // The budget must pay the step, a batch's fixed part and the
+            // close. With no debt a measured step goes alone whatever the
+            // budget, as above: the budget never reaches one step at a tenth
+            // of the slice, and holding it to that would starve it. An
+            // unmeasured step counts as free, so the first one still goes.
+            let may = !self.rows_owed() || self.maintenance_us >= self.maintenance_batch();
+            let step = if !may {
+                self.cheapest(false)
+            } else if self.enum_due || self.enumeration.is_some() {
+                Some(self.tiers[Tier::Enumeration.index()].cost)
+            } else {
+                Some(self.tiers[Tier::Births.index()].cost)
+            };
+            return match step {
+                None => false,
+                Some(step) if in_debt || (!may && !self.credit_owed()) => {
+                    k * (left - self.xcall_us)
+                        >= step.max(0.0) + self.batch_us + self.close_us + 2.0 * self.close_dev_us
+                }
+                Some(_) => true,
+            };
+        }
+        if k < 1.0
+            && in_debt
+            && !self.sub_wanted()
+            && let Some(row) = self.cheapest_owed()
+        {
+            return k * (left - self.xcall_us)
+                >= row + self.batch_us + self.close_us + 2.0 * self.close_dev_us;
+        }
+        true
     }
 
     /// Tell the sampler whether the host sweeps positions itself, by object
@@ -2618,10 +2757,21 @@ impl Sampler {
                 self.rates.warehouse_s,
             ),
         ];
+        #[cfg(test)]
+        let one_sweep = self.vitals_cap_one_sweep;
+        #[cfg(not(test))]
+        let one_sweep = false;
         for (tier, n, period) in periods {
             let t = &mut self.tiers[tier.index()];
             let period = period.max(1e-3);
-            t.credit = (t.credit + n * dt / period).min(n.max(1.0));
+            // A tier holds at most one sweep's rows. Vitals holds one full slow
+            // cycle, every row once: a stall or a higher tier's hold costs it
+            // more than a twelfth of its rows, and the rows owed are repaid.
+            let cap = match tier {
+                Tier::Vitals if !one_sweep => n.max(rows),
+                _ => n,
+            };
+            t.credit = (t.credit + n * dt / period).min(cap.max(1.0));
             if t.credit >= 1.0 {
                 t.owed_since.get_or_insert(now);
                 // A slow sweep's first period runs from the first row owed.
@@ -2841,6 +2991,21 @@ impl Sampler {
         None
     }
 
+    /// Whether a row tier with a measured cost owes rows by its credit, not
+    /// by marks.
+    fn credit_owed(&self) -> bool {
+        !self.stopped.is_empty()
+            || [
+                Tier::Subscribed,
+                Tier::Positions,
+                Tier::Vitals,
+                Tier::Ammo,
+                Tier::Warehouses,
+            ]
+            .iter()
+            .any(|t| self.tiers[t.index()].credit >= 1.0 && self.tiers[t.index()].cost > 0.0)
+    }
+
     /// Whether a row tier owes rows.
     fn rows_owed(&self) -> bool {
         !self.stopped.is_empty()
@@ -2909,6 +3074,56 @@ impl Sampler {
             + self.stopped.len() as f64 * cost(Tier::Stopped)
             + (self.life_marks.len() + self.checks.len()) as f64 * cost(Tier::Vitals)
             + self.ammo_marks.len() as f64 * cost(Tier::Ammo)
+    }
+
+    /// The cost of the cheapest row or item the pump owes, µs; `None` when
+    /// it owes nothing. An unmeasured tier counts as free, so it still gets
+    /// its first batch.
+    fn cheapest_owed(&self) -> Option<f64> {
+        self.cheapest(true)
+    }
+
+    /// [`Sampler::cheapest_owed`], counting births and the enumeration only
+    /// when `maintenance`.
+    fn cheapest(&self, maintenance: bool) -> Option<f64> {
+        let cost = |t: Tier| self.tiers[t.index()].cost.max(0.0);
+        // While the host's sweep is behind, `plan` gives no row to the tiers
+        // below the positions.
+        let held = self.behind();
+        let mut owed = vec![];
+        if !held {
+            for t in [Tier::Vitals, Tier::Ammo, Tier::Warehouses] {
+                if self.tiers[t.index()].credit >= 1.0 {
+                    owed.push(cost(t));
+                }
+            }
+            if !self.stopped.is_empty() {
+                owed.push(cost(Tier::Stopped));
+            }
+            if !self.life_marks.is_empty() || !self.checks.is_empty() {
+                owed.push(cost(Tier::Vitals));
+            }
+            if !self.ammo_marks.is_empty() {
+                owed.push(cost(Tier::Ammo));
+            }
+        }
+        if !self.direct {
+            for t in [Tier::Subscribed, Tier::Positions] {
+                if self.tiers[t.index()].credit >= 1.0 {
+                    owed.push(cost(t));
+                }
+            }
+        }
+        if self.sub_wanted() {
+            owed.push(cost(Tier::Subscribed));
+        }
+        if maintenance && self.births > 0 {
+            owed.push(cost(Tier::Births));
+        }
+        if maintenance && (self.enum_due || self.enumeration.is_some()) {
+            owed.push(cost(Tier::Enumeration));
+        }
+        owed.into_iter().reduce(f64::min)
     }
 
     /// An enumeration that has run longer than its period.
@@ -2988,6 +3203,12 @@ impl Sampler {
                     let n = self.enum_count;
                     self.enumeration = Some(n);
                     self.enum_objects = 0;
+                    self.enum_seen_ids = 0;
+                    self.flush_seen(link);
+                    let drops = link.event_drops();
+                    self.full |= drops != self.drops_seen;
+                    self.drops_seen = drops;
+                    self.enum_full = std::mem::take(&mut self.full);
                     self.enum_last_begin = Some(now);
                     for row in self.rows.iter_mut().flatten() {
                         if row.found.object != 0 {
@@ -2995,7 +3216,8 @@ impl Sampler {
                             row.enum_seen = false;
                         }
                     }
-                    link.enqueue(
+                    self.put(
+                        link,
                         kind::ENUM_BEGIN as u16,
                         EnumBegin { enumeration: n }.encode(),
                     );
@@ -3133,6 +3355,11 @@ impl Sampler {
     /// sweep's count and the slot pick the sweep, so each sweep reads an
     /// even share of them.
     fn readable(&self, tier: Tier, place: usize) -> Option<u32> {
+        self.readable_at(tier, place, 0)
+    }
+
+    /// [`Sampler::readable`] in the pass `ahead` after the current one.
+    fn readable_at(&self, tier: Tier, place: usize, ahead: u64) -> Option<u32> {
         match tier {
             Tier::Warehouses => Some(place as u32),
             Tier::Subscribed => {
@@ -3145,7 +3372,7 @@ impl Sampler {
                 let turn = |every: Option<u64>| {
                     every.is_some_and(|every| {
                         pass_of(tier).is_some_and(|i| {
-                            (self.passes[i] + u64::from(slot)).is_multiple_of(every)
+                            (self.passes[i] + ahead + u64::from(slot)).is_multiple_of(every)
                         })
                     })
                 };
@@ -3163,26 +3390,46 @@ impl Sampler {
     /// Fill `slots` with up to `n` readable places of a tier from its
     /// cursor, passing the end of the list at most once. The batch keeps the
     /// cursor place after each slot.
+    ///
+    /// Each place is evaluated once in a pass: the places past the end of
+    /// the list belong to the next pass, which the batch's close counts. The
+    /// batch notes where that pass begins, in `wrap`. A fill that finds
+    /// nothing from a cursor inside the list completes the lap at once, and
+    /// the next fill starts at the head.
     fn fill(&mut self, tier: Tier, n: usize, now: Instant, slots: &mut Vec<u32>) {
         let len = self.list_len(tier);
         self.batch.after.clear();
+        self.batch.wrap = None;
         if len == 0 {
             return;
         }
-        let mut place = self.tiers[tier.index()].cursor.min(len);
+        let start = self.tiers[tier.index()].cursor.min(len);
+        let mut place = start;
         self.tiers[tier.index()].sweep_start.get_or_insert(now);
         let mut looked = 0;
+        let mut ahead = 0;
         while slots.len() < n && looked < len {
             if place >= len {
                 place = 0;
+                ahead = 1;
+                self.batch.wrap = Some(self.batch.after.len());
             }
             let here = place;
             place += 1;
             looked += 1;
-            if let Some(slot) = self.readable(tier, here) {
+            if let Some(slot) = self.readable_at(tier, here, ahead) {
                 slots.push(slot);
                 self.batch.after.push(place);
             }
+        }
+        if self.batch.after.is_empty() && looked == len {
+            // Nothing is due from the cursor to the end or from the head to
+            // the cursor, one pass on: the lap is complete. From the head
+            // that is the whole list in this pass, and the lap is complete
+            // as well, so the pass count moves to a pass with rows due.
+            self.batch.wrap = None;
+            self.completed(tier, now);
+            self.tiers[tier.index()].cursor = 0;
         }
     }
 
@@ -3193,6 +3440,11 @@ impl Sampler {
         let Some(tier) = self.batch.tier.take() else {
             return;
         };
+        if tier == Tier::Enumeration {
+            // No other record of the pump's frame, or of an event after it,
+            // goes ahead of the batch's `SEEN`.
+            self.flush_seen(link);
+        }
         let done = self
             .batch
             .done
@@ -3351,21 +3603,25 @@ impl Sampler {
                 // The cursor's rows: the ones after the marked.
                 let done = all.saturating_sub(lead);
                 let len = self.list_len(tier);
-                let start = self.tiers[tier.index()].cursor.min(len);
+                let wrap = self.batch.wrap.take();
                 let t = &mut self.tiers[tier.index()];
                 t.credit = (t.credit - done as f64).max(0.0);
                 if done > 0 && done <= self.batch.after.len() {
                     let end = self.batch.after[done - 1];
-                    // The batch passed the end of the list when a later place
-                    // is not after the start, or it reached the end.
-                    let wrapped = end <= start || end >= len;
                     t.cursor = if end >= len { 0 } else { end };
                     let cursor = t.cursor;
-                    let rest_empty =
-                        !wrapped && (cursor..len).all(|p| self.readable(tier, p).is_none());
-                    if wrapped || rest_empty {
+                    // A batch that read a place past the end of the list
+                    // completed the lap its first places were in, and the
+                    // places it read are the next pass's. It also completes
+                    // the lap when it reached the end or no place after its
+                    // last row is due.
+                    let past = wrap.is_some_and(|w| done > w);
+                    let rest_empty = !past
+                        && cursor > 0
+                        && (cursor..len).all(|p| self.readable(tier, p).is_none());
+                    if past || end >= len || rest_empty {
                         self.completed(tier, now);
-                        if rest_empty {
+                        if !past {
                             self.tiers[tier.index()].cursor = 0;
                         }
                     }
@@ -4451,3 +4707,7 @@ mod tests;
 #[cfg(test)]
 #[path = "sampler_gone_tests.rs"]
 mod gone_tests;
+
+#[cfg(test)]
+#[path = "sampler_seen_tests.rs"]
+mod seen_tests;

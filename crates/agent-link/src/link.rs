@@ -214,6 +214,23 @@ const FRAME_LEN: usize = 56;
 /// Diagnostic lines kept for the host at most; more are dropped.
 const NOTES: usize = 256;
 
+/// The per-frame cap on the agent's time, µs (the owner's p99 target).
+pub const FRAME_CAP_US: f64 = 250.0;
+
+/// Frames whose agent time passed [`FRAME_CAP_US`], counted exactly.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FrameTail {
+    /// Frames past the cap.
+    pub over: u64,
+    /// Of those, system-call frames.
+    pub syscall_over: u64,
+    /// The longest frame, µs.
+    pub max_us: f64,
+    /// The longest real time, s, between the starts of two consecutive
+    /// frames. A gap counts when it ends; the first frame adds none.
+    pub gap_max_s: f64,
+}
+
 /// The agent's side of the transport.
 pub struct Link {
     opts: Options,
@@ -262,6 +279,12 @@ pub struct Link {
     /// all: later frames store only the words that changed.
     metrics_stored: Option<Metrics>,
     last_pump: Option<Instant>,
+    /// Since the last `take_frame_tail`: frames whose agent time passed
+    /// [`FRAME_CAP_US`], all and system-call frames, and the longest frame.
+    frame_tail: FrameTail,
+    /// Event time, µs, since the last frame ended. The next frame's agent
+    /// time for the tail includes it (spec/sampling.md, "Slice").
+    events_us: f64,
     notes: Vec<String>,
     /// The theater and mission of the last `LIFECYCLE`, for the last one
     /// [`Link::disable`] writes.
@@ -356,6 +379,8 @@ impl Link {
             metrics: Metrics::default(),
             metrics_stored: None,
             last_pump: None,
+            frame_tail: FrameTail::default(),
+            events_us: 0.0,
             notes,
             names: (String::new(), String::new()),
             #[cfg(feature = "faults")]
@@ -1029,8 +1054,18 @@ impl Link {
         }
     }
 
+    /// The frames past [`FRAME_CAP_US`] and the longest frame since the last
+    /// call, then start counting again. The pump histogram's bucket edge is
+    /// 256 µs, so it cannot show a p99 against 250 µs exactly.
+    pub fn take_frame_tail(&mut self) -> FrameTail {
+        std::mem::take(&mut self.frame_tail)
+    }
+
     /// Count the agent's time for one world event in `hist_event`.
     pub fn record_event(&mut self, cost_us: f64) {
+        if cost_us.is_finite() && cost_us > 0.0 {
+            self.events_us += cost_us;
+        }
         self.metrics.hist[3][status::bucket(cost_us)] += 1;
     }
 
@@ -1334,11 +1369,23 @@ impl Link {
         let began = self.began;
         let pump_us = began.elapsed().as_secs_f64() * 1e6;
         self.metrics.hist[0][status::bucket(pump_us)] += 1;
+        // Agent time: the frame span plus the events since the last frame,
+        // the basis of `Sampler::end_frame`. The histograms keep the span.
+        let agent_us = pump_us + std::mem::take(&mut self.events_us);
+        let t = &mut self.frame_tail;
+        t.max_us = t.max_us.max(agent_us);
+        if agent_us > FRAME_CAP_US {
+            t.over += 1;
+            if self.syscall_frame {
+                t.syscall_over += 1;
+            }
+        }
         if self.syscall_frame {
             self.metrics.hist[4][status::bucket(pump_us)] += 1;
         }
         if let Some(prev) = self.last_pump {
             let interval = began.duration_since(prev).as_secs_f64() * 1e6;
+            self.frame_tail.gap_max_s = self.frame_tail.gap_max_s.max(interval * 1e-6);
             self.metrics.hist[1][status::bucket(interval)] += 1;
             let avg = &mut self.metrics.frame_interval_us;
             *avg = if *avg == 0.0 {
@@ -1363,6 +1410,15 @@ impl Link {
     /// enumeration when it grows.
     pub fn hellos(&self) -> u64 {
         self.hellos
+    }
+
+    /// Event-class records other than logs dropped in this process, counted
+    /// when each is dropped: a `GAP` of events, written or pending, covers
+    /// each. A sampler's next enumeration writes every row whole when it grew
+    /// (spec/records.md, "Layout: SEEN"). A dropped log cannot leave the
+    /// sidecar's mirror stale, so it does not count.
+    pub fn event_drops(&self) -> u64 {
+        self.counters.events_dropped
     }
 
     /// The boot of the last sidecar that attached, 0 before any.
@@ -1435,8 +1491,30 @@ mod tests {
 
     const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+    /// A test's folder, removed when dropped, so a failed test leaves none.
+    struct Folder(PathBuf);
+
+    impl std::ops::Deref for Folder {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<std::path::Path> for Folder {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Folder {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// A link on a free port in its own folder, and the folder.
-    fn open(name: &str) -> (Link, PathBuf) {
+    fn open(name: &str) -> (Link, Folder) {
         let port = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -1446,7 +1524,7 @@ mod tests {
     }
 
     /// A link on `port` in its own folder, and the folder.
-    fn open_on(name: &str, port: u16) -> (Link, PathBuf) {
+    fn open_on(name: &str, port: u16) -> (Link, Folder) {
         let dir = std::env::temp_dir().join(format!(
             "nanoprobe-link-{name}-{}",
             nanoprobe_transport::random_nonzero()
@@ -1467,7 +1545,7 @@ mod tests {
             dcs_version: "test".into(),
         })
         .unwrap();
-        (link, dir)
+        (link, Folder(dir))
     }
 
     /// Pump frames every 10 ms until `done`, at most `limit`. Returns the
@@ -1585,6 +1663,29 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[test]
+    fn event_drops_count_each_dropped_event_class_record_when_it_drops() {
+        let (mut link, _dir) = open("drops");
+        assert_eq!(link.event_drops(), 0);
+        let big = vec![0u8; 20 << 10];
+        // 64 KiB of queue holds three of these; the fourth drops the oldest.
+        for i in 1..=3 {
+            link.enqueue(kind::OBJECT as u16, big.clone());
+            assert_eq!(link.event_drops(), 0, "record {i}");
+        }
+        link.enqueue(kind::OBJECT as u16, big.clone());
+        assert_eq!(link.event_drops(), 1);
+        // With no log queued, the oldest other record makes room for one.
+        link.enqueue(kind::LOG as u16, vec![0u8; 20 << 10]);
+        assert_eq!(link.event_drops(), 2);
+        // Then the log drops first, and a dropped log does not count.
+        link.enqueue(kind::LOG as u16, vec![0u8; 20 << 10]);
+        assert_eq!(link.event_drops(), 2);
+        // A control record is no event-class record.
+        link.enqueue(kind::RESULT as u16, vec![0u8; 16]);
+        assert_eq!(link.event_drops(), 2);
+    }
+
     #[cfg(feature = "faults")]
     #[test]
     fn publish_now_writes_no_hello_after_a_lost_control_record() {
@@ -1615,6 +1716,63 @@ mod tests {
         );
         assert!(!link.reading_commands());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Event time since the last frame counts toward the frame's agent time
+    /// in the tail, and only once.
+    #[test]
+    fn event_time_pushes_a_frame_past_the_cap_in_the_tail() {
+        let (mut link, dir) = open("tail-events");
+        // A frame under the cap with no events counts nothing.
+        link.begin(Instant::now(), 0.0, 0.0);
+        link.end();
+        assert_eq!(link.take_frame_tail().over, 0);
+        // 200 µs of events before a frame make it exceed 250 µs.
+        link.record_event(100.0);
+        link.record_event(100.0);
+        link.begin(Instant::now(), 0.0, 0.0);
+        std::thread::sleep(Duration::from_micros(100));
+        link.end();
+        let t = link.take_frame_tail();
+        assert_eq!(t.over, 1);
+        assert!(t.max_us >= 300.0, "max {}", t.max_us);
+        // The events were spent: the next quiet frame is under the cap.
+        link.begin(Instant::now(), 0.0, 0.0);
+        link.end();
+        let t = link.take_frame_tail();
+        assert_eq!(t.over, 0, "events counted twice, max {}", t.max_us);
+        // Counted twice, the 200 µs of events would show in this frame's max.
+        assert!(t.max_us < 150.0, "events counted twice, max {}", t.max_us);
+        // A taken tail starts again from zero.
+        assert_eq!(link.take_frame_tail(), FrameTail::default());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The tail keeps the longest gap between frame starts: the first frame
+    /// adds none, a gap counts in the window where it ends, and a taken tail
+    /// starts again.
+    #[test]
+    fn the_tail_keeps_the_longest_gap_between_frames() {
+        let (mut link, dir) = open("tail-gap");
+        let t0 = Instant::now();
+        link.begin(t0, 0.0, 0.0);
+        link.end();
+        assert_eq!(link.take_frame_tail().gap_max_s, 0.0, "first frame");
+        link.begin(t0 + Duration::from_millis(50), 0.0, 0.0);
+        link.end();
+        link.begin(t0 + Duration::from_millis(1550), 0.0, 0.0);
+        link.end();
+        link.begin(t0 + Duration::from_millis(1600), 0.0, 0.0);
+        link.end();
+        let g = link.take_frame_tail().gap_max_s;
+        assert!((g - 1.5).abs() < 1e-6, "gap {g}");
+        // The next window sees only its own gaps.
+        link.begin(t0 + Duration::from_millis(1700), 0.0, 0.0);
+        link.end();
+        let g = link.take_frame_tail().gap_max_s;
+        assert!((g - 0.1).abs() < 1e-6, "gap {g}");
+        assert_eq!(link.take_frame_tail().gap_max_s, 0.0);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Each event's time is counted in `hist_event` and in no other histogram.

@@ -69,7 +69,7 @@ pub mod gone_reason {
     pub const REMOVED: u32 = 4;
 }
 
-pub use nanoprobe_transport::records::{Object, ObjectGone};
+pub use nanoprobe_transport::records::{Object, ObjectGone, Seen};
 
 /// `ENUM_BEGIN` and `ENUM_END`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -78,6 +78,8 @@ pub struct Enumeration {
     pub enumeration: u64,
     /// `OBJECT` records it wrote; `ENUM_END` only.
     pub objects: u32,
+    /// IDs it wrote in `SEEN` records; `ENUM_END` only.
+    pub seen: u32,
 }
 
 impl Enumeration {
@@ -94,6 +96,7 @@ impl Enumeration {
         EnumEnd {
             enumeration: self.enumeration,
             objects: self.objects,
+            seen: self.seen,
         }
         .encode()
     }
@@ -103,6 +106,7 @@ impl Enumeration {
         Ok(Enumeration {
             enumeration: EnumBegin::decode(b)?.enumeration,
             objects: 0,
+            seen: 0,
         })
     }
 
@@ -112,6 +116,7 @@ impl Enumeration {
         Ok(Enumeration {
             enumeration: e.enumeration,
             objects: e.objects,
+            seen: e.seen,
         })
     }
 }
@@ -204,6 +209,8 @@ pub enum Input {
     Object(Object),
     /// `OBJECT_GONE`
     ObjectGone(ObjectGone),
+    /// `SEEN`
+    Seen(Seen),
     /// `ENUM_BEGIN`
     EnumBegin(Enumeration),
     /// `ENUM_END`
@@ -229,6 +236,7 @@ impl Input {
             kind::GAP => Input::Gap(Gap::decode(payload)?),
             kind::OBJECT => Input::Object(Object::decode(payload)?),
             kind::OBJECT_GONE => Input::ObjectGone(ObjectGone::decode(payload)?),
+            kind::SEEN => Input::Seen(Seen::decode(payload)?),
             kind::ENUM_BEGIN => Input::EnumBegin(Enumeration::decode_begin(payload)?),
             kind::ENUM_END => Input::EnumEnd(Enumeration::decode_end(payload)?),
             kind::POSITIONS => Input::Positions(decode_positions(payload)?),
@@ -248,6 +256,7 @@ impl Input {
             Input::Gap(g) => (kind::GAP, g.encode()),
             Input::Object(o) => (kind::OBJECT, o.encode()),
             Input::ObjectGone(g) => (kind::OBJECT_GONE, g.encode()),
+            Input::Seen(s) => (kind::SEEN, s.encode()),
             Input::EnumBegin(e) => (kind::ENUM_BEGIN, e.encode_begin()),
             Input::EnumEnd(e) => (kind::ENUM_END, e.encode_end()),
             Input::Positions(p) => (kind::POSITIONS, encode_positions(p)),
@@ -528,6 +537,7 @@ mod tests {
             ("OBJECT", Object::default().encode().len() - 6),
             ("ENUM_BEGIN", Enumeration::default().encode_begin().len()),
             ("ENUM_END", Enumeration::default().encode_end().len()),
+            ("SEEN", Seen::default().encode().len()),
         ] {
             assert_eq!(golden::layout(name).unwrap().fixed, len, "{name}");
         }
@@ -560,10 +570,16 @@ mod tests {
             Input::EnumBegin(Enumeration {
                 enumeration: 4,
                 objects: 0,
+                seen: 0,
+            }),
+            Input::Seen(Seen {
+                enumeration: 4,
+                objects: vec![7, 8],
             }),
             Input::EnumEnd(Enumeration {
                 enumeration: 4,
                 objects: 11,
+                seen: 2,
             }),
             Input::Positions(vec![
                 Position {

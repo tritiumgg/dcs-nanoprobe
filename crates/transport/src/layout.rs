@@ -179,7 +179,7 @@ codes! {
     kind "record_kind" {
         PADDING = 0, FRAME = 1, HELLO = 2, LIFECYCLE = 3, RESULT = 4, GAP = 5,
         OBJECT = 16, OBJECT_GONE = 17, ENUM_BEGIN = 18, ENUM_END = 19, EVENT = 20,
-        AUTHOR_EVENT = 21, PLAYER = 22, MENU = 23, LOG = 24,
+        AUTHOR_EVENT = 21, PLAYER = 22, MENU = 23, LOG = 24, SEEN = 25,
         POSITIONS = 32, VITALS = 33, ATTITUDE = 34, AMMO = 35, WAREHOUSE = 36,
         AIRBASE = 37, EXTENSION = 38,
     }
@@ -221,7 +221,7 @@ pub enum Class {
 pub fn record_class(kind: u64) -> Option<Class> {
     match kind {
         1..=5 => Some(Class::Control),
-        16..=24 => Some(Class::Event),
+        16..=25 => Some(Class::Event),
         32..=38 => Some(Class::Sample),
         _ => None,
     }

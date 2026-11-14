@@ -14,6 +14,8 @@ struct Rec {
     share: f64,
     syscall: bool,
     hellos: u64,
+    /// Event-class records the recorder pretends to have dropped.
+    drops: u64,
     boot: u64,
     slice: f64,
     periods: [f64; 5],
@@ -28,6 +30,7 @@ impl Rec {
             share,
             syscall: false,
             hellos: 1,
+            drops: 0,
             boot: 1,
             slice: 0.0,
             periods: [0.0; 5],
@@ -68,6 +71,9 @@ impl Port for Rec {
     }
     fn hellos(&self) -> u64 {
         self.hellos
+    }
+    fn event_drops(&self) -> u64 {
+        self.drops
     }
     fn served_boot(&self) -> u64 {
         self.boot
@@ -3044,3 +3050,326 @@ fn check_pumps_are_counted_apart_from_row_frames() {
     assert!((s.overrun_max - 15.0).abs() < 1e-6, "{}", s.overrun_max);
     assert_eq!(s.check_overrun, 0.0);
 }
+
+/// Run `secs` more seconds after a gap of `gap_s` seconds with no frame (a
+/// stall), returning the run.
+fn run_after(s: &mut Sampler, rec: &mut Rec, w: &mut World, gap_s: f64, secs: f64) -> Run {
+    rec.began += Duration::from_nanos(9_090_909) + Duration::from_secs_f64(gap_s);
+    run_x(s, rec, w, secs, 110.0, 165.0, 23.0, 3.0)
+}
+
+/// Vitals rows a second at 2,000 rows with 50 subscribed units: the 50 each
+/// 5 s period, and a twelfth of the other 1,950 each period.
+const VITALS_ROWS_S: f64 = (50.0 + 1950.0 / 12.0) / 5.0;
+
+/// What a 2,000-row cycle with a stall and an enumeration did to vitals.
+struct Cycle {
+    /// Vitals rows read from the start of the stall to the end of the
+    /// window, and the window's real seconds, stall included.
+    vitals_rows: f64,
+    window_s: f64,
+    /// The most vitals rows a second in any 10 s after the stall began.
+    peak_rows_s: f64,
+    /// The longest positions period, and the subscribed period, seen after
+    /// the stall began.
+    worst_positions: f64,
+    sub_period: f64,
+    sub_before: f64,
+    /// Vitals period and slow-sweep period over the last 30 s.
+    vitals_tail: f64,
+    slow_end: f64,
+    over_250: usize,
+    forgiven_us: f64,
+}
+
+/// A mission at 2,000 rows with 50 subscribed units, warm for 90 s; then a
+/// stall of `stall_s` real seconds with no frame, `enumeration` due at its
+/// end, and 110 s more of frames. The enumeration step costs 60 µs, well under
+/// the slice cap.
+fn cycle(stall_s: f64, enumeration: bool) -> Cycle {
+    cycle_capped(stall_s, enumeration, false)
+}
+
+/// As [`cycle`], with vitals' credit capped at one sweep's rows when
+/// `one_sweep` holds.
+fn cycle_capped(stall_s: f64, enumeration: bool, one_sweep: bool) -> Cycle {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    s.vitals_cap_one_sweep = one_sweep;
+    let mut rec = Rec::new(0.003, 1e6 / 110.0);
+    let mut w = world(1960, 40, 20);
+    w.batch_us = 20.0;
+    w.birth_us = Some(37.0);
+    w.enum_step_us = Some(60.0);
+    w.close_us = 6.0;
+    s.set_campaign(1);
+    for i in 1..=50u64 {
+        let o = w.objects.get_mut(&(1000 + i)).unwrap();
+        o.name = format!("np.u.1.{}", base36_of(i));
+    }
+    run_x(&mut s, &mut rec, &mut w, 1.0, 110.0, 165.0, 23.0, 3.0);
+    s.subscribe(1.0, false, &(1..=50).collect::<Vec<_>>());
+    run_after(&mut s, &mut rec, &mut w, 0.0, 89.0);
+    let sub_before = s.subscribed_period();
+    if enumeration {
+        s.enum_due = true;
+    }
+    let mut c = Cycle {
+        vitals_rows: 0.0,
+        window_s: stall_s,
+        peak_rows_s: 0.0,
+        worst_positions: 0.0,
+        sub_period: 0.0,
+        sub_before,
+        vitals_tail: 0.0,
+        slow_end: 0.0,
+        over_250: 0,
+        forgiven_us: 0.0,
+    };
+    let mut gap = stall_s;
+    for chunk in 0..11 {
+        let r = run_after(&mut s, &mut rec, &mut w, gap, 10.0);
+        gap = 0.0;
+        let rows = r.tier_rows[Tier::Vitals.index()] as f64;
+        c.vitals_rows += rows;
+        c.window_s += 10.0;
+        c.peak_rows_s = c.peak_rows_s.max(rows / 10.0);
+        // The first 10 s after a stall show the stall itself, and the
+        // enumeration's hold behind it, as the positions' achieved period:
+        // skip them.
+        let skip = if stall_s > 0.0 && chunk == 0 { 10 } else { 0 };
+        c.worst_positions = c.worst_positions.max(
+            r.samples
+                .iter()
+                .skip(skip)
+                .map(|p| p[0])
+                .fold(0.0, f64::max),
+        );
+        c.sub_period = c.sub_period.max(s.subscribed_period());
+        c.over_250 += r.over_250;
+        c.forgiven_us += r.forgiven_us;
+        if chunk >= 8 {
+            c.vitals_tail += tail_mean(&r.samples, 1, 10) / 3.0;
+        }
+    }
+    c.slow_end = s.slow_period[0];
+    c
+}
+
+/// Vitals repays above its rate and leaves the tiers above it where they
+/// were. The two caps' worst positions periods differ by 0.06 to 0.23 s in
+/// both directions (the repayment changes which frame a sweep ends in), and
+/// only a slower period is a harm, so the check is that it is no more than
+/// 0.2 s above the same cycle run with vitals capped at one sweep's rows
+/// (`vitals_cap_one_sweep`); the 2.5 s bound it replaces let 0.5 s through.
+fn assert_positions_unchanged(c: &Cycle, stall_s: f64, enumeration: bool) {
+    let baseline = cycle_capped(stall_s, enumeration, true).worst_positions;
+    assert!(
+        c.worst_positions <= baseline + 0.2,
+        "positions {} s, {baseline} s with the one-sweep cap",
+        c.worst_positions
+    );
+}
+
+/// With 5 rows most vitals passes find nothing due. The reported periods stay
+/// at the sweeps' real ones, not at a pump interval.
+#[test]
+fn empty_passes_do_not_report_a_short_period() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 110.0);
+    let mut w = world(5, 0, 0);
+    let r = run(&mut s, &mut rec, &mut w, 60.0, 110.0, 200.0);
+    for tier in [0, 1] {
+        let lowest = r.samples[20..]
+            .iter()
+            .map(|p| p[tier])
+            .fold(f64::MAX, f64::min);
+        assert!(lowest >= 0.5, "tier {tier} period {lowest} s");
+    }
+}
+
+/// A 20 s stall at 2,000 rows (LIVE, S11: DCS stalls of this size left
+/// vitals rows owed that the one-sweep cap forgave). Vitals' credit holds
+/// one full slow cycle, so the rows owed are read in the next seconds above
+/// the tier's rate, and what the window reads is what its length owes.
+///
+/// Thresholds. The window is 130 s: 20 stalled, 110 running. The tier owes
+/// 42.5 rows a second, 5,525 in the window; with the full-cycle cap it reads
+/// 5,526. The floor is 99 % of the rows owed. With the one-sweep cap the
+/// window reads 4,659 (84 %), 4,546 with an enumeration too (82 %) and 4,531
+/// with an enumeration alone (97 %): the floor fails all three. The peak shows repayment: more
+/// than twice the rate (85 rows a second) in some 10 s. The slow sweep ends
+/// within 5 % of its 60 s target.
+#[test]
+fn after_a_stall_vitals_repays_its_rows_and_the_slow_sweep_returns_to_target() {
+    let c = cycle(20.0, false);
+    let owed = VITALS_ROWS_S * c.window_s;
+    eprintln!(
+        "stall: {:.0} rows of {owed:.0} owed, peak {:.1} a second, slow sweep {:.1} s, \
+         vitals tail {:.2} s, positions worst {:.2} s",
+        c.vitals_rows, c.peak_rows_s, c.slow_end, c.vitals_tail, c.worst_positions
+    );
+    assert!(
+        c.vitals_rows >= 0.99 * owed,
+        "{} of {owed} rows",
+        c.vitals_rows
+    );
+    assert!(c.peak_rows_s > 85.0, "no repayment: peak {}", c.peak_rows_s);
+    assert!(
+        (57.0..=63.0).contains(&c.slow_end),
+        "slow sweep {} s",
+        c.slow_end
+    );
+    // After repayment ends the vitals period is back in its band.
+    assert!(
+        (4.5..6.5).contains(&c.vitals_tail),
+        "vitals {} s",
+        c.vitals_tail
+    );
+    // Positions and the subscribed period do not move while vitals repays:
+    // the tier ranks below them.
+    assert_positions_unchanged(&c, 20.0, false);
+    assert!(
+        (c.sub_period - c.sub_before).abs() <= 0.05,
+        "subscribed {} s against {} s",
+        c.sub_period,
+        c.sub_before
+    );
+    assert_eq!(c.over_250, 0, "frames past the slice cap");
+    assert_eq!(c.forgiven_us, 0.0, "debt forgiven");
+}
+
+/// An enumeration of 2,000 rows holds vitals under it for seconds. The
+/// floor is as in the stall test. The stall and the enumeration delay
+/// positions' sweeps with either cap; the cap moves that delay by no more than
+/// 0.2 s.
+#[test]
+fn after_an_enumeration_vitals_repays_its_rows() {
+    let c = cycle(0.0, true);
+    let owed = VITALS_ROWS_S * c.window_s;
+    eprintln!(
+        "enumeration: {:.0} rows of {owed:.0}, peak {:.1} a second, slow sweep {:.1} s, \
+         positions worst {:.2} s",
+        c.vitals_rows, c.peak_rows_s, c.slow_end, c.worst_positions
+    );
+    assert!(
+        c.vitals_rows >= 0.99 * owed,
+        "{} of {owed} rows",
+        c.vitals_rows
+    );
+    assert!(
+        (57.0..=63.0).contains(&c.slow_end),
+        "slow sweep {} s",
+        c.slow_end
+    );
+    assert!(
+        (4.5..6.5).contains(&c.vitals_tail),
+        "vitals {} s",
+        c.vitals_tail
+    );
+    assert_positions_unchanged(&c, 0.0, true);
+    assert!(
+        (c.sub_period - c.sub_before).abs() <= 0.05,
+        "subscribed {} s against {} s",
+        c.sub_period,
+        c.sub_before
+    );
+    assert_eq!(c.over_250, 0, "frames past the slice cap");
+}
+
+/// A stall and an enumeration in one 60 s cycle: the rows owed pass one
+/// sweep's cap many times over (a 20 s stall owes 850 rows, the enumeration
+/// holds vitals for several seconds more), and the full-cycle cap holds them
+/// all. Floor and peak as in the stall test.
+#[test]
+fn a_stall_and_an_enumeration_in_one_cycle_are_repaid() {
+    let c = cycle(20.0, true);
+    let owed = VITALS_ROWS_S * c.window_s;
+    eprintln!(
+        "both: {:.0} rows of {owed:.0}, peak {:.1} a second, slow sweep {:.1} s, \
+         vitals tail {:.2} s, positions worst {:.2} s",
+        c.vitals_rows, c.peak_rows_s, c.slow_end, c.vitals_tail, c.worst_positions
+    );
+    assert!(
+        c.vitals_rows >= 0.99 * owed,
+        "{} of {owed} rows",
+        c.vitals_rows
+    );
+    assert!(c.peak_rows_s > 85.0, "no repayment: peak {}", c.peak_rows_s);
+    assert!(
+        (57.0..=63.0).contains(&c.slow_end),
+        "slow sweep {} s",
+        c.slow_end
+    );
+    assert!(
+        (4.5..6.5).contains(&c.vitals_tail),
+        "vitals {} s",
+        c.vitals_tail
+    );
+    assert_positions_unchanged(&c, 20.0, true);
+    assert!(
+        (c.sub_period - c.sub_before).abs() <= 0.05,
+        "subscribed {} s against {} s",
+        c.sub_period,
+        c.sub_before
+    );
+    assert_eq!(c.over_250, 0, "frames past the slice cap");
+}
+
+/// At k = 0.1 with births pending and a balance too short for maintenance,
+/// the pump has no step to plan and the rows owed (each resolved birth leaves
+/// a life mark) cost more than the scaled budget: it paid the call and
+/// planned nothing, on 9 pumps in 10 (LIVE, S11: 50 births pending for over
+/// 2 minutes, about 8 such pumps a second). The gate now holds such a pump
+/// back until the budget pays for a step. The births still resolve, one at a
+/// time, as the balance allows.
+///
+/// Thresholds. 50 births at 37 µs (57 µs measured), 20 µs a batch, 120 s,
+/// 110 frames a second. Without the gate's maintenance check the run has about
+/// 320 empty pumps of 340 in each 10 s while births wait, 1,300 in the first
+/// 40 s; with it, 36 of 1,565 pumps in all (the births' first seconds, before
+/// the balance is measured). The bound is 5 % of the pumps, 78, and every
+/// birth resolves in the 120 s.
+#[cfg(feature = "faults")]
+#[test]
+fn at_a_tenth_pending_births_cause_no_empty_pumps_and_still_resolve() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 110.0);
+    let mut w = world(0, 0, 0);
+    w.batch_us = 20.0;
+    w.birth_us = Some(37.0);
+    w.close_us = 6.0;
+    s.set_scale(0.1).unwrap();
+    // The warm-up's own idle pumps are reported with the next window: let
+    // them out first.
+    run_x(&mut s, &mut rec, &mut w, 20.0, 110.0, 165.0, 23.0, 3.0);
+    rec.began += Duration::from_nanos(9_090_909);
+    run_x(&mut s, &mut rec, &mut w, 1.0, 110.0, 165.0, 23.0, 3.0);
+    for i in 1..=50 {
+        w.spawn(5000 + i, object_kind::UNIT, format!("b{i}"), 5.0);
+    }
+    // Each 10 s: the pumps that planned nothing, and the births left.
+    let (mut empty, mut pumps, mut frames) = (0, 0, 0);
+    for _ in 0..12 {
+        rec.began += Duration::from_nanos(9_090_909);
+        let r = run_x(&mut s, &mut rec, &mut w, 10.0, 110.0, 165.0, 23.0, 3.0);
+        empty += r.empty_pumps;
+        pumps += r.pumps;
+        frames += r.frames;
+    }
+    let (empty, pumps, frames) = (empty, pumps, frames);
+    eprintln!(
+        "k = 0.1, 50 births: {} empty pumps of {} pumps in {} frames, {} rows",
+        empty,
+        pumps,
+        frames,
+        s.len()
+    );
+    assert!(
+        empty as f64 <= 0.05 * pumps as f64,
+        "{empty} empty pumps of {pumps} pumps in {frames} frames"
+    );
+    assert_eq!(s.len(), 50, "births resolved");
+}
+
+#[path = "sampler_sweep_tests.rs"]
+mod sweep;

@@ -777,11 +777,18 @@ local function main()
       end
     end
     assert(reports >= 2, 'only ' .. reports .. ' sampling reports at k = 0.1')
-    -- Forgiven debt, the largest overrun and the count of row frames past
-    -- their budget are reported, not failed: at k = 0.1 the gate is judged
-    -- unscaled, and the mock debug build times unevenly under load. The live
-    -- run judges them on the release build in DCS (crates/xtask, `tenth`);
-    -- a gate that knows the scale is an S11 item.
+    -- At k = 0.1 the gate asks for a pump that can pay for a row once the
+    -- agent is in debt, so few pumps plan nothing: 8 to 10 % of pumps over
+    -- five runs on the mock debug build, against 41 to 45 % without it. The
+    -- bound leaves room for a loaded machine.
+    assert(empty * 5 <= pumps, string.format('%d of %d pumps at k = 0.1 planned no row', empty, pumps))
+    -- Row frames past their budget by more than a clock interval are
+    -- reported, not failed: 41 to 69 % over five runs with the gate and three
+    -- without, mostly one-batch pumps for the subscribed rows that run 4 to
+    -- 14 us past a budget of about 18 us (the batch's close and the pump's
+    -- own steps on the unoptimized mock). The gate does not change the count.
+    -- The live run judges it on the release build in DCS (crates/xtask,
+    -- `tenth`). Forgiven debt and the largest overrun are reported too.
     S.ok(string.format('at k = 0.1 the share and debt stay within their bounds, and the mirror '
       .. 'matches (overrun frames %d of %d, %.0f us in all, largest %.0f us; empty pumps %d of %d pumps, '
       .. '%d with checks; lone rows %d)', over, rows, over_us, max_over, empty, pumps, checkp, lone))

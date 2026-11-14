@@ -178,7 +178,7 @@ other, is answered `UNKNOWN_OPCODE`, and sets `last_applied_seq`.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 0 | PADDING |  |  |  |  |  |  | Fills the end of the ring |
 | 1 | CAMPAIGN | control |  |  |  |  | layout | Announce the active campaign |
-| 2 | ENUMERATE | control |  |  |  |  | none | Start a full enumeration now |
+| 2 | ENUMERATE | control |  |  |  |  | none | Start a full enumeration now, which writes an `OBJECT` for every row |
 | 3 | RATES | control |  |  |  |  | layout | Set the target period of each sampling tier |
 | 4 | SUBSCRIBE | control |  |  |  |  | layout | Replace the set of objects sampled at a higher rate |
 | 5 | BIND | control |  |  |  |  | layout | Give `EntityId`s to unmanaged objects |

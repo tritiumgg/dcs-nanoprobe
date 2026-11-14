@@ -21,6 +21,7 @@
 //! {"t":..,"ev":"gap","class":N,"count":N}
 //! {"t":..,"ev":"report","text":".."}
 //! {"t":..,"ev":"status","lifecycle":N,"gen":N,"flags":N,"frame":N,"boot":"<hex>"}
+//! {"t":..,"ev":"heap","kib":N,"min":N,"max":N}
 //! {"t":..,"ev":"final","lifecycle":N,"frame":N,"commands":N,"timed":N,"over_budget":N,
 //!  "events_dropped":N,"hist_event":[N x 32],"hist_pump":[N x 32],
 //!  "hist_syscall":[N x 32]}
@@ -34,7 +35,9 @@
 //! when the sidecar read it. The `final` line is its last reading. At the end, one `reconnect` line per mission
 //! generation that ran: `ready` is when the status block first showed it
 //! running or paused, `read` when the sidecar first read its `LIFECYCLE`
-//! saying so, and `ms` the difference. After each `HELLO` the probe sends
+//! saying so, and `ms` the difference. Every 5 s that the status block holds a
+//! Lua heap figure, a `heap` line gives it in KiB: the last value and the
+//! lowest and highest in the 5 s. After each `HELLO` the probe sends
 //! `CAMPAIGN` 7, then under a new epoch a `MESSAGE` for campaign 7, which the
 //! agent answers `UNKNOWN_OPCODE` (20), and one for campaign 8, which it
 //! answers `WRONG_CAMPAIGN` (24). With `--short-command`, after the first
@@ -338,7 +341,7 @@ impl MirrorOut {
         };
         let subscribed: Vec<String> = self.subscribed.iter().map(u64::to_string).collect();
         format!(
-            "{{\"t\":{},\"real\":{},\"generation\":{},\"slice_us\":{slice},\"periods\":{periods},\"subscribed\":[{}],\"counters\":{{\"samples_before_hello\":{},\"samples_unknown_object\":{},\"old_generation\":{},\"enumerations_used\":{},\"enumerations_refused\":{},\"missing_by_rule\":{},\"disagreements\":{}}},\"rows\":[{}]}}\n",
+            "{{\"t\":{},\"real\":{},\"generation\":{},\"slice_us\":{slice},\"periods\":{periods},\"subscribed\":[{}],\"counters\":{{\"samples_before_hello\":{},\"samples_unknown_object\":{},\"old_generation\":{},\"enumerations_used\":{},\"enumerations_refused\":{},\"missing_by_rule\":{},\"disagreements\":{},\"seen_unknown\":{},\"seen_guarded\":{}}},\"rows\":[{}]}}\n",
             content::now_ms(),
             num(self.mirror.stamp().real_time),
             self.mirror.generation(),
@@ -350,6 +353,8 @@ impl MirrorOut {
             c.enumerations_refused,
             c.missing_by_rule,
             c.disagreements,
+            c.seen_unknown,
+            c.seen_guarded,
             rows.join(","),
         )
     }
@@ -673,11 +678,33 @@ fn watch(path: std::path::PathBuf, out: Out, times: Times, stop: Arc<AtomicBool>
     let mut map = None;
     let mut last = None;
     let mut disabled_at: Option<Instant> = None;
+    // The `server` state's Lua heap as the agent last wrote it, KiB, over
+    // each 5 s: the last value and the lowest and highest read. The lowest
+    // is the live set just after a collection, which a drift fit wants.
+    let mut heap: Option<(Instant, u64, u64, u64)> = None;
     while !stop.load(Ordering::Relaxed) {
         if map.is_none() {
             map = MappedFile::open_read_only(&path).ok();
         }
         if let Some(m) = &map {
+            let kib = m.load(s::LUA_HEAP_KIB, Ordering::Relaxed);
+            if kib > 0 {
+                let (since, last, min, max) = heap.get_or_insert((Instant::now(), kib, kib, kib));
+                *last = kib;
+                *min = (*min).min(kib);
+                *max = (*max).max(kib);
+                if since.elapsed() >= Duration::from_secs(5) {
+                    out.line(
+                        "heap",
+                        &[
+                            ("kib", Json::Num(*last)),
+                            ("min", Json::Num(*min)),
+                            ("max", Json::Num(*max)),
+                        ],
+                    );
+                    heap = None;
+                }
+            }
             let now = (
                 m.load32(s::LIFECYCLE, Ordering::Acquire),
                 m.load32(s::MISSION_GEN, Ordering::Acquire),

@@ -32,8 +32,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use nanoprobe_sidecar::ids;
 use nanoprobe_sidecar::intents::{Waypoint, route_points};
 use nanoprobe_sidecar::sim::wire::{
-    Body, Command, Enumeration, Input, Object, ObjectGone, Position, gone_reason, lv, object_kind,
-    opcode,
+    Body, Command, Enumeration, Input, Object, ObjectGone, Position, Seen, gone_reason, lv,
+    object_kind, opcode,
 };
 use nanoprobe_sidecar::sim::{Detached, RawRecord, SimAdapter};
 use nanoprobe_transport::codec::Lv;
@@ -212,6 +212,10 @@ struct Run {
     /// Rows the enumeration did not find, checked before it ends.
     misses: Vec<u64>,
     written: u32,
+    /// `SEEN` IDs written.
+    seen: u32,
+    /// The enumeration took the `full` flag: every row is an `OBJECT`.
+    full: bool,
 }
 
 /// One DCS process with the agent in it.
@@ -272,6 +276,11 @@ pub struct FakeSim {
     next_enum: u64,
     /// Objects the enumeration does not find although they exist.
     hidden: BTreeSet<u64>,
+    /// Rows whose `OBJECT` the agent queued since the last `HELLO` and has
+    /// not changed: an enumeration may report them in `SEEN` records.
+    sent: BTreeSet<u64>,
+    /// The agent's `full` flag (spec/records.md, "Layout: SEEN").
+    full: bool,
 }
 
 impl FakeSim {
@@ -321,6 +330,8 @@ impl FakeSim {
             enumerations: 0,
             next_enum: 0,
             hidden: BTreeSet::new(),
+            sent: BTreeSet::new(),
+            full: true,
         };
         f.load_mission();
         f
@@ -445,6 +456,9 @@ impl FakeSim {
 
     /// Emit a record: written when attached, else queued by its class.
     fn emit(&mut self, input: Input) {
+        if let Input::Object(o) = &input {
+            self.sent.insert(o.object);
+        }
         if self.losing
             && let Input::Result(r) = &input
         {
@@ -479,6 +493,8 @@ impl FakeSim {
                         })
                         .expect("an event");
                     let (s, dropped) = self.queue.remove(at).expect("queued");
+                    // A dropped record: the next enumeration is whole.
+                    self.full = true;
                     if let Input::ObjectGone(g) = dropped {
                         self.ledger.unreported.insert((
                             self.agent_boot,
@@ -573,6 +589,7 @@ impl FakeSim {
         self.orphans.clear();
         self.objects.clear();
         self.table.clear();
+        self.sent.clear();
         self.run = None;
         // A generation change clears the agent's memory of rows that left.
         self.late.clear();
@@ -675,6 +692,8 @@ impl FakeSim {
         // spawn under one of their names replaces it, as spec/commands.md
         // allows between a switch and the next load.
         self.orphans.extend(self.groups.keys().copied());
+        // Every row's payload is encoded again under the new binding.
+        self.sent.clear();
         for (object, b) in self.table.iter_mut() {
             *b = match self.objects.get(object) {
                 Some(o) if o.campaign == c && c != 0 => (o.entity, o.group_entity),
@@ -805,6 +824,10 @@ impl FakeSim {
             dcs_version: "fake".into(),
         };
         self.write(&Input::Hello(hello));
+        // Rows queued before the HELLO are of the last attach: every row is
+        // written whole in the first enumeration, and again until sent.
+        self.sent.clear();
+        self.full = true;
         // A LIFECYCLE of the current state right after every HELLO, so a
         // sidecar that attaches to a running mission learns its theater
         // (step S10 specifies it and builds it in the agent).
@@ -1014,6 +1037,7 @@ impl FakeSim {
     /// The row leaves the table with an `OBJECT_GONE` that carries its
     /// binding.
     fn gone(&mut self, object: u64, reason: u32) {
+        self.sent.remove(&object);
         if let Some((entity, group_entity)) = self.table.remove(&object) {
             self.emit(Input::ObjectGone(ObjectGone {
                 object,
@@ -1157,20 +1181,34 @@ impl FakeSim {
         self.emit(Input::EnumBegin(Enumeration {
             enumeration: id,
             objects: 0,
+            seen: 0,
         }));
         self.run = Some(Run {
             id,
             rows: self.table.keys().copied().collect(),
             misses: Vec::new(),
             written: 0,
+            seen: 0,
+            full: std::mem::take(&mut self.full),
         });
         self.next_enum = self.frame + self.cfg.enum_period;
+    }
+
+    /// Write the open batch of `SEEN` IDs of the enumeration `run`.
+    fn flush_seen(&mut self, run: &mut Run, seen: &mut Vec<u64>) {
+        if !seen.is_empty() {
+            self.emit(Input::Seen(Seen {
+                enumeration: run.id,
+                objects: std::mem::take(seen),
+            }));
+        }
     }
 
     fn enumeration_slice(&mut self) {
         let Some(mut run) = self.run.take() else {
             return;
         };
+        let mut seen = Vec::new();
         for _ in 0..self.cfg.enum_slice {
             let Some(row) = run.rows.pop_front() else {
                 break;
@@ -1179,13 +1217,22 @@ impl FakeSim {
                 continue;
             }
             if self.objects.contains_key(&row) && !self.hidden.contains(&row) {
-                let r = self.object_record(row, run.id);
-                self.emit(r);
-                run.written += 1;
+                if run.full || !self.sent.contains(&row) {
+                    // Another record goes after the open batch of `SEEN` IDs,
+                    // never before it.
+                    self.flush_seen(&mut run, &mut seen);
+                    let r = self.object_record(row, run.id);
+                    self.emit(r);
+                    run.written += 1;
+                } else {
+                    seen.push(row);
+                    run.seen += 1;
+                }
             } else {
                 run.misses.push(row);
             }
         }
+        self.flush_seen(&mut run, &mut seen);
         if run.rows.is_empty() {
             // Each miss is checked before the end: alive, it is written
             // with this enumeration's number; gone, it leaves.
@@ -1201,6 +1248,7 @@ impl FakeSim {
             self.emit(Input::EnumEnd(Enumeration {
                 enumeration: run.id,
                 objects: run.written,
+                seen: run.seen,
             }));
         } else {
             self.run = Some(run);
@@ -1374,7 +1422,10 @@ impl FakeSim {
                         self.frame_record(&s, false);
                     }
                 }
-                Body::Enumerate => self.start_enumeration(),
+                Body::Enumerate => {
+                    self.full = true;
+                    self.start_enumeration();
+                }
                 _ => {}
             }
             return;

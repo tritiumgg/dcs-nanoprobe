@@ -16,7 +16,7 @@
 local agent, root, dir, previous = ...
 
 -- The agent's interface version this shim was written for.
-local ABI = '6'
+local ABI = '7'
 if type(agent) ~= 'table' or agent.abi ~= ABI then
   error('the shim needs agent ABI ' .. ABI .. '; the DLL has '
     .. tostring(type(agent) == 'table' and agent.abi or agent), 0)
