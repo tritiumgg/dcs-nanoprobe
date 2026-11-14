@@ -12,7 +12,8 @@
 //!   the reconnect is timed from the kill to the pair attached with the new
 //!   sidecar boot;
 //! * DCS: with `--dcs-start`, DCS is the runner's child, killed and started
-//!   again; with `--dcs-kill`, the command kills it and DCS comes back by
+//!   again (on Unix the command runs in its own process group, and the kill
+//!   reaches the whole group); with `--dcs-kill`, the command kills it and DCS comes back by
 //!   itself (the host restarts it). The reconnect is timed from the new
 //!   agent's first frame to the pair attached with its boot: an agent can
 //!   attach only on a frame, and none comes before a mission runs. The first
@@ -226,6 +227,22 @@ fn kill(child: &mut Option<Child>) {
     }
 }
 
+/// Kill DCS and every process its command started. On Unix the command runs
+/// in its own process group (`start_dcs`), so a program it left running in
+/// the background dies with it and holds no inherited file past the run.
+fn kill_group(child: &mut Option<Child>) {
+    #[cfg(unix)]
+    if let Some(c) = child {
+        let _ = Command::new("kill")
+            .args(["-KILL", "--", &format!("-{}", c.id())])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    kill(child);
+}
+
 impl Runner {
     fn fail(&mut self, cycle: u64, text: &str) {
         self.failures += 1;
@@ -270,7 +287,10 @@ impl Runner {
         let err = log.try_clone().map_err(|e| e.to_string())?;
         if let Dcs::Child { cmd, child } = &mut self.dcs {
             // exec, so the kill reaches the program and not only the shell.
-            let started = shell(&format!("exec {cmd}"))
+            let mut c = shell(&format!("exec {cmd}"));
+            #[cfg(unix)]
+            std::os::unix::process::CommandExt::process_group(&mut c, 0);
+            let started = c
                 .stdin(Stdio::null())
                 .stdout(log)
                 .stderr(err)
@@ -284,7 +304,7 @@ impl Runner {
     fn kill_dcs(&mut self) -> Result<(), String> {
         match &mut self.dcs {
             Dcs::Child { child, .. } => {
-                kill(child);
+                kill_group(child);
                 Ok(())
             }
             Dcs::External { kill } => {
@@ -628,7 +648,7 @@ impl Drop for Runner {
     fn drop(&mut self) {
         kill(&mut self.sidecar);
         if let Dcs::Child { child, .. } = &mut self.dcs {
-            kill(child);
+            kill_group(child);
         }
     }
 }
