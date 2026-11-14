@@ -261,8 +261,8 @@ pub struct Metrics {
     pub periods: [f64; 5],
     /// Rows the sampling loop passes between clock reads.
     pub rows_per_clock: u64,
-    /// The histograms: pump, interval, command, event.
-    pub hist: [[u64; s::HIST_BUCKETS]; 4],
+    /// The histograms: pump, interval, command, event, system-call frame.
+    pub hist: [[u64; s::HIST_BUCKETS]; 5],
 }
 
 const PERIODS: [usize; 5] = [
@@ -272,11 +272,12 @@ const PERIODS: [usize; 5] = [
     s::PERIOD_WAREHOUSE,
     s::PERIOD_ENUMERATION,
 ];
-const HISTS: [usize; 4] = [
+const HISTS: [usize; 5] = [
     s::HIST_PUMP,
     s::HIST_INTERVAL,
     s::HIST_COMMAND,
     s::HIST_EVENT,
+    s::HIST_SYSCALL,
 ];
 
 /// Write under a sequence lock at `seq_off` (spec/transport.md, "Metrics"):
@@ -324,6 +325,56 @@ pub fn write_metrics(m: &impl Memory, metrics: &Metrics) {
     });
 }
 
+/// Write the metrics that differ from `last`, under their sequence lock, and
+/// bring `last` up to date. `last` is the writer's own copy of what the block
+/// holds: one made with [`Metrics::default`] matches a block just started,
+/// and the same copy goes to every call. A frame changes a few of the 170
+/// words, and each word stored is a cache line the reader's core must fetch
+/// again.
+pub fn write_metrics_changed(m: &impl Memory, metrics: &Metrics, last: &mut Metrics) {
+    // By bits: a period may be NaN, which is not equal to itself.
+    let bits = |a: f64, b: f64| a.to_bits() == b.to_bits();
+    if bits(metrics.slice_us, last.slice_us)
+        && bits(metrics.frame_interval_us, last.frame_interval_us)
+        && metrics
+            .periods
+            .iter()
+            .zip(last.periods)
+            .all(|(a, b)| bits(*a, b))
+        && metrics.rows_per_clock == last.rows_per_clock
+        && metrics.hist == last.hist
+    {
+        return;
+    }
+    seqlock_write(m, s::METRICS_SEQ, |m| {
+        let float = |off, new: f64, old: f64| {
+            if new.to_bits() != old.to_bits() {
+                m.store(off, new.to_bits(), Ordering::Relaxed);
+            }
+        };
+        float(s::SLICE_US, metrics.slice_us, last.slice_us);
+        float(
+            s::FRAME_INTERVAL_US,
+            metrics.frame_interval_us,
+            last.frame_interval_us,
+        );
+        for ((off, new), old) in PERIODS.iter().zip(metrics.periods).zip(last.periods) {
+            float(*off, new, old);
+        }
+        if metrics.rows_per_clock != last.rows_per_clock {
+            m.store(s::ROWS_PER_CLOCK, metrics.rows_per_clock, Ordering::Relaxed);
+        }
+        for ((off, new), old) in HISTS.iter().zip(&metrics.hist).zip(&last.hist) {
+            for (i, (new, old)) in new.iter().zip(old).enumerate() {
+                if new != old {
+                    m.store(off + 8 * i, *new, Ordering::Relaxed);
+                }
+            }
+        }
+    });
+    last.clone_from(metrics);
+}
+
 /// Read the metrics under their sequence lock. `None` when the agent was
 /// writing them; try again on the next poll.
 pub fn read_metrics(m: &impl Memory) -> Option<Metrics> {
@@ -334,7 +385,7 @@ pub fn read_metrics(m: &impl Memory) -> Option<Metrics> {
             frame_interval_us: f(s::FRAME_INTERVAL_US),
             periods: PERIODS.map(f),
             rows_per_clock: m.load(s::ROWS_PER_CLOCK, Ordering::Relaxed),
-            hist: [[0; s::HIST_BUCKETS]; 4],
+            hist: [[0; s::HIST_BUCKETS]; 5],
         };
         for (off, h) in HISTS.iter().zip(&mut out.hist) {
             for (i, v) in h.iter_mut().enumerate() {
@@ -441,6 +492,59 @@ mod tests {
         assert_eq!(read_metrics(&m), Some(metrics));
         m.store(s::METRICS_SEQ, 3, Ordering::Relaxed);
         assert_eq!(read_metrics(&m), None);
+    }
+
+    #[test]
+    fn storing_only_the_changed_metrics_leaves_the_block_as_a_full_store_does() {
+        let (changed, full) = (Heap::new(s::SIZE), Heap::new(s::SIZE));
+        let mut last = Metrics::default();
+        let mut metrics = Metrics::default();
+        // A seeded walk over every field, each step compared with a full
+        // store of the same metrics.
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for step in 0..500 {
+            match next() % 5 {
+                0 => metrics.slice_us = (next() % 250) as f64,
+                1 => metrics.frame_interval_us = (next() % 20_000) as f64,
+                2 => metrics.periods[(next() % 5) as usize] = (next() % 600) as f64 / 7.0,
+                3 => metrics.rows_per_clock = next() % 64,
+                _ => metrics.hist[(next() % 5) as usize][(next() % 32) as usize] += 1,
+            }
+            if step % 7 == 0 {
+                // A period may be infinite or NaN; both are stored as given.
+                metrics.periods[0] = if step % 14 == 0 {
+                    f64::INFINITY
+                } else {
+                    f64::NAN
+                };
+            }
+            let before = changed.load(s::METRICS_SEQ, Ordering::Relaxed);
+            write_metrics_changed(&changed, &metrics, &mut last);
+            write_metrics(&full, &metrics);
+            // One write, or none when the step changed nothing.
+            let after = changed.load(s::METRICS_SEQ, Ordering::Relaxed);
+            assert!(
+                after == before || after == before + 2,
+                "{before} then {after}"
+            );
+            for off in (0..s::SIZE).step_by(8).filter(|o| *o != s::METRICS_SEQ) {
+                assert_eq!(
+                    changed.load(off, Ordering::Relaxed),
+                    full.load(off, Ordering::Relaxed),
+                    "the word at {off:#x} after step {step}"
+                );
+            }
+        }
+        // Nothing changed: nothing is stored, the sequence included.
+        let before = changed.load(s::METRICS_SEQ, Ordering::Relaxed);
+        write_metrics_changed(&changed, &metrics, &mut last);
+        assert_eq!(changed.load(s::METRICS_SEQ, Ordering::Relaxed), before);
     }
 
     #[test]

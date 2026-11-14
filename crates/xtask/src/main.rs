@@ -18,6 +18,7 @@ mod peerkill;
 mod probes;
 mod profile;
 mod remote;
+mod sampling;
 mod spec;
 mod ssh;
 mod symbols;
@@ -103,6 +104,10 @@ commands:
                             channel and each sidecar fault from link-probe, check
                             each is survived or refused with a log line, then
                             restart DCS. Writes bundles/faults-<name>-<time>.json.
+  sampling compare <oracle.json> <mirror.json> [--out FILE]
+                            Set the oracle's dump (lua/sampling/oracle.lua) against
+                            the sidecar's mirror (link-probe --mirror); exit 1 when
+                            the mirror does not match
   catalogue <name>          Experiment E9 on a docker-wine target: deploy with --dev,
                             restart DCS, load a fresh shell, record the agent's stream
                             with link-probe, run the scenarios in lua/catalogue, load
@@ -167,6 +172,7 @@ fn main() -> ExitCode {
         ["chaos", name, rest @ ..] => chaos::command(name, rest),
         ["faults", name, rest @ ..] => faults::command(name, rest),
         ["catalogue", rest @ ..] => catalogue::command(&repository(), rest),
+        ["sampling", rest @ ..] => sampling::command(&repository(), rest),
         ["client", rest @ ..] => client::command(rest),
         ["spec"] => spec::command(&repository(), false),
         ["spec", "--check"] => spec::command(&repository(), true),

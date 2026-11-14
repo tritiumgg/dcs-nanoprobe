@@ -16,11 +16,27 @@ local function quote(path)
 end
 S.quote = quote
 
--- A new empty directory, with a trailing slash.
+-- Scratch directories this process made, removed when it closes the Lua
+-- state, as at a normal exit or an error that ends the script.
+local made = {}
+S.cleanup = newproxy(true)
+getmetatable(S.cleanup).__gc = function()
+  for _, path in ipairs(made) do
+    os.execute('rm -rf ' .. quote(path))
+  end
+end
+
+-- A new empty directory, with a trailing slash. Under tools/luatest.sh it
+-- goes in the run's own folder, which the run removes at exit.
 function S.scratch()
   local path = os.tmpname()
   os.remove(path)
+  local root = os.getenv('NANOPROBE_SCRATCH')
+  if root then
+    path = root .. '/' .. path:match('[^/]+$')
+  end
   assert(os.execute('mkdir -p ' .. quote(path)) == 0, 'no scratch directory')
+  made[#made + 1] = path
   return path .. '/'
 end
 

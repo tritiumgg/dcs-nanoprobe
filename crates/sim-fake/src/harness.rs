@@ -16,6 +16,10 @@
 //!   only what it journalled first, and every command DCS took must be in
 //!   the journal.
 //! - A spawn never includes a unit with a death fact.
+//! - The respawn policy never respawns a group with a member that left DCS
+//!   in this generation, without a death event, whether the sidecar had heard
+//!   of it or not (spec/world.md, "Respawn gate"). A member with a death
+//!   fact does not hold it, and is never in a spawn.
 //! - No spawn replaces a group DCS still holds (no duplicate group).
 //! - Every death fact is a death that happened; `dead` is final.
 //! - Every outcome matches what the agent did: `not_sent` was never taken,
@@ -97,6 +101,11 @@ pub enum Op {
     /// campaign's too, is in DCS. This campaign's sidecar switches back when
     /// it next attaches.
     ForeignCampaign,
+    /// A unit or static is killed and its row leaves the table as `REMOVED`;
+    /// the death event comes this many seconds later.
+    KillRemoved(u16),
+    /// A killed object comes alive again under the same object ID.
+    Revive(u16),
 }
 
 /// A schedule drawn from a seed: a SplitMix64 stream, so the same seed draws
@@ -146,6 +155,22 @@ impl Schedule {
             87..=93 => Op::Order(i),
             94..=96 => Op::BreakSpec(i),
             _ => Op::FixSpec(i),
+        }
+    }
+}
+
+impl Schedule {
+    /// The next operation, with late death events in the mix: one in four
+    /// draws is a kill that leaves as `REMOVED`, a revival or a kill. The
+    /// world's sim should draw its death delays ([`World::new_late`]).
+    pub fn op_late(&mut self) -> Op {
+        let r = self.next_u64();
+        let i = (r >> 16) as u16;
+        match r % 12 {
+            0 => Op::KillRemoved(i),
+            1 => Op::Revive(i),
+            2 => Op::Kill(i),
+            _ => self.op(),
         }
     }
 }
@@ -255,6 +280,9 @@ fn check_journal(store: &Store, sent: &[Command]) -> Result<(), Violation> {
             }
             Entry::Death { unit } => {
                 dead.insert(*unit);
+            }
+            Entry::Revived { unit, .. } => {
+                dead.remove(unit);
             }
             Entry::Command(c) => {
                 let s = state.get(&c.entity).copied().unwrap_or(State::Virtual);
@@ -423,10 +451,41 @@ impl World {
     /// A world with `groups` groups of three units and `statics` statics,
     /// all under DCS authority, and the sidecar attached.
     pub fn new(groups: usize, statics: usize, on_lost: LostPolicy) -> World {
-        let sim = FakeSim::new(Config {
-            event_queue: 6,
-            ..Config::default()
-        });
+        World::with_config(
+            groups,
+            statics,
+            on_lost,
+            Config {
+                event_queue: 6,
+                ..Config::default()
+            },
+        )
+    }
+
+    /// [`World::new`] where every kill draws a death delay from 0 to 83
+    /// model seconds (LIVE, the longest seen), seeded by `seed`.
+    pub fn new_late(groups: usize, statics: usize, on_lost: LostPolicy, seed: u64) -> World {
+        World::with_config(
+            groups,
+            statics,
+            on_lost,
+            Config {
+                event_queue: 6,
+                death_delay_max: 83.0,
+                death_seed: seed,
+                ..Config::default()
+            },
+        )
+    }
+
+    /// A world with a fake sim of the given settings.
+    pub fn with_config(
+        groups: usize,
+        statics: usize,
+        on_lost: LostPolicy,
+        config: Config,
+    ) -> World {
+        let sim = FakeSim::new(config);
         let store = new_store(groups, statics);
         let rec_cfg = RecConfig {
             materialize_per_frame: 2,
@@ -523,6 +582,17 @@ impl World {
             Op::Kill(i) => {
                 if let Some(o) = Self::pick(&objects, i) {
                     self.sim.kill(o);
+                }
+            }
+            Op::KillRemoved(i) => {
+                if let Some(o) = Self::pick(&objects, i) {
+                    self.sim
+                        .kill_late(o, f64::from(i % 84), crate::Left::Removed);
+                }
+            }
+            Op::Revive(i) => {
+                if let Some(o) = Self::pick(&self.sim.graves(), i) {
+                    self.sim.revive(o);
                 }
             }
             Op::RemoveSilently(i) => {
@@ -760,8 +830,30 @@ impl World {
                     }
                 }
                 Entry::Transition {
-                    entity, from, to, ..
+                    entity,
+                    from,
+                    to,
+                    spec_rev,
                 } => {
+                    if *from == State::Lost
+                        && *to == State::Materializing
+                        && spec_rev.is_some()
+                        && let Some(g) = self.store.group(*entity)
+                    {
+                        let (boot, gen_, c) = (
+                            self.sim.agent_boot(),
+                            self.sim.mission_gen(),
+                            self.store.campaign().0,
+                        );
+                        if let Some(m) = g.members.iter().find(|m| {
+                            let k = (boot, gen_, c, m.0);
+                            l.left_in.contains(&k) && !l.reported_deaths.contains(&k)
+                        }) {
+                            return Err(Violation(format!(
+                                "group {entity} respawned with member {m}, which left DCS unexplained in this generation"
+                            )));
+                        }
+                    }
                     if *from == State::Dead && scan.dead.contains(entity) {
                         return Err(Violation(format!("entity {entity} left dead")));
                     }
@@ -797,7 +889,9 @@ impl World {
         self.sim.attach(self.sidecar_boot);
         // Long enough for a load, several enumerations and every spawn at
         // two per step.
-        let frames = 400 + 4 * self.store.groups().count();
+        let frames = 400
+            + 4 * self.store.groups().count()
+            + (self.sim.late_horizon() * 10.0).ceil() as usize;
         for _ in 0..frames {
             self.tick()?;
         }
@@ -925,6 +1019,7 @@ impl World {
                         && policy(g) == LostPolicy::Respawn
                         && want_dcs
                         && in_dcs.is_none()
+                        && !self.store.gate_shut(g.id)
                     {
                         return bad(format!(
                             "{} is lost under the respawn policy and was not respawned",
@@ -967,7 +1062,13 @@ impl World {
                 .store
                 .group(u.group)
                 .is_some_and(|g| g.state == State::Dead);
-            if !u.dead && !marked {
+            // A revived unit is alive again: its death stays in the journal.
+            // A death for an object from before a respawn marks nobody.
+            let excused = self.store.entries().iter().any(|x| {
+                matches!(x, Entry::StaleDeath { unit, .. } | Entry::Revived { unit, .. }
+                    if unit.0 == *e)
+            });
+            if !u.dead && !marked && !excused {
                 return bad(format!("unit {e}'s death was reported and is no fact"));
             }
         }
@@ -990,11 +1091,26 @@ impl World {
 /// Run a seed's schedule for `ops` operations, then settle. On failure the
 /// error names the seed and the operation that broke an invariant.
 pub fn run_seed(seed: u64, ops: usize, groups: usize, statics: usize) -> Result<(), String> {
+    run_seed_with(seed, ops, groups, statics, false)
+}
+
+/// [`run_seed`] with late death events, `REMOVED` and revivals when `late`.
+pub fn run_seed_with(
+    seed: u64,
+    ops: usize,
+    groups: usize,
+    statics: usize,
+    late: bool,
+) -> Result<(), String> {
     let policy = [LostPolicy::Report, LostPolicy::Respawn, LostPolicy::Dead][(seed % 3) as usize];
-    let mut w = World::new(groups, statics, policy);
+    let mut w = if late {
+        World::new_late(groups, statics, policy, seed)
+    } else {
+        World::new(groups, statics, policy)
+    };
     let mut s = Schedule::new(seed);
     for i in 0..ops {
-        let op = s.op();
+        let op = if late { s.op_late() } else { s.op() };
         if let Err(Violation(v)) = w.apply(&op) {
             return Err(format!("seed {seed:#x}, op {i} {op:?}: {v}"));
         }

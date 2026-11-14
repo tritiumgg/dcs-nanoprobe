@@ -45,8 +45,21 @@ Rejected:
 
 ## Consequences
 
-- The agent pays one cross-state call per frame, about 5 µs under Wine. It is charged
-  to the agent's overhead budget.
+- The agent pays one cross-state call per pump, charged to its overhead budget. A
+  trivial call cost about 5 µs under Wine (E17); the real pump call, from the hook
+  through `net.dostring_in` to the shim's pump, costs 22–30 µs (LIVE, S10,
+  docs/results/2026-11-13-s10-sampling.md), about the whole 0.3 % slice at 110 frames
+  a second. So the agent does not pump every frame: it carries unspent allowance
+  forward as credit and pumps when the call is at most a third of what it can spend
+  (spec/sampling.md, "Slice"). Calling the shim from the DLL through the stored
+  `server` state pointer (candidate C) would remove the call; S11 decides it from a
+  breakdown of the call's cost.
+- The pump is the one path into the `server` state, and positions do not take it. The
+  hook's own state has `DCS.getUnitPositionByObjectId`, so the agent's `frame` reads the
+  units' positions there, with no cross-state call, and the pump runs only when
+  births, an enumeration or the tiers below the positions have work worth its call
+  (spec/sampling.md, "The sweep", "The pump's worth"). LIVE at 1,960 objects the pump
+  then runs about 3 times a second, against about 27 with the positions in it (S10).
 - The pump runs while paused, so spawning, sampling and command handling work before a
   resume. A removal requested while paused finishes only after a resume (E17), and the
   reconciler must expect the group to exist until then.

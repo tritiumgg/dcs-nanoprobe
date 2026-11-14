@@ -79,6 +79,15 @@ unsafe extern "C" {
     /// Push `t[n]` for the table `t` at `index`, without metamethods.
     pub unsafe fn lua_rawgeti(state: *mut State, index: c_int, n: c_int);
 
+    /// Replace the key on top of the stack with `t[key]` for the table `t`
+    /// at `index`, without metamethods.
+    pub unsafe fn lua_rawget(state: *mut State, index: c_int);
+
+    /// Set `t[n]` for the table `t` at `index` to the top value and pop it,
+    /// without metamethods. Allocates, and so can raise a memory error, only
+    /// when the table must grow: callers write only slots that exist.
+    pub unsafe fn lua_rawseti(state: *mut State, index: c_int, n: c_int);
+
     /// The index of the top of the stack, which is the number of values on it.
     pub unsafe fn lua_gettop(state: *mut State) -> c_int;
 

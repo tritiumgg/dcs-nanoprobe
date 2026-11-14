@@ -1,15 +1,15 @@
 //! The records and commands the reconciler reads and writes, typed, with their
 //! layouts from spec/records.md and spec/commands.md.
 //!
-//! The control records (`FRAME`, `HELLO`, `LIFECYCLE`, `RESULT`, `GAP`) and
-//! the command header come from `nanoprobe_transport::records`. The object
-//! table's records and the two sample batches the reconciler reads are
-//! encoded here until the transport crate carries them.
+//! Every record's codec is `nanoprobe_transport::records`'. This module
+//! gives the reconciler its inputs as one enum, with the two sample batches
+//! it reads as rows.
 
 use nanoprobe_transport::codec::{DecodeError, Lv, Reader, Writer};
 use nanoprobe_transport::layout::{command, kind};
 use nanoprobe_transport::records::{
-    CommandHeader, CommandResult, Event, Frame, Gap, Hello, Lifecycle,
+    CommandHeader, CommandResult, EnumBegin, EnumEnd, Event, Frame, Gap, Hello, Lifecycle,
+    Positions, Vitals as TransportVitals,
 };
 
 /// Opcodes (spec/commands.md, "Codes: opcode") the reconciler writes.
@@ -69,133 +69,7 @@ pub mod gone_reason {
     pub const REMOVED: u32 = 4;
 }
 
-/// `OBJECT`: a unit or static entered the agent's table, or an enumeration
-/// found it.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Object {
-    /// DCS object ID.
-    pub object: u64,
-    /// DCS group ID, 0 for a static.
-    pub group: u64,
-    /// The binding's `EntityId` for the object, 0 for none.
-    pub entity: u64,
-    /// The binding's `EntityId` for the group, 0 for none.
-    pub group_entity: u64,
-    /// The enumeration that found it, 0 for an event or a spawn.
-    pub enumeration: u64,
-    /// `object_kind`.
-    pub kind: u32,
-    /// DCS category.
-    pub category: u32,
-    /// DCS coalition.
-    pub coalition: u32,
-    /// DCS country.
-    pub country: u32,
-    /// Initial life.
-    pub life0: f32,
-    /// DCS name.
-    pub name: String,
-    /// DCS type name.
-    pub type_name: String,
-    /// The group's DCS name, empty for a static.
-    pub group_name: String,
-}
-
-impl Object {
-    /// The payload.
-    pub fn encode(&self) -> Vec<u8> {
-        let mut w = Writer::new();
-        w.u64(self.object)
-            .u64(self.group)
-            .u64(self.entity)
-            .u64(self.group_entity)
-            .u64(self.enumeration)
-            .u32(self.kind)
-            .u32(self.category)
-            .u32(self.coalition)
-            .u32(self.country)
-            .f32(self.life0)
-            .pad(4)
-            .str(&self.name)
-            .str(&self.type_name)
-            .str(&self.group_name);
-        w.finish()
-    }
-
-    /// Decode a payload.
-    pub fn decode(b: &[u8]) -> Result<Object, DecodeError> {
-        let mut r = Reader::new(b);
-        let mut o = Object {
-            object: r.u64()?,
-            group: r.u64()?,
-            entity: r.u64()?,
-            group_entity: r.u64()?,
-            enumeration: r.u64()?,
-            kind: r.u32()?,
-            category: r.u32()?,
-            coalition: r.u32()?,
-            country: r.u32()?,
-            life0: r.f32()?,
-            ..Object::default()
-        };
-        r.skip(4)?;
-        o.name = r.str()?.to_owned();
-        o.type_name = r.str()?.to_owned();
-        o.group_name = r.str()?.to_owned();
-        Ok(o)
-    }
-}
-
-/// `OBJECT_GONE`: a unit or static left the agent's table.
-///
-/// The layout carries the row's binding, so a death the agent queued while
-/// no sidecar was attached names its unit before the enumeration that
-/// re-reads the binding (step S10 writes the layout into spec/records.md and
-/// the golden file). The decoder also takes the
-/// 16-byte layout the golden file still holds, with no binding.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ObjectGone {
-    /// DCS object ID.
-    pub object: u64,
-    /// `gone_reason`.
-    pub reason: u32,
-    /// The `EntityId` the row was bound to, 0 for none.
-    pub entity: u64,
-    /// The group's `EntityId` the row was bound to, 0 for none or a static.
-    pub group_entity: u64,
-}
-
-/// Bytes of the `OBJECT_GONE` layout with the binding.
-pub const OBJECT_GONE_LEN: usize = 32;
-
-impl ObjectGone {
-    /// The payload, with the binding.
-    pub fn encode(&self) -> Vec<u8> {
-        let mut w = Writer::new();
-        w.u64(self.object)
-            .u32(self.reason)
-            .pad(4)
-            .u64(self.entity)
-            .u64(self.group_entity);
-        w.finish()
-    }
-
-    /// Decode a payload of either layout.
-    pub fn decode(b: &[u8]) -> Result<ObjectGone, DecodeError> {
-        let mut r = Reader::new(b);
-        let mut g = ObjectGone {
-            object: r.u64()?,
-            reason: r.u32()?,
-            ..ObjectGone::default()
-        };
-        r.skip(4)?;
-        if r.remaining() > 0 {
-            g.entity = r.u64()?;
-            g.group_entity = r.u64()?;
-        }
-        Ok(g)
-    }
-}
+pub use nanoprobe_transport::records::{Object, ObjectGone};
 
 /// `ENUM_BEGIN` and `ENUM_END`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -209,36 +83,36 @@ pub struct Enumeration {
 impl Enumeration {
     /// The `ENUM_BEGIN` payload.
     pub fn encode_begin(&self) -> Vec<u8> {
-        let mut w = Writer::new();
-        w.u64(self.enumeration);
-        w.finish()
+        EnumBegin {
+            enumeration: self.enumeration,
+        }
+        .encode()
     }
 
     /// The `ENUM_END` payload.
     pub fn encode_end(&self) -> Vec<u8> {
-        let mut w = Writer::new();
-        w.u64(self.enumeration).u32(self.objects).pad(4);
-        w.finish()
+        EnumEnd {
+            enumeration: self.enumeration,
+            objects: self.objects,
+        }
+        .encode()
     }
 
     /// Decode an `ENUM_BEGIN` payload.
     pub fn decode_begin(b: &[u8]) -> Result<Enumeration, DecodeError> {
-        let mut r = Reader::new(b);
         Ok(Enumeration {
-            enumeration: r.u64()?,
+            enumeration: EnumBegin::decode(b)?.enumeration,
             objects: 0,
         })
     }
 
     /// Decode an `ENUM_END` payload.
     pub fn decode_end(b: &[u8]) -> Result<Enumeration, DecodeError> {
-        let mut r = Reader::new(b);
-        let e = Enumeration {
-            enumeration: r.u64()?,
-            objects: r.u32()?,
-        };
-        r.skip(4)?;
-        Ok(e)
+        let e = EnumEnd::decode(b)?;
+        Ok(Enumeration {
+            enumeration: e.enumeration,
+            objects: e.objects,
+        })
     }
 }
 
@@ -266,88 +140,50 @@ pub struct Vitals {
     pub fuel: f32,
 }
 
-fn rows(r: &mut Reader<'_>, width: usize) -> Result<usize, DecodeError> {
-    let n = r.u32()? as usize;
-    r.skip(4)?;
-    if n.checked_mul(width).is_none_or(|b| b > r.remaining()) {
-        return Err(DecodeError {
-            at: r.position(),
-            what: "rows past the payload",
-        });
-    }
-    Ok(n)
-}
-
 /// Encode a `POSITIONS` batch.
 pub fn encode_positions(rows: &[Position]) -> Vec<u8> {
-    let mut w = Writer::new();
-    w.u32(rows.len() as u32).pad(4);
-    rows.iter().for_each(|p| {
-        w.u64(p.object);
-    });
-    rows.iter().for_each(|p| {
-        w.f64(p.x);
-    });
-    rows.iter().for_each(|p| {
-        w.f64(p.y);
-    });
-    rows.iter().for_each(|p| {
-        w.f64(p.z);
-    });
-    w.finish()
+    Positions {
+        object: rows.iter().map(|p| p.object).collect(),
+        x: rows.iter().map(|p| p.x).collect(),
+        y: rows.iter().map(|p| p.y).collect(),
+        z: rows.iter().map(|p| p.z).collect(),
+    }
+    .encode()
 }
 
 /// Decode a `POSITIONS` batch.
 pub fn decode_positions(b: &[u8]) -> Result<Vec<Position>, DecodeError> {
-    let mut r = Reader::new(b);
-    let n = rows(&mut r, 32)?;
-    let mut out = vec![Position::default(); n];
-    for p in &mut out {
-        p.object = r.u64()?;
-    }
-    for p in &mut out {
-        p.x = r.f64()?;
-    }
-    for p in &mut out {
-        p.y = r.f64()?;
-    }
-    for p in &mut out {
-        p.z = r.f64()?;
-    }
-    Ok(out)
+    let p = Positions::decode(b)?;
+    Ok((0..p.object.len())
+        .map(|i| Position {
+            object: p.object[i],
+            x: p.x[i],
+            y: p.y[i],
+            z: p.z[i],
+        })
+        .collect())
 }
 
 /// Encode a `VITALS` batch.
 pub fn encode_vitals(rows: &[Vitals]) -> Vec<u8> {
-    let mut w = Writer::new();
-    w.u32(rows.len() as u32).pad(4);
-    rows.iter().for_each(|v| {
-        w.u64(v.object);
-    });
-    rows.iter().for_each(|v| {
-        w.f32(v.life);
-    });
-    rows.iter().for_each(|v| {
-        w.f32(v.fuel);
-    });
-    w.finish()
+    TransportVitals {
+        object: rows.iter().map(|v| v.object).collect(),
+        life: rows.iter().map(|v| v.life).collect(),
+        fuel: rows.iter().map(|v| v.fuel).collect(),
+    }
+    .encode()
 }
 
 /// Decode a `VITALS` batch.
 pub fn decode_vitals(b: &[u8]) -> Result<Vec<Vitals>, DecodeError> {
-    let mut r = Reader::new(b);
-    let n = rows(&mut r, 16)?;
-    let mut out = vec![Vitals::default(); n];
-    for v in &mut out {
-        v.object = r.u64()?;
-    }
-    for v in &mut out {
-        v.life = r.f32()?;
-    }
-    for v in &mut out {
-        v.fuel = r.f32()?;
-    }
-    Ok(out)
+    let v = TransportVitals::decode(b)?;
+    Ok((0..v.object.len())
+        .map(|i| Vitals {
+            object: v.object[i],
+            life: v.life[i],
+            fuel: v.fuel[i],
+        })
+        .collect())
 }
 
 /// One outbound record, decoded. Kinds the reconciler does not read are
@@ -753,18 +589,6 @@ mod tests {
             let (k, p) = i.encode();
             assert_eq!(Input::decode(k, &p).unwrap(), i);
         }
-    }
-
-    #[test]
-    fn object_gone_reads_both_layouts() {
-        assert_eq!(ObjectGone::default().encode().len(), OBJECT_GONE_LEN);
-        // The golden file's layout, with no binding.
-        assert_eq!(golden::layout("OBJECT_GONE").unwrap().fixed, 16);
-        let mut short = vec![7, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];
-        let g = ObjectGone::decode(&short).unwrap();
-        assert_eq!((g.object, g.reason, g.entity, g.group_entity), (7, 1, 0, 0));
-        short.extend([1, 2, 3]);
-        assert!(ObjectGone::decode(&short).is_err());
     }
 
     #[test]

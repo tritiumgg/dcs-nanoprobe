@@ -3,9 +3,11 @@
 --
 -- It writes a session marker to dcs.log, loads the agent DLL into this state,
 -- opens the agent's link to the sidecar (spec/transport.md), and pumps it on
--- every frame. On each simulation start it loads the shim into the server
--- state, once per process, and starts it. It logs the mission lifecycle as
--- JSON lines (spec/log.md), which also reach the sidecar through the agent.
+-- every frame: the agent's frame, on a sampling frame one cross-state call
+-- into the shim's pump, then the agent's finish. On each simulation start it
+-- loads the shim into the server state, once per process, and starts it. It
+-- logs the mission lifecycle as JSON lines (spec/log.md), which also reach
+-- the sidecar through the agent.
 --
 -- With the link open, the agent looks for the kill switch and the shim reload
 -- request on the frames where it makes its system calls. Without it, the hook
@@ -21,7 +23,7 @@ local dir = root .. 'versions/' .. build .. '/'
 local logmodule = assert(loadfile(dir .. 'lua/log.lua'))()
 
 -- The agent's interface version this hook was written for.
-local ABI = '3'
+local ABI = '6'
 -- What agent.frame returns.
 local FRAME_RELOAD, FRAME_DISABLED = 1, 2
 
@@ -240,10 +242,21 @@ __nanoprobe_shim = new
 return new.start()
 ]]
 
+-- Whether a shim is loaded in the server state, for the pump.
+local shim_loaded = false
+
+-- The pump, one cross-state call on each sampling frame
+-- (spec/sampling.md, "The frame"). The string is fixed, so no frame builds
+-- one, and short, because net.dostring_in compiles it on every call: a
+-- chunk with a local and a test costs about 10 µs more (LIVE, S10). The hook
+-- calls it only while a shim is loaded.
+local PUMP = '__nanoprobe_shim.pump()'
+
 local function shim_start()
   local chunk = string.format(BOOT, dll, dir .. 'lua/shim.lua', root, dir)
   local text, ok = net.dostring_in('server', chunk)
   if ok then
+    shim_loaded = true
     file.write('info', 'shim started', { result = text })
   else
     file.write('error', 'shim not started', { error = tostring(text) })
@@ -269,6 +282,19 @@ local function shim_reload()
     file.write('info', 'shim reloaded', { version = active, result = text })
   else
     file.write('error', 'shim not reloaded', { version = active, error = tostring(text) })
+  end
+end
+
+-- The position getter by object ID, when this DCS has it in this state: the
+-- agent sweeps the units' positions with it inside `frame`, with no
+-- cross-state call (spec/sampling.md, "The frame").
+local BY_ID
+do
+  local ok, f = pcall(function()
+    return DCS.getUnitPositionByObjectId
+  end)
+  if ok and type(f) == 'function' then
+    BY_ID = f
   end
 end
 
@@ -304,7 +330,14 @@ end)
 
 callbacks.onSimulationFrame = guard('onSimulationFrame', function()
   if linked then
-    local code = agent.frame(DCS.getRealTime(), DCS.getModelTime(), DCS.getPause())
+    local code, pump = agent.frame(DCS.getRealTime(), DCS.getModelTime(), DCS.getPause(), BY_ID)
+    -- A frame that does not sample ends inside `frame`.
+    if pump then
+      if shim_loaded then
+        net.dostring_in('server', PUMP)
+      end
+      agent.finish()
+    end
     if code == nil then
       -- A caught panic disabled the agent: every entry returns nothing. The
       -- hook goes on without the link.

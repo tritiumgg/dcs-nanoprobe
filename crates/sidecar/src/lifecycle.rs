@@ -67,9 +67,8 @@ pub enum Trigger {
     SpawnRefused,
     /// The spawn's outcome is `unknown`: it is sent again.
     SpawnUnknown,
-    /// Every member has a death fact. From `lost` this is unreachable under
-    /// the protocol's ordering (an enumeration finds no row of a lost group,
-    /// so no later `OBJECT_GONE` names one); the row keeps the rule total.
+    /// Every member has a death fact. From `lost` it follows a death event
+    /// that comes after the members left as `MISSING` or `REMOVED`.
     AllDead,
     /// The authority moved to the campaign.
     Dematerialize,

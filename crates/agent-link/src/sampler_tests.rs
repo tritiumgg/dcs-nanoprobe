@@ -1,0 +1,3046 @@
+//! The sampler driven by a simulated shim and a recorder in place of the
+//! link, on a made-up clock.
+
+use super::*;
+use nanoprobe_transport::records::{Ammo, EnumEnd, ObjectGone};
+use proptest::prelude::*;
+use std::collections::BTreeMap;
+
+/// A recorder in place of the link.
+struct Rec {
+    records: Vec<(u64, Vec<u8>)>,
+    began: Instant,
+    interval_us: f64,
+    share: f64,
+    syscall: bool,
+    hellos: u64,
+    boot: u64,
+    slice: f64,
+    periods: [f64; 5],
+}
+
+impl Rec {
+    fn new(share: f64, interval_us: f64) -> Rec {
+        Rec {
+            records: Vec::new(),
+            began: Instant::now(),
+            interval_us,
+            share,
+            syscall: false,
+            hellos: 1,
+            boot: 1,
+            slice: 0.0,
+            periods: [0.0; 5],
+        }
+    }
+
+    fn of(&self, k: u64) -> impl Iterator<Item = &Vec<u8>> {
+        self.records
+            .iter()
+            .filter(move |(kk, _)| *kk == k)
+            .map(|(_, p)| p)
+    }
+}
+
+impl Port for Rec {
+    fn enqueue(&mut self, kind: u16, payload: Vec<u8>) {
+        self.records.push((u64::from(kind), payload));
+    }
+    fn sample(&mut self, kind: u16, payload: &[u8]) -> bool {
+        self.records.push((u64::from(kind), payload.to_vec()));
+        true
+    }
+    fn flush(&mut self) {}
+    fn max_payload(&self) -> usize {
+        32 << 10
+    }
+    fn began(&self) -> Instant {
+        self.began
+    }
+    fn frame_interval_us(&self) -> f64 {
+        self.interval_us
+    }
+    fn overhead_share(&self) -> f64 {
+        self.share
+    }
+    fn syscall_frame(&self) -> bool {
+        self.syscall
+    }
+    fn hellos(&self) -> u64 {
+        self.hellos
+    }
+    fn served_boot(&self) -> u64 {
+        self.boot
+    }
+    fn set_sampling(&mut self, slice_us: f64, periods: [f64; 5], _rows_per_clock: u64) {
+        self.slice = slice_us;
+        self.periods = periods;
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Obj {
+    kind: u32,
+    name: String,
+    group: u64,
+    group_name: String,
+    pos: [f64; 3],
+    speed: f64,
+    /// A static that can move.
+    cargo: bool,
+    /// DCS's category: 0 aircraft, 2 ground.
+    category: u32,
+}
+
+/// What DCS holds, for the simulated shim.
+#[derive(Default)]
+struct World {
+    objects: BTreeMap<u64, Obj>,
+    births: Vec<u64>,
+    airbases: usize,
+    /// The enumeration's list and how far it got.
+    enum_list: Vec<u64>,
+    enum_at: usize,
+    /// What each batch costs apart from its rows, µs: the plan call, the
+    /// shim's dispatch and its return.
+    batch_us: f64,
+    /// What resolving one birth costs, µs, when not the default.
+    birth_us: Option<f64>,
+    /// What every 100th enumeration item costs, µs, when set: a
+    /// `coalition.getGroups` call.
+    enum_step_us: Option<f64>,
+    /// What an enumeration item costs, µs, when not the default.
+    enum_item_us: Option<f64>,
+    /// What closing a batch costs, µs, on average; each close varies from
+    /// half to one and a half times it.
+    close_us: f64,
+    /// Closes so far, for the variation.
+    closes: u64,
+    /// The host sweeps the units' positions itself in `frame`, each batch
+    /// costing this much apart from its rows, µs, and each row `.1`.
+    sweep: Option<(f64, f64)>,
+    /// Rows the sweep read.
+    swept: u64,
+    /// Objects killed: their ID reads dead once DCS no longer has them.
+    killed: HashSet<u64>,
+    /// No sidecar is attached: frames run, nothing sweeps or pumps.
+    detached: bool,
+    /// Every second frame makes the system calls, as at 0.5 frames a second
+    /// with a sidecar attached.
+    alternate: bool,
+    /// Existence checks the pumps made.
+    checked: u64,
+}
+
+impl World {
+    fn found(&self, object: u64) -> Option<Found> {
+        let o = self.objects.get(&object)?;
+        Some(Found {
+            object,
+            group: o.group,
+            kind: o.kind,
+            category: o.category,
+            coalition: 2,
+            country: 2,
+            life0: 3.0,
+            name: o.name.clone(),
+            type_name: "M-113".into(),
+            group_name: o.group_name.clone(),
+            movable: o.cargo,
+        })
+    }
+
+    /// As the shim: a static's point is read when its row is added and when
+    /// an enumeration finds it.
+    fn spot(&self, s: &mut Sampler, object: u64) {
+        if let Some(o) = self.objects.get(&object)
+            && o.kind == object_kind::STATIC
+        {
+            s.spot(object, o.pos);
+        }
+    }
+
+    fn spawn(&mut self, object: u64, kind: u32, name: String, speed: f64) {
+        self.objects.insert(
+            object,
+            Obj {
+                kind,
+                name,
+                group: if kind == object_kind::UNIT {
+                    object / 10
+                } else {
+                    0
+                },
+                group_name: if kind == object_kind::UNIT {
+                    format!("g{}", object / 10)
+                } else {
+                    String::new()
+                },
+                pos: [object as f64, 0.0, 0.0],
+                speed,
+                cargo: false,
+                category: 2,
+            },
+        );
+        self.births.push(object);
+    }
+
+    fn step(&mut self, dt: f64) {
+        for o in self.objects.values_mut() {
+            o.pos[0] += o.speed * dt;
+        }
+    }
+}
+
+/// Microseconds each row costs on the simulated clock, by tier.
+fn cost(tier: Tier) -> f64 {
+    match tier {
+        Tier::Births => 3.0,
+        Tier::Enumeration => 1.0,
+        Tier::Subscribed | Tier::Positions => 0.2,
+        Tier::Stopped => 3.0,
+        Tier::Vitals => 0.2,
+        Tier::Ammo => 1.7,
+        Tier::Warehouses => 50.0,
+    }
+}
+
+struct Clock(Instant);
+
+impl Clock {
+    fn add(&mut self, us: f64) -> Instant {
+        self.0 += Duration::from_nanos((us * 1000.0) as u64);
+        self.0
+    }
+}
+
+/// The shim's pump, simulated: what lua/agent/shim.lua does with the
+/// sampler's plans.
+fn pump(s: &mut Sampler, rec: &mut Rec, w: &mut World, clock: &mut Clock) {
+    s.set_pending(w.births.len(), w.airbases);
+    let b = s.begin(rec, clock.0);
+    if !b.sample {
+        return;
+    }
+    // The existence checks go first: a killed object reads dead, any other
+    // that DCS no longer has raises.
+    let mut ids = Vec::new();
+    s.checks(&mut ids);
+    w.checked += ids.len() as u64;
+    for id in ids {
+        if w.objects.contains_key(&id) {
+            continue;
+        }
+        if w.killed.contains(&id) {
+            s.gone(rec, id, Read::Value(Some(true)), Read::Value(Some(0.0)));
+        } else {
+            s.gone(rec, id, Read::Raised, Read::Raised);
+        }
+    }
+    let mut slots = Vec::new();
+    while let Some(plan) = {
+        let t = clock.0;
+        // Closing the last batch takes time: the clock moves on after the
+        // plan's first read.
+        w.closes += 1;
+        let c = w.close_us * (0.5 + (w.closes * 7919 % 101) as f64 / 100.0);
+        let closing = s.batch.tier.is_some();
+        let c = if closing { c } else { 0.0 };
+        let reads = std::cell::Cell::new(0u32);
+        let p = s.plan(
+            rec,
+            || {
+                reads.set(reads.get() + 1);
+                if reads.get() == 1 {
+                    t
+                } else {
+                    t + Duration::from_nanos((c * 1000.0) as u64)
+                }
+            },
+            &mut slots,
+        );
+        if closing {
+            clock.add(c);
+        }
+        p
+    } {
+        clock.add(w.batch_us);
+        let mut stop = false;
+        match plan.tier {
+            Tier::Births => {
+                for _ in 0..plan.rows {
+                    let Some(object) = (!w.births.is_empty()).then(|| w.births.remove(0)) else {
+                        break;
+                    };
+                    // A birth the table already has costs the shim one
+                    // `wants` check.
+                    let wanted = s.wants(object);
+                    if let Some(f) = w.found(object) {
+                        s.add(rec, f, false);
+                        w.spot(s, object);
+                    }
+                    let us = if wanted {
+                        w.birth_us.unwrap_or(cost(plan.tier))
+                    } else {
+                        1.0
+                    };
+                    let t = clock.add(us);
+                    if s.item(|| t) {
+                        stop = true;
+                        break;
+                    }
+                }
+            }
+            Tier::Enumeration => {
+                if plan.flag {
+                    w.enum_list = w.objects.keys().copied().collect();
+                    w.enum_at = 0;
+                }
+                for _ in 0..plan.rows {
+                    if w.enum_at >= w.enum_list.len() {
+                        s.enumeration_done(rec, clock.0);
+                        break;
+                    }
+                    let object = w.enum_list[w.enum_at];
+                    if w.enum_at.is_multiple_of(100)
+                        && let Some(us) = w.enum_step_us
+                    {
+                        clock.add(us);
+                    }
+                    w.enum_at += 1;
+                    // As the shim's `visit`: one call for a known object,
+                    // a read and `item` for a new one.
+                    let t = clock.add(w.enum_item_us.unwrap_or(cost(plan.tier)));
+                    let (found, end) = s.seen_item(rec, object, || t);
+                    let end = if found == Some(0) {
+                        if let Some(f) = w.found(object) {
+                            s.add(rec, f, true);
+                        }
+                        w.spot(s, object);
+                        s.item(|| t)
+                    } else {
+                        if found.is_some() {
+                            w.spot(s, object);
+                        }
+                        end
+                    };
+                    if end {
+                        stop = true;
+                        break;
+                    }
+                }
+                if !stop && w.enum_at >= w.enum_list.len() && s.enumeration().is_some() {
+                    s.enumeration_done(rec, clock.0);
+                }
+            }
+            Tier::Subscribed | Tier::Positions => {
+                for &slot in &slots {
+                    let p = s
+                        .object_at(slot)
+                        .and_then(|o| w.objects.get(&o))
+                        .map(|o| o.pos);
+                    let t = clock.add(cost(plan.tier));
+                    let st = s.position(slot, p, || t);
+                    if plan.flag {
+                        s.attitude(slot, [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+                    }
+                    if st {
+                        stop = true;
+                        break;
+                    }
+                }
+            }
+            Tier::Stopped => {
+                for &slot in &slots {
+                    s.attitude(slot, [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+                    let t = clock.add(cost(plan.tier));
+                    if s.stopped_done(|| t) {
+                        stop = true;
+                        break;
+                    }
+                }
+            }
+            Tier::Vitals => {
+                for &slot in &slots {
+                    let t = clock.add(cost(plan.tier));
+                    if s.vitals(slot, Some(3.0), Some(1.0), || t) {
+                        stop = true;
+                        break;
+                    }
+                }
+            }
+            Tier::Ammo => {
+                for &slot in &slots {
+                    let t = clock.add(cost(plan.tier));
+                    if s.ammo(rec, slot, &[(b"shell".to_vec(), 5.0)], || t) {
+                        stop = true;
+                        break;
+                    }
+                }
+            }
+            Tier::Warehouses => {
+                for &i in &slots {
+                    let a = Airbase {
+                        object: u64::from(i) + 1,
+                        coalition: 2,
+                        airbase: format!("base{i}"),
+                    };
+                    let t = clock.add(cost(plan.tier));
+                    if s.airbase(rec, i, a, Some(Lv::Nil), || t) {
+                        stop = true;
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = stop;
+    }
+    // A batch still open ends with its close, which takes what one in `plan`
+    // does.
+    if s.batch.tier.is_some() {
+        w.closes += 1;
+        let c = w.close_us * (0.5 + (w.closes * 7919 % 101) as f64 / 100.0);
+        let t = clock.0;
+        let reads = std::cell::Cell::new(0u32);
+        s.end_pump(rec, || {
+            reads.set(reads.get() + 1);
+            if reads.get() == 1 {
+                t
+            } else {
+                t + Duration::from_nanos((c * 1000.0) as u64)
+            }
+        });
+        clock.add(c);
+    } else {
+        s.end_pump(rec, || clock.0);
+    }
+}
+
+/// Frames at `fps` for `secs` seconds, a system-call frame costing
+/// `syscall_us` once a second. Returns the agent's share of real time and
+/// the position periods seen once a second.
+struct Run {
+    share: f64,
+    samples: Vec<[f64; 5]>,
+    /// Frames that pumped, frames that did not make system calls.
+    pumps: usize,
+    frames: usize,
+    /// The longest frame, µs.
+    longest_us: f64,
+    /// The most credit left right after a pump frame, µs.
+    #[cfg_attr(
+        not(feature = "faults"),
+        allow(dead_code, reason = "read by a faults test")
+    )]
+    credit_after_pump: f64,
+    /// From the reports: frames that only swept rows, and those that ran
+    /// past the budget by more than a clock interval.
+    row_frames: u64,
+    overrun_frames: u64,
+    /// Debt the cap forgave, µs, from the reports.
+    forgiven_us: f64,
+    /// From the reports: the host's sweeps, those their deadline stopped,
+    /// and those that ran past their budget by more than the rows between
+    /// two clock reads.
+    sweeps: u64,
+    sweep_cut: u64,
+    sweep_overruns: u64,
+    /// From the reports: each tier's rows, births first.
+    #[cfg_attr(
+        not(feature = "faults"),
+        allow(dead_code, reason = "read by a faults test")
+    )]
+    tier_rows: [u64; 8],
+    /// From the reports: pumps that planned no row.
+    empty_pumps: u64,
+    /// Seconds from the start to the first frame where the host's gate found
+    /// the pump worth its call, and to the first pump.
+    #[cfg_attr(
+        not(feature = "faults"),
+        allow(dead_code, reason = "read by a faults test")
+    )]
+    first_worth: Option<f64>,
+    #[cfg_attr(
+        not(feature = "faults"),
+        allow(dead_code, reason = "read by a faults test")
+    )]
+    first_pump: Option<f64>,
+    /// Existence checks waiting, once a second.
+    checks: Vec<usize>,
+    /// Frames over 250 µs.
+    over_250: usize,
+}
+
+fn run(s: &mut Sampler, rec: &mut Rec, w: &mut World, secs: f64, fps: f64, syscall_us: f64) -> Run {
+    run_x(s, rec, w, secs, fps, syscall_us, 5.0, 2.0)
+}
+
+/// [`run`] with the cross-state call costing `xcall_us` and the link's work
+/// before the decision `pre_us`.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one argument per knob of the simulation"
+)]
+fn run_x(
+    s: &mut Sampler,
+    rec: &mut Rec,
+    w: &mut World,
+    secs: f64,
+    fps: f64,
+    syscall_us: f64,
+    xcall_us: f64,
+    pre_us: f64,
+) -> Run {
+    let interval = 1e6 / fps;
+    let mut clock = Clock(rec.began);
+    let start = clock.0;
+    let mut agent = 0.0;
+    let mut samples = Vec::new();
+    let frames = (secs * fps) as usize;
+    let mut next_syscall = 0.0;
+    let (mut pumps, mut counted, mut longest_us, mut credit_after_pump) = (0, 0, 0.0f64, 0.0f64);
+    let (mut row_frames, mut overrun_frames, mut forgiven_us) = (0, 0, 0.0);
+    let (mut sweeps, mut sweep_cut, mut sweep_overruns) = (0, 0, 0);
+    let mut tier_rows = [0u64; 8];
+    let mut empty_pumps = 0;
+    let (mut first_worth, mut first_pump) = (None, None);
+    let mut checks = Vec::new();
+    let mut over_250 = 0;
+    let mut report = None;
+    for f in 0..frames {
+        let t0 = start + Duration::from_nanos((f as f64 * interval * 1000.0) as u64);
+        clock.0 = t0;
+        rec.began = t0;
+        let elapsed = f as f64 * interval / 1e6;
+        w.step(interval / 1e6);
+        rec.syscall = if w.alternate {
+            f % 2 == 0
+        } else {
+            elapsed >= next_syscall
+        };
+        if rec.syscall {
+            next_syscall += 1.0;
+            clock.add(syscall_us);
+        } else {
+            // The link's work, then the cross-state call when the frame
+            // samples, then `finish`.
+            clock.add(pre_us);
+            counted += 1;
+            let pumped = if w.detached {
+                s.slice(rec, clock.0);
+                false
+            } else if let Some((batch_us, row_us)) = w.sweep {
+                // As the driver's `frame`: the slice, the sweep with the
+                // hook state's getter, then the gate.
+                s.set_direct(true);
+                s.slice(rec, clock.0);
+                let now = clock.0;
+                let rows = std::cell::Cell::new(0u64);
+                let objects = &w.objects;
+                let mut read = |object: u64| {
+                    rows.set(rows.get() + 1);
+                    Ok(objects.get(&object).map(|o| o.pos))
+                };
+                // The sweep's clock: its fixed part, then each row read.
+                let end = s.sweep(rec, now, &mut read, || {
+                    now + Duration::from_nanos(
+                        ((batch_us + rows.get() as f64 * row_us) * 1000.0) as u64,
+                    )
+                });
+                w.swept += rows.get();
+                clock.0 = end;
+                if first_worth.is_none() && s.pump_worth(clock.0) {
+                    first_worth = Some(elapsed);
+                }
+                s.gate(rec, clock.0)
+            } else {
+                s.decide(rec, clock.0)
+            };
+            if pumped {
+                pumps += 1;
+                first_pump.get_or_insert(elapsed);
+                clock.add(xcall_us);
+                pump(s, rec, w, &mut clock);
+            }
+            clock.add(1.0);
+            report = s.end_frame(rec, clock.0);
+            if pumped {
+                credit_after_pump = credit_after_pump.max(s.credit_us());
+            }
+            let frame_us = clock.0.saturating_duration_since(t0).as_secs_f64() * 1e6;
+            over_250 += usize::from(frame_us > SLICE_CAP_US);
+            longest_us = longest_us.max(frame_us);
+        }
+        if rec.syscall {
+            report = s.end_frame(rec, clock.0);
+        }
+        if let Some(r) = report.take() {
+            row_frames += r.row_frames;
+            overrun_frames += r.overrun_frames;
+            forgiven_us += r.forgiven_us;
+            sweeps += r.sweeps;
+            sweep_cut += r.sweep_cut;
+            sweep_overruns += r.sweep_overruns;
+            empty_pumps += r.empty_pumps;
+            for (sum, rows) in tier_rows.iter_mut().zip(r.spend.tier_rows) {
+                *sum += rows;
+            }
+        }
+        agent += clock.0.saturating_duration_since(t0).as_secs_f64();
+        if f % (fps as usize).max(1) == 0 {
+            samples.push(rec.periods);
+            checks.push(s.checks_waiting());
+        }
+    }
+    Run {
+        share: agent / secs,
+        samples,
+        pumps,
+        frames: counted,
+        longest_us,
+        credit_after_pump,
+        row_frames,
+        overrun_frames,
+        forgiven_us,
+        sweeps,
+        sweep_cut,
+        sweep_overruns,
+        tier_rows,
+        empty_pumps,
+        first_worth,
+        first_pump,
+        checks,
+        over_250,
+    }
+}
+
+fn world(units: u64, statics: u64, airbases: usize) -> World {
+    let mut w = World {
+        airbases,
+        ..World::default()
+    };
+    for i in 1..=units {
+        w.spawn(1000 + i, object_kind::UNIT, format!("u{i}"), 5.0);
+    }
+    for i in 1..=statics {
+        w.spawn(100_000 + i, object_kind::STATIC, format!("s{i}"), 0.0);
+    }
+    w
+}
+
+/// Halt four groups of ten units in five, as the live scenario at 1,200 and
+/// 2,000 objects does: a halted unit's position is read once in five sweeps.
+fn halt_four_in_five(w: &mut World) {
+    for (i, o) in w.objects.values_mut().enumerate() {
+        if (i / 10) % 5 != 0 {
+            o.speed = 0.0;
+        }
+    }
+}
+
+fn tail_mean(samples: &[[f64; 5]], tier: usize, n: usize) -> f64 {
+    let tail = &samples[samples.len().saturating_sub(n)..];
+    tail.iter().map(|p| p[tier]).sum::<f64>() / tail.len() as f64
+}
+
+#[test]
+fn rates_meet_their_targets_and_the_mean_holds_at_2000_units() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 110.0);
+    let mut w = world(1960, 40, 20);
+    run(&mut s, &mut rec, &mut w, 60.0, 110.0, 200.0);
+    assert_eq!(s.len(), 2000);
+    // No unit has fired and none is subscribed: no ammunition is read.
+    assert_eq!(
+        rec.of(kind::AMMO).count(),
+        0,
+        "ammunition read with no shot"
+    );
+    // Ten units fire: each one's ammunition is read once.
+    for i in 1..=10u64 {
+        s.mark(Some((1000 + i) as f64), false);
+    }
+    let r = run(&mut s, &mut rec, &mut w, 60.0, 110.0, 200.0);
+    assert!(r.share <= 0.003 * 1.02, "share {}", r.share);
+    let fired: Vec<u64> = rec
+        .of(kind::AMMO)
+        .filter_map(|p| Ammo::decode(p).ok())
+        .map(|a| a.object)
+        .collect();
+    assert_eq!(fired.len(), 10, "ammunition records {fired:?}");
+    assert!(fired.iter().all(|o| (1001..=1010).contains(o)), "{fired:?}");
+    for k in [
+        kind::POSITIONS,
+        kind::VITALS,
+        kind::AIRBASE,
+        kind::WAREHOUSE,
+    ] {
+        assert!(rec.of(k).count() > 0, "no record of kind {k}");
+    }
+    let pos = tail_mean(&r.samples, 0, 30);
+    let vit = tail_mean(&r.samples, 1, 30);
+    let ammo = tail_mean(&r.samples, 2, 30);
+    let wh = tail_mean(&r.samples, 3, 30);
+    assert!((0.9..1.3).contains(&pos), "position period {pos}");
+    assert!((4.5..6.0).contains(&vit), "vitals period {vit}");
+    assert!((27.0..36.0).contains(&ammo), "ammo period {ammo}");
+    assert!((54.0..72.0).contains(&wh), "warehouse period {wh}");
+}
+
+/// The host sweeps the units' positions in `frame` with LIVE costs (S10: a
+/// row 0.7 µs, a batch 1.5 µs around its rows, the call 29 µs, the link's
+/// work 2.2 µs): every unit is read once a second, the pump runs for the
+/// other tiers only, and a spawn's births and the enumeration still get
+/// their turn.
+#[test]
+fn the_hosts_sweep_reads_each_unit_once_a_second_and_leaves_the_pump_its_turn() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 100.0);
+    let mut w = world(1960, 40, 20);
+    w.sweep = Some((1.5, 0.7));
+    w.batch_us = 7.0;
+    w.close_us = 3.0;
+    let r = run_x(&mut s, &mut rec, &mut w, 60.0, 100.0, 185.0, 29.0, 2.2);
+    assert_eq!(s.len(), 2000, "births left: {}", w.births.len());
+    let before = w.swept;
+    let r2 = run_x(&mut s, &mut rec, &mut w, 60.0, 100.0, 185.0, 29.0, 2.2);
+    assert!(
+        r.share <= 0.003 * 1.02 && r2.share <= 0.003 * 1.02,
+        "share {} {}",
+        r.share,
+        r2.share
+    );
+    let rate = (w.swept - before) as f64 / 60.0 / 1960.0;
+    assert!(
+        (0.95..1.05).contains(&rate),
+        "each unit read {rate} times a second"
+    );
+    let pos = tail_mean(&r2.samples, 0, 30);
+    let vit = tail_mean(&r2.samples, 1, 30);
+    assert!((0.9..1.2).contains(&pos), "position period {pos}");
+    assert!((4.5..6.5).contains(&vit), "vitals period {vit}");
+    // The statics' points come with their vitals.
+    let statics = rec
+        .of(kind::POSITIONS)
+        .filter_map(|p| Positions::decode(p).ok())
+        .flat_map(|p| p.object)
+        .filter(|o| *o > 100_000)
+        .count();
+    assert!(statics > 0, "no static's position");
+    // With the ruled gate a pump comes every 4 frames when the pump reads
+    // the positions (25 a second, LIVE). Here the simulated tiers below
+    // positions stay owed, so the pump still runs often.
+    assert!(
+        r2.pumps as f64 / 60.0 < 15.0,
+        "{} pumps a second; enumeration {:?} due {} stopped {} births {} call {} tiers {:?}",
+        r2.pumps as f64 / 60.0,
+        s.enumeration,
+        s.enum_due,
+        s.stopped.len(),
+        s.births,
+        s.xcall_seen,
+        [Tier::Vitals, Tier::Ammo, Tier::Warehouses]
+            .map(|t| (s.tiers[t.index()].credit, s.tiers[t.index()].cost)),
+    );
+    assert!(r2.longest_us <= 250.0, "a frame of {} µs", r2.longest_us);
+}
+
+/// A row that costs the sweep twice what it planned with, and then ten times
+/// (a slow getter): the sweep reads the clock every few rows and stops at
+/// its deadline, so no frame passes 250 µs and the mean holds; the rows it
+/// did not read stay owed, and the cost estimate follows within seconds.
+#[test]
+fn the_sweep_stops_at_its_deadline_when_a_row_costs_more_than_planned() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 100.0);
+    let mut w = world(1960, 40, 20);
+    w.sweep = Some((1.5, 0.7));
+    w.batch_us = 7.0;
+    w.close_us = 3.0;
+    let settled = run_x(&mut s, &mut rec, &mut w, 90.0, 100.0, 185.0, 29.0, 2.2);
+    assert_eq!(s.len(), 2000);
+    assert!(
+        settled.sweeps > 0 && settled.sweep_overruns == 0,
+        "settled: {} overruns",
+        settled.sweep_overruns
+    );
+    for (row_us, label) in [(1.4, "twice"), (7.0, "ten times")] {
+        w.sweep = Some((1.5, row_us));
+        let r = run_x(&mut s, &mut rec, &mut w, 20.0, 100.0, 185.0, 29.0, 2.2);
+        assert!(
+            r.longest_us <= 250.0,
+            "{label}: a frame of {} µs",
+            r.longest_us
+        );
+        assert!(r.share <= 0.003 * 1.02, "{label}: share {}", r.share);
+        assert!(r.sweep_cut > 0, "{label}: no sweep was stopped");
+        assert_eq!(r.sweep_overruns, 0, "{label}: a sweep ran past its budget");
+        assert!(
+            r.sweeps > 0 && r.forgiven_us == 0.0,
+            "{label}: {} sweeps",
+            r.sweeps
+        );
+    }
+    // The estimate has followed the getter: sweeps are planned to fit again.
+    let after = run_x(&mut s, &mut rec, &mut w, 20.0, 100.0, 185.0, 29.0, 2.2);
+    assert!(
+        after.sweep_cut * 10 <= after.sweeps,
+        "{} of {} sweeps still stopped",
+        after.sweep_cut,
+        after.sweeps
+    );
+    assert!(
+        (6.0..8.0).contains(&s.sweep_row_us),
+        "row estimate {}",
+        s.sweep_row_us
+    );
+}
+
+/// The sweep's first rows, with no estimate of its own yet: a getter that
+/// costs 50 µs a row is stopped within the clock interval, well inside the
+/// frame's limit.
+#[test]
+fn a_cold_sweep_with_a_slow_getter_stays_inside_the_slice() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 100.0);
+    let mut w = world(1960, 0, 0);
+    w.sweep = Some((1.5, 50.0));
+    let r = run_x(&mut s, &mut rec, &mut w, 30.0, 100.0, 185.0, 29.0, 2.2);
+    assert!(r.longest_us <= 250.0, "a frame of {} µs", r.longest_us);
+    assert!(r.share <= 0.003 * 1.02, "share {}", r.share);
+    assert!(w.swept > 0, "nothing was read");
+}
+
+/// A row that costs the sweep 9 µs with an allowance of 500 µs a frame, as
+/// on the mock (a debug build, Lua getters, a share of 5 %): a frame can
+/// spend 250 µs at most, so the sweep's savings and its least batch are
+/// taken from that. Sized from the allowance, the least batch was more than
+/// a frame could ever read, the sweep never ran, and its savings shut the
+/// pump out for good (the rehearsal, S10).
+#[test]
+fn a_dear_row_and_a_large_allowance_do_not_stop_the_sweep() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.05, 1e6 / 100.0);
+    let mut w = world(480, 20, 4);
+    w.sweep = Some((40.0, 9.0));
+    w.batch_us = 7.0;
+    w.close_us = 3.0;
+    run_x(&mut s, &mut rec, &mut w, 20.0, 100.0, 185.0, 29.0, 2.2);
+    assert_eq!(s.len(), 500, "births left: {}", w.births.len());
+    let before = w.swept;
+    let r = run_x(&mut s, &mut rec, &mut w, 20.0, 100.0, 185.0, 29.0, 2.2);
+    let rate = (w.swept - before) as f64 / 20.0 / 480.0;
+    assert!(
+        (0.95..1.05).contains(&rate),
+        "each unit read {rate} times a second"
+    );
+    assert!(
+        r.pumps > 0 && r.longest_us <= 300.0,
+        "{} pumps, a frame of {} µs",
+        r.pumps,
+        r.longest_us
+    );
+    let vit = tail_mean(&r.samples, 1, 10);
+    assert!((4.5..6.5).contains(&vit), "vitals period {vit}");
+}
+
+/// A sidecar that attaches holds no samples. After its `HELLO` every row is
+/// read again within seconds, the halted ones too: a position (a static's
+/// with the enumeration the attach asks for), and life and fuel.
+#[test]
+fn an_attach_reads_every_row_again() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 100.0);
+    let mut w = world(1960, 40, 20);
+    halt_four_in_five(&mut w);
+    w.sweep = Some((1.5, 0.7));
+    run_x(&mut s, &mut rec, &mut w, 60.0, 100.0, 185.0, 29.0, 2.2);
+    assert_eq!(s.len(), 2000);
+    assert!(
+        s.idle_units > 1500,
+        "{} units read less often",
+        s.idle_units
+    );
+    rec.hellos += 1;
+    rec.records.clear();
+    run_x(&mut s, &mut rec, &mut w, 10.0, 100.0, 185.0, 29.0, 2.2);
+    let positions: std::collections::BTreeSet<u64> = rec
+        .of(kind::POSITIONS)
+        .filter_map(|p| Positions::decode(p).ok())
+        .flat_map(|p| p.object)
+        .collect();
+    let vitals: std::collections::BTreeSet<u64> = rec
+        .of(kind::VITALS)
+        .filter_map(|p| Vitals::decode(p).ok())
+        .flat_map(|p| p.object)
+        .collect();
+    assert_eq!(positions.len(), 2000, "positions after the attach");
+    assert_eq!(vitals.len(), 2000, "life and fuel after the attach");
+    // The halted rows go back to their slow schedule.
+    run_x(&mut s, &mut rec, &mut w, 10.0, 100.0, 185.0, 29.0, 2.2);
+    assert!(
+        s.idle_units > 1500,
+        "{} units read less often",
+        s.idle_units
+    );
+}
+
+/// One rule for births and the enumeration (S10 ruling on the adoption
+/// brief, 1b): they earn half of each frame's sampling allowance, the sweep
+/// saves from the other half while they wait, and the pump takes no second
+/// half. With LIVE costs at 2,000 objects (an enumeration item 10 µs with
+/// the table full, a `coalition.getGroups` step of 570 µs, the call 29 µs)
+/// the enumeration keeps its 60 s period, and the positions and vitals keep
+/// theirs while it runs.
+#[test]
+fn the_enumeration_keeps_its_period_at_2000_with_live_costs() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 100.0);
+    let mut w = world(1960, 40, 20);
+    w.sweep = Some((1.5, 0.7));
+    w.batch_us = 7.0;
+    w.close_us = 3.0;
+    w.enum_item_us = Some(10.0);
+    w.enum_step_us = Some(570.0);
+    halt_four_in_five(&mut w);
+    let first = run_x(&mut s, &mut rec, &mut w, 120.0, 100.0, 185.0, 29.0, 2.2);
+    assert_eq!(s.len(), 2000, "births left: {}", w.births.len());
+    let r = run_x(&mut s, &mut rec, &mut w, 240.0, 100.0, 185.0, 29.0, 2.2);
+    assert!(
+        first.share <= 0.003 * 1.02 && r.share <= 0.003 * 1.02,
+        "share {} {}",
+        first.share,
+        r.share
+    );
+    let worst = |tier: usize| r.samples.iter().map(|p| p[tier]).fold(0.0f64, f64::max);
+    // The period is begin to begin, 60 s. An enumeration of this size takes
+    // about 35 s, and while one runs the reported period grows from the
+    // last ended one's begin: at most the target plus the duration.
+    let ended = s.periods()[4];
+    assert!((59.0..61.0).contains(&ended), "enumeration period {ended}");
+    assert!(
+        worst(4) <= 60.0 + 40.0,
+        "enumeration period grew to {}",
+        worst(4)
+    );
+    assert!(
+        worst(0) <= 1.3,
+        "position period {} during an enumeration",
+        worst(0)
+    );
+    assert!(
+        worst(1) <= 7.5,
+        "vitals period {} during an enumeration",
+        worst(1)
+    );
+    assert_eq!(r.forgiven_us, 0.0);
+}
+
+/// LIVE, S10: a batch costs a fixed part (about 20 µs under Wine) besides
+/// its rows (about 0.2 µs each, E5). A cost per row that absorbs the fixed
+/// part plans small batches, each paying it again, and the positions took
+/// 4 s at 2,000 rows. With the fixed part apart, they keep their 1 s.
+#[test]
+fn a_fixed_cost_per_batch_does_not_slow_the_positions() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 110.0);
+    let mut w = world(1960, 40, 20);
+    w.batch_us = 20.0;
+    // Closing a batch varies around the 6 µs measured live.
+    w.close_us = 6.0;
+    let r = run_x(&mut s, &mut rec, &mut w, 120.0, 110.0, 165.0, 23.0, 3.0);
+    assert!(r.share <= 0.003 * 1.02, "share {}", r.share);
+    let pos = tail_mean(&r.samples, 0, 30);
+    assert!(pos <= 1.1, "position period {pos}");
+    // A close that varies from 3 to 9 µs runs past the budget in at most
+    // 1 % of the frames that only swept rows.
+    assert!(
+        r.row_frames > 0 && r.overrun_frames * 100 <= r.row_frames,
+        "{} of {} row frames ran past the budget",
+        r.overrun_frames,
+        r.row_frames
+    );
+    let c = s.costs()[Tier::Positions.index()];
+    assert!((0.15..0.3).contains(&c), "cost per position {c}");
+    // The estimate decays 1 % on each pump, so it sits a little under the
+    // true 20 µs.
+    assert!(
+        (15.0..25.0).contains(&s.batch_us()),
+        "batch cost {}",
+        s.batch_us()
+    );
+}
+
+/// LIVE, S10: a 2,000-object spawn brought births at 37 µs each, which
+/// ranked first and took every pump for over a minute: positions and the
+/// enumeration stalled. Births now take at most half the sampling time while
+/// rows are owed, and a running enumeration goes before them.
+#[test]
+fn a_birth_burst_leaves_the_positions_and_the_enumeration_their_turn() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 110.0);
+    let mut w = world(1000, 0, 0);
+    w.batch_us = 20.0;
+    w.birth_us = Some(37.0);
+    run_x(&mut s, &mut rec, &mut w, 40.0, 110.0, 165.0, 23.0, 3.0);
+    assert_eq!(s.len(), 1000);
+    for i in 1..=1000 {
+        w.spawn(5000 + i, object_kind::UNIT, format!("b{i}"), 5.0);
+    }
+    // The next run starts one frame after the last one began.
+    rec.began += Duration::from_nanos(9_090_909);
+    // Every birth resolves within one enumeration period plus that
+    // enumeration's duration: 60 s at most.
+    let r = run_x(&mut s, &mut rec, &mut w, 60.0, 110.0, 165.0, 23.0, 3.0);
+    assert!(r.share <= 0.003 * 1.02, "share {}", r.share);
+    let worst = r.samples.iter().map(|p| p[0]).fold(0.0f64, f64::max);
+    assert!(worst <= 3.0, "positions took {worst:.1} s during the burst");
+    let en = r.samples.iter().map(|p| p[4]).fold(0.0f64, f64::max);
+    // The enumeration keeps its 60 s target, within half again.
+    assert!(en <= 90.0, "the enumeration took {en:.1} s");
+    assert_eq!(s.len(), 2000, "every birth resolved");
+}
+
+/// A frame whose fixed work is 60 µs still pumps on full credit: the gate's
+/// cap counts the fixed work (S10 ruling on the per-batch cost). Fixed work
+/// over the allowance on every frame leaves no credit to pump with, which
+/// is the `starved` warning's case.
+#[test]
+fn sixty_us_of_fixed_work_still_pumps_on_full_credit() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 110.0);
+    let mut w = world(500, 0, 0);
+    w.batch_us = 20.0;
+    run_x(&mut s, &mut rec, &mut w, 10.0, 110.0, 165.0, 23.0, 3.0);
+    s.budget.debt = -CREDIT_CAP_US;
+    s.xcall_us = 23.0;
+    s.batch_us = 20.0;
+    rec.syscall = false;
+    let t0 = rec.began + Duration::from_nanos(9_090_909);
+    s.last_began = Some(rec.began);
+    rec.began = t0;
+    let now = t0 + Duration::from_micros(60);
+    assert!(s.decide(&rec, now), "slice {} µs", s.slice_us());
+}
+
+/// At a tenth of the slice, with the costs measured live (a birth 37 µs, a
+/// `coalition.getGroups` 687 µs, the call 23 µs, a batch's fixed part
+/// 20 µs), the rates fall in order and subscribed positions keep a rate.
+#[cfg(feature = "faults")]
+#[test]
+fn at_a_tenth_with_live_costs_subscribed_positions_keep_a_rate() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 110.0);
+    let mut w = world(1960, 40, 20);
+    w.batch_us = 20.0;
+    w.birth_us = Some(37.0);
+    w.enum_step_us = Some(687.0);
+    // Closing a batch varies around the 6 µs measured live.
+    w.close_us = 6.0;
+    s.set_campaign(1);
+    for i in 1..=20u64 {
+        let o = w.objects.get_mut(&(1000 + i)).unwrap();
+        o.name = format!("np.u.1.{}", base36_of(i));
+    }
+    s.subscribe(1.0, false, &(1..=20).collect::<Vec<_>>());
+    run_x(&mut s, &mut rec, &mut w, 120.0, 110.0, 165.0, 23.0, 3.0);
+    s.set_scale(0.1).unwrap();
+    for i in 1..=50 {
+        w.spawn(9000 + i, object_kind::UNIT, format!("c{i}"), 5.0);
+    }
+    rec.began += Duration::from_nanos(9_090_909);
+    let enumerations = s.enum_count;
+    let r = run_x(&mut s, &mut rec, &mut w, 900.0, 110.0, 165.0, 23.0, 3.0);
+    assert!(r.share <= 0.003 * 1.02, "share {}", r.share);
+    assert_eq!(r.forgiven_us, 0.0, "debt forgiven");
+    let sub = s.subscribed_period();
+    assert!(sub > 0.0 && sub < 10.0, "subscribed period {sub}");
+    assert!(s.enum_count > enumerations + 1, "no enumeration completed");
+    // Past the change of k, as the live run's reports are.
+    rec.began += Duration::from_nanos(9_090_909);
+    let r2 = run_x(&mut s, &mut rec, &mut w, 60.0, 110.0, 165.0, 23.0, 3.0);
+    // Sampling stays within k·B plus one clock interval of rows, in all but
+    // 1 % of the frames that only swept rows, though each close varies. A
+    // batch whose fixed part alone passes k·B counts as a lone row instead.
+    assert!(
+        r2.overrun_frames * 100 <= r2.row_frames.max(1),
+        "{} of {} row frames ran past the budget",
+        r2.overrun_frames,
+        r2.row_frames
+    );
+    // Strict rank: positions keep a rate, and the lower tiers may get no
+    // rows. A tier that gets none shows a period that grows; none reads 0.
+    let half = &r.samples[r.samples.len() / 2];
+    let end = r.samples.last().copied().unwrap_or_default();
+    let pos = end[0];
+    assert!(pos > 0.0 && pos < 60.0, "positions period {pos}");
+    assert!(pos >= sub, "positions {pos} against subscribed {sub}");
+    for (i, name) in [(1, "vitals"), (2, "ammunition"), (3, "warehouses")] {
+        assert!(end[i] > 0.0, "{name} reads 0");
+        assert!(
+            end[i] >= pos,
+            "{name} {} s against positions {pos} s",
+            end[i]
+        );
+        // Starved, its period grows with the run; served, it is steady.
+        assert!(
+            end[i] >= half[i] || end[i] < 120.0,
+            "{name} {} s fell from {} s",
+            end[i],
+            half[i]
+        );
+    }
+}
+
+/// Strict rank at k = 1 too (S10 ruling on starvation): a saturating
+/// subscription leaves the lower tiers no rows. Their periods grow and never
+/// read 0, the mean holds and nothing is forgiven; once the subscription
+/// ends, every tier returns to its target period.
+#[test]
+fn a_saturating_subscription_starves_the_lower_tiers_and_they_recover() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 110.0);
+    let mut w = world(1960, 40, 20);
+    w.batch_us = 7.0;
+    w.close_us = 3.0;
+    s.set_campaign(1);
+    for i in 1..=1960u64 {
+        let o = w.objects.get_mut(&(1000 + i)).unwrap();
+        o.name = format!("np.u.1.{}", base36_of(i));
+    }
+    run_x(&mut s, &mut rec, &mut w, 60.0, 110.0, 165.0, 23.0, 3.0);
+    let before = rec.periods;
+    s.subscribe(0.1, true, &(1..=1960).collect::<Vec<_>>());
+    rec.began += Duration::from_nanos(9_090_909);
+    let r = run_x(&mut s, &mut rec, &mut w, 120.0, 110.0, 165.0, 23.0, 3.0);
+    assert!(r.share <= 0.003 * 1.02, "share {}", r.share);
+    assert_eq!(r.forgiven_us, 0.0, "debt forgiven");
+    let starved = rec.periods;
+    for (i, name) in [(0, "positions"), (1, "vitals")] {
+        assert!(
+            starved[i] > 2.0 * before[i].max(1.0),
+            "{name} {} s did not grow from {} s",
+            starved[i],
+            before[i]
+        );
+    }
+    s.subscribe(1.0, false, &[]);
+    rec.began += Duration::from_nanos(9_090_909);
+    let r = run_x(&mut s, &mut rec, &mut w, 120.0, 110.0, 165.0, 23.0, 3.0);
+    let pos = tail_mean(&r.samples, 0, 20);
+    let vit = tail_mean(&r.samples, 1, 20);
+    assert!((0.9..1.3).contains(&pos), "positions recovered to {pos} s");
+    assert!((4.5..6.5).contains(&vit), "vitals recovered to {vit} s");
+}
+
+/// With the sampling budget at a tenth, ammunition and warehouses fall first, then
+/// vitals, then positions; subscribed positions last; the mean still holds.
+#[cfg(feature = "faults")]
+#[test]
+fn with_a_tenth_of_the_slice_the_rates_fall_in_order() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    s.set_scale(0.1).unwrap();
+    let mut rec = Rec::new(0.003, 1e6 / 110.0);
+    let mut w = world(1960, 40, 20);
+    // Bind 50 units by name to a campaign, and subscribe them.
+    s.set_campaign(1);
+    for i in 1..=50u64 {
+        let o = w.objects.get_mut(&(1000 + i)).unwrap();
+        o.name = format!("np.u.1.{}", base36_of(i));
+    }
+    // The first frame sees the sidecar's boot and drops the subscriptions
+    // of any sidecar before it: subscribe after it.
+    run(&mut s, &mut rec, &mut w, 1.0, 110.0, 200.0);
+    s.subscribe(1.0, false, &(1..=50).collect::<Vec<_>>());
+    let r = run(&mut s, &mut rec, &mut w, 240.0, 110.0, 200.0);
+    assert!(r.share <= 0.003, "share {}", r.share);
+    assert_eq!(s.watched_units, 50, "subscribed units");
+    let ratio = |tier: usize, target: f64| tail_mean(&r.samples, tier, 60) / target;
+    let (pos, vit, ammo) = (ratio(0, 1.0), ratio(1, 5.0), ratio(2, 30.0));
+    let sub = s.subscribed_period();
+    assert!(sub > 0.0 && sub < 1.3, "subscribed period {sub}");
+    // Positions fell, and the lower tiers fell further: in achieved period,
+    // ammunition ≥ vitals ≥ positions (S10 ruling on the tenth). A tier that
+    // got no rows shows a period that grows from when it first owed them,
+    // never 0.
+    assert!(pos > 1.2, "positions did not fall: {pos}");
+    let period = |tier: usize| tail_mean(&r.samples, tier, 60);
+    let (pos_p, vit_p, ammo_p) = (period(0), period(1), period(2));
+    assert!(
+        vit_p > 0.0 && ammo_p > 0.0,
+        "vitals {vit_p} s, ammunition {ammo_p} s"
+    );
+    assert!(
+        vit_p > pos_p,
+        "vitals {vit_p} s against positions {pos_p} s"
+    );
+    // A tier that gets no rows meets the order with its growing period. Two
+    // such tiers grow from their own starts, so either may read a little
+    // higher: one past twice its target has stalled, and meets it.
+    assert!(
+        ammo_p >= vit_p || ammo_p >= 2.0 * 30.0,
+        "ammunition {ammo_p} s against vitals {vit_p} s"
+    );
+    let _ = (vit, ammo);
+}
+
+/// At scale 1 the faults build plans exactly what a sampler never scaled
+/// plans: the same records, byte for byte, on the same clock.
+#[cfg(feature = "faults")]
+#[test]
+fn at_scale_one_the_plan_is_the_release_plan() {
+    let records = |set: bool| {
+        let mut s = Sampler::new(Rates::default(), 0.07);
+        if set {
+            s.set_scale(0.25).unwrap();
+            s.set_scale(1.0).unwrap();
+        }
+        let mut rec = Rec::new(0.003, 1e6 / 110.0);
+        let mut w = world(500, 10, 5);
+        run(&mut s, &mut rec, &mut w, 20.0, 110.0, 200.0);
+        rec.records
+    };
+    let (a, b) = (records(false), records(true));
+    assert!(!a.is_empty());
+    assert!(a == b, "the plans differ");
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    assert!(s.set_scale(0.0).is_err() && s.set_scale(1.5).is_err());
+}
+
+/// The live case on the Wine server: the cross-state call costs 22 µs and
+/// the slice is about 25 µs (LIVE, S10). Frames that do not pump carry
+/// their allowance as credit, and a pump comes every few frames; the rates
+/// hold and the mean stays under the share.
+#[test]
+fn a_dear_cross_state_call_pumps_every_few_frames() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 110.0);
+    let mut w = world(1960, 40, 20);
+    let r = run_x(&mut s, &mut rec, &mut w, 120.0, 110.0, 165.0, 22.0, 2.0);
+    assert_eq!(s.len(), 2000);
+    assert!(r.share <= 0.003 * 1.02, "share {}", r.share);
+    let pos = tail_mean(&r.samples, 0, 30);
+    let vit = tail_mean(&r.samples, 1, 30);
+    assert!((0.9..1.3).contains(&pos), "position period {pos}");
+    assert!((4.5..6.5).contains(&vit), "vitals period {vit}");
+}
+
+/// The ruled cadence: with A = 27 µs, F = 3 µs, a 23 µs call and a batch's
+/// fixed part of 20 µs, the gate is 3 × (23 + 20) = 129 µs, so a pump comes
+/// every 4 to 7 frames; the mean stays at or under the share over 10 s, and
+/// no frame, its closing and finish included, passes 250 µs.
+#[test]
+fn a_23_us_call_and_a_20_us_batch_pump_every_4_to_7_frames() {
+    // A load that takes every pump's whole budget: positions every 0.2 s
+    // and vitals every second for 2,000 rows. A lighter load leaves credit
+    // after a pump, and the next one comes sooner.
+    let rates = Rates {
+        position_s: 0.2,
+        vitals_s: 1.0,
+        ..Rates::default()
+    };
+    let mut s = Sampler::new(rates, 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 110.0);
+    let mut w = world(1960, 40, 20);
+    w.batch_us = 20.0;
+    // Settle past the first enumeration and births, then measure 10 s.
+    run_x(&mut s, &mut rec, &mut w, 30.0, 110.0, 165.0, 23.0, 3.0);
+    rec.began += Duration::from_secs(30);
+    let r = run_x(&mut s, &mut rec, &mut w, 10.0, 110.0, 165.0, 23.0, 3.0);
+    let every = r.frames as f64 / r.pumps.max(1) as f64;
+    // By the gate, 3 × (23 + 20) = 129 µs at about 24 µs of allowance a
+    // frame: the sixth frame.
+    assert!(
+        (4.0..=7.0).contains(&every),
+        "a pump every {every:.2} frames"
+    );
+    assert!(r.share <= 0.003, "share {}", r.share);
+    assert!(r.longest_us <= 250.0, "a frame of {:.1} µs", r.longest_us);
+}
+
+/// Credit stops at its cap however long the agent goes without a pump, as
+/// while detached.
+#[test]
+fn credit_stops_at_its_cap_after_a_long_detach() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let rec = &mut Rec::new(0.003, 1e6 / 110.0);
+    let t0 = rec.began;
+    for f in 0..110 * 60u64 {
+        let t = t0 + Duration::from_micros(9091 * f);
+        rec.began = t;
+        rec.syscall = false;
+        s.end_frame(rec, t + Duration::from_micros(2));
+    }
+    assert!(
+        s.credit_us() <= 150.0 && s.credit_us() > 140.0,
+        "credit {}",
+        s.credit_us()
+    );
+    // The next frame's slice holds the plain slice and the credit, under 250.
+    let t = t0 + Duration::from_micros(9091 * 110 * 60);
+    rec.began = t;
+    s.decide(rec, t);
+    assert!(
+        s.slice_us() <= 250.0 && s.slice_us() > 150.0,
+        "slice {}",
+        s.slice_us()
+    );
+}
+
+/// After a frame interval over twice the average the frame spends only its
+/// plain slice.
+#[test]
+fn a_slow_frame_spends_no_credit() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let rec = &mut Rec::new(0.003, 1e6 / 110.0);
+    let t0 = rec.began;
+    for f in 0..200u64 {
+        let t = t0 + Duration::from_micros(9091 * f);
+        rec.began = t;
+        s.decide(rec, t);
+        s.end_frame(rec, t + Duration::from_micros(2));
+    }
+    assert!(s.credit_us() > 100.0);
+    let t = t0 + Duration::from_micros(9091 * 200);
+    rec.began = t;
+    s.decide(rec, t);
+    assert!(s.slice_us() > 100.0, "an ordinary frame spends its credit");
+    // A stall: the next frame begins five intervals later.
+    let t = t + Duration::from_micros(9091 * 5);
+    rec.began = t;
+    s.decide(rec, t);
+    let plain = 0.003 * 1e6 / 110.0;
+    assert!(
+        s.slice_us() <= plain + 0.01,
+        "slice {} after a stall",
+        s.slice_us()
+    );
+}
+
+/// At k = 0.1 the withheld budget counts as spent: no credit is left after
+/// a pump frame beyond one frame's allowance, and the order of the rates
+/// holds.
+#[cfg(feature = "faults")]
+#[test]
+fn at_a_tenth_the_withheld_budget_builds_no_credit() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    s.set_scale(0.1).unwrap();
+    let mut rec = Rec::new(0.003, 1e6 / 110.0);
+    let mut w = world(1960, 40, 20);
+    let r = run_x(&mut s, &mut rec, &mut w, 60.0, 110.0, 165.0, 23.0, 3.0);
+    let allowance = 0.003 * 1e6 / 110.0;
+    assert!(r.pumps > 0);
+    assert!(
+        r.credit_after_pump <= allowance,
+        "credit {} after a pump",
+        r.credit_after_pump
+    );
+    assert!(r.share <= 0.003, "share {}", r.share);
+}
+
+/// Tier periods stay steady when a 200 µs system-call frame comes once a
+/// second, and the mean stays at or under the share.
+#[test]
+fn periods_are_steady_with_a_200_us_frame_each_second() {
+    // One enumeration at the start, and none in the window measured.
+    let rates = Rates {
+        enumeration_s: 1e6,
+        ..Rates::default()
+    };
+    let mut s = Sampler::new(rates, 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 110.0);
+    let mut w = world(2000, 0, 0);
+    let r = run(&mut s, &mut rec, &mut w, 90.0, 110.0, 200.0);
+    assert!(r.share <= 0.003, "share {}", r.share);
+    let tail: Vec<f64> = r.samples[r.samples.len() - 40..]
+        .iter()
+        .map(|p| p[0])
+        .collect();
+    let (lo, hi) = tail
+        .iter()
+        .fold((f64::MAX, 0.0f64), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+    assert!(
+        lo > 0.0 && hi / lo < 1.25,
+        "position periods from {lo} to {hi}"
+    );
+    // No frame after the system-call frame was zeroed by it: the slice
+    // stays near its share.
+    assert!(
+        s.slice_us() > 0.5 * 0.003 * 1e6 / 110.0,
+        "slice {}",
+        s.slice_us()
+    );
+}
+
+fn base36_of(mut v: u64) -> String {
+    let digits = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut out = Vec::new();
+    loop {
+        out.push(digits[(v % 36) as usize]);
+        v /= 36;
+        if v == 0 {
+            break;
+        }
+    }
+    out.reverse();
+    String::from_utf8(out).unwrap()
+}
+
+#[test]
+fn one_slow_cross_state_call_does_not_stop_sampling() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 110.0);
+    let mut w = world(200, 0, 0);
+    run(&mut s, &mut rec, &mut w, 5.0, 110.0, 200.0);
+    // One pump that begins 5 ms after the decision, as a stalled call would.
+    let t = Instant::now() + Duration::from_secs(10);
+    rec.began = t;
+    rec.syscall = false;
+    assert!(s.decide(&rec, t));
+    s.begin(&rec, t + Duration::from_millis(5));
+    s.end_pump(&mut rec, || t + Duration::from_millis(5));
+    s.end_frame(&mut rec, t + Duration::from_millis(5));
+    // The 5 ms frame is debt, repaid within about 1.3 s; within 3 s the
+    // pump is called again.
+    let mut sampled = false;
+    for f in 1..330u64 {
+        let t = t + Duration::from_micros(9091 * f);
+        rec.began = t;
+        if s.decide(&rec, t + Duration::from_micros(2)) {
+            sampled = true;
+            break;
+        }
+        s.end_frame(&mut rec, t + Duration::from_micros(3));
+    }
+    assert!(
+        sampled,
+        "no sampling frame within a second of one slow call"
+    );
+}
+
+#[test]
+fn names_give_entities_only_under_their_campaign() {
+    assert_eq!(
+        name_entity(
+            "np.u.m3k9x2a1.1z",
+            base36("m3k9x2a1").unwrap(),
+            object_kind::UNIT
+        ),
+        71
+    );
+    assert_eq!(name_entity("np.u.m3k9x2a1.1z", 5, object_kind::UNIT), 0);
+    assert_eq!(name_entity("np.g.1.2", 1, object_kind::UNIT), 0);
+    assert_eq!(name_entity("np.g.1.2", 1, object_kind::GROUP), 2);
+    assert_eq!(name_entity("np.u.1.02", 1, object_kind::UNIT), 0);
+    assert_eq!(name_entity("np.u.1.0", 1, object_kind::UNIT), 0);
+    assert_eq!(name_entity("Ground-1-1", 1, object_kind::UNIT), 0);
+    assert_eq!(name_entity("np.u.1.2", 0, object_kind::UNIT), 0);
+}
+
+#[test]
+fn heading_pitch_and_roll_come_from_the_vectors() {
+    let (h, p, r) = euler([0.0, 0.0, 1.0], [0.0, 1.0, 0.0]).unwrap();
+    assert!(
+        (h - std::f64::consts::FRAC_PI_2).abs() < 1e-9,
+        "east is pi/2: {h}"
+    );
+    assert!(p.abs() < 1e-9 && r.abs() < 1e-9);
+    let (_, p, _) = euler([0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]).unwrap();
+    assert!((p - std::f64::consts::FRAC_PI_2).abs() < 1e-9);
+}
+
+/// One step of the table property test.
+#[derive(Clone, Debug)]
+enum Op {
+    /// DCS adds an object, which sends a birth.
+    Spawn { kind: u32 },
+    /// A death event about an object, with a category.
+    Death { pick: usize, category: Option<u8> },
+    /// DCS removes an object with no event.
+    Vanish { pick: usize },
+    /// A death event about an object the table never had.
+    Stranger { category: u8 },
+    /// Frames pass.
+    Frames { n: u8 },
+    /// The sidecar asks for an enumeration.
+    Enumerate,
+    /// A BIND of an object to an entity.
+    Bind { pick: usize, entity: u16 },
+}
+
+fn op() -> impl Strategy<Value = Op> {
+    prop_oneof![
+        3 => prop_oneof![Just(object_kind::UNIT), Just(object_kind::STATIC)].prop_map(|kind| Op::Spawn { kind }),
+        2 => (any::<usize>(), prop_oneof![Just(None), Just(Some(1u8)), Just(Some(3u8)), Just(Some(5u8)), Just(Some(2u8))])
+            .prop_map(|(pick, category)| Op::Death { pick, category }),
+        1 => any::<usize>().prop_map(|pick| Op::Vanish { pick }),
+        1 => prop_oneof![Just(1u8), Just(5u8)].prop_map(|category| Op::Stranger { category }),
+        3 => (1u8..40).prop_map(|n| Op::Frames { n }),
+        1 => Just(Op::Enumerate),
+        1 => (any::<usize>(), 1u16..500).prop_map(|(pick, entity)| Op::Bind { pick, entity }),
+    ]
+}
+
+fn pick(w: &World, i: usize) -> Option<u64> {
+    let keys: Vec<u64> = w.objects.keys().copied().collect();
+    (!keys.is_empty()).then(|| keys[i % keys.len()])
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(200))]
+
+    /// The table against a model of DCS: rows come from births and
+    /// enumerations, and leave only by an existence check, which a death
+    /// event and an enumeration that misses the object ask for. Every
+    /// OBJECT_GONE names the binding its row had; a killed object leaves as
+    /// DEAD; every ENUM_END counts the OBJECTs of its enumeration; a dead
+    /// object never comes back.
+    #[test]
+    fn the_table_follows_dcs(ops in proptest::collection::vec(op(), 1..60)) {
+        let mut s = Sampler::new(Rates::default(), 0.07);
+        let mut rec = Rec::new(0.003, 1e6 / 110.0);
+        let mut w = World::default();
+        let mut next = 1u64;
+        let mut dead: HashSet<u64> = HashSet::new();
+        let mut bound: HashMap<u64, u64> = HashMap::new();
+        let mut ents: HashMap<u64, (u64, u64)> = HashMap::new();
+        let mut clock = Clock(rec.began);
+        let frame = |s: &mut Sampler, rec: &mut Rec, w: &mut World, clock: &mut Clock| {
+            clock.add(9091.0);
+            rec.began = clock.0;
+            rec.syscall = false;
+            clock.add(2.0);
+            if s.decide(rec, clock.0) {
+                clock.add(5.0);
+                pump(s, rec, w, clock);
+            }
+            s.end_frame(rec, clock.0);
+        };
+        for op in ops {
+            match op {
+                Op::Spawn { kind } => {
+                    next += 1;
+                    w.spawn(next, kind, format!("o{next}"), 1.0);
+                }
+                Op::Death { pick: i, category } => {
+                    if let Some(o) = pick(&w, i) {
+                        let n = rec.of(kind::OBJECT_GONE).count();
+                        let counts = matches!(category, Some(1) | Some(3));
+                        if counts {
+                            // DCS removes the dead object before its event.
+                            w.objects.remove(&o);
+                            w.killed.insert(o);
+                            dead.insert(o);
+                        }
+                        // A death event removes nothing by itself.
+                        let r = s.death(&mut rec, Some(o as f64), category.map(f64::from));
+                        prop_assert_eq!(r, 0);
+                        prop_assert_eq!(rec.of(kind::OBJECT_GONE).count(), n);
+                        if let Some(e) = s.entities(o) {
+                            ents.insert(o, e);
+                        }
+                    }
+                }
+                Op::Vanish { pick: i } => {
+                    if let Some(o) = pick(&w, i) {
+                        w.objects.remove(&o);
+                    }
+                }
+                Op::Stranger { category } => {
+                    let len = s.len();
+                    s.death(&mut rec, Some(9e9), Some(f64::from(category)));
+                    prop_assert_eq!(s.len(), len);
+                }
+                Op::Frames { n } => {
+                    for _ in 0..n {
+                        frame(&mut s, &mut rec, &mut w, &mut clock);
+                    }
+                }
+                Op::Enumerate => s.request_enumeration(),
+                Op::Bind { pick: i, entity } => {
+                    if let Some(o) = pick(&w, i).filter(|o| s.slot_of(*o).is_some()) {
+                        let kind = w.objects[&o].kind;
+                        s.bind(kind, &[(u64::from(entity), o)]);
+                        bound.insert(o, u64::from(entity));
+                        prop_assert_eq!(s.entities(o).map(|e| e.0), Some(u64::from(entity)));
+                    }
+                }
+            }
+        }
+        // Finish: one enumeration from start to end, with no change in DCS.
+        s.request_enumeration();
+        for _ in 0..2000 {
+            frame(&mut s, &mut rec, &mut w, &mut clock);
+            if s.enumeration().is_none() && w.births.is_empty() && rec.of(kind::ENUM_END).count() > 0 {
+                let last_end = rec.records.iter().rposition(|(k, _)| *k == kind::ENUM_END).unwrap();
+                let last_begin = rec.records.iter().rposition(|(k, _)| *k == kind::ENUM_BEGIN).unwrap();
+                if last_end > last_begin && s.objects() == w.objects.keys().copied().collect::<Vec<_>>() {
+                    break;
+                }
+            }
+        }
+        prop_assert_eq!(s.objects(), w.objects.keys().copied().collect::<Vec<_>>());
+        // A killed object that the table held left as DEAD, with the
+        // binding it had when its death event came.
+        for (k, p) in &rec.records {
+            if *k == kind::OBJECT_GONE {
+                let g = ObjectGone::decode(p).unwrap();
+                if dead.contains(&g.object) {
+                    prop_assert_eq!(g.reason, gone::DEAD);
+                    if let Some(e) = ents.get(&g.object) {
+                        prop_assert_eq!((g.entity, g.group_entity), *e);
+                    }
+                }
+            }
+        }
+        // Every ENUM_END counts the OBJECTs of its enumeration.
+        let mut current: Option<(u64, u32)> = None;
+        for (k, p) in &rec.records {
+            match *k {
+                k if k == kind::ENUM_BEGIN => {
+                    current = Some((EnumBegin::decode(p).unwrap().enumeration, 0));
+                }
+                k if k == kind::OBJECT => {
+                    let o = Object::decode(p).unwrap();
+                    if let Some((n, c)) = current.as_mut()
+                        && o.enumeration == *n
+                    {
+                        *c += 1;
+                    }
+                }
+                k if k == kind::ENUM_END => {
+                    let e = EnumEnd::decode(p).unwrap();
+                    let (n, c) = current.take().unwrap();
+                    prop_assert_eq!(e.enumeration, n);
+                    prop_assert_eq!(e.objects, c);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// An enumeration writes each known row's `OBJECT` from a payload encoded
+/// once and patched with its number: the same bytes a fresh encoding gives,
+/// and fresh again after the row's entity changes.
+#[test]
+fn an_enumeration_patches_each_rows_cached_object() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 110.0);
+    let mut w = World::default();
+    w.spawn(
+        1001,
+        object_kind::UNIT,
+        format!("np.u.1.{}", base36_of(5)),
+        0.0,
+    );
+    let slot = s.add(&mut rec, w.found(1001).unwrap(), false) - 1;
+    let expect = |s: &Sampler, n: u64| object_record(s.row(slot).unwrap(), n).encode();
+    for n in [3u64, 4] {
+        s.enumeration = Some(n);
+        assert_eq!(s.seen(&mut rec, 1001), Some(slot + 1));
+        let last = rec.of(kind::OBJECT).last().unwrap().clone();
+        assert_eq!(last, expect(&s, n));
+    }
+    // A new campaign gives the row an entity from its name: the cache is
+    // encoded again.
+    s.set_campaign(1);
+    s.enumeration = Some(5);
+    s.seen(&mut rec, 1001);
+    let last = Object::decode(rec.of(kind::OBJECT).last().unwrap()).unwrap();
+    assert_ne!(last.entity, 0);
+    assert_eq!(last.enumeration, 5);
+    assert_eq!(rec.of(kind::OBJECT).last().unwrap(), &expect(&s, 5));
+}
+
+/// At a tenth with the host's sweep and LIVE costs (a sweep's fixed part
+/// 15 µs, a row 0.6 µs, the call 23 µs, a pump batch 20 µs): the sweep saves
+/// for whole batches, so the positions keep about a tenth of their rows and
+/// never stop; over the span the vitals fall at least as far as the
+/// positions; both paths stay within their budgets; the mean holds.
+#[cfg(feature = "faults")]
+#[test]
+fn at_a_tenth_the_sweep_saves_for_whole_batches_and_the_order_holds() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 110.0);
+    let mut w = world(1960, 40, 20);
+    w.sweep = Some((15.0, 0.6));
+    // As the live scenario: one group in five moves.
+    halt_four_in_five(&mut w);
+    w.batch_us = 20.0;
+    w.birth_us = Some(37.0);
+    w.enum_step_us = Some(687.0);
+    w.close_us = 6.0;
+    s.set_campaign(1);
+    for i in 1..=20u64 {
+        let o = w.objects.get_mut(&(1000 + i)).unwrap();
+        o.name = format!("np.u.1.{}", base36_of(i));
+    }
+    run_x(&mut s, &mut rec, &mut w, 1.0, 110.0, 165.0, 23.0, 3.0);
+    // Subscribed with their attitude: the pump reads them.
+    s.subscribe(1.0, true, &(1..=20).collect::<Vec<_>>());
+    rec.began += Duration::from_nanos(9_090_909);
+    run_x(&mut s, &mut rec, &mut w, 60.0, 110.0, 165.0, 23.0, 3.0);
+    rec.began += Duration::from_nanos(9_090_909);
+    let full = run_x(&mut s, &mut rec, &mut w, 120.0, 110.0, 165.0, 23.0, 3.0);
+    eprintln!(
+        "at k = 1: periods {:?}, enumerations {}",
+        rec.periods, s.enum_count
+    );
+    let enumerations = s.enum_count;
+    s.set_scale(0.1).unwrap();
+    rec.began += Duration::from_nanos(9_090_909);
+    let tenth = run_x(&mut s, &mut rec, &mut w, 600.0, 110.0, 165.0, 23.0, 3.0);
+    let rate = |r: &Run, t: Tier, secs: f64| r.tier_rows[t.index()] as f64 / secs;
+    let pos = (
+        rate(&full, Tier::Positions, 120.0),
+        rate(&tenth, Tier::Positions, 600.0),
+    );
+    let sub = (
+        rate(&full, Tier::Subscribed, 120.0),
+        rate(&tenth, Tier::Subscribed, 600.0),
+    );
+    let vit = (
+        rate(&full, Tier::Vitals, 120.0),
+        rate(&tenth, Tier::Vitals, 600.0),
+    );
+    eprintln!(
+        "rows a second, full and tenth: positions {pos:?}, subscribed {sub:?}, vitals {vit:?}; \
+         sweeps {} cut {} overruns {}; row frames {} overrun {}; share {} periods {:?}; \
+         cost {} row {} batch {}",
+        tenth.sweeps,
+        tenth.sweep_cut,
+        tenth.sweep_overruns,
+        tenth.row_frames,
+        tenth.overrun_frames,
+        tenth.share,
+        rec.periods,
+        s.tiers[Tier::Positions.index()].cost,
+        s.sweep_row_us,
+        s.sweep_batch_us,
+    );
+    eprintln!(
+        "enumerations at a tenth: {}, items a second {}, pumps a second {}, maintenance {} µs, lone {}, debt {}",
+        s.enum_count - enumerations,
+        rate(&tenth, Tier::Enumeration, 600.0),
+        tenth.pumps as f64 / 600.0,
+        s.maintenance_us,
+        s.lone_rows,
+        s.debt_us(),
+    );
+    assert!(tenth.share <= 0.003 * 1.02, "share {}", tenth.share);
+    // The scale did something: the spend falls well below the k = 1 spend
+    // of the same run, and the positions keep a fraction of their rows.
+    eprintln!("share {} at k = 1, {} at k = 0.1", full.share, tenth.share);
+    assert!(
+        tenth.share < 0.75 * full.share,
+        "share {} at k = 0.1, {} at k = 1",
+        tenth.share,
+        full.share
+    );
+    assert!(pos.1 < 0.5 * pos.0, "positions {pos:?} rows a second");
+    assert_eq!(tenth.forgiven_us, 0.0, "debt forgiven");
+    // The positions never stop, and a sweep is a whole batch.
+    assert!(tenth.sweeps > 0, "no sweep at a tenth");
+    let swept =
+        tenth.tier_rows[Tier::Positions.index()] + tenth.tier_rows[Tier::Subscribed.index()];
+    let per_sweep = swept as f64 / tenth.sweeps as f64;
+    assert!(per_sweep >= 32.0, "{per_sweep} rows a sweep");
+    assert!(pos.1 >= 0.04 * pos.0, "positions {pos:?} rows a second");
+    // Subscribed positions fall last: they keep nearly all their rows, and
+    // at least the positions' ratio.
+    assert!(
+        sub.1 >= 0.9 * sub.0 && sub.1 / sub.0 >= pos.1 / pos.0,
+        "subscribed {sub:?}, positions {pos:?}"
+    );
+    // Few of the pump's calls plan no row. The ruled bound of under 5 pumps
+    // a second is in `at_a_tenth_the_pump_comes_under_5_times_a_second`.
+    assert!(
+        tenth.empty_pumps * 100 <= tenth.pumps as u64,
+        "{} of {} pumps planned no row",
+        tenth.empty_pumps,
+        tenth.pumps
+    );
+    // The lower tiers fall first, over the span.
+    assert!(
+        vit.1 / vit.0 <= pos.1 / pos.0,
+        "vitals {vit:?}, positions {pos:?}"
+    );
+    // Each path stays within its budget, but for the rows between two clock
+    // reads.
+    assert!(
+        tenth.sweep_overruns * 100 <= tenth.sweeps,
+        "{} of {} sweeps ran past their budget",
+        tenth.sweep_overruns,
+        tenth.sweeps
+    );
+    assert!(
+        tenth.overrun_frames * 100 <= tenth.row_frames.max(1),
+        "{} of {} row frames ran past the budget",
+        tenth.overrun_frames,
+        tenth.row_frames
+    );
+}
+
+/// 01:38 ruling, item 4: at a tenth, with subscribed rows read with their
+/// attitude, under 5 pumps a second. With an enumeration running for most of
+/// the span at a tenth (a few hundred seconds, an item or so a pump) the pump
+/// comes 7 to 8 times a second, about one enumeration row each: the
+/// enumeration's efficiency at a tenth, deferred to S11 (01:14 ruling, item
+/// 6). Ignored until the coordinator rules.
+#[cfg(feature = "faults")]
+#[test]
+fn at_a_tenth_the_pump_comes_under_5_times_a_second() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 110.0);
+    let mut w = world(1960, 40, 20);
+    w.sweep = Some((15.0, 0.6));
+    halt_four_in_five(&mut w);
+    w.batch_us = 20.0;
+    w.birth_us = Some(37.0);
+    w.enum_step_us = Some(687.0);
+    w.close_us = 6.0;
+    s.set_campaign(1);
+    for i in 1..=20u64 {
+        let o = w.objects.get_mut(&(1000 + i)).unwrap();
+        o.name = format!("np.u.1.{}", base36_of(i));
+    }
+    run_x(&mut s, &mut rec, &mut w, 1.0, 110.0, 165.0, 23.0, 3.0);
+    s.subscribe(1.0, true, &(1..=20).collect::<Vec<_>>());
+    rec.began += Duration::from_nanos(9_090_909);
+    run_x(&mut s, &mut rec, &mut w, 180.0, 110.0, 165.0, 23.0, 3.0);
+    s.set_scale(0.1).unwrap();
+    rec.began += Duration::from_nanos(9_090_909);
+    let r = run_x(&mut s, &mut rec, &mut w, 200.0, 110.0, 165.0, 23.0, 3.0);
+    eprintln!(
+        "k = 0.1: {} pumps a second, enumeration period {}, enumerations {}",
+        r.pumps as f64 / 200.0,
+        s.periods()[4],
+        s.enum_count
+    );
+    assert!(
+        r.pumps as f64 / 200.0 < 5.0,
+        "{} pumps a second",
+        r.pumps as f64 / 200.0
+    );
+}
+
+/// Whatever a pump batch's fixed part costs, 7 to 20 µs, with and without
+/// dear enumeration steps: the estimates of the call and of the batch hold
+/// between pumps, so the gate waits for a pump worth its call. Every tier
+/// keeps its period, the enumeration its 60 s, and the pump comes a few
+/// times a second (LIVE, S10: with estimates that read near 0 the pump came
+/// 20 to 30 times a second during an enumeration and took the whole budget).
+fn every_tier_holds(cases: &[(Sweep, f64, f64, Option<f64>, bool)]) {
+    for &(sweep, batch, call, step, attitude) in cases {
+        let mut s = Sampler::new(Rates::default(), 0.07);
+        let mut rec = Rec::new(0.003, 1e6 / 110.0);
+        let mut w = world(1960, 40, 20);
+        w.sweep = Some(sweep);
+        halt_four_in_five(&mut w);
+        w.batch_us = batch;
+        w.enum_step_us = step;
+        w.close_us = 6.0;
+        if attitude {
+            s.set_campaign(1);
+            for i in 1..=20u64 {
+                let o = w.objects.get_mut(&(1000 + i)).unwrap();
+                o.name = format!("np.u.1.{}", base36_of(i));
+            }
+            run_x(&mut s, &mut rec, &mut w, 1.0, 110.0, 165.0, call, 3.0);
+            s.subscribe(1.0, true, &(1..=20).collect::<Vec<_>>());
+            rec.began += Duration::from_nanos(9_090_909);
+        }
+        run_x(&mut s, &mut rec, &mut w, 60.0, 110.0, 165.0, call, 3.0);
+        rec.began += Duration::from_nanos(9_090_909);
+        let r = run_x(&mut s, &mut rec, &mut w, 180.0, 110.0, 165.0, call, 3.0);
+        let case = format!(
+            "sweep {sweep:?}, batch {batch}, call {call}, step {step:?}, attitude {attitude}"
+        );
+        let mut p = rec.periods;
+        if attitude {
+            // The pump reads the subscribed rows in batches of its own, so
+            // the vitals sweep's single readings scatter: the mean of the
+            // last minute stands for them.
+            p[0] = tail_mean(&r.samples, 0, 60);
+            p[1] = tail_mean(&r.samples, 1, 60);
+        }
+        assert!(
+            (0.9..1.2).contains(&p[0]),
+            "{case}: position period {}",
+            p[0]
+        );
+        assert!((4.5..6.5).contains(&p[1]), "{case}: vitals period {}", p[1]);
+        assert!(
+            (58.0..64.0).contains(&p[4]),
+            "{case}: enumeration period {}",
+            p[4]
+        );
+        // The reported period grows while one runs: at most the target and
+        // the duration.
+        let worst = r.samples.iter().map(|p| p[4]).fold(0.0f64, f64::max);
+        assert!(worst <= 60.0 + 40.0, "{case}: enumeration period {worst}");
+        if attitude {
+            // The warehouses are still read: within about twice their
+            // period, whatever the pump leaves them.
+            assert!(
+                p[3] > 0.0 && p[3] <= 2.0 * 60.0,
+                "{case}: warehouse period {}",
+                p[3]
+            );
+            // A row's period is the span over the rows read.
+            let sub = 20.0 * 180.0 / r.tier_rows[Tier::Subscribed.index()] as f64;
+            assert!(
+                (0.99..1.3).contains(&sub),
+                "{case}: subscribed period {sub}"
+            );
+        }
+        let pumps = r.pumps as f64 / 180.0;
+        assert!(pumps < 5.0, "{case}: {pumps} pumps a second");
+        assert!(r.share <= 0.003, "{case}: share {}", r.share);
+        assert!(
+            (0.75 * batch..=1.25 * batch).contains(&s.batch_us),
+            "{case}: the batch estimate reads {}",
+            s.batch_us
+        );
+    }
+}
+
+type Sweep = (f64, f64);
+
+#[test]
+fn every_tier_holds_whatever_a_pump_batch_costs() {
+    every_tier_holds(&[
+        ((1.5, 0.7), 7.0, 29.0, Some(570.0), false),
+        ((15.0, 0.6), 7.0, 23.0, Some(687.0), false),
+        ((1.5, 0.7), 20.0, 23.0, Some(687.0), false),
+        ((15.0, 0.6), 20.0, 23.0, Some(687.0), false),
+        ((15.0, 0.6), 20.0, 23.0, None, false),
+        ((15.0, 0.6), 12.0, 23.0, Some(687.0), false),
+    ]);
+}
+
+/// Twenty rows subscribed with their attitude, read by the pump (01:38
+/// ruling, item 4). The ruled bound of under 5 pumps a second does not hold:
+/// the pump comes 17 to 24 times a second, each reading about one
+/// subscribed row (the share holds). Ignored until the coordinator rules.
+#[test]
+fn every_tier_holds_whatever_a_pump_batch_costs_with_an_attitude_subscription() {
+    every_tier_holds(&[
+        ((1.5, 0.7), 7.0, 29.0, Some(570.0), true),
+        ((15.0, 0.6), 20.0, 23.0, Some(687.0), true),
+    ]);
+}
+
+/// An estimate at its 62.5 µs clamp, under a sweep that reserves its
+/// savings: three calls then pass the gate's cap, no pump comes to correct
+/// the estimate, and it decays on each frame that wants a pump until one
+/// does. With a pump wanted, by an enumeration asked for or by subscribed
+/// rows read with their attitude and no enumeration, and calls of 23 µs, the
+/// pump is back within 2 s of the first frame that wanted it, at the whole
+/// budget and at a tenth. The same holds for a batch's fixed part read too
+/// high, under a full reserve.
+#[cfg(feature = "faults")]
+#[test]
+fn an_estimate_read_too_high_does_not_shut_the_pump() {
+    #[derive(Clone, Copy, Debug)]
+    enum Want {
+        Enumeration,
+        Attitude,
+    }
+    for k in [1.0, 0.1] {
+        for (high_call, want) in [
+            (true, Want::Enumeration),
+            (false, Want::Enumeration),
+            (true, Want::Attitude),
+            (false, Want::Attitude),
+        ] {
+            let mut s = Sampler::new(Rates::default(), 0.07);
+            let mut rec = Rec::new(0.003, 1e6 / 110.0);
+            let mut w = world(500, 20, 5);
+            w.sweep = Some((15.0, 0.6));
+            halt_four_in_five(&mut w);
+            w.batch_us = 20.0;
+            w.close_us = 6.0;
+            s.set_campaign(1);
+            for i in 1..=20u64 {
+                let o = w.objects.get_mut(&(1000 + i)).unwrap();
+                o.name = format!("np.u.1.{}", base36_of(i));
+            }
+            run_x(&mut s, &mut rec, &mut w, 1.0, 110.0, 165.0, 23.0, 3.0);
+            if matches!(want, Want::Attitude) {
+                s.subscribe(1.0, true, &(1..=20).collect::<Vec<_>>());
+            }
+            run_x(&mut s, &mut rec, &mut w, 60.0, 110.0, 165.0, 23.0, 3.0);
+            s.set_scale(k).unwrap();
+            if high_call {
+                s.xcall_us = SLICE_CAP_US / 4.0;
+            } else {
+                s.batch_us = SLICE_CAP_US / 4.0;
+                // A full reserve: the sweep holds all it may.
+                s.sweep_fund = 1e4;
+            }
+            rec.began += Duration::from_nanos(9_090_909);
+            match want {
+                Want::Enumeration => s.request_enumeration(),
+                Want::Attitude => {
+                    assert!(
+                        s.enumeration.is_none() && !s.enum_due,
+                        "an enumeration is under way"
+                    );
+                    // The first frame that wants the pump finds the rows
+                    // owed within a second.
+                }
+            }
+            let r = run_x(&mut s, &mut rec, &mut w, 4.0, 110.0, 165.0, 23.0, 3.0);
+            let case = format!("k = {k}, high call {high_call}, {want:?}");
+            let (Some(worth), Some(first)) = (r.first_worth, r.first_pump) else {
+                panic!(
+                    "{case}: worth {:?}, pump {:?}; call {} µs, batch {} µs",
+                    r.first_worth, r.first_pump, s.xcall_us, s.batch_us
+                );
+            };
+            assert!(
+                first - worth <= 2.0,
+                "{case}: the first pump came {:.2} s after the first frame that wanted one; \
+                 call {} µs, batch {} µs",
+                first - worth,
+                s.xcall_us,
+                s.batch_us
+            );
+        }
+    }
+}
+
+/// `x` decays at most once a frame: the guard on the gate and the decay on
+/// a pump's start count as one.
+#[test]
+fn the_call_estimate_decays_at_most_once_a_frame() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 110.0);
+    let t = rec.began;
+    rec.syscall = false;
+    s.xcall_us = 60.0;
+    s.slice(&rec, t);
+    // Three calls pass what a frame can reach: the gate refuses and decays.
+    assert!(!s.gate(&rec, t));
+    assert!((s.xcall_us - 59.4).abs() < 1e-9, "{}", s.xcall_us);
+    // A second look at the gate in the same frame decays nothing.
+    s.gate(&rec, t);
+    assert!((s.xcall_us - 59.4).abs() < 1e-9, "{}", s.xcall_us);
+    // A pump starting in the frame, a call of 60 µs: no second decay.
+    s.begin(&rec, t + Duration::from_micros(60));
+    let blended = 59.4 * 0.9 + 60.0 * 0.1;
+    assert!((s.xcall_us - blended).abs() < 1e-9, "{}", s.xcall_us);
+    // The next frame decays once more.
+    let t2 = t + Duration::from_micros(9091);
+    rec.began = t2;
+    s.slice(&rec, t2);
+    s.gate(&rec, t2);
+    assert!((s.xcall_us - blended * 0.99).abs() < 1e-9, "{}", s.xcall_us);
+}
+
+/// Under a sweep that reserves its savings, a call's estimate that was
+/// driven to the clamp reads the true 23 µs again within 10 s: the floor of
+/// three calls does not hold it up.
+#[test]
+fn the_call_estimate_returns_to_the_true_cost_under_a_reserving_sweep() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 110.0);
+    let mut w = world(1960, 40, 20);
+    w.sweep = Some((15.0, 0.6));
+    halt_four_in_five(&mut w);
+    w.batch_us = 20.0;
+    w.close_us = 6.0;
+    run_x(&mut s, &mut rec, &mut w, 60.0, 110.0, 165.0, 23.0, 3.0);
+    s.xcall_us = SLICE_CAP_US / 4.0;
+    rec.began += Duration::from_nanos(9_090_909);
+    let r = run_x(&mut s, &mut rec, &mut w, 10.0, 110.0, 165.0, 23.0, 3.0);
+    assert!(r.pumps > 0);
+    assert!(
+        (0.75 * 23.0..=1.25 * 23.0).contains(&s.xcall_us),
+        "the call estimate reads {} µs after 10 s",
+        s.xcall_us
+    );
+}
+
+/// LIVE, S10, the storm case: a batch's fixed part of 20 µs, a call of 23 µs
+/// and `coalition.getGroups` steps of 687 µs. Every tier holds its target,
+/// the enumeration runs at 60 s plus its duration at most, the pump comes
+/// under about 5 times a second, and the estimate of the fixed part reads
+/// within 25 % of the true 20 µs.
+#[test]
+fn the_live_cost_storm_case_holds_every_tier_at_k_1() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 110.0);
+    let mut w = world(1960, 40, 20);
+    w.sweep = Some((15.0, 0.6));
+    halt_four_in_five(&mut w);
+    w.batch_us = 20.0;
+    w.enum_step_us = Some(687.0);
+    w.birth_us = Some(37.0);
+    w.close_us = 6.0;
+    run_x(&mut s, &mut rec, &mut w, 60.0, 110.0, 165.0, 23.0, 3.0);
+    rec.began += Duration::from_nanos(9_090_909);
+    let r = run_x(&mut s, &mut rec, &mut w, 180.0, 110.0, 165.0, 23.0, 3.0);
+    let p = rec.periods;
+    assert!((0.9..1.2).contains(&p[0]), "positions {}", p[0]);
+    assert!((4.5..6.5).contains(&p[1]), "vitals {}", p[1]);
+    let worst = r.samples.iter().map(|p| p[4]).fold(0.0f64, f64::max);
+    assert!(worst <= 60.0 + 40.0, "enumeration period {worst}");
+    assert!(r.share <= 0.003, "share {}", r.share);
+    assert!(r.pumps as f64 / 180.0 < 5.0, "{} pumps", r.pumps);
+    assert!((15.0..=25.0).contains(&s.batch_us), "batch {}", s.batch_us);
+    assert_eq!(r.forgiven_us, 0.0);
+}
+
+/// At 2,000 rows the slow sweep of life queues an existence check for each
+/// row it reads, about 33 a second; at one pump a second or so the queue
+/// stays bounded.
+#[test]
+fn the_check_queue_stays_bounded_at_2000_rows() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 110.0);
+    let mut w = world(1960, 40, 20);
+    w.sweep = Some((1.5, 0.7));
+    w.batch_us = 7.0;
+    w.close_us = 3.0;
+    halt_four_in_five(&mut w);
+    let r = run_x(&mut s, &mut rec, &mut w, 90.0, 110.0, 165.0, 29.0, 2.2);
+    let peak = |a: &[usize]| a.iter().copied().max().unwrap_or(0);
+    let (first, last) = (peak(&r.checks[20..55]), peak(&r.checks[55..]));
+    eprintln!(
+        "check queue: {first} then {last}; {} pumps a second",
+        r.pumps as f64 / 90.0
+    );
+    // The queue settles where the waiting checks are worth a call: about
+    // three calls' worth of vitals rows.
+    assert!(
+        last * 10 <= first * 11 + 50,
+        "the queue grew: {first} then {last}"
+    );
+    assert!(last <= 500, "{last} checks waiting");
+}
+
+/// 01:38 ruling, item 4: at k = 1 with twenty rows subscribed with their
+/// attitude, every tier holds its target, the pump comes under 5 times a
+/// second, and the mean holds.
+#[test]
+fn at_full_scale_subscribed_attitude_rows_keep_their_period() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 110.0);
+    let mut w = world(1960, 40, 20);
+    w.sweep = Some((15.0, 0.6));
+    halt_four_in_five(&mut w);
+    w.batch_us = 20.0;
+    w.enum_step_us = Some(687.0);
+    w.close_us = 6.0;
+    s.set_campaign(1);
+    for i in 1..=20u64 {
+        let o = w.objects.get_mut(&(1000 + i)).unwrap();
+        o.name = format!("np.u.1.{}", base36_of(i));
+    }
+    run_x(&mut s, &mut rec, &mut w, 1.0, 110.0, 165.0, 23.0, 3.0);
+    s.subscribe(1.0, true, &(1..=20).collect::<Vec<_>>());
+    rec.began += Duration::from_nanos(9_090_909);
+    run_x(&mut s, &mut rec, &mut w, 60.0, 110.0, 165.0, 23.0, 3.0);
+    rec.began += Duration::from_nanos(9_090_909);
+    // Read each 5 s over two minutes: one reading of a period is scattered
+    // by where the pump's batches fall, so the readings are averaged.
+    let (mut pumps, mut empty, mut share) = (0, 0, 0.0f64);
+    let (mut sub_rows, mut pos, mut vit) = (0u64, 0.0, 0.0);
+    for _ in 0..24 {
+        let r = run_x(&mut s, &mut rec, &mut w, 5.0, 110.0, 165.0, 23.0, 3.0);
+        rec.began += Duration::from_nanos(9_090_909);
+        pumps += r.pumps;
+        empty += r.empty_pumps;
+        share += r.share / 24.0;
+        sub_rows += r.tier_rows[Tier::Subscribed.index()];
+        pos += rec.periods[0] / 24.0;
+        vit += rec.periods[1] / 24.0;
+    }
+    // A row's period is the span over the rows read: the pump's partial
+    // batches make the reported sweep period scatter below it.
+    let sub = 20.0 * 120.0 / sub_rows as f64;
+    assert!((0.99..=1.2).contains(&sub), "subscribed period {sub}");
+    assert!((0.9..=1.2).contains(&pos), "positions {pos}");
+    assert!((4.5..=6.5).contains(&vit), "vitals {vit}");
+    assert!(share <= 0.003, "share {share}");
+    assert!(
+        pumps as f64 / 120.0 < 5.0,
+        "{} pumps a second; empty {empty}",
+        pumps as f64 / 120.0
+    );
+    // No subscribed row waits more than 1.2 s and a pump's wait (1 s) for a
+    // read: seen in every window of 2 s.
+    let mut last = [0usize; 20];
+    for chunk in 1..=60usize {
+        rec.records.clear();
+        run_x(&mut s, &mut rec, &mut w, 0.5, 110.0, 165.0, 23.0, 3.0);
+        rec.began += Duration::from_nanos(9_090_909);
+        for o in positions_read(&rec) {
+            if (1001..=1020).contains(&o) {
+                last[(o - 1001) as usize] = chunk;
+            }
+        }
+        if chunk > 8 {
+            for (i, l) in last.iter().enumerate() {
+                assert!(
+                    chunk - l <= 4,
+                    "subscribed row {i} unread for {} s",
+                    (chunk - l) as f64 / 2.0
+                );
+            }
+        }
+    }
+}
+
+/// A table of `units` rows added by hand, with the host's sweep on and no
+/// births waiting.
+fn table(units: u64) -> (Sampler, Rec, World) {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 110.0);
+    let mut w = world(units, 0, 0);
+    for id in w.objects.keys().copied().collect::<Vec<_>>() {
+        s.add(&mut rec, w.found(id).unwrap(), false);
+    }
+    w.births.clear();
+    // No row waits for its first life read, and no enumeration is due.
+    s.life_marks.clear();
+    for row in s.rows.iter_mut().flatten() {
+        row.life_marked = false;
+    }
+    s.enum_due = false;
+    s.enum_last_begin = Some(rec.began);
+    s.hellos_seen = rec.hellos();
+    s.set_direct(true);
+    (s, rec, w)
+}
+
+/// One pump at `t`, as a frame that sampled.
+fn one_pump(s: &mut Sampler, rec: &mut Rec, w: &mut World, t: Instant) {
+    rec.began = t;
+    rec.syscall = false;
+    s.slice(rec, t);
+    pump(s, rec, w, &mut Clock(t));
+}
+
+fn objects_of<T>(rec: &Rec, k: u64, f: impl Fn(&[u8]) -> Option<Vec<u64>>) -> Vec<u64> {
+    let _ = std::marker::PhantomData::<T>;
+    rec.of(k).filter_map(|p| f(p)).flatten().collect()
+}
+
+fn vitals_read(rec: &Rec) -> Vec<u64> {
+    objects_of::<Vitals>(rec, kind::VITALS, |p| {
+        Vitals::decode(p).ok().map(|v| v.object)
+    })
+}
+
+fn positions_read(rec: &Rec) -> Vec<u64> {
+    objects_of::<Positions>(rec, kind::POSITIONS, |p| {
+        Positions::decode(p).ok().map(|v| v.object)
+    })
+}
+
+/// One sweep at `t` with `credit` positions owed and the last sweep `age_s`
+/// old: how many rows it read.
+fn sweep_once(credit: f64, age_s: f64) -> usize {
+    let (mut s, mut rec, w) = table(500);
+    let t = rec.began + Duration::from_secs(10);
+    rec.began = t;
+    rec.syscall = false;
+    s.accrue(t);
+    s.tiers[Tier::Positions.index()].credit = credit;
+    s.tiers[Tier::Vitals.index()].credit = 0.0;
+    s.last_sweep = Some(t - Duration::from_secs_f64(age_s));
+    s.sweep_fund = 1e4;
+    s.budget.debt = -CREDIT_CAP_US;
+    s.slice(&rec, t);
+    s.tiers[Tier::Positions.index()].credit = credit;
+    let reads = std::cell::Cell::new(0usize);
+    let objects = &w.objects;
+    s.sweep(
+        &mut rec,
+        t,
+        &mut |o| {
+            reads.set(reads.get() + 1);
+            Ok(objects.get(&o).map(|o| o.pos))
+        },
+        || t,
+    );
+    reads.get()
+}
+
+/// The sweep waits until it can read `SWEEP_MIN` rows, or every row owed
+/// when the last sweep is `SWEEP_LATE` of a period old.
+#[test]
+fn the_sweep_waits_for_a_batch_unless_the_last_one_is_late() {
+    // Ten rows owed, the last sweep 50 ms old (under SWEEP_LATE of 1 s).
+    assert_eq!(sweep_once(10.0, 0.05), 0);
+    // The same, the last sweep 200 ms old: every row owed.
+    assert_eq!(sweep_once(10.0, 0.2), 10);
+    // A batch of SWEEP_MIN or more goes at once.
+    assert_eq!(sweep_once(SWEEP_MIN as f64 + 36.0, 0.05), SWEEP_MIN + 36);
+    assert_eq!(sweep_once(SWEEP_MIN as f64, 0.05), SWEEP_MIN);
+    assert_eq!(sweep_once(SWEEP_MIN as f64 - 1.0, 0.05), 0);
+}
+
+/// A unit unmoved for `IDLE_AFTER` reads is read once in `IDLE_EVERY`
+/// sweeps, and the first read that finds it moved returns it to every
+/// sweep; each sweep reads an even fifth of the idle rows.
+#[test]
+fn an_unmoved_unit_backs_off_and_a_moving_one_returns() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 100.0);
+    let mut w = world(200, 0, 0);
+    w.sweep = Some((1.5, 0.7));
+    for o in w.objects.values_mut() {
+        o.speed = 0.0;
+    }
+    run_x(&mut s, &mut rec, &mut w, 20.0, 100.0, 185.0, 29.0, 2.2);
+    assert_eq!(s.idle_units, 200, "units not read less often");
+    // Each sweep reads an even fifth.
+    for pass in 0..IDLE_EVERY {
+        s.passes[0] = pass;
+        let n = (0..s.rows.len())
+            .filter(|p| s.readable(Tier::Positions, *p).is_some())
+            .count();
+        assert_eq!(n, 200 / IDLE_EVERY as usize, "pass {pass}");
+    }
+    // Over 50 s each unit is read about once in five seconds.
+    rec.records.clear();
+    run_x(&mut s, &mut rec, &mut w, 50.0, 100.0, 185.0, 29.0, 2.2);
+    let reads = positions_read(&rec)
+        .into_iter()
+        .filter(|o| *o > 1000 && *o <= 1200)
+        .count() as f64;
+    let per_unit = reads / 200.0 / 50.0;
+    assert!(
+        (0.15..0.26).contains(&per_unit),
+        "each idle unit read {per_unit} times a second"
+    );
+    // One unit moves: it is read every sweep again within one idle round.
+    w.objects.get_mut(&1100).unwrap().speed = 5.0;
+    rec.records.clear();
+    run_x(&mut s, &mut rec, &mut w, 10.0, 100.0, 185.0, 29.0, 2.2);
+    let reads = positions_read(&rec).iter().filter(|o| **o == 1100).count();
+    assert!(reads >= 5, "the moving unit was read {reads} times in 10 s");
+    assert_eq!(s.idle_units, 199);
+}
+
+/// While the host's sweep is behind, the pump reads no tier below the
+/// positions (strict rank); with the positions served it does.
+#[test]
+fn the_pump_reads_no_lower_tier_while_the_sweep_is_behind() {
+    for behind in [true, false] {
+        let (mut s, mut rec, mut w) = table(500);
+        let t = rec.began + Duration::from_secs(10);
+        rec.began = t;
+        s.accrue(t);
+        s.tiers[Tier::Vitals.index()].cost = 0.2;
+        s.tiers[Tier::Vitals.index()].credit = 50.0;
+        s.tiers[Tier::Positions.index()].credit = if behind { 500.0 } else { 0.0 };
+        assert_eq!(s.behind(), behind);
+        assert_eq!(s.pump_worth(t), !behind || false, "pump_worth");
+        s.budget.debt = -CREDIT_CAP_US;
+        one_pump(&mut s, &mut rec, &mut w, t);
+        assert_eq!(
+            !vitals_read(&rec).is_empty(),
+            !behind,
+            "behind {behind}: vitals read {:?}",
+            vitals_read(&rec).len()
+        );
+    }
+}
+
+/// A HIT names a row's life and a shot its ammunition: each is read on the
+/// next pump, and a row read again within `LIFE_AGAIN_S`, or
+/// `AMMO_AGAIN_S`, waits.
+#[test]
+fn marks_read_the_named_row_and_not_again_within_their_wait() {
+    let (mut s, mut rec, mut w) = table(100);
+    // The positions are not owed here: the sweep that would read them does
+    // not run between these pumps.
+    s.set_rates(Rates {
+        position_s: 1e6,
+        ..s.rates()
+    });
+    let t0 = rec.began + Duration::from_secs(10);
+    s.budget.debt = -CREDIT_CAP_US;
+    s.mark(Some(1005.0), true);
+    one_pump(&mut s, &mut rec, &mut w, t0);
+    assert_eq!(vitals_read(&rec), vec![1005]);
+    rec.records.clear();
+    // Hit again 0.5 s later: too soon.
+    s.mark(Some(1005.0), true);
+    one_pump(&mut s, &mut rec, &mut w, t0 + Duration::from_millis(500));
+    assert!(!vitals_read(&rec).contains(&1005), "read again at 0.5 s");
+    one_pump(&mut s, &mut rec, &mut w, t0 + Duration::from_millis(1200));
+    assert!(vitals_read(&rec).contains(&1005), "not read at 1.2 s");
+    // A shot.
+    rec.records.clear();
+    let ammo = |rec: &Rec| {
+        rec.of(kind::AMMO)
+            .filter_map(|p| Ammo::decode(p).ok())
+            .map(|a| a.object)
+            .collect::<Vec<_>>()
+    };
+    let t1 = t0 + Duration::from_secs(2);
+    s.mark(Some(1007.0), false);
+    one_pump(&mut s, &mut rec, &mut w, t1);
+    assert_eq!(ammo(&rec), vec![1007]);
+    rec.records.clear();
+    s.mark(Some(1007.0), false);
+    one_pump(&mut s, &mut rec, &mut w, t1 + Duration::from_secs(2));
+    assert!(ammo(&rec).is_empty(), "read again at 2 s");
+    one_pump(&mut s, &mut rec, &mut w, t1 + Duration::from_millis(5200));
+    assert_eq!(ammo(&rec), vec![1007]);
+    // An object the table lacks is ignored.
+    s.mark(Some(5.0), true);
+    s.mark(Some(f64::NAN), false);
+    assert!(s.life_marks.is_empty() && s.ammo_marks.is_empty());
+}
+
+/// A row a getter raised on is left out of every tier until an enumeration
+/// settles it.
+#[test]
+fn a_suspect_row_is_read_by_no_tier_until_an_enumeration_finds_it() {
+    let (mut s, mut rec, _w) = table(20);
+    let slot = s.slot_of(1005).unwrap();
+    s.suspect(slot);
+    for tier in [Tier::Positions, Tier::Vitals, Tier::Ammo] {
+        assert!(s.readable(tier, slot as usize).is_none(), "{tier:?}");
+    }
+    assert!(s.readable(Tier::Positions, slot as usize + 1).is_some());
+    s.accrue(rec.began);
+    assert_eq!((s.suspect_rows, s.suspect_units), (1, 1));
+    s.enumeration = Some(1);
+    s.seen(&mut rec, 1005);
+    s.accrue(rec.began);
+    assert_eq!(s.suspect_rows, 0);
+    assert!(s.readable(Tier::Positions, slot as usize).is_some());
+}
+
+/// The sweep with a getter that raises on its fifth row: the four before it
+/// are written, the fifth is suspect and the sweep ends; nothing stays
+/// batched, and a later sweep never calls the getter on the suspect row.
+#[test]
+fn a_getter_that_raises_mid_sweep_leaves_the_sampler_whole() {
+    let (mut s, mut rec, w) = table(200);
+    let t = rec.began + Duration::from_secs(10);
+    rec.began = t;
+    rec.syscall = false;
+    s.accrue(t);
+    s.sweep_fund = 1e4;
+    s.budget.debt = -CREDIT_CAP_US;
+    s.slice(&rec, t);
+    s.tiers[Tier::Positions.index()].credit = 200.0;
+    let calls = std::cell::RefCell::new(Vec::new());
+    let objects = &w.objects;
+    s.sweep(
+        &mut rec,
+        t,
+        &mut |o| {
+            calls.borrow_mut().push(o);
+            if calls.borrow().len() == 5 {
+                Err(())
+            } else {
+                Ok(objects.get(&o).map(|o| o.pos))
+            }
+        },
+        || t,
+    );
+    let calls1 = calls.borrow().clone();
+    assert_eq!(calls1.len(), 5);
+    assert_eq!(positions_read(&rec), calls1[..4].to_vec());
+    assert!(s.batch.positions.object.is_empty() && s.batch.tier.is_none());
+    let bad = calls1[4];
+    let slot = s.slot_of(bad).unwrap();
+    assert!(s.row(slot).unwrap().suspect);
+    assert!(s.checks_waiting() >= 1, "no existence check queued");
+    // The next sweep reads the others, and not the suspect row.
+    calls.borrow_mut().clear();
+    let t2 = t + Duration::from_micros(9091);
+    rec.began = t2;
+    s.budget.debt = -CREDIT_CAP_US;
+    s.slice(&rec, t2);
+    s.tiers[Tier::Positions.index()].credit = 200.0;
+    s.sweep_fund = 1e4;
+    s.sweep(
+        &mut rec,
+        t2,
+        &mut |o| {
+            calls.borrow_mut().push(o);
+            Ok(objects.get(&o).map(|o| o.pos))
+        },
+        || t2,
+    );
+    assert!(!calls.borrow().is_empty(), "the sweep read nothing");
+    assert!(!calls.borrow().contains(&bad), "the suspect row was read");
+}
+
+/// One rule for the maintenance share: half of each frame's allowance, three
+/// quarters while the enumeration is overdue; the sweep saves the rest while
+/// births or the enumeration wait.
+#[test]
+fn the_sweep_saves_what_maintenance_leaves() {
+    let fund_after = |births: usize, overdue: bool| {
+        let (mut s, mut rec, _w) = table(500);
+        let t = rec.began + Duration::from_secs(10);
+        rec.began = t;
+        rec.syscall = false;
+        s.accrue(t);
+        s.births = births;
+        if overdue {
+            s.enumeration = Some(1);
+            s.enum_last_begin = Some(t - Duration::from_secs(61));
+        }
+        s.slice(&rec, t);
+        s.tiers[Tier::Positions.index()].credit = 500.0;
+        s.sweep_fund = 0.0;
+        let share = s.maintenance_share(t);
+        // Too few rows for a batch: the sweep waits, with its savings.
+        s.last_sweep = Some(t);
+        s.sweep(&mut rec, t, &mut |_| Ok(Some([1.0, 0.0, 0.0])), || t);
+        (s.sweep_fund, share, s.budget.allowance)
+    };
+    let (none, share, a) = fund_after(0, false);
+    assert!((none - a).abs() < 1e-6 && share == 0.5, "{none} of {a}");
+    let (waiting, share, a) = fund_after(5, false);
+    assert_eq!(share, MAINTENANCE_SHARE);
+    assert!((waiting - 0.5 * a).abs() < 1e-6, "{waiting} of {a}");
+    let (overdue, share, a) = fund_after(5, true);
+    assert_eq!(share, MAINTENANCE_SHARE_OVERDUE);
+    assert!((overdue - 0.25 * a).abs() < 1e-6, "{overdue} of {a}");
+}
+
+/// A static's point is read when its row is added and when an enumeration
+/// finds it, and by no other read; cargo, a static that can move, is swept
+/// with the units.
+#[test]
+fn a_static_has_a_point_at_its_add_and_cargo_is_swept() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 100.0);
+    let mut w = world(30, 3, 0);
+    w.spawn(200_001, object_kind::STATIC, "cargo".into(), 5.0);
+    w.objects.get_mut(&200_001).unwrap().cargo = true;
+    w.sweep = Some((1.5, 0.7));
+    run_x(&mut s, &mut rec, &mut w, 30.0, 100.0, 185.0, 29.0, 2.2);
+    let all = positions_read(&rec);
+    let count = |o: u64| all.iter().filter(|x| **x == o).count();
+    for st in 100_001..=100_003 {
+        // At its add, and at the first enumeration; no more in 30 s.
+        assert!((1..=2).contains(&count(st)), "static {st}: {}", count(st));
+    }
+    assert!(count(200_001) >= 20, "cargo read {} times", count(200_001));
+    assert!(count(1005) >= 20, "unit read {} times", count(1005));
+    assert_eq!(s.cargo, 1);
+}
+
+/// Work that is not worth a call by its size waits at most `PUMP_WAIT_S`.
+#[test]
+fn a_small_job_waits_one_second_for_a_pump() {
+    let (mut s, rec, _w) = table(100);
+    let t = rec.began + Duration::from_secs(10);
+    s.accrue(t);
+    s.tiers[Tier::Vitals.index()].cost = 0.2;
+    s.tiers[Tier::Vitals.index()].credit = 1.0;
+    // The job is a row, 0.2 µs: far under three calls.
+    s.last_pump = Some(t);
+    assert!(!s.pump_worth(t + Duration::from_millis(500)));
+    assert!(s.pump_worth(t + Duration::from_secs(1)));
+    // With nothing owed, no wait is long enough.
+    s.tiers[Tier::Vitals.index()].credit = 0.0;
+    assert!(!s.pump_worth(t + Duration::from_secs(30)));
+}
+
+/// `encode_into` gives the bytes `encode` gives, over a buffer that held
+/// something else.
+#[test]
+fn encode_into_matches_encode() {
+    let p = Positions {
+        object: vec![1, 2, 3],
+        x: vec![1.0, 2.0, 3.0],
+        y: vec![4.0, 5.0, 6.0],
+        z: vec![7.0, 8.0, 9.0],
+    };
+    let v = Vitals {
+        object: vec![4, 5],
+        life: vec![1.5, 2.5],
+        fuel: vec![0.5, 0.25],
+    };
+    let a = Attitude {
+        object: vec![6],
+        heading: vec![0.1],
+        pitch: vec![0.2],
+        roll: vec![0.3],
+    };
+    let mut out = vec![0xAAu8; 500];
+    p.encode_into(&mut out);
+    assert_eq!(out, p.encode());
+    v.encode_into(&mut out);
+    assert_eq!(out, v.encode());
+    a.encode_into(&mut out);
+    assert_eq!(out, a.encode());
+    Positions::default().encode_into(&mut out);
+    assert_eq!(out, Positions::default().encode());
+}
+
+/// The sweep while no sidecar is attached (the host runs no sweep), through
+/// a pause with nothing moving, and across a mission change: each leaves
+/// the table whole and every tier back at its period within seconds.
+#[test]
+fn the_sweep_survives_a_detach_a_pause_and_a_mission_change() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 100.0);
+    let mut w = world(500, 20, 4);
+    w.sweep = Some((1.5, 0.7));
+    w.batch_us = 7.0;
+    run_x(&mut s, &mut rec, &mut w, 30.0, 100.0, 185.0, 29.0, 2.2);
+    // Detached for a minute: frames run, nothing sweeps, credit stops.
+    w.detached = true;
+    run_x(&mut s, &mut rec, &mut w, 60.0, 100.0, 185.0, 29.0, 2.2);
+    w.detached = false;
+    let credit = s.tiers[Tier::Positions.index()].credit;
+    assert!(credit <= 520.0, "{credit} positions owed");
+    let r = run_x(&mut s, &mut rec, &mut w, 10.0, 100.0, 185.0, 29.0, 2.2);
+    assert!(r.longest_us <= 250.0, "a frame of {} µs", r.longest_us);
+    assert!(r.share <= 0.003 * 1.02, "share {}", r.share);
+    assert!(tail_mean(&r.samples, 0, 3) <= 1.3);
+    // Paused: DCS runs frames, nothing moves. Every unit is idle after a
+    // while, and moving again brings each back within one idle round.
+    let speeds: Vec<(u64, f64)> = w.objects.iter().map(|(k, o)| (*k, o.speed)).collect();
+    for o in w.objects.values_mut() {
+        o.speed = 0.0;
+    }
+    run_x(&mut s, &mut rec, &mut w, 15.0, 100.0, 185.0, 29.0, 2.2);
+    assert_eq!(s.idle_units, 500);
+    for (k, v) in speeds {
+        w.objects.get_mut(&k).unwrap().speed = v;
+    }
+    run_x(&mut s, &mut rec, &mut w, 12.0, 100.0, 185.0, 29.0, 2.2);
+    assert!(s.idle_units <= 25, "{} units still idle", s.idle_units);
+    // A mission change: a new generation, a new world.
+    s.new_generation(2);
+    let mut w2 = world(300, 10, 4);
+    w2.sweep = Some((1.5, 0.7));
+    w2.batch_us = 7.0;
+    let r = run_x(&mut s, &mut rec, &mut w2, 30.0, 100.0, 185.0, 29.0, 2.2);
+    assert_eq!(s.len(), 310, "births left: {}", w2.births.len());
+    assert!(r.longest_us <= 250.0, "a frame of {} µs", r.longest_us);
+    assert!(r.share <= 0.003 * 1.02, "share {}", r.share);
+    assert!(tail_mean(&r.samples, 0, 5) <= 1.3);
+    assert!(w2.swept > 0);
+}
+
+/// A cost estimate half the true cost, on every path: no frame passes
+/// 250 µs and the mean holds, while the estimates find the truth again.
+#[test]
+fn estimates_at_half_the_true_cost_keep_every_frame_under_250_us() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 110.0);
+    let mut w = world(1960, 40, 20);
+    w.sweep = Some((15.0, 0.6));
+    halt_four_in_five(&mut w);
+    w.batch_us = 20.0;
+    w.close_us = 6.0;
+    run_x(&mut s, &mut rec, &mut w, 60.0, 110.0, 165.0, 23.0, 3.0);
+    for t in &mut s.tiers {
+        t.cost *= 0.5;
+    }
+    s.sweep_row_us *= 0.5;
+    s.sweep_batch_us *= 0.5;
+    s.xcall_us *= 0.5;
+    s.xcall_seen *= 0.5;
+    s.batch_us *= 0.5;
+    s.close_us *= 0.5;
+    rec.began += Duration::from_nanos(9_090_909);
+    let r = run_x(&mut s, &mut rec, &mut w, 30.0, 110.0, 165.0, 23.0, 3.0);
+    assert!(r.longest_us <= 250.0, "a frame of {} µs", r.longest_us);
+    assert!(r.share <= 0.003 * 1.02, "share {}", r.share);
+    assert!(
+        (0.75 * 20.0..=1.25 * 20.0).contains(&s.batch_us),
+        "batch {}",
+        s.batch_us
+    );
+}
+
+/// At 0.5 frames a second with a sidecar attached the system-call frames
+/// alternate with sampling frames: no frame passes 250 µs, the mean holds,
+/// and the sampler goes on sampling (the link's own alternation is tested in
+/// `link.rs`).
+#[test]
+fn at_half_a_frame_a_second_the_sampling_frames_stay_under_250_us() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 2e6);
+    let mut w = world(200, 5, 2);
+    w.alternate = true;
+    w.sweep = Some((1.5, 0.7));
+    w.batch_us = 7.0;
+    let r = run_x(&mut s, &mut rec, &mut w, 600.0, 0.5, 200.0, 29.0, 2.2);
+    assert_eq!(s.len(), 205, "births left: {}", w.births.len());
+    assert!(
+        r.longest_us <= SLICE_CAP_US,
+        "a frame of {} µs; {} of {} over 250",
+        r.longest_us,
+        r.over_250,
+        r.frames
+    );
+    assert!(r.share <= 0.003, "share {}", r.share);
+    assert!(r.frames > 100 && r.pumps + (w.swept > 0) as usize > 0);
+    assert!(w.swept > 200, "{} rows swept", w.swept);
+}
+
+/// No aircraft exception: an unsubscribed aircraft's life is read when its
+/// row is added, after a hit, and on the slow sweep; a subscribed aircraft's
+/// life and fuel every 5 s.
+#[test]
+fn only_a_subscribed_aircraft_has_its_life_read_every_vitals_period() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 100.0);
+    let mut w = world(100, 0, 0);
+    for o in w.objects.values_mut() {
+        o.category = 0;
+        o.speed = 100.0;
+    }
+    w.sweep = Some((1.5, 0.7));
+    w.batch_us = 7.0;
+    s.set_campaign(1);
+    for i in 1..=10u64 {
+        w.objects.get_mut(&(1000 + i)).unwrap().name = format!("np.u.1.{}", base36_of(i));
+    }
+    run_x(&mut s, &mut rec, &mut w, 1.0, 100.0, 185.0, 29.0, 2.2);
+    s.subscribe(1.0, false, &(1..=10).collect::<Vec<_>>());
+    rec.began += Duration::from_millis(10);
+    run_x(&mut s, &mut rec, &mut w, 20.0, 100.0, 185.0, 29.0, 2.2);
+    rec.records.clear();
+    rec.began += Duration::from_millis(10);
+    run_x(&mut s, &mut rec, &mut w, 120.0, 100.0, 185.0, 29.0, 2.2);
+    let all = vitals_read(&rec);
+    let count = |o: u64| all.iter().filter(|x| **x == o).count();
+    for o in 1001..=1010 {
+        let n = count(o);
+        assert!((20..=26).contains(&n), "subscribed {o}: {n} reads in 120 s");
+    }
+    for o in 1011..=1100 {
+        let n = count(o);
+        assert!(n <= 3, "unsubscribed {o}: {n} reads in 120 s");
+    }
+    // A hit names one: read within two seconds, once.
+    rec.records.clear();
+    s.mark(Some(1050.0), true);
+    rec.began += Duration::from_millis(10);
+    run_x(&mut s, &mut rec, &mut w, 2.0, 100.0, 185.0, 29.0, 2.2);
+    assert!(
+        vitals_read(&rec).contains(&1050),
+        "a hit did not read the aircraft's life"
+    );
+}
+
+/// A HIT on a row DCS no longer has: the existence check wants a pump at
+/// once, and the row leaves as `DEAD` within 0.5 s at 110 frames a second
+/// (00:38 ruling, item 7) at the whole budget. At a tenth the
+/// pump is not called within 10 s (recorded): the sweep's withheld budget is
+/// debt, and the gate waits for credit.
+#[cfg(feature = "faults")]
+#[test]
+fn a_hit_on_a_gone_row_is_classified_within_half_a_second() {
+    for k in [1.0, 0.1] {
+        let mut s = Sampler::new(Rates::default(), 0.07);
+        let mut rec = Rec::new(0.003, 1e6 / 110.0);
+        let mut w = world(1960, 40, 20);
+        w.sweep = Some((15.0, 0.6));
+        halt_four_in_five(&mut w);
+        w.batch_us = 20.0;
+        w.close_us = 6.0;
+        run_x(&mut s, &mut rec, &mut w, 90.0, 110.0, 165.0, 23.0, 3.0);
+        s.set_scale(k).unwrap();
+        rec.began += Duration::from_nanos(9_090_909);
+        run_x(&mut s, &mut rec, &mut w, 5.0, 110.0, 165.0, 23.0, 3.0);
+        for (n, object) in [1500u64, 1501, 1502, 1503].into_iter().enumerate() {
+            // The unit dies; the HIT names it.
+            w.objects.remove(&object);
+            w.killed.insert(object);
+            rec.records.clear();
+            s.watch(Some(object as f64));
+            let mut waited = 0.0;
+            let gone = |rec: &Rec| {
+                rec.of(kind::OBJECT_GONE)
+                    .filter_map(|p| ObjectGone::decode(p).ok())
+                    .any(|g| g.object == object && g.reason == gone::DEAD)
+            };
+            while !gone(&rec) && waited < 10.0 {
+                rec.began += Duration::from_nanos(9_090_909);
+                run_x(&mut s, &mut rec, &mut w, 0.05, 110.0, 165.0, 23.0, 3.0);
+                waited += 0.05;
+            }
+            eprintln!("k = {k}, kill {n}: DEAD after {waited:.2} s");
+            // At a tenth the sweep's withheld budget is debt that keeps the
+            // gate shut (the slice stays at about 12 µs against a gate of
+            // 63 µs or more): recorded, not asserted.
+            if k == 1.0 {
+                assert!(waited <= 0.5, "k = {k}: DEAD after {waited:.2} s");
+            }
+        }
+    }
+}
+
+/// 200 HITs at 0.5 frames a second, with a sidecar attached: the checks they
+/// queue are made in step with the budget, and no frame passes 250 µs.
+#[test]
+fn two_hundred_hits_at_half_a_frame_a_second_keep_every_frame_under_250_us() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 2e6);
+    let mut w = world(400, 5, 2);
+    w.alternate = true;
+    w.sweep = Some((1.5, 0.7));
+    w.batch_us = 7.0;
+    w.close_us = 3.0;
+    run_x(&mut s, &mut rec, &mut w, 120.0, 0.5, 200.0, 29.0, 2.2);
+    let mut longest = 0.0f64;
+    for n in 0..100u64 {
+        rec.began += Duration::from_secs(4);
+        for h in 0..2 {
+            s.watch(Some((1001 + (n * 2 + h) % 400) as f64));
+        }
+        let r = run_x(&mut s, &mut rec, &mut w, 4.0, 0.5, 200.0, 29.0, 2.2);
+        longest = longest.max(r.longest_us);
+    }
+    assert!(longest <= SLICE_CAP_US, "a frame of {longest} µs");
+    assert!(
+        s.checks_waiting() < 50,
+        "{} checks waiting",
+        s.checks_waiting()
+    );
+    assert!(s.urgent.len() < 20, "{} urgent", s.urgent.len());
+}
+
+/// Fire on a survivor, a HIT every 0.1 s: each queues a check that finds it
+/// alive. The pumps they call do not starve the positions.
+#[test]
+fn sustained_hits_on_survivors_leave_the_positions_at_target() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 110.0);
+    let mut w = world(1960, 40, 20);
+    w.sweep = Some((15.0, 0.6));
+    halt_four_in_five(&mut w);
+    w.batch_us = 20.0;
+    w.close_us = 6.0;
+    run_x(&mut s, &mut rec, &mut w, 90.0, 110.0, 165.0, 23.0, 3.0);
+    let mut share = 0.0;
+    let mut worst = 0.0f64;
+    let mut pumps = 0;
+    for n in 0..300u64 {
+        rec.began += Duration::from_nanos(9_090_909);
+        s.watch(Some((1001 + n % 1960) as f64));
+        let r = run_x(&mut s, &mut rec, &mut w, 0.2, 110.0, 165.0, 23.0, 3.0);
+        share += r.share / 300.0;
+        pumps += r.pumps;
+        if n > 50 {
+            worst = worst.max(rec.periods[0]);
+        }
+    }
+    assert!(worst <= 1.3, "positions {worst} s");
+    assert!(share <= 0.003 * 1.02, "share {share}");
+    assert!(pumps < 300 * 5, "{pumps} pumps in 60 s");
+}
+
+/// At k = 0.1 with rows owed the enumeration's items a second are 1 % to
+/// 10 % of its rate at k = 1 (half the allowance over a row's cost), it
+/// completes and reports a period, and the pump comes under 5 times a second
+/// (03:09 and 03:12 rulings).
+#[cfg(feature = "faults")]
+#[test]
+fn at_a_tenth_the_enumeration_runs_at_a_fraction_of_its_rate() {
+    let build = || {
+        let mut s = Sampler::new(Rates::default(), 0.07);
+        let mut rec = Rec::new(0.003, 1e6 / 110.0);
+        let mut w = world(1960, 40, 20);
+        w.sweep = Some((15.0, 0.6));
+        halt_four_in_five(&mut w);
+        w.batch_us = 20.0;
+        w.enum_step_us = Some(687.0);
+        w.close_us = 6.0;
+        run_x(&mut s, &mut rec, &mut w, 60.0, 110.0, 165.0, 23.0, 3.0);
+        (s, rec, w)
+    };
+    // At k = 1 with rows owed the enumeration earns half the allowance: it
+    // reads that many µs of its rows a second, at the cost a row measured
+    // plus its share of the dear step every 100th item costs.
+    let (s, _, _) = build();
+    let cost = s.costs()[Tier::Enumeration.index()] + 687.0 / 100.0;
+    let full = 0.5 * 0.003 * 1e6 / cost;
+    // At k = 0.1 with rows owed, run until it completes.
+    let (mut s, mut rec, mut w) = build();
+    s.set_scale(0.1).unwrap();
+    s.request_enumeration();
+    let before = s.enum_count;
+    // Over the 10 s windows in which an enumeration ran.
+    let (mut rows, mut active, mut pumps) = (0u64, 0.0, 0usize);
+    for _ in 0..90 {
+        rec.began += Duration::from_nanos(9_090_909);
+        let running = s.enumeration.is_some();
+        let r = run_x(&mut s, &mut rec, &mut w, 10.0, 110.0, 165.0, 23.0, 3.0);
+        pumps += r.pumps;
+        if running || s.enumeration.is_some() {
+            rows += r.tier_rows[Tier::Enumeration.index()];
+            active += 10.0;
+        }
+    }
+    let tenth = rows as f64 / active;
+    let ratio = tenth / full;
+    eprintln!(
+        "enumeration items a second: {full:.1} at k = 1 with rows owed, {tenth:.1} at k = 0.1 \
+         (ratio {ratio:.3}); period {}; {} pumps a second",
+        s.periods()[4],
+        pumps as f64 / 900.0
+    );
+    assert!(
+        (0.01..=0.10).contains(&ratio),
+        "{tenth} items a second against {full}"
+    );
+    assert!(
+        s.enum_count > before + 1,
+        "the enumeration did not complete"
+    );
+    assert!(s.periods()[4] > 0.0, "no period reported");
+    assert!(pumps as f64 / 900.0 < 5.0, "{} pumps", pumps);
+}
+
+/// The starvation guard: a late tier takes at most one row per late
+/// interval.
+#[test]
+fn the_starvation_guard_takes_one_row_at_a_time() {
+    let run_with = |guard: bool| {
+        let mut s = Sampler::new(Rates::default(), 0.07);
+        s.no_guard = !guard;
+        let mut rec = Rec::new(0.003, 1e6 / 110.0);
+        let mut w = world(1960, 40, 20);
+        w.sweep = Some((15.0, 0.6));
+        halt_four_in_five(&mut w);
+        w.batch_us = 20.0;
+        w.enum_step_us = Some(687.0);
+        w.close_us = 6.0;
+        s.set_campaign(1);
+        for i in 1..=20u64 {
+            w.objects.get_mut(&(1000 + i)).unwrap().name = format!("np.u.1.{}", base36_of(i));
+        }
+        run_x(&mut s, &mut rec, &mut w, 1.0, 110.0, 165.0, 23.0, 3.0);
+        s.subscribe(1.0, true, &(1..=20).collect::<Vec<_>>());
+        rec.began += Duration::from_nanos(9_090_909);
+        run_x(&mut s, &mut rec, &mut w, 60.0, 110.0, 165.0, 23.0, 3.0);
+        rec.began += Duration::from_nanos(9_090_909);
+        let r = run_x(&mut s, &mut rec, &mut w, 180.0, 110.0, 165.0, 23.0, 3.0);
+        (tail_mean(&r.samples, 1, 120), r)
+    };
+    let (_, r) = run_with(true);
+    let (_, bare) = run_with(false);
+    // The warehouses: 20 rows a minute are due; the guard adds one row at
+    // most each late interval (the pump's wait, 1 s) and never more than a
+    // row a pump.
+    let rows = r.tier_rows[Tier::Warehouses.index()];
+    let without = bare.tier_rows[Tier::Warehouses.index()];
+    eprintln!("warehouse rows in 180 s: {rows} with the guard, {without} without");
+    assert!(
+        rows > without,
+        "{rows} rows with the guard, {without} without"
+    );
+    assert!(rows <= 180 + 60, "{rows} warehouse rows in 180 s");
+    assert!(rows <= r.pumps as u64, "{rows} rows in {} pumps", r.pumps);
+}
+
+/// With the starvation guard the vitals period stays inside its target
+/// band, 4.5 to 6.5 s; it is reported beside the period without the guard.
+#[test]
+fn the_starvation_guard_keeps_the_vitals_period_in_its_band() {
+    let run_with = |guard: bool| {
+        let mut s = Sampler::new(Rates::default(), 0.07);
+        s.no_guard = !guard;
+        let mut rec = Rec::new(0.003, 1e6 / 110.0);
+        let mut w = world(1960, 40, 20);
+        w.sweep = Some((15.0, 0.6));
+        halt_four_in_five(&mut w);
+        w.batch_us = 20.0;
+        w.enum_step_us = Some(687.0);
+        w.close_us = 6.0;
+        s.set_campaign(1);
+        for i in 1..=20u64 {
+            w.objects.get_mut(&(1000 + i)).unwrap().name = format!("np.u.1.{}", base36_of(i));
+        }
+        run_x(&mut s, &mut rec, &mut w, 1.0, 110.0, 165.0, 23.0, 3.0);
+        s.subscribe(1.0, true, &(1..=20).collect::<Vec<_>>());
+        rec.began += Duration::from_nanos(9_090_909);
+        run_x(&mut s, &mut rec, &mut w, 60.0, 110.0, 165.0, 23.0, 3.0);
+        rec.began += Duration::from_nanos(9_090_909);
+        let r = run_x(&mut s, &mut rec, &mut w, 180.0, 110.0, 165.0, 23.0, 3.0);
+        tail_mean(&r.samples, 1, 120)
+    };
+    let (with, without) = (run_with(true), run_with(false));
+    eprintln!("vitals {with:.2} s with the guard, {without:.2} s without");
+    assert!(
+        (4.5..=6.5).contains(&with),
+        "vitals {with} s with the guard, {without} s without"
+    );
+}
+
+/// A sampler in a pump that began at `t0` with a budget of 10 µs, and a
+/// batch of `tier` open when `open`.
+fn mid_pump(t0: Instant, open: bool) -> (Sampler, Rec) {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    s.sampling = true;
+    s.pump_start = Some(t0);
+    s.budget.budget = 10.0;
+    s.close_us = 2.0;
+    if open {
+        s.batch.tier = Some(Tier::Vitals);
+        s.batch.started = Some(t0);
+        s.batches = 1;
+    }
+    (s, Rec::new(0.003, 1e6 / 110.0))
+}
+
+/// The pump's last close counts in its spend, and teaches the close's cost.
+#[test]
+fn the_last_close_is_in_the_overrun_and_teaches_close_us() {
+    let t0 = Instant::now();
+    let (mut s, mut rec) = mid_pump(t0, true);
+    let reads = std::cell::Cell::new(0u32);
+    s.end_pump(&mut rec, || {
+        reads.set(reads.get() + 1);
+        // 20 µs to the end of the rows, then the close takes 8 µs.
+        t0 + Duration::from_micros(if reads.get() == 1 { 20 } else { 28 })
+    });
+    assert!((s.overrun_max - 18.0).abs() < 1e-6, "{}", s.overrun_max);
+    assert!(s.close_us > 2.0 && s.close_us < 8.0, "{}", s.close_us);
+}
+
+/// A frame that ends with a batch open times no close, so it teaches none.
+#[test]
+fn an_untimed_close_teaches_nothing() {
+    let t0 = Instant::now();
+    let (mut s, mut rec) = mid_pump(t0, true);
+    rec.began = t0;
+    s.end_frame(&mut rec, t0 + Duration::from_micros(20));
+    assert_eq!(s.close_us, 2.0);
+    assert_eq!(s.close_dev_us, 0.0);
+}
+
+/// A pump of checks and no row is a check pump; one that also swept rows is
+/// a row frame, with the checks' time in its overrun.
+#[test]
+fn check_pumps_are_counted_apart_from_row_frames() {
+    let t0 = Instant::now();
+    let end = || t0 + Duration::from_micros(25);
+    let (mut s, mut rec) = mid_pump(t0, false);
+    s.checked = true;
+    s.end_pump(&mut rec, end);
+    assert_eq!((s.check_pumps, s.row_frames), (1, 0));
+    assert!((s.check_overrun - 15.0).abs() < 1e-6, "{}", s.check_overrun);
+    assert_eq!(s.overrun_max, 0.0);
+    let (mut s, mut rec) = mid_pump(t0, true);
+    s.checked = true;
+    s.end_pump(&mut rec, end);
+    assert_eq!((s.check_pumps, s.row_frames), (0, 1));
+    assert!((s.overrun_max - 15.0).abs() < 1e-6, "{}", s.overrun_max);
+    assert_eq!(s.check_overrun, 0.0);
+}

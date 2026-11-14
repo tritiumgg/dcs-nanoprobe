@@ -1,6 +1,6 @@
 //! `link-probe --map PATH --port N --token-file PATH --seconds N [--poll-ms N]
 //! [--short-command] [--bad-record past-tail|over-limit|misaligned|past-capacity|padding]
-//! [--record FILE] [--stop-file FILE]`,
+//! [--record FILE] [--stop-file FILE] [--mirror FILE [--subscribe N]]`,
 //! or `link-probe --now-ms`, which prints the wall clock as the probe's `t`
 //! reads it and exits, so a test can compare its own times with the probe's.
 //!
@@ -16,13 +16,14 @@
 //! {"t":..,"ev":"hello","number":N,"epoch":N,"in_head":N,"interface":N,"dcs":".."}
 //! {"t":..,"ev":"lifecycle","state":N,"gen":N,"theater":"..","mission":".."}
 //! {"t":..,"ev":"result","opcode":N,"code":N,"seq":N}
-//! {"t":..,"ev":"log","level":N,"target":"..","msg":".."}
+//! {"t":..,"ev":"log","level":N,"target":"..","msg":"..","data":{..}|null}
 //! {"t":..,"ev":"event","id":N,"codes":[<code>,..],"fields":{"<code>":<value>,..}}
 //! {"t":..,"ev":"gap","class":N,"count":N}
 //! {"t":..,"ev":"report","text":".."}
 //! {"t":..,"ev":"status","lifecycle":N,"gen":N,"flags":N,"frame":N,"boot":"<hex>"}
 //! {"t":..,"ev":"final","lifecycle":N,"frame":N,"commands":N,"timed":N,"over_budget":N,
-//!  "events_dropped":N,"hist_event":[N x 32],"hist_pump":[N x 32]}
+//!  "events_dropped":N,"hist_event":[N x 32],"hist_pump":[N x 32],
+//!  "hist_syscall":[N x 32]}
 //! {"t":..,"ev":"reconnect","gen":N,"ready":T,"read":T,"ms":N}
 //! {"t":..,"ev":"end","records":N}
 //! ```
@@ -63,6 +64,19 @@
 //! every record can be read back. A recording holds server data and stays
 //! out of the repository.
 //!
+//! With `--mirror FILE`, the probe keeps the sidecar's mirror of the agent's
+//! object table (`nanoprobe_sidecar::mirror`, step S10). When `FILE.req`
+//! exists it writes the mirror to FILE as one JSON object and removes the
+//! request: `generation`, `counters`, the status block's `slice_us` and
+//! `periods`, the `subscribed` object IDs, and `rows`, each with `object`,
+//! `name`, `kind`, `pos`, `pos_model`, `pos_real`, `samples`, `interval`,
+//! `life`, `fuel`, `vit_model` and `since_real`, the real time its row was
+//! added; and `real`, the real time of the last `FRAME` read. The `xtask sampling compare` command sets
+//! it against the oracle. When the mirror wants an enumeration, the probe
+//! sends `ENUMERATE`. With `--subscribe N`, once it has used an enumeration
+//! and holds N units, it binds the N unit objects with the lowest IDs to
+//! entities 1 to N and subscribes them, at 1 s with attitude.
+//!
 //! Test tooling: built from source, never released.
 
 use std::collections::HashMap;
@@ -74,6 +88,7 @@ use std::time::{Duration, Instant};
 
 use nanoprobe_fake_agent::{arg, content, json_string, read_token};
 use nanoprobe_sidecar::link::{self, Command, Config, End, Sink};
+use nanoprobe_sidecar::mirror::Mirror;
 use nanoprobe_transport::codec::Lv;
 use nanoprobe_transport::codec::Writer;
 use nanoprobe_transport::layout::{kind, record as r, status as s};
@@ -236,6 +251,165 @@ struct Probe {
     queue: Vec<Command>,
     /// The stream recording, with `--record`.
     recording: Option<std::io::BufWriter<std::fs::File>>,
+    /// The mirror, with `--mirror`.
+    mirror: Option<MirrorOut>,
+}
+
+/// The mirror and where it goes.
+struct MirrorOut {
+    mirror: Mirror,
+    path: std::path::PathBuf,
+    subscribe: usize,
+    subscribed: Vec<u64>,
+    checked: Instant,
+}
+
+impl MirrorOut {
+    /// Write the mirror when a request file exists, at most every 50 ms.
+    fn serve(&mut self, map_path: &std::path::Path) -> Result<(), String> {
+        if self.checked.elapsed() < Duration::from_millis(50) {
+            return Ok(());
+        }
+        self.checked = Instant::now();
+        let req = self.path.with_extension("req");
+        if !req.exists() {
+            return Ok(());
+        }
+        let text = self.json(map_path);
+        let tmp = self.path.with_extension("tmp");
+        std::fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
+        std::fs::rename(&tmp, &self.path).map_err(|e| format!("{}: {e}", self.path.display()))?;
+        let _ = std::fs::remove_file(&req);
+        Ok(())
+    }
+
+    fn json(&self, map_path: &std::path::Path) -> String {
+        let num = |v: f64| {
+            if v.is_finite() {
+                format!("{v}")
+            } else {
+                "null".into()
+            }
+        };
+        let rows: Vec<String> = self
+            .mirror
+            .objects()
+            .map(|r| {
+                let (pos, pm, pr) = match &r.position {
+                    Some(p) => (
+                        format!("[{},{},{}]", num(p.value[0]), num(p.value[1]), num(p.value[2])),
+                        num(p.at.model_time),
+                        num(p.at.real_time),
+                    ),
+                    None => ("null".into(), "null".into(), "null".into()),
+                };
+                let (life, fuel, vm) = match &r.vitals {
+                    Some(v) => (num(v.value.0.into()), num(v.value.1.into()), num(v.at.model_time)),
+                    None => ("null".into(), "null".into(), "null".into()),
+                };
+                format!(
+                    "{{\"object\":{},\"name\":{},\"kind\":{},\"pos\":{pos},\"pos_model\":{pm},\"pos_real\":{pr},\"samples\":{},\"interval\":{},\"life\":{life},\"fuel\":{fuel},\"vit_model\":{vm},\"since_real\":{}}}",
+                    r.object.object,
+                    json_string(&r.object.name),
+                    r.object.kind,
+                    r.position_samples,
+                    num(r.position_interval),
+                    num(r.since.real_time),
+                )
+            })
+            .collect();
+        let c = self.mirror.counters();
+        let metrics = MappedFile::open_read_only(map_path)
+            .ok()
+            .and_then(|m| nanoprobe_transport::status::read_metrics(&m));
+        let (slice, periods) = match metrics {
+            Some(m) => (
+                num(m.slice_us),
+                format!(
+                    "[{}]",
+                    m.periods
+                        .iter()
+                        .map(|v| num(*v))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+            ),
+            None => ("null".into(), "null".into()),
+        };
+        let subscribed: Vec<String> = self.subscribed.iter().map(u64::to_string).collect();
+        format!(
+            "{{\"t\":{},\"real\":{},\"generation\":{},\"slice_us\":{slice},\"periods\":{periods},\"subscribed\":[{}],\"counters\":{{\"samples_before_hello\":{},\"samples_unknown_object\":{},\"old_generation\":{},\"enumerations_used\":{},\"enumerations_refused\":{},\"missing_by_rule\":{},\"disagreements\":{}}},\"rows\":[{}]}}\n",
+            content::now_ms(),
+            num(self.mirror.stamp().real_time),
+            self.mirror.generation(),
+            subscribed.join(","),
+            c.samples_before_hello,
+            c.samples_unknown_object,
+            c.old_generation,
+            c.enumerations_used,
+            c.enumerations_refused,
+            c.missing_by_rule,
+            c.disagreements,
+            rows.join(","),
+        )
+    }
+
+    /// Commands the mirror asks for: `ENUMERATE` when it wants one, and the
+    /// `BIND` and `SUBSCRIBE` of `--subscribe` after the first enumeration
+    /// it used.
+    fn commands(&mut self) -> Vec<Command> {
+        let mut out = Vec::new();
+        let header = || {
+            let mut w = Writer::new();
+            CommandHeader::default().write(&mut w);
+            w
+        };
+        if self.mirror.wants_enumeration() {
+            self.mirror.clear_wants();
+            out.push(Command {
+                opcode: 2,
+                payload: header().finish(),
+            });
+        }
+        if self.subscribe > 0
+            && self.subscribed.is_empty()
+            && self.mirror.counters().enumerations_used > 0
+        {
+            let objects: Vec<u64> = self
+                .mirror
+                .objects()
+                .filter(|r| r.object.kind == 1)
+                .map(|r| r.object.object)
+                .take(self.subscribe)
+                .collect();
+            if objects.len() == self.subscribe {
+                let entities: Vec<u64> = (1..=objects.len() as u64).collect();
+                let mut w = header();
+                w.u32(objects.len() as u32).u32(1);
+                for e in &entities {
+                    w.u64(*e);
+                }
+                for o in &objects {
+                    w.u64(*o);
+                }
+                out.push(Command {
+                    opcode: 5,
+                    payload: w.finish(),
+                });
+                let mut w = header();
+                w.f64(1.0).u32(1).u32(entities.len() as u32);
+                for e in &entities {
+                    w.u64(*e);
+                }
+                out.push(Command {
+                    opcode: 4,
+                    payload: w.finish(),
+                });
+                self.subscribed = objects;
+            }
+        }
+        out
+    }
 }
 
 /// An `lv` value as JSON: a number (null when not finite), a string, a
@@ -247,13 +421,35 @@ fn lv_json(v: &Lv) -> String {
         Lv::Number(n) if n.is_finite() => format!("{n}"),
         Lv::Number(_) => "null".into(),
         Lv::String(s) => json_string(&String::from_utf8_lossy(s)),
-        Lv::Table(_) => json_string("<table>"),
+        Lv::Table(pairs) => {
+            // A table with string keys is an object; any other, its type.
+            if pairs.iter().all(|(k, _)| matches!(k, Lv::String(_))) {
+                let fields: Vec<String> = pairs
+                    .iter()
+                    .map(|(k, v)| match k {
+                        Lv::String(k) => format!(
+                            "{}:{}",
+                            json_string(&String::from_utf8_lossy(k)),
+                            lv_json(v)
+                        ),
+                        _ => String::new(),
+                    })
+                    .collect();
+                format!("{{{}}}", fields.join(","))
+            } else {
+                json_string("<table>")
+            }
+        }
         Lv::Other(t) => json_string(&format!("<{t}>")),
     }
 }
 
 impl Sink for Probe {
     fn attached(&mut self, agent_boot: u64, _sidecar_boot: u64) {
+        if let Some(m) = self.mirror.as_mut() {
+            m.mirror.attached();
+            m.subscribed.clear();
+        }
         self.out.line(
             "attached",
             &[("agent_boot", Json::Str(format!("{agent_boot:016x}")))],
@@ -275,6 +471,17 @@ impl Sink for Probe {
     ) -> Result<(), String> {
         self.last.insert(agent_boot, number);
         self.records += 1;
+        if let Some(m) = self.mirror.as_mut()
+            && let Err(e) = m.mirror.record(kind, payload)
+        {
+            self.out.line(
+                "report",
+                &[(
+                    "text",
+                    Json::Str(format!("the mirror refused a record of kind {kind}: {e:?}")),
+                )],
+            );
+        }
         if let Some(rec) = self.recording.as_mut()
             && u64::from(kind) != kind::PADDING
         {
@@ -350,6 +557,7 @@ impl Sink for Probe {
                             ("level", Json::Num(l.level.into())),
                             ("target", Json::Str(l.target)),
                             ("msg", Json::Str(l.msg)),
+                            ("data", Json::Raw(lv_json(&l.data))),
                         ],
                     );
                 }
@@ -373,6 +581,15 @@ impl Sink for Probe {
     fn durable(&mut self) -> Result<(), String> {
         if let Some(rec) = self.recording.as_mut() {
             rec.flush().map_err(|e| format!("the recording: {e}"))?;
+        }
+        if let Some(m) = self.mirror.as_mut() {
+            m.serve(&self.map_path)?;
+            if self.hellos > 0 {
+                // Oldest first: the queue is popped from its end.
+                for c in m.commands() {
+                    self.queue.insert(0, c);
+                }
+            }
         }
         Ok(())
     }
@@ -526,6 +743,7 @@ fn watch(path: std::path::PathBuf, out: Out, times: Times, stop: Arc<AtomicBool>
                 ),
                 ("hist_event", Json::Raw(hist(m, s::HIST_EVENT))),
                 ("hist_pump", Json::Raw(hist(m, s::HIST_PUMP))),
+                ("hist_syscall", Json::Raw(hist(m, s::HIST_SYSCALL))),
             ],
         );
     }
@@ -614,6 +832,18 @@ fn main() -> ExitCode {
                         .open(&path)
                         .map_err(|e| format!("--record {path}: {e}"))?,
                 )),
+                None => None,
+            },
+            mirror: match arg(&args, "--mirror") {
+                Some(path) => Some(MirrorOut {
+                    mirror: Mirror::new(),
+                    path: path.into(),
+                    subscribe: arg(&args, "--subscribe").map_or(Ok(0), |v| {
+                        v.parse().map_err(|_| "--subscribe takes a number")
+                    })?,
+                    subscribed: Vec::new(),
+                    checked: Instant::now(),
+                }),
                 None => None,
             },
         };
