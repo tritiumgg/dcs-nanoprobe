@@ -90,6 +90,9 @@ pub struct Link {
     pub dcs_version: String,
     /// The install's build the agent reported.
     pub agent_build: u64,
+    /// The agent DLL's interface version (the DLL-to-shim ABI), reported and
+    /// not checked (spec/transport.md, "Layout version").
+    pub agent_interface: u32,
     /// `GAP` records of events read.
     pub event_gaps: u64,
     /// The last lifecycle emitted as an event: state, generation, theater.
@@ -196,6 +199,7 @@ impl Link {
                 self.attached = true;
                 self.agent_boot = h.agent_boot;
                 self.agent_build = h.build;
+                self.agent_interface = h.interface;
                 self.dcs_version = h.dcs_version;
                 None
             }
@@ -379,6 +383,7 @@ mod tests {
                 number: 0,
                 kind,
                 payload,
+                resync: false,
             }
         };
         let mut link = Link::default();
@@ -453,6 +458,7 @@ mod tests {
                 number: 0,
                 kind,
                 payload,
+                resync: false,
             })
             .expect("an event");
         let event::Body::World(w) = r.body else {
