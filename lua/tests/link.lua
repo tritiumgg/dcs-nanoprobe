@@ -133,7 +133,7 @@ local function main()
   local hello = find(function(e)
     return e.ev == 'hello'
   end)
-  assert(hello and hello.interface == 7, 'the HELLO reads interface ' .. tostring(hello and hello.interface))
+  assert(hello and hello.interface == 8, 'the HELLO reads interface ' .. tostring(hello and hello.interface))
   assert(hello.build == BUILD, 'the HELLO reads build ' .. tostring(hello.build))
   assert(find(function(e)
     return e.ev == 'log' and e.target == 'hook' and e.msg == 'capabilities'
@@ -242,14 +242,19 @@ local function main()
   S.ok('the agent takes 16 fields at most and drops pairs with bad codes')
 
   -- The stream recording holds the FRAME and EVENT records, with numbers
-  -- that grow.
-  local kinds, last = {}, 0
+  -- that grow, and an attach marker line on each attach.
+  local kinds, last, attaches = {}, 0, 0
   for _, line in ipairs(S.lines(recording)) do
     local r = S.json(line)
-    kinds[r.kind] = (kinds[r.kind] or 0) + 1
-    assert(r.number > last, 'a recorded number did not grow')
-    last = r.number
+    if r.attach then
+      attaches = attaches + 1
+    else
+      kinds[r.kind] = (kinds[r.kind] or 0) + 1
+      assert(r.number > last, 'a recorded number did not grow')
+      last = r.number
+    end
   end
+  assert(attaches >= 1, 'the recording has no attach marker')
   assert((kinds[1] or 0) > 0 and (kinds[20] or 0) >= 3, 'the recording has no FRAME or too few EVENT records')
   S.ok('the stream recorder keeps every record, FRAME and EVENT among them')
 

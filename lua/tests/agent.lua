@@ -24,7 +24,7 @@ end
 
 local agent = open(path)
 assert(type(agent) == 'table', 'the opener returned a ' .. type(agent))
-assert(agent.abi == '7', 'abi reads ' .. tostring(agent.abi))
+assert(agent.abi == '8', 'abi reads ' .. tostring(agent.abi))
 assert(type(agent.build) == 'string' and agent.build ~= '', 'build is missing')
 
 -- status works before configure.

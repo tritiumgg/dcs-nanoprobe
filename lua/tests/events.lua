@@ -55,7 +55,7 @@ host:load_mission('events')
 
 local calls = {}
 local agent = {
-  abi = '7',
+  abi = '8',
   status = function()
     return { gen = 1 }
   end,

@@ -75,6 +75,7 @@ fn record(w: &World, input: Input, n: u64) -> RawRecord {
         number: u64::MAX - n,
         kind,
         payload,
+        resync: false,
     }
 }
 

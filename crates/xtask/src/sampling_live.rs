@@ -301,6 +301,12 @@ impl Run {
         Ok((v, mirror))
     }
 
+    /// The link arguments a probe in the container takes: the map path, the
+    /// handshake port and the token file.
+    pub(crate) fn link_args(&self) -> [&str; 3] {
+        [&self.map, &self.port, &self.token]
+    }
+
     pub(crate) fn start_probe(&self, probe: &Path, subscribe: usize) -> Result<(), String> {
         self.sh(
             &format!("pkill -f '[l]ink-probe --map' || true; rm -rf {DIR}"),
