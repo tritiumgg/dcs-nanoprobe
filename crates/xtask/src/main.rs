@@ -14,6 +14,7 @@ mod hello;
 mod install;
 mod link;
 mod live;
+mod meter;
 mod miz;
 mod peerkill;
 mod probes;
@@ -21,6 +22,7 @@ mod profile;
 mod proto;
 mod remote;
 mod sampling;
+mod soak;
 mod spec;
 mod ssh;
 mod symbols;
@@ -110,6 +112,30 @@ commands:
                             Set the oracle's dump (lua/sampling/oracle.lua) against
                             the sidecar's mirror (link-probe --mirror); exit 1 when
                             the mirror does not match
+  soak <name> [--minutes 30] [--units 1200] [--collect-every MIN] [--no-sidecar]
+                            The S11 churn soak on a docker-wine target: deploy with
+                            --dev, restart DCS, load a fresh shell, attach link-probe
+                            as the sidecar, spawn --units objects, and for --minutes
+                            destroy and respawn groups at a steady rate. Once a minute
+                            record the Lua heap, DCS's memory and CPU, the container's,
+                            the largest object ID, the agent's share and long frames,
+                            and fps. --collect-every forces a full collect in the
+                            server state every MIN minutes and judges the heap by
+                            the live heap read after each; it needs 3 collects
+                            after the first half of --minutes (up to 180), and
+                            the option is refused when the interval gives fewer.
+                            Without it the heap is judged by the floors of its
+                            natural collection cycles, which a run cannot reach 3 of
+                            (LIVE, 2026-11-14, DCS 2.9.31.29434 under Wine 10.0), so
+                            the run is INCONCLUSIVE. Fit the second half for the
+                            rest, list the minutes with over 1 % of frames over
+                            250 us, and write the verdict to
+                            bundles/soak-<name>-<time>/soak.json. Exit 0 PASS, 1 FAIL,
+                            2 INCONCLUSIVE. With the sidecar it also judges the
+                            object IDs per spawned object (256, +10 %) and the
+                            mirror's row count. --no-sidecar is the
+                            control: no link-probe, the heap by the eval channel, no
+                            agent figures. Refuses a server with players.
   catalogue <name>          Experiment E9 on a docker-wine target: deploy with --dev,
                             restart DCS, load a fresh shell, record the agent's stream
                             with link-probe, run the scenarios in lua/catalogue, load
@@ -184,6 +210,7 @@ fn main() -> ExitCode {
         ["faults", name, rest @ ..] => faults::command(name, rest),
         ["catalogue", rest @ ..] => catalogue::command(&repository(), rest),
         ["sampling", rest @ ..] => sampling::command(&repository(), rest),
+        ["soak", name, rest @ ..] => soak::command(&repository(), name, rest),
         ["client", rest @ ..] => client::command(rest),
         ["hello"] => hello::command(None),
         ["hello", name] => hello::command(Some(name)),

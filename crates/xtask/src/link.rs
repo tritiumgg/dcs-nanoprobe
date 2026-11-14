@@ -498,7 +498,7 @@ fn at_main_menu(windows: &windows::Windows, name: &str) -> Result<(), String> {
 
 /// Host a private session on a Windows client at its main menu, with a shell
 /// mission, and wait until the shim has started in it.
-fn host_session(profile: &dyn Profile) -> Result<(), String> {
+pub(crate) fn host_session(profile: &dyn Profile) -> Result<(), String> {
     let repo = crate::repository();
     let template = std::fs::read(repo.join("templates/caucasus.miz"))
         .map_err(|e| format!("templates/caucasus.miz: {e}"))?;
@@ -536,7 +536,7 @@ fn host_session(profile: &dyn Profile) -> Result<(), String> {
 }
 
 /// Close DCS on the Windows PC with its stop task, and wait until it is gone.
-fn close_dcs(ssh: &str, profile: &str, stop_task: &str) -> Result<(), String> {
+pub(crate) fn close_dcs(ssh: &str, profile: &str, stop_task: &str) -> Result<(), String> {
     let windows = windows::Windows::connect(ssh, profile)?;
     windows.run_task(stop_task)?;
     let deadline = Instant::now() + Duration::from_secs(120);
