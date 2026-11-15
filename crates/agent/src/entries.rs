@@ -229,7 +229,7 @@ unsafe fn work_status(state: *mut State) -> c_int {
     let link = driver::summary();
     // SAFETY: a live state; the table takes one slot, each field one more.
     unsafe {
-        lua::lua_createtable(state, 0, 17);
+        lua::lua_createtable(state, 0, 20);
         field_bool(state, c"disabled", state::disabled());
         field_str(state, c"reason", &state::reason());
         field_str(state, c"build", state::build());
@@ -251,6 +251,9 @@ unsafe fn work_status(state: *mut State) -> c_int {
             field_num(state, c"gen", f64::from(l.mission_gen));
             field_num(state, c"flags", f64::from(l.flags));
             field_num(state, c"frame", l.frame as f64);
+            field_num(state, c"pending_destroy", l.pending_destroy as f64);
+            field_num(state, c"pending_overflow", l.pending_overflow as f64);
+            field_num(state, c"pending_expired", l.pending_expired as f64);
         }
     }
     1
@@ -459,9 +462,11 @@ const SWEEP_CRUMB: u64 = 0x5057 << 32;
 /// units' positions.
 /// Returns 0, 1 when the hook should reload the shim, 2 when the agent is
 /// disabled and the hook stops calling, or 3 when no link is open; and
-/// whether this is a sampling frame, on which the hook calls the shim's pump
-/// and then `finish`. Any other frame ends inside this call
-/// (spec/sampling.md, "The frame").
+/// whether the hook calls the shim's pump (a sampling frame, or a `server`
+/// command waits), and whether a command with a `hook` handler waits, which
+/// the hook runs with `command(true)` after the pump. The hook then calls
+/// `finish`. Any other frame ends inside this call (spec/sampling.md, "The
+/// frame").
 unsafe fn work_frame(state: *mut State) -> c_int {
     // SAFETY: a live state.
     let real = unsafe { arg_num(state, 1, 0.0) };
@@ -510,13 +515,14 @@ unsafe fn work_frame(state: *mut State) -> c_int {
     };
     // SAFETY: as above.
     let shim = unsafe { lua::lua_toboolean(state, 5) } != 0;
-    let (code, pump) = driver::frame(real, model, paused, shim, getter.then_some(&mut read));
-    // SAFETY: a live state with two free slots.
+    let (code, pump, hook) = driver::frame(real, model, paused, shim, getter.then_some(&mut read));
+    // SAFETY: a live state with three free slots.
     unsafe {
         lua::lua_pushinteger(state, code as isize);
         lua::lua_pushboolean(state, c_int::from(pump));
+        lua::lua_pushboolean(state, c_int::from(hook));
     }
-    2
+    3
 }
 
 /// The encoded arguments `command` pushes, for [`push_staged`]. Single
@@ -530,7 +536,10 @@ static STAGED: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 /// to be answered `LUA_ERROR` "no result".
 unsafe fn work_command(state: *mut State) -> c_int {
     let mut args = std::mem::take(&mut *STAGED.lock().unwrap_or_else(|e| e.into_inner()));
-    let opcode = driver::command(&mut args);
+    // SAFETY: a live state; reading a value never raises. The hook's state
+    // passes true: it takes only a command whose handler runs there.
+    let hook = unsafe { lua::lua_toboolean(state, 1) } != 0;
+    let opcode = driver::command(&mut args, hook);
     *STAGED.lock().unwrap_or_else(|e| e.into_inner()) = args;
     let Some(opcode) = opcode else {
         return 0;
@@ -634,7 +643,7 @@ unsafe fn push_lv(
 static DONE: Mutex<Option<Done>> = Mutex::new(None);
 
 /// The code, message, value and cut flag of one `command_done`.
-type Done = (Option<u64>, String, Lv, bool);
+type Done = (Option<u64>, String, Lv, bool, (Vec<u64>, usize));
 
 /// `command_done(code, message, value)`: the shim's handler finished the
 /// command `command` returned. `value` is read as an `lv`, tables included,
@@ -643,39 +652,57 @@ type Done = (Option<u64>, String, Lv, bool);
 /// at the read limit is answered `TOO_LARGE` with a nil value.
 unsafe fn work_command_done(state: *mut State) -> c_int {
     *DONE.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    // SAFETY: a live state; `command_done` is called with three arguments,
-    // the closure runs under `lua_pcall` with copies of them, and the stack
-    // has the free slots Lua guarantees a C function.
+    let wants = driver::wants_destroyed();
+    // SAFETY: a live state; `command_done` is called with four arguments,
+    // the closure runs under `lua_pcall` with copies of them (nil for the
+    // fourth unless the command's opcode reads it), and the stack has the
+    // free slots Lua guarantees a C function.
     let failed = unsafe {
-        lua::lua_settop(state, 3);
+        lua::lua_settop(state, 4);
         lua::lua_pushcclosure(state, read_done, 0);
         lua::lua_pushvalue(state, 1);
         lua::lua_pushvalue(state, 2);
         lua::lua_pushvalue(state, 3);
-        let status = lua::lua_pcall(state, 3, 0, 0);
+        if wants {
+            lua::lua_pushvalue(state, 4);
+        } else {
+            lua::lua_pushnil(state);
+        }
+        let status = lua::lua_pcall(state, 4, 0, 0);
         lua::lua_settop(state, 0);
         status != 0
     };
     let read = DONE.lock().unwrap_or_else(|e| e.into_inner()).take();
-    match read {
-        Some((code, message, value, cut)) if !failed => {
+    let taken = match read {
+        Some((code, message, value, cut, (destroyed, cut_ids))) if !failed => {
             let code = code.unwrap_or(result::LUA_ERROR);
             if cut && code == result::APPLIED {
                 let why = format!(
                     "value over {READ_NODES} table entries or {} KiB of strings",
                     READ_BYTES / 1024
                 );
-                driver::command_done(result::TOO_LARGE, &why, Lv::Nil);
+                driver::command_done(result::TOO_LARGE, &why, Lv::Nil, &destroyed, cut_ids)
             } else {
-                driver::command_done(code, &message, value);
+                driver::command_done(code, &message, value, &destroyed, cut_ids)
             }
         }
-        _ => driver::command_done(result::LUA_ERROR, "the result could not be read", Lv::Nil),
-    }
-    0
+        _ => {
+            driver::command_done(
+                result::LUA_ERROR,
+                "the result could not be read",
+                Lv::Nil,
+                &[],
+                0,
+            );
+            0
+        }
+    };
+    // SAFETY: a live state; the stack was emptied above and has a free slot.
+    unsafe { lua::lua_pushnumber(state, taken as f64) };
+    1
 }
 
-/// Read `command_done`'s three arguments into [`DONE`]. Called only under
+/// Read `command_done`'s four arguments into [`DONE`]. Called only under
 /// `lua_pcall`. The one call that can raise, `lua_checkstack` on a failed
 /// grow, comes first, before this function owns a value; the reads after it
 /// allocate nothing in Lua, and the message is read only when it is a string.
@@ -693,10 +720,40 @@ unsafe extern "C" fn read_done(state: *mut State) -> c_int {
             String::new()
         };
         let (value, cut) = read_lv(state, 3, 0);
-        (code, message, value, cut)
+        (code, message, value, cut, read_ids(state, 4))
     };
     *DONE.lock().unwrap_or_else(|e| e.into_inner()) = Some(done);
     0
+}
+
+/// The most object IDs `read_ids` reads.
+const READ_IDS: usize = 4096;
+
+/// The array of object IDs at `index`, in order, and how many past the limit
+/// were cut; an entry that is not an ID
+/// is skipped, and anything that is not a table reads as no IDs. Raw reads
+/// of a table raise nothing and allocate nothing in Lua.
+unsafe fn read_ids(state: *mut State, index: c_int) -> (Vec<u64>, usize) {
+    let mut out = Vec::new();
+    let cut;
+    // SAFETY: a live state with the stack grown by the caller; `lua_type`
+    // and `lua_objlen` never raise.
+    unsafe {
+        if lua::lua_type(state, index) != lua::TTABLE {
+            return (out, 0);
+        }
+        let len = lua::lua_objlen(state, index);
+        cut = len.saturating_sub(READ_IDS);
+        let n = len.min(READ_IDS);
+        for i in 1..=n {
+            lua::lua_rawgeti(state, index, i as c_int);
+            if let Some(id) = arg_id(state, -1) {
+                out.push(id);
+            }
+            lua::lua_settop(state, -2);
+        }
+    }
+    (out, cut)
 }
 
 /// The most table entries (key and value pairs) `read_lv` reads from one

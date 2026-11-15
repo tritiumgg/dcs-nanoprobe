@@ -3484,3 +3484,19 @@ fn commanded_time_is_out_of_the_fixed_part_of_the_sweep_the_gate_and_the_plan() 
         "an unexcused frame has less budget: {slow:?}"
     );
 }
+
+/// A pending-destroy object resolves in a pump's existence checks, so the set
+/// makes a pump worth its call even with no row owed.
+#[test]
+fn a_pending_destroy_makes_a_pump_worth_its_call() {
+    let (mut s, mut rec, _w) = table(0);
+    let t = rec.began + Duration::from_secs(10);
+    s.accrue(t);
+    s.last_pump = Some(t);
+    let soon = t + Duration::from_millis(10);
+    assert!(!s.pump_worth(soon));
+    s.destroyed(&mut rec, &[900_001]);
+    assert!(s.pump_worth(soon));
+    s.alive(&mut rec, 900_001, false);
+    assert!(!s.pump_worth(soon));
+}

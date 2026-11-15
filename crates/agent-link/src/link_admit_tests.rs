@@ -401,3 +401,43 @@ fn an_oversized_result_is_too_large_only_when_it_was_applied() {
         assert!(r.message.contains("record limit"), "{}", r.message);
     }
 }
+
+#[test]
+fn a_spawn_clears_the_order_and_a_destroy_clears_both() {
+    use crate::revisions::RevKey;
+    let (mut l, _d) = link("admit-clear");
+    let g = generation(&l);
+    let ok = result::APPLIED;
+    run(
+        &mut l,
+        &header(1, 5, 9, 3, g),
+        opcode::GROUP_SPAWN,
+        None,
+        ok,
+    );
+    run(
+        &mut l,
+        &header(2, 5, 9, 2, g),
+        opcode::GROUP_ORDER,
+        None,
+        ok,
+    );
+    assert_eq!(l.revisions().get(&RevKey::Order(9)), 2);
+    l.clear_order(9);
+    assert_eq!(l.revisions().get(&RevKey::Order(9)), 0);
+    assert_eq!(l.revisions().get(&RevKey::Spec(9)), 3);
+    // The order is sent again at its own revision.
+    assert_eq!(
+        run(
+            &mut l,
+            &header(3, 5, 9, 1, g),
+            opcode::GROUP_ORDER,
+            None,
+            result::APPLIED
+        ),
+        result::APPLIED
+    );
+    l.clear_entity(9);
+    assert_eq!(l.revisions().get(&RevKey::Spec(9)), 0);
+    assert_eq!(l.revisions().get(&RevKey::Order(9)), 0);
+}

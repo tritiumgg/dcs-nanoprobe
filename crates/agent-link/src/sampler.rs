@@ -609,6 +609,22 @@ pub struct Sampler {
     dead: HashSet<u64>,
     /// Objects whose row left as `MISSING` or `REMOVED` in this generation.
     kept: HashMap<u64, Kept>,
+    /// Objects the agent destroyed that DCS may still hold, with the unpaused
+    /// model time they entered at; and the order their existence is checked.
+    pending: HashMap<u64, f64>,
+    pending_order: VecDeque<u64>,
+    /// `(entered_at, id)` in insertion order; unpaused model time only grows,
+    /// so expiry pops from the front. IDs no longer in `pending` are skipped.
+    pending_expiry: VecDeque<(f64, u64)>,
+    /// Unpaused model seconds since the generation began, and the model time
+    /// last seen.
+    unpaused_s: f64,
+    last_model: Option<f64>,
+    /// `DEAD` events that named a pending object, objects that did not fit
+    /// the set, and objects dropped at the backstop.
+    pending_deaths: u64,
+    pending_overflow: u64,
+    pending_expired: u64,
     /// Rows [`Sampler::gone`] removed, by reason.
     gone_dead: u64,
     gone_removed: u64,
@@ -918,6 +934,15 @@ const PUMP_WAIT_S: f64 = 1.0;
 
 /// Existence checks one pump asks for at most.
 pub const CHECKS_PER_PUMP: usize = 20;
+/// Pending-destroy objects one pump checks at most, within `CHECKS_PER_PUMP`.
+const PENDING_PER_PUMP: usize = 4;
+/// The most objects the pending-destroy set holds. The object table has no
+/// fixed capacity, so this is the bound on it (spec/commands.md, "A destroy
+/// while paused is pending").
+pub const PENDING_CAP: usize = 65_536;
+/// Seconds of unpaused model time after which an object still existing leaves
+/// the pending-destroy set.
+const PENDING_EXPIRY_S: f64 = 60.0;
 
 /// The index of a tier's sweep count in [`Sampler::passes`].
 fn pass_of(tier: Tier) -> Option<usize> {
@@ -939,6 +964,14 @@ impl Sampler {
             by_object: HashMap::new(),
             dead: HashSet::new(),
             kept: HashMap::new(),
+            pending: HashMap::new(),
+            pending_order: VecDeque::new(),
+            pending_expiry: VecDeque::new(),
+            unpaused_s: 0.0,
+            last_model: None,
+            pending_deaths: 0,
+            pending_overflow: 0,
+            pending_expired: 0,
             gone_dead: 0,
             gone_removed: 0,
             gone_missing: 0,
@@ -1141,6 +1174,11 @@ impl Sampler {
         self.units = 0;
         self.dead.clear();
         self.kept.clear();
+        self.pending.clear();
+        self.pending_order.clear();
+        self.pending_expiry.clear();
+        self.unpaused_s = 0.0;
+        self.last_model = None;
         self.checks.clear();
         self.urgent.clear();
         self.promoted.clear();
@@ -1204,7 +1242,7 @@ impl Sampler {
     /// lives (revival): the shim checks `isDead` first for an object
     /// [`Sampler::died`] names.
     pub fn wants(&self, object: u64) -> bool {
-        !self.by_object.contains_key(&object)
+        !self.by_object.contains_key(&object) && !self.pending.contains_key(&object)
     }
 
     /// Whether the object left as `DEAD` in this generation.
@@ -1383,6 +1421,11 @@ impl Sampler {
             self.want_check(object);
             return 0;
         }
+        if self.pending.contains_key(&object) {
+            // The event is forwarded; it removes nothing.
+            self.pending_deaths += 1;
+            return 0;
+        }
         // A late event: the row left as `MISSING` or `REMOVED` and DCS now
         // reports the death.
         if let Some(kept) = self.kept.remove(&object) {
@@ -1413,6 +1456,10 @@ impl Sampler {
         dead: Read<Option<bool>>,
         life: Read<Option<f64>>,
     ) -> u32 {
+        // A pending-destroy object has no row, but the shim may still hold
+        // its handle, so its check ends here: it no longer exists.
+        // The check rotation and the expiry queue skip the stale ID.
+        self.pending.remove(&object);
         let Some(row) = self.slot_of(object).and_then(|s| self.present(s)) else {
             return 0;
         };
@@ -1476,6 +1523,11 @@ impl Sampler {
     /// enumeration whose `ENUM_END` is held gets its `OBJECT` with that
     /// enumeration's number.
     pub fn alive(&mut self, link: &mut impl Port, object: u64, sure: bool) {
+        if !sure && self.pending.remove(&object).is_some() {
+            // `isExist` gave false or raised: DCS removed it, or it is
+            // beyond saying.
+            // The check rotation and the expiry queue skip the stale ID.
+        }
         if let Some(i) = self.named.iter().position(|o| *o == object) {
             self.named.swap_remove(i);
             if sure {
@@ -1676,8 +1728,88 @@ impl Sampler {
             }
             out.push(object);
         }
+        // The pending-destroy objects take what the queue left.
+        let mut turns = self.pending_order.len().min(PENDING_PER_PUMP);
+        while turns > 0 && out.len() < most {
+            turns -= 1;
+            let Some(o) = self.pending_order.pop_front() else {
+                break;
+            };
+            if self.pending.contains_key(&o) {
+                self.pending_order.push_back(o);
+                out.push(o);
+            }
+        }
         self.checked |= !out.is_empty();
         out.len()
+    }
+
+    /// The command destroyed these objects: each row held leaves as
+    /// `DESTROYED` at once, before the command's `RESULT`, and every ID
+    /// enters the pending-destroy set (spec/commands.md, "A destroy while
+    /// paused is pending").
+    pub fn destroyed(&mut self, link: &mut impl Port, ids: &[u64]) {
+        for &object in ids {
+            self.remove(link, object, gone::DESTROYED);
+            self.kept.remove(&object);
+            if self.pending.contains_key(&object) {
+                continue;
+            }
+            if self.pending.len() >= PENDING_CAP {
+                self.pending_overflow += 1;
+                continue;
+            }
+            self.pending.insert(object, self.unpaused_s);
+            self.pending_order.push_back(object);
+            self.pending_expiry.push_back((self.unpaused_s, object));
+        }
+    }
+
+    /// Count IDs a `destroyed` array held past the read limit; they cannot
+    /// enter the pending set and leave through the existence checks.
+    pub fn add_pending_overflow(&mut self, n: u64) {
+        self.pending_overflow += n;
+    }
+
+    /// The frame's model time: pending objects still existing after
+    /// [`PENDING_EXPIRY_S`] unpaused seconds are dropped.
+    pub fn model_time(&mut self, model: f64, paused: bool) {
+        let before = self.last_model.replace(model);
+        if paused || self.pending.is_empty() {
+            return;
+        }
+        if let Some(before) = before {
+            self.unpaused_s += (model - before).clamp(0.0, 1.0e6);
+        }
+        let now = self.unpaused_s;
+        while let Some(&(since, object)) = self.pending_expiry.front() {
+            if self.pending.get(&object) != Some(&since) {
+                // Already removed (or re-entered later): a stale entry.
+                self.pending_expiry.pop_front();
+                continue;
+            }
+            if now - since < PENDING_EXPIRY_S {
+                break;
+            }
+            self.pending_expiry.pop_front();
+            self.pending.remove(&object);
+            self.pending_expired += 1;
+        }
+    }
+
+    /// Objects in the pending-destroy set.
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Cumulative: `DEAD` events that named a pending object, objects over
+    /// the set's capacity, objects dropped at the backstop.
+    pub fn pending_counts(&self) -> [u64; 3] {
+        [
+            self.pending_deaths,
+            self.pending_overflow,
+            self.pending_expired,
+        ]
     }
 
     /// Existence checks waiting for a pump.
@@ -2231,6 +2363,13 @@ impl Sampler {
         }
         if self.behind() {
             return false;
+        }
+        // A pending-destroy object resolves only in a pump's existence
+        // checks, and the set has a 60 s backstop: with no row owed, nothing
+        // else asks for the pump (spec/commands.md, "A destroy while paused
+        // is pending").
+        if !self.pending.is_empty() {
+            return true;
         }
         // Before the first pump the call is unmeasured: LIVE, S10, it costs
         // 20 to 30 µs under Wine.

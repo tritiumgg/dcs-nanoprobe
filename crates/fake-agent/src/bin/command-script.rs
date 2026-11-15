@@ -33,17 +33,30 @@
 //! | `BURST` | `on` |
 //! | `EXTENSION_SET` | `name`, `source` (text) |
 //! | `EXTENSION_INVOKE` | `name`, `args` (an `lv` value), or `args_hex`, the argument's raw bytes, for a value the writer would cut |
+//! | `GROUP_SPAWN` | `country`, `category`, `group` (an `lv`), `name` (text, default `""`) |
+//! | `GROUP_ORDER` | `task` (an `lv`) |
+//! | `GROUP_OPTION` | `option`, `value` (an `lv`) |
+//! | `STATIC_SPAWN` | `country`, `static` (an `lv`), `name` |
+//! | `AIRBASE_OWNER` | `coalition`, `airbase` (text) |
+//! | `WAREHOUSE_SET` | `airbase`, `stock` (an `lv`) |
+//! | `WAREHOUSE_ADJUST` | `airbase`, `delta` (an `lv`) |
+//! | `DAMAGE` | `life_percent` |
+//! | `SOUND` | `scope`, `target`, `file` (text) |
+//! | `PICTURE` | `scope`, `target`, `file`, `seconds`, `clear_view`, `size`, `horizontal`, `vertical`, `size_units` |
 //! | any | `payload_hex`, appended after what the opcode writes |
 //!
-//! An `lv` value is JSON: an object is a table with string keys, an array a
+//! An `lv` value is JSON: an object is a table with string keys (a key
+//! `#<number>` is that number), an array a
 //! table with keys 1 to n, `null` is nil. Two optional fields pace a command:
 //! `wait_ms` waits that long before it is sent, and `wait_result` waits until
 //! every command sent before it has its `RESULT`.
 //!
-//! Output is one JSON object per line, one for each `RESULT`:
+//! Output is one JSON object per line, in the order the agent wrote the records:
+//! one for each `RESULT`,
 //! `{"ev":"result","seq":N,"epoch":N,"opcode":N,"code":N,"code_name":"..",
-//! "message":"..","cost_us":N,"depth":N,"value":<json>}`, where `depth` is how
-//! deep the value's tables nest; and last
+//! "message":"..","cost_us":N,"object":N,"depth":N,"value":<json>}`, where `depth` is how
+//! deep the value's tables nest; one for each `OBJECT_GONE`,
+//! `{"ev":"gone","object":N,"reason":N,"entity":N}`; and last
 //! `{"ev":"end","sent":N,"results":N,"complete":B,"duplicates":N}`. The tool ends
 //! `--linger-ms` (default 300) after every command it sent is answered, or
 //! after `--seconds` (default 60), and exits 0 only when all were answered.
@@ -61,7 +74,7 @@ use nanoprobe_sidecar::link::Config;
 use nanoprobe_sidecar::sim::SimAdapter;
 use nanoprobe_transport::codec::{Lv, Writer};
 use nanoprobe_transport::layout::{kind, opcode, result};
-use nanoprobe_transport::records::{CommandHeader, CommandResult, Hello};
+use nanoprobe_transport::records::{CommandHeader, CommandResult, Hello, ObjectGone};
 use serde_json::Value;
 
 /// One command of the script.
@@ -114,7 +127,14 @@ fn lv_of(v: &Value) -> Lv {
         ),
         Value::Object(o) => Lv::Table(
             o.iter()
-                .map(|(k, v)| (Lv::String(k.as_bytes().to_vec()), lv_of(v)))
+                .map(|(k, v)| {
+                    // A key `#<number>` is a number key.
+                    let key = k
+                        .strip_prefix('#')
+                        .and_then(|n| n.parse::<f64>().ok())
+                        .map_or_else(|| Lv::String(k.as_bytes().to_vec()), Lv::Number);
+                    (key, lv_of(v))
+                })
                 .collect(),
         ),
     }
@@ -172,6 +192,66 @@ fn parse_step(step: &Value, campaign: u64) -> Result<Step, String> {
                 let args = step.get("args").map_or(Lv::Table(vec![]), lv_of);
                 w.lv(&args);
             }
+        }
+        opcode::GROUP_SPAWN => {
+            w.u32(u64_field(step, "country")?.unwrap_or(0) as u32)
+                .u32(u64_field(step, "category")?.unwrap_or(0) as u32)
+                .str(step.get("name").and_then(Value::as_str).unwrap_or(""))
+                .lv(&step.get("group").map_or(Lv::Nil, lv_of));
+        }
+        opcode::GROUP_ORDER => {
+            w.lv(&step.get("task").map_or(Lv::Nil, lv_of));
+        }
+        opcode::GROUP_OPTION => {
+            w.u32(u64_field(step, "option")?.unwrap_or(0) as u32)
+                .pad(4)
+                .lv(&step.get("value").map_or(Lv::Nil, lv_of));
+        }
+        opcode::STATIC_SPAWN => {
+            w.u32(u64_field(step, "country")?.unwrap_or(0) as u32)
+                .pad(4)
+                .str(step.get("name").and_then(Value::as_str).unwrap_or(""))
+                .lv(&step.get("static").map_or(Lv::Nil, lv_of));
+        }
+        opcode::AIRBASE_OWNER => {
+            w.u32(u64_field(step, "coalition")?.unwrap_or(0) as u32)
+                .pad(4)
+                .str(text_field(step, "airbase")?);
+        }
+        opcode::WAREHOUSE_SET | opcode::WAREHOUSE_ADJUST => {
+            let key = if u64::from(op) == opcode::WAREHOUSE_SET {
+                "stock"
+            } else {
+                "delta"
+            };
+            w.str(text_field(step, "airbase")?)
+                .lv(&step.get(key).map_or(Lv::Nil, lv_of));
+        }
+        opcode::DAMAGE => {
+            w.f64(
+                step.get("life_percent")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0),
+            );
+        }
+        opcode::SOUND => {
+            w.u32(u64_field(step, "scope")?.unwrap_or(0) as u32)
+                .pad(4)
+                .u64(u64_field(step, "target")?.unwrap_or(0))
+                .str(text_field(step, "file")?);
+        }
+        opcode::PICTURE => {
+            let real = |name: &str| step.get(name).and_then(Value::as_f64).unwrap_or(0.0);
+            w.u32(u64_field(step, "scope")?.unwrap_or(0) as u32)
+                .u32(u64_field(step, "clear_view")?.unwrap_or(0) as u32)
+                .u64(u64_field(step, "target")?.unwrap_or(0))
+                .f64(real("seconds"))
+                .f64(real("size"))
+                .u32(u64_field(step, "horizontal")?.unwrap_or(0) as u32)
+                .u32(u64_field(step, "vertical")?.unwrap_or(0) as u32)
+                .u32(u64_field(step, "size_units")?.unwrap_or(0) as u32)
+                .pad(4)
+                .str(text_field(step, "file")?);
         }
         _ => {}
     }
@@ -278,7 +358,7 @@ fn lv_json(v: &Lv) -> String {
 fn print_result(r: &CommandResult) {
     println!(
         "{{\"ev\":\"result\",\"seq\":{},\"epoch\":{},\"opcode\":{},\"code\":{},\"code_name\":{},\
-         \"message\":{},\"cost_us\":{},\"depth\":{},\"value\":{}}}",
+         \"message\":{},\"cost_us\":{},\"object\":{},\"depth\":{},\"value\":{}}}",
         r.seq,
         r.epoch,
         r.opcode,
@@ -286,6 +366,7 @@ fn print_result(r: &CommandResult) {
         json_string(&name_of(result::ALL, u64::from(r.code))),
         json_string(&r.message),
         r.cost_us,
+        r.object,
         depth(&r.value),
         lv_json(&r.value),
     );
@@ -350,6 +431,14 @@ fn run(args: &[String]) -> Result<bool, String> {
             match u64::from(r.kind) {
                 kind::HELLO if epoch.is_none() => {
                     epoch = Hello::decode(&r.payload).ok().map(|h| h.epoch + 1);
+                }
+                kind::OBJECT_GONE => {
+                    if let Ok(g) = ObjectGone::decode(&r.payload) {
+                        println!(
+                            "{{\"ev\":\"gone\",\"object\":{},\"reason\":{},\"entity\":{}}}",
+                            g.object, g.reason, g.entity
+                        );
+                    }
                 }
                 kind::RESULT => {
                     if let Ok(c) = CommandResult::decode(&r.payload) {

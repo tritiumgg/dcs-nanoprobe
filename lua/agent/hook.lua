@@ -23,7 +23,7 @@ local dir = root .. 'versions/' .. build .. '/'
 local logmodule = assert(loadfile(dir .. 'lua/log.lua'))()
 
 -- The agent's interface version this hook was written for.
-local ABI = '8'
+local ABI = '9'
 -- What agent.frame returns.
 local FRAME_RELOAD, FRAME_DISABLED = 1, 2
 
@@ -298,6 +298,182 @@ do
   end
 end
 
+-- Commands whose handler runs in this state (spec/commands.md, "Handlers").
+-- Each returns a result code, a value, and a message, as the shim's do, and
+-- runs under pcall. The agent has admitted the command.
+local APPLIED, NOT_BOUND, DCS_REFUSED, LUA_ERROR = 0, 18, 22, 23
+
+-- The platform's unit name form, at most 28 characters (spec/world.md, "Names").
+local UNIT_NAME = '^np%.u%.[0-9a-z]+%.[0-9a-z]+$'
+-- The agent formats the life: digits, a point and digits.
+local LIFE_TEXT = '^%d+%.%d+$'
+
+-- PICTURE's arguments, as the agent formats them: a number is digits, with a
+-- point and digits for a real; a platform name is a group's or a unit's.
+local INT_TEXT = '^%d+$'
+local NAME_TEXT = '^np%.[gu]%.[0-9a-z]+%.[0-9a-z]+$'
+-- A picture's file name goes into Lua source for the mission state, inside
+-- double quotes. The agent rejects any name outside this set, which has no
+-- quote, backslash or control character, so the name cannot leave the
+-- string; the hook checks again because it builds the source. The set is
+-- allowed, and the rest is rejected, because no escaping is needed then and
+-- none can differ from what the mission state reads.
+local FILE_TEXT = '^[%w _%.%-/%(%)%+,#]+$'
+-- The mission state's picture function by scope: ALL, COALITION, COUNTRY,
+-- GROUP and UNIT (spec/commands.md, "Layout: PICTURE").
+local PICTURE_CALL = {
+  [1] = 'a_out_picture', [2] = 'a_out_picture_s', [5] = 'a_out_picture_c',
+  [3] = 'a_out_picture_g', [4] = 'a_out_picture_u',
+}
+
+-- One call into another state. Returns its text, or nil and the reason.
+local function cross(state, chunk)
+  local text, ok = net.dostring_in(state, chunk)
+  if not ok then
+    return nil, tostring(text)
+  end
+  return text
+end
+
+local HANDLERS = {
+  -- PICTURE: the target's mission ID from the server state for a group or a
+  -- unit, then the mission state's picture function from a fixed template
+  -- whose every part was checked above or is a number checked here.
+  [60] = function(a)
+    local scope = type(a.scope) == 'string' and a.scope:find(INT_TEXT) and tonumber(a.scope)
+    local call = scope and PICTURE_CALL[scope]
+    if not call then
+      return DCS_REFUSED, nil, 'the scope is not 1 to 5'
+    end
+    local file = a.file
+    if type(file) ~= 'string' or #file > 255 or not file:find(FILE_TEXT) then
+      return DCS_REFUSED, nil, 'the file name is not safe'
+    end
+    for _, key in ipairs({ 'seconds', 'size' }) do
+      if type(a[key]) ~= 'string' or #a[key] > 12 or not a[key]:find(LIFE_TEXT) then
+        return DCS_REFUSED, nil, 'the ' .. key .. ' is not formatted'
+      end
+    end
+    for _, key in ipairs({ 'target', 'horizontal', 'vertical', 'size_units' }) do
+      if type(a[key]) ~= 'string' or #a[key] > 10 or not a[key]:find(INT_TEXT) then
+        return DCS_REFUSED, nil, 'the ' .. key .. ' is not formatted'
+      end
+    end
+    if a.clear_view ~= 'true' and a.clear_view ~= 'false' then
+      return DCS_REFUSED, nil, 'clear_view is not true or false'
+    end
+    -- The target the call names: none, a number, or a mission ID.
+    local first = ''
+    if scope == 2 or scope == 5 then
+      first = a.target .. ', '
+    elseif scope == 3 or scope == 4 then
+      local name = a.name
+      if name == '' then
+        return NOT_BOUND, nil, 'no campaign to name the object'
+      end
+      if type(name) ~= 'string' or #name > 28 or not name:find(NAME_TEXT)
+        or name:sub(1, 5) ~= (scope == 3 and 'np.g.' or 'np.u.') then
+        return DCS_REFUSED, nil, 'not a platform name'
+      end
+      local class = scope == 3 and 'Group' or 'Unit'
+      local text, err = cross('server', "local o = " .. class .. ".getByName('" .. name .. "') if o then return o:getID() end")
+      if not text then
+        return DCS_REFUSED, nil, err
+      end
+      if text == '' then
+        return NOT_BOUND, nil, 'no object ' .. name
+      end
+      local id = tonumber(text)
+      if not id or id ~= math.floor(id) or id < 0 or id >= 2 ^ 53 then
+        return DCS_REFUSED, nil, 'the object has no integer mission ID'
+      end
+      first = string.format('%.0f, ', id)
+    end
+    local text, err = cross('mission', string.format(
+      'if not %s then return "none" end %s(%sgetValueResourceByKey("%s"), %s, %s, 0, %s, %s, %s, %s) return "shown"',
+      call, call, first, file, a.seconds, a.clear_view,
+      a.horizontal, a.vertical, a.size, a.size_units))
+    if not text then
+      return DCS_REFUSED, nil, err
+    elseif text == 'none' then
+      return DCS_REFUSED, nil, 'the mission state has no ' .. call
+    elseif text ~= 'shown' then
+      return DCS_REFUSED, nil, 'the mission state answered ' .. text
+    end
+    return APPLIED
+  end,
+  -- PICTURE_STOP
+  [61] = function()
+    local text, err = cross('mission', 'a_out_picture_stop() return "stopped"')
+    if not text then
+      return DCS_REFUSED, nil, err
+    elseif text ~= 'stopped' then
+      return DCS_REFUSED, nil, 'the mission state answered ' .. text
+    end
+    return APPLIED
+  end,
+  -- DAMAGE: the unit's mission ID from the server state, then
+  -- a_unit_set_life_percentage in the mission state. A unit that is not
+  -- there is NOT_BOUND with no mission call: the setter revives a dead unit
+  -- (LIVE, E38). A dead unit is NOT_BOUND too.
+  [54] = function(a)
+    local name, life = a.name, a.life_percent
+    if type(name) ~= 'string' or #name > 28 or not name:find(UNIT_NAME) then
+      return DCS_REFUSED, nil, 'not a platform unit name'
+    end
+    if type(life) ~= 'string' or not life:find(LIFE_TEXT) then
+      return DCS_REFUSED, nil, 'the life is not formatted'
+    end
+    local text, err = cross('server', "local u = Unit.getByName('" .. name .. "') if u then return u:getID() end")
+    if not text then
+      return DCS_REFUSED, nil, err
+    end
+    if text == '' then
+      return NOT_BOUND, nil, 'no unit ' .. name
+    end
+    local id = tonumber(text)
+    if not id or id ~= math.floor(id) or id < 0 or id >= 2 ^ 53 then
+      return DCS_REFUSED, nil, 'the unit has no integer mission ID'
+    end
+    text, err = cross('mission', string.format(
+      'if c_unit_dead(%.0f) then return "dead" end a_unit_set_life_percentage(%.0f, %s) return "set"', id, id, life))
+    if not text then
+      return DCS_REFUSED, nil, err
+    elseif text == 'dead' then
+      return NOT_BOUND, nil, 'the unit is dead'
+    elseif text ~= 'set' then
+      return DCS_REFUSED, nil, 'the mission state answered ' .. text
+    end
+    return APPLIED
+  end,
+}
+
+-- Run the commands the agent hands out for this state, in ring order, until
+-- it has none. Any hook callback can call it; `onSimulationFrame` does when
+-- `frame` says a command waits. A command taken and not answered is answered
+-- `LUA_ERROR` "no result" by the agent.
+local function run_commands()
+  while true do
+    local opcode, args = agent.command(true)
+    if not opcode then
+      return
+    end
+    local handler = HANDLERS[opcode]
+    if not handler then
+      agent.command_done(20, 'no handler in the hook')
+    else
+      local ok, code, value, message = pcall(handler, args or {})
+      if not ok then
+        agent.command_done(LUA_ERROR, tostring(code))
+      elseif type(code) ~= 'number' then
+        agent.command_done(LUA_ERROR, 'the handler returned no code')
+      else
+        agent.command_done(code, message, value)
+      end
+    end
+  end
+end
+
 local callbacks = {}
 
 callbacks.onMissionLoadBegin = guard('onMissionLoadBegin', function()
@@ -330,11 +506,19 @@ end)
 
 callbacks.onSimulationFrame = guard('onSimulationFrame', function()
   if linked then
-    local code, pump = agent.frame(DCS.getRealTime(), DCS.getModelTime(), DCS.getPause(), BY_ID, shim_loaded)
-    -- A frame that does not sample ends inside `frame`.
-    if pump then
-      if shim_loaded then
+    local code, pump, hook = agent.frame(DCS.getRealTime(), DCS.getModelTime(), DCS.getPause(), BY_ID, shim_loaded)
+    -- A frame that needs neither a pump nor the hook's commands ends inside
+    -- `frame`. Otherwise the pump runs, then the hook's commands, then
+    -- `finish`.
+    if pump or hook then
+      if pump and shim_loaded then
         net.dostring_in('server', PUMP)
+      end
+      if hook then
+        local ran, err = pcall(run_commands)
+        if not ran then
+          file.write('error', 'hook commands raised', { error = tostring(err) })
+        end
       end
       agent.finish()
     end

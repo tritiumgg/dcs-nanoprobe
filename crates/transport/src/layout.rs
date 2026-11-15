@@ -215,7 +215,8 @@ codes! {
         MARK_REMOVE = 26, DRAWING_SET = 27, DRAWING_REMOVE = 28, MENU_SET = 29,
         MENU_REMOVE = 30, EXTENSION_SET = 31, EXTENSION_REMOVE = 32, EXPLOSION = 48,
         MESSAGE = 49, SOUND = 50, SMOKE = 51, FLARE = 52, ILLUMINATION = 53, DAMAGE = 54,
-        CHAT = 55, MISSION_LOAD = 56, EXTENSION_INVOKE = 57, EVAL = 58, CAPTURE = 64,
+        CHAT = 55, MISSION_LOAD = 56, EXTENSION_INVOKE = 57, EVAL = 58,
+        WAREHOUSE_ADJUST = 59, PICTURE = 60, PICTURE_STOP = 61, CAPTURE = 64, COUNTRIES = 65,
     }
 }
 
@@ -295,9 +296,16 @@ pub const fn opcode_row(code: u64) -> Option<Opcode> {
         18..=20 | 22..=24 | 26 | 28 | 30 => row(SetState, None, true, true),
         31 => row(SetState, Some(Rev::Spec), true, false),
         32 => row(SetState, None, true, false),
-        48 | 51..=54 => row(Effect, None, true, true),
+        48 | 51..=53 | 59 => row(Effect, None, true, true),
+        54 => Some(Opcode {
+            class: Effect,
+            rev: None,
+            needs_campaign: true,
+            gen_bound: true,
+            state: Some(HandlerState::Hook),
+        }),
         49 | 50 => row(Effect, None, false, false),
-        55 | 56 => Some(Opcode {
+        55 | 56 | 60 | 61 => Some(Opcode {
             state: Some(HandlerState::Hook),
             ..Opcode {
                 class: Effect,
@@ -309,6 +317,7 @@ pub const fn opcode_row(code: u64) -> Option<Opcode> {
         }),
         57 | 58 => row(Effect, None, true, false),
         64 => row(Query, None, true, true),
+        65 => row(Query, None, false, true),
         _ => None,
     }
 }
