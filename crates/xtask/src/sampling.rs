@@ -38,8 +38,14 @@
 //! - no tier that owes rows reports a period of 0;
 //! - with `--recording`, the median over objects of the interval between an
 //!   object's last two samples in the recording is within 25 % of the period
-//!   the agent reported: positions of the objects that move, life and fuel
-//!   of the subscribed rows. Fewer than 20 objects are reported and not judged,
+//!   the agent reported, for the positions of the objects that move. The
+//!   same figures for the life and fuel of the subscribed rows are reported,
+//!   not judged, in every compare (the mock's `tenth` scenario, the live
+//!   `tenth` part's `k1`, the Windows part, and `--rejudge` of a bundle):
+//!   one reading of the vitals period can show a pass waiting for an
+//!   enumeration. The vitals band is judged as a rate, from `due_vitals` and
+//!   `swept_vitals` (`assert_vitals_band` in the agent-link host tests).
+//!   Fewer than 20 objects are reported and not judged,
 //!   and with `--no-ages` the figures are reported only;
 //! - every mirrored life equals the oracle's, and every unit's fuel is within
 //!   0.002 a second of the sample's age, plus 0.001;
@@ -638,20 +644,39 @@ pub fn compare_files(oracle: &Path, mirror: &Path, judge: Judge<'_>) -> Result<V
             let window = (8.0 * reported).clamp(30.0, 120.0);
             let (median, n) = median_interval(&text, ids, positions, model, window);
             v.intervals.push((name, median, reported, n));
-            // Reported, not judged, where ages are not: at a tenth of the
-            // slice a sweep can stall behind an overdue enumeration, and
-            // the period the agent reports then grows past the intervals
-            // of the sweeps before it.
-            if judge.ages
-                && !(positions && judge.positions_by_window)
-                && n >= INTERVALS_MIN
-                && (median - reported).abs() > INTERVAL_SHARE * reported
-            {
+            if interval_judged(&judge, positions, n, median, reported) {
                 v.interval_off.push(name);
             }
         }
     }
     Ok(v)
+}
+
+/// Whether a tier's median interval in the recording is judged against the
+/// period the agent reported at the dump, and found off by more than
+/// [`INTERVAL_SHARE`].
+///
+/// Only the positions are judged, and not where ages are reported only: at
+/// a tenth of the slice a sweep can stall behind an overdue enumeration,
+/// and the period the agent reports then grows past the intervals of the
+/// sweeps before it. Nor where `positions_by_window`. The vitals period is
+/// never judged here, in any compare: one
+/// reading of it can show a vitals pass waiting for an enumeration
+/// (spec/sampling.md, "Achieved period"), in either direction against the
+/// rows' last intervals. Its band is a rate over a span, from the
+/// `sampling` LOG's `due_vitals` and `swept_vitals`.
+fn interval_judged(
+    judge: &Judge<'_>,
+    positions: bool,
+    n: usize,
+    median: f64,
+    reported: f64,
+) -> bool {
+    judge.ages
+        && positions
+        && !judge.positions_by_window
+        && n >= INTERVALS_MIN
+        && (median - reported).abs() > INTERVAL_SHARE * reported
 }
 
 const USAGE: &str = "usage: cargo xtask sampling compare <oracle.json> <mirror.json> [--no-ages] [--strict] [--recording FILE] [--out FILE]\n       cargo xtask sampling deaths <probe.json> <recording.jsonl> [--catch-s N] [--hit-s N]\n       cargo xtask sampling --rejudge <bundle dir>\n       cargo xtask sampling <name> [--part mirror|mirror500|tenth|probes|design|deaths|windows]";
@@ -1550,5 +1575,26 @@ mod tests {
         let r = judge_deaths(&v, 62.0);
         assert_eq!(r["unconfirmed_dead"].as_array().unwrap().len(), 6);
         assert_eq!(r["ok"], json!(true), "an unconfirmed DEAD is not a failure");
+    }
+
+    #[test]
+    fn only_the_positions_interval_is_judged_against_the_reported_period() {
+        let judge = |ages, positions_by_window| Judge {
+            ages,
+            strict: false,
+            recording: None,
+            positions_by_window,
+        };
+        // Off by 40 % with 20 objects: judged for the positions only.
+        assert!(interval_judged(&judge(true, false), true, 20, 1.4, 1.0));
+        assert!(!interval_judged(&judge(true, false), false, 20, 7.0, 5.0));
+        assert!(!interval_judged(&judge(true, false), false, 20, 2.3, 9.2));
+        // Not where ages are reported only, nor by window, nor with fewer
+        // than 20 objects.
+        assert!(!interval_judged(&judge(false, false), true, 20, 1.4, 1.0));
+        assert!(!interval_judged(&judge(true, true), true, 20, 1.4, 1.0));
+        assert!(!interval_judged(&judge(true, false), true, 19, 1.4, 1.0));
+        // Within 25 %.
+        assert!(!interval_judged(&judge(true, false), true, 20, 1.2, 1.0));
     }
 }
