@@ -1,44 +1,51 @@
 # Persistence
 
-How the sidecar keeps a campaign across a sidecar restart, a DCS restart, a mission
-reload and a campaign switch. The world model and the lifecycle are in spec/world.md;
-the settings are the `[store]` table of spec/config.md.
+How the sidecar keeps a campaign, and what outlives a campaign, across a sidecar
+restart, a DCS restart, a mission reload and a campaign switch. The world model and the
+lifecycle are in spec/world.md; the settings are the `[store]` table of spec/config.md.
 
 ## Files
 
-Each campaign has a folder in `[store] dir`, named by its campaign ID in decimal.
+`[store] dir` holds one folder per campaign, named by its campaign ID in decimal, the
+server folder `server`, and the lock file `lock`.
 
 | File | Holds |
 |---|---|
-| `<id>/store.sqlite` | The campaign's store: its record, the entity tables, the journal and the checkpoint log. SQLite in WAL mode. |
-| `<id>/history.log` | The event history, append-only. |
+| `lock` | Nothing. The sidecar holds an exclusive OS lock on it while it runs (below). |
+| `<id>/store.sqlite` | The campaign's store: its record, the entity tables, the journal, the commands in flight, the idempotency keys of calls on it, and the last checkpoint. |
+| `<id>/events.sqlite` | The campaign's event history. |
 | `<id>/backups/<n>/store.sqlite` | Backup `n`, a consistent copy of the store. `n` counts up from 1 and is never reused in the folder. |
-| `<id>/backups/<n>/backup.txt` | One line: the time in milliseconds since the Unix epoch, the store's schema version, and the reason (`scheduled`, `manual` or `pre_migration`), separated by spaces. Written last: a numbered folder without it is a backup cut short, which is not listed and is removed at the next backup. |
+| `<id>/backups/<n>/backup.txt` | One line: the time in milliseconds since the Unix epoch, the store's schema version, the store revision, and the reason (`scheduled`, `manual` or `pre_migration`), separated by spaces. Written last: a numbered folder without it is a backup cut short, which is not listed and is removed at the next backup. |
 | `<id>/backups/next` | The last backup number given, in decimal, so a number is not reused after its folder is pruned. |
-| `<id>/backups/history.log` | One copy of the event history, shared by every backup. |
+| `<id>/backups/events.sqlite` | One copy of the event history, shared by every backup. |
+| `server/store.sqlite` | The server store (below). |
+| `server/events.sqlite` | The server event log: events recorded while no campaign is active. |
+| `server/backups/...` | The server store's backups, laid out as a campaign's. One is taken with each scheduled backup of the active campaign (reason `scheduled`) and before a migration (`pre_migration`), with the same retention. Its revision in `backup.txt` is the command epoch. |
 
-Nothing else of a campaign lives outside its folder, so copying, moving or deleting the
-folder is copying, moving or deleting the campaign. The server-scoped store
-(spec/world.md, "Events and the store") is not specified here.
+Every `.sqlite` file runs SQLite with `journal_mode = WAL` and `synchronous = NORMAL`: a
+transaction survives a crash of the sidecar process and of DCS. A power loss may lose
+the last transactions, never corrupt a file.
 
-With `[store] enabled = false` there are no files: the store is in memory, and the
-author keeps state through capture and restore (spec/world.md).
+A campaign's folder holds all of the campaign's own state, so copying, moving or
+deleting the folder is copying, moving or deleting the campaign. It does not hold what
+the server derives for it: the command epoch and the player keys are in the server
+store, so a campaign folder copied to another server meets other player keys there
+(spec/world.md, "Players").
 
-## The store file
+With `[store] enabled = false` there are no files: the stores and logs are in memory,
+and the author keeps state through capture and restore (spec/world.md).
 
-| Table | Columns | Rows |
-|---|---|---|
-| `meta` | `key TEXT PRIMARY KEY`, `value BLOB` | One per key below |
-| `entity` | `id INTEGER`, `kind TEXT`, `body BLOB`; the key is `id` and `kind` | One per group or static (`kind` is `group`) and one per unit (`unit`). A static is its own unit, so its `EntityId` has both rows. |
-| `extension` | `name TEXT PRIMARY KEY`, `body BLOB` | One per registered Lua extension, and one tombstone per removed one |
-| `journal` | `seq INTEGER PRIMARY KEY`, `body BLOB` | One per journal entry, in order, from 1 |
-| `checkpoint` | `seq INTEGER PRIMARY KEY`, `body BLOB` | One per checkpoint, in order, from 1 |
+### The lock
 
-A removed extension keeps its `extension` row as a tombstone: `removed` is true, the
-body holds no source, and `spec_rev` is the highest revision the extension had. A
-registration of the name after a reopen gets a revision above it.
+At start the sidecar creates `lock` if it is missing and takes an exclusive OS lock on
+it (`flock` on Linux and macOS, `LockFileEx` on Windows), without waiting. If another
+process holds it, the sidecar refuses to start and says so. The lock ends with the
+process, so a crash leaves no stale lock. Two sidecars never write one store dir.
 
-Every `body` and every `meta` value is one `lv` value (spec/transport.md, "Encodings"):
+## Encodings
+
+In a store file (a campaign's or the server's), every `body` and every `meta` value is
+one `lv` value (spec/transport.md, "Encodings"):
 a table with string keys, except `schema`, which is a number. A `u64` (an `EntityId`,
 a revision, an epoch, an object ID, a time in milliseconds) is written as its decimal
 text, because an `lv` number is a double. A list is a table with keys 1 to n. A
@@ -48,6 +55,32 @@ stays fixed. A reader ignores keys it does not know, and a missing key
 takes its default (nil, false, 0, the empty string or the empty table). So a field
 added in the same schema version reads back from an older file.
 
+The store encodes with a checked writer: a value nested deeper than the codec allows
+or a table with more pairs than it allows is an error, and the change that carries it
+is refused (`INVALID_FIELD` for an API call). The transport codec's writer, which
+writes nil there, is never used for the store. The encoding of every row kind and of
+an event body is pinned in `spec/persistence.golden`, which the tests check.
+
+An events file's `meta` values are UTF-8 text. An event `body` is the Protobuf encoding
+of the `Event` message of the package named in the events file's `meta`
+(`nanoprobe.v1alpha1`), as the Events service sends it.
+
+## The store file
+
+| Table | Columns | Rows |
+|---|---|---|
+| `meta` | `key TEXT PRIMARY KEY`, `value BLOB` | One per key below |
+| `entity` | `id INTEGER`, `kind TEXT`, `body BLOB`; the key is `id` and `kind` | One per group or static (`kind` is `group`) and one per unit (`unit`). A static is its own unit, so its `EntityId` has both rows. |
+| `extension` | `name TEXT PRIMARY KEY`, `body BLOB` | One per registered Lua extension, and one tombstone per removed one |
+| `journal` | `seq INTEGER PRIMARY KEY`, `at_ms INTEGER`, `kind TEXT`, `entity INTEGER`, `body BLOB` | One per journal entry, in order, from 1 |
+| `inflight` | `epoch INTEGER`, `seq INTEGER`, `body BLOB`; the key is `epoch` and `seq` | One per command sent with no outcome yet |
+| `idempotency` | `key TEXT PRIMARY KEY`, `at_ms INTEGER`, `request_hash BLOB`, `response BLOB` | One per changing call answered on this campaign |
+| `checkpoint` | `seq INTEGER PRIMARY KEY`, `body BLOB` | The last checkpoint, one row |
+
+A removed extension keeps its `extension` row as a tombstone: `removed` is true, the
+body holds no source, and `spec_rev` is the highest revision the extension had. A
+registration of the name after a reopen gets a revision above it.
+
 `meta` keys:
 
 | Key | Value |
@@ -55,95 +88,143 @@ added in the same schema version reads back from an older file.
 | `schema` | The schema version, a number. 1 is this document. |
 | `campaign_id` | The campaign ID. It must equal the folder's name. |
 | `campaign` | The campaign record: ID, name, state (`active`, `suspended`, `finished`), theaters, the theater to load, clock, created time, the author's component schema versions, and the outcome of a finished campaign. Its `state` key keeps its layout in every schema version, so the state is read before a migration. The platform schema version is `schema`. |
-| `world` | The next `EntityId`, the store revision, the command epoch, the loaded mission (agent boot, mission generation, theater), the desired airbase owners and warehouse stocks with their revisions, the sample rates the controller set, the agent's country-to-coalition map, the model time of the last samples, and the route events not yet published. |
+| `world` | The next `EntityId`, the store revision, whether the store is open, the loaded mission (agent boot, mission generation, theater), the last agent record folded in (agent boot and record number) with the stamp it was read under (agent boot, mission generation, campaign), which records delivered again before their next `FRAME` keep, the desired airbase owners and warehouse stocks with their revisions, the sample rates the controller set, the agent's country-to-coalition map, the model time of the last samples, and the route events not yet published. |
 
 An entity body carries every field of its row in spec/world.md: for a group or static
 its spec, order and revisions, lifecycle state, authority, lost policy, error, and the
 reconciler's per-generation bookkeeping (spawned, spawn unknown, order sent, destroy
 failures); for a unit its spec, last observed state, death fact, missing or removed
 mark, whether the agent reported that mark in an `OBJECT_GONE` (only a reported mark
-outlives a mission generation, spec/world.md "Respawn gate"), and DCS object ID. A group's body records whether it is a `group` or a
-`static`.
+outlives a mission generation, spec/world.md "Respawn gate"), and DCS object ID. A
+group's body records whether it is a `group` or a `static`.
 
 The journal holds the entries spec/world.md says are journalled, each with its `kind`
-and its fields. The journal is append-only: no row is changed or removed.
+(`command`, `outcome`, `death`, and so on), the entity it names (0 for none), the wall
+time it was made and its fields. The journal is an audit trail: the sidecar appends to
+it and never reads it back. An `inflight` row is inserted with the `command` entry that
+sends it and deleted with the entry that gives its outcome, in the same transaction; it
+is what a restarted reconciler reads to learn which commands it is owed a result for.
+
+The checkpoint row holds `seq`, `at_ms` (wall time), `revision`, `model_time` and
+`mission_gen` (the samples' model time and generation), and `achieved` (below). A new
+checkpoint replaces it, with `seq` one more.
 
 ## Writes
 
-The sidecar writes the store in one SQLite transaction at a time. A transaction writes
-every entity row that differs from the file, the extensions that changed, the journal
-entries made since the last one, and `meta`. So the file always holds one state the
-sidecar had, never part of one.
+The sidecar writes the store in one SQLite transaction at a time, so the file always
+holds one state the sidecar had, never part of one.
 
-| When | Why |
+**Group commit.** The driver commits at most once per step. During a step the
+reconciler folds in what it read and decides its commands; the commands are written to
+the inbound ring but held back from the agent. At the end of the step the sidecar
+commits the events file, then the store, then lets the held commands through and
+acknowledges the records it read. An API call that changes a store commits the same
+way before it answers. So a command is on disk before it reaches DCS, a result or fact
+read from DCS is on disk before the agent learns it was read, and a change the API
+acknowledged survives a sidecar crash. A loaded mission goes to disk with the
+transitions it causes.
+
+A commit writes:
+
+| Written | When |
 |---|---|
-| When a command, a result, a fact or a command epoch is journalled: before every command is sent, and when a result or a fact arrives | A transition and its command are on disk before the command reaches DCS (spec/world.md, "Lifecycle"). A result, a death, a removal or a revival read from DCS is on disk before anything else happens, so a sidecar that restarts never takes a result it read for `unknown`. A new loaded mission is not written alone: it goes to disk with the transitions it causes, so a restarted sidecar never sees the new mission without them. |
-| Before an API call that changes the store answers | A change the API acknowledged survives a sidecar crash. |
-| Every `checkpoint_s` | Positions, fuel, life and the rest of the observed state. A checkpoint row records the wall time, the store revision, the model time and mission generation of its samples, and the period each sampling tier achieved (below); the API shows the last one as `Campaign.last_checkpoint`. |
-| At suspend and finish | The final state. |
+| The journal entries made since the last commit, and the `inflight` rows they insert or delete | Every commit |
+| Every group, unit or extension row whose spec, order, lifecycle, authority, policy, error, death, mark or object ID changed | Every commit |
+| `meta.world` and `meta.campaign` when they changed | Every commit |
+| The idempotency rows of calls answered | Every commit |
+| Positions, fuel, life, ammunition, warehouse stock: the sampled state | Only at a checkpoint |
 
-Writes happen on the sidecar's driver thread, under the hub lock, before the command
-or the answer they protect. A write that fails stops the sidecar through its panic path
-(spec/errors.md, `UNAVAILABLE`): the sidecar never sends a command it could not
-journal, and never answers a call whose change is not on disk.
+A checkpoint is a commit that also writes every row whose sampled state changed, and
+replaces the checkpoint row. It is taken every `checkpoint_s` while the campaign is
+active, skipped when the store revision did not move since the last one, and taken at
+suspend and finish and at a clean stop. `Campaign.last_checkpoint` shows the last one.
 
-SQLite runs with `journal_mode = WAL` and `synchronous = NORMAL`: a transaction
-survives a crash of the sidecar process and of DCS. A power loss may lose the last
-transactions, never corrupt the file.
+Writes happen on the driver thread, under the hub lock. A write that fails stops the
+sidecar through its panic path (spec/errors.md, `UNAVAILABLE`): the sidecar never lets a
+command through it could not journal, and never answers a call whose change is not on
+disk.
 
 What each failure loses:
 
 | Data | Written | Lost if DCS crashes | Lost if the sidecar crashes |
 |---|---|---|---|
-| Specs, orders, components, extensions | before the command that carries them is sent, and before an API call that changed them answers | nothing | nothing |
-| Results, deaths, removals, revivals | when they arrive | what DCS did in its last frames before the crash and had not yet written | nothing already read |
+| Specs, orders, components, extensions | in the step or call that changes them, before any command that carries them reaches DCS and before the call answers | nothing | nothing |
+| Results, deaths, removals, revivals | at the end of the step that reads them, before the agent learns they were read | what DCS did in its last frames before the crash and had not yet written | nothing: unacknowledged records are read again |
 | Positions, fuel, life, ammunition, warehouse stock | every `checkpoint_s` | up to `checkpoint_s` | up to `checkpoint_s`; read again from the agent |
-| Events | before they are published | nothing published | nothing published |
+| Events | at the end of the step that makes them, before they are published | nothing published | nothing published |
 | Effects | journalled as sent | may or may not have applied; never sent again | never sent again |
+
+### A crash between the two commits
+
+The events file commits before the store. Each event made from an agent record carries
+that record's identity (agent boot and record number) in its row. The store keeps the
+last agent record it folded in (`meta.world`); the sidecar acknowledges records to the
+agent only after both commits, and after a restart the agent's link delivers again
+every record it was not told was read.
+
+- A crash before the events commit loses nothing: both commits are missing, and every
+  record of the step is read again.
+- A crash between the commits leaves the events of the step in the events file and its
+  facts out of the store. The records are read again: their facts are folded in, and an
+  event whose record identity is already in the events file is not appended again.
+- A crash after the store commit, before the acknowledgement: the records are read
+  again, and a record at or below the store's last folded record is dropped.
+
+So each fact is folded in once and each event is recorded once, whatever the crash
+point.
 
 ### Achieved periods
 
 The agent samples positions, vitals, ammunition and warehouse stock in tiers whose
 period stretches when the frame budget is short (spec/sampling.md). A value read in a
-starved tier can be much older than its target period. Each checkpoint row therefore
+starved tier can be much older than its target period. The checkpoint therefore
 records, per tier, the period achieved at that moment, in seconds, next to the target.
 A restore that uses a checkpointed value can tell how old it may be.
 
-A checkpoint body holds `seq`, `at_ms` (wall time), `revision`, `model_time` and
-`mission_gen` (the samples' model time and generation), and `achieved`: a list of
-`{tier, target_s, achieved_s}`, where `tier` is `position`, `vitals`, `ammo`,
-`warehouse` or `enumeration`, the field names of the API's `SampleRates`.
-`Campaign.last_checkpoint` shows the last one as a `CheckpointInfo`: `taken` from
-`at_ms`, `sim` from `model_time` and `mission_gen`, and `achieved` from the achieved
-periods; the targets are not shown.
+`achieved` is a list of `{tier, target_s, achieved_s}`, where `tier` is `position`,
+`vitals`, `ammo`, `warehouse` or `enumeration`, the field names of the API's
+`SampleRates`. `Campaign.last_checkpoint` shows the checkpoint as a `CheckpointInfo`:
+`taken` from `at_ms`, `sim` from `model_time` and `mission_gen`, and `achieved` from
+the achieved periods; the targets are not shown.
 
 ## Opening a store
 
 1. Read `meta.schema`. A version newer than the sidecar's is refused: the sidecar does
    not open the campaign and reports the version it found.
 2. An older version is migrated (below).
-3. Load `meta`, the entities, the extensions and the journal into memory. A tombstone
-   is not an extension: it sets the name's revision floor and the agent's pending
-   removal, so `EXTENSION_REMOVE` is sent until the agent confirms it.
+3. Load `meta`, the entities, the extensions, the `inflight` rows and the checkpoint row
+   into memory. The journal is not read. A tombstone is not an extension: it sets the
+   name's revision floor and the agent's pending removal, so `EXTENSION_REMOVE` is sent
+   until the agent confirms it.
+4. Copy the idempotency rows younger than `idempotency_keep_h` into the server store's
+   key index (below).
 
 The spatial grid and the change list a watch resumes from are not stored. The grid is
 rebuilt from the units' last positions. A watch that resumes from before the open gets
 a resync (spec/errors.md).
 
 `meta.world` records whether the store is open: true from an open, false after a
-clean close (suspend, finish). An open that finds it true follows an unclean stop: the
-store revision may have been handed out past the last write, so the open moves it
-forward by 2^32 and writes that at once. A revision handed out before the stop is
-never handed out again, and a watch that resumes from one gets a resync.
+clean close (suspend, finish, a clean stop). An open that finds it true follows an
+unclean stop: the store revision may have been handed out past the last write, so the
+open moves it forward by 2^32 and writes that at once. A revision handed out before the
+stop is never handed out again, and a watch that resumes from one gets a resync.
+
+A new store file is made under a temporary name, filled in one transaction (tables,
+`schema`, `campaign_id`, the record and an empty world), flushed and renamed into
+place. A crash leaves either no file or a whole one.
 
 ## Schema version and migration
 
 The schema version is a number, one more at each change to this document's tables or
 bodies that an older sidecar would read wrongly. A migration is a list of steps, one
-per version. On open, a store at version N below the current version M:
+per version. Each step keeps its own decoder for the version it reads, frozen when the
+step is written: a later change to the current decoders never changes what an old step
+reads. On open, a store at version N below the current version M:
 
-1. Is backed up (below), always, whatever the backup schedule. Listing campaigns reads
-   each store's record and version without opening it, so it migrates nothing.
+1. Is backed up (below) with reason `pre_migration`, whatever the backup schedule,
+   unless the newest complete backup already has schema N and the store's current
+   revision. Listing campaigns reads each store's record and version without opening
+   it, so it migrates nothing.
 2. Has steps N+1 to M applied in one transaction, and `meta.schema` set to M in it.
 3. Is opened.
 
@@ -154,58 +235,117 @@ campaign record keeps each component schema's version for it.
 
 ## Backups
 
-A backup is a consistent copy of the store, taken with SQLite's `VACUUM INTO` while the
-store is open. The copy is flushed to disk before its `backup.txt` is written and
-flushed. It is taken every `backup_interval_h` while the campaign is active
-(reason `scheduled`), on request through the API (`manual`), and before every
-migration (`pre_migration`). Suspend and finish take none: their final checkpoint is
-in the store itself.
+A backup is a consistent copy of the store, taken with SQLite's `VACUUM INTO` through a
+connection of its own, on a worker thread: the driver starts it and goes on stepping,
+and collects the result in a later step. `BackupCampaign` answers when the worker is
+done. The copy is flushed to disk before its `backup.txt` is written and flushed. A
+backup is taken every `backup_interval_h` while the campaign is active (reason
+`scheduled`), on request through the API (`manual`), and before a migration
+(`pre_migration`). Suspend and finish take none: their final checkpoint is in the store
+itself. One backup of a campaign runs at a time; a request while one runs waits for it.
 
-Retention: after each backup the sidecar keeps the newest `backup_keep` backups of the
-campaign, whatever their reason, and deletes the older ones. A backup's number counts
-up from 1 and is never reused in the folder, so a deleted number does not come back.
+Retention: after each backup the sidecar keeps the newest `backup_keep` scheduled and
+manual backups of the campaign and deletes the older ones. It keeps, in addition, the
+newest `pre_migration` backup of each schema version, outside `backup_keep`; older
+`pre_migration` backups of the same version are deleted. A backup's number counts up
+from 1 and is never reused in the folder, so a deleted number does not come back.
 
-There is no restore call. To restore a backup: suspend the campaign; stop the sidecar;
-delete the campaign's `store.sqlite-wal` and `store.sqlite-shm` if they are there (an
-unclean stop leaves them, and SQLite would replay them onto the copied file); copy
-`backups/<n>/store.sqlite` over the campaign's `store.sqlite`; start the sidecar; and
-activate the campaign. The event history is not rolled back: `history.log` keeps the
-events after the backup, which the restored store does not know.
+There is no restore call; S19 builds an offline restore. To restore a backup by hand:
+stop the sidecar; delete the campaign's `store.sqlite-wal` and `store.sqlite-shm` if they
+are there (an unclean stop leaves them, and SQLite would replay them onto the copied
+file); copy `backups/<n>/store.sqlite` over the campaign's `store.sqlite`; start the
+sidecar; and activate the campaign. Two hazards remain with a hand restore: the
+restored store's next `EntityId` is the backup's, so entities made after the backup
+have their IDs given again to new entities, which the event history and controllers
+already know; and a WAL file left in place corrupts the restored copy. The event
+history is not rolled back: `events.sqlite` keeps the events after the backup.
 
-The event history is not copied into each backup: `backups/history.log` is one copy,
-extended at each backup by the bytes the history gained since the last one. So
-`backup_keep` does not multiply the history. If the history was compacted since (its
-first record changed), the copy is made again in full.
+The event history is not copied into each backup: `backups/events.sqlite` is one copy,
+extended at each backup with the events it lacks (`INSERT ... WHERE seq > ` its newest
+sequence number). Events the retention deleted from the history since are deleted from
+the copy too, so `backup_keep` does not multiply the history.
 
 ## Event history
 
-`history.log` holds the campaign's events in sequence order, one record each:
+`events.sqlite` holds a campaign's events:
 
-| Offset | Type | Field |
+| Table | Columns | Rows |
 |---|---|---|
-| 0x00 | u32 | `len`, the length of `body` |
-| 0x04 | u32 | `crc`, CRC-32 (IEEE) of the bytes from 0x08 to the end of `body` |
-| 0x08 | u64 | `seq`, the event's sequence number |
-| 0x10 | u64 | `wall_ms`, milliseconds since the Unix epoch |
-| 0x18 | bytes[len] | `body`, the Protobuf encoding of the event as the Events service sends it |
+| `meta` | `key TEXT PRIMARY KEY`, `value BLOB` | `format` (1, a number), `campaign_id` (decimal text; 0 for the server log), `package` (the Protobuf package of the bodies, `nanoprobe.v1alpha1`) |
+| `event` | `seq INTEGER PRIMARY KEY`, `wall_ms INTEGER`, `source TEXT`, `body BLOB` | One per event |
 
-Little-endian throughout. Sequence numbers grow by one from record to record. The
-sidecar appends an event's record and flushes it before it publishes the event, so a
-number a client has seen is on disk and is never given to another event. An append
-that fails is cut back to the last whole record and stops the sidecar, as a failed
-store write does.
+`source` names what the event was made from, so an event made again after a crash is
+not logged twice. It is unique where it is not null:
 
-On open the sidecar reads the file to its end, and cuts a last record that is short or
-whose `crc` does not match: that is a write cut by a crash, and zeros may follow it. A
-bad record anywhere else stops the open and is reported: a record is not last when a
-whole record numbered past it follows anywhere, or when the bytes right after it start
-a later-numbered record, whole or cut short.
+- An event made from an agent record: `<agent boot>:<record number>` for the record's
+  first event, and `<agent boot>:<record number>:<i>` for its event at index `i`
+  (from 1) when one record makes several. A record's events are logged in one
+  transaction, so the first one's key stands for all of them.
+- A route event (spec/world.md), which the sidecar makes again from samples read
+  again: `route:<group EntityId>:<order revision>:<waypoint index or end>`.
+- Any other event the sidecar makes: null.
 
-`event_retention_days` (spec/config.md) above 0 compacts the history at open: the
-records older than the retention are dropped by writing the rest to a new file and
-renaming it over the old one. The newest record is always kept, so the sequence
-numbers go on from it after a restart. The Events service reports the first sequence
-number it still holds, and a request before it gets a gap record.
+Sequence numbers grow by one from row to row. The driver commits the events of a step
+in one transaction before it publishes them (above), so a number a client has seen is
+on disk and is never given to another event. The Events service reads rows by `seq`.
+
+`event_retention_days` above 0 deletes the events older than the retention, at open
+and once an hour: the cutoff is the earlier of now and the newest event's `wall_ms`,
+less the retention. The newest event is always kept, so the sequence numbers go on from
+it after a restart. When the clock is behind the newest event's `wall_ms` the deletion
+is skipped and a warning logged: a clock set back must not delete the history. A
+finished campaign's history is not deleted. The Events service serves the log from the
+first sequence number it still holds; a request to read on from before it is refused
+with `SEQUENCE_EXPIRED` (spec/errors.md).
+
+## The server store
+
+`server/store.sqlite` holds what outlives a campaign. It is built as a campaign store:
+`meta.schema`, migration, backups and the same `lv` bodies.
+
+| Table | Columns | Rows |
+|---|---|---|
+| `meta` | `key TEXT PRIMARY KEY`, `value BLOB` | `schema`; `epoch`, the command epoch (spec/commands.md); `open`, as a campaign store's |
+| `player_secret` | `id INTEGER PRIMARY KEY`, `secret BLOB` | One row: the secret player keys are derived with (spec/world.md, "Players") |
+| `player` | `key TEXT PRIMARY KEY`, `ucid TEXT`, `body BLOB` | One per player key the server has given |
+| `idempotency` | `key TEXT PRIMARY KEY`, `at_ms INTEGER`, `campaign INTEGER`, `request_hash BLOB`, `response BLOB` | One per changing call answered: for a call on no campaign, the whole answer; for a call on a campaign, the index (`campaign` set, `request_hash` and `response` null) |
+| `extension` | `name TEXT PRIMARY KEY`, `body BLOB` | Server-scoped extension data, by name |
+| `deleted_campaign` | `id INTEGER PRIMARY KEY`, `at_ms INTEGER` | One per campaign deleted through the API, so its tag is never given again (spec/world.md, "Names") |
+
+The command epoch is written before any command of the new epoch reaches DCS. It
+grows across a campaign switch and a sidecar restart.
+
+The server event log is `server/events.sqlite`, laid out as a campaign's, with
+`campaign_id` 0 and its own sequence numbers. `server_log_days` is its retention, by
+the rule above.
+
+A player's key is the same in every campaign of the server. An existing
+`players.json` in `[store] dir` (written before the server store) is read once into the
+server store and renamed `players.json.migrated`.
+
+The `server` folder is made with mode 0700 on Linux and macOS, and set to it at every
+open: it holds the player secret, the key-to-ucid pairs and their backups.
+`players.json.migrated` is set to mode 0600 before it is renamed and is kept as the
+record of the migration. Nothing in the `server` folder, `players.json` or
+`players.json.migrated` is ever put in a diagnostics bundle or a campaign backup.
+
+## Idempotency keys
+
+A changing call's key (spec/errors.md, "Idempotency") is written with its change:
+
+- A call that acted on a campaign writes its `idempotency` row in that campaign's
+  store, in the same transaction as the change; a call that suspends or finishes the
+  campaign writes it in the closing transaction. The server store's index row (`key`,
+  `at_ms`, `campaign`) is written before that transaction. An index row whose
+  campaign store never got the key finds nothing, and the repeat runs as a new call.
+- A call on no campaign writes its whole row in the server store.
+
+A repeat looks in the index, then in that campaign's store; with no index row, in the
+store of the campaign the call names, or the active one. A finished campaign's store
+is read for it without being opened. When a campaign's store is opened, its rows
+younger than `idempotency_keep_h` are copied into the index. A stored key older than
+`idempotency_keep_h` is forgotten: the repeat runs as a new call. Rows older than
+`idempotency_keep_h` are deleted from every open store once an hour.
 
 ## Campaign operations
 
@@ -213,16 +353,41 @@ What each operation of the Campaign service does to the files:
 
 | Operation | Files |
 |---|---|
-| Create | A new folder and store, with the campaign record (state `suspended`, or `active` when the call activates it) and an empty world. |
-| Activate | A finished campaign is refused (`FAILED_PRECONDITION`) before anything is opened or migrated. The store is opened (and migrated). Then the active campaign, if any, is suspended, the store's state is set to `active`, and its mission is loaded. If the open fails, the active campaign stays active; if the suspend fails, no campaign is active. Exactly one campaign is active per DCS instance. |
-| Suspend | The driver captures every live group (`CAPTURE`) into the store and tells the agent there is no active campaign (`CAMPAIGN` 0). Then a final checkpoint, the state set to `suspended`, and the store closed cleanly. DCS keeps running whatever it has, unmanaged. |
+| Create | A new folder with its store (the campaign record, state `suspended`, or `active` when the call activates it, and an empty world) and its events file. |
+| Activate | A finished campaign is refused (`FAILED_PRECONDITION`) before anything is opened or migrated. The active campaign, if any, is suspended first. Then the target's store is opened (and migrated), its state set to `active`, and its mission loaded. If the open fails, no campaign is active. Exactly one campaign is active per DCS instance. |
+| Suspend | The driver captures every group and static DCS holds (`CAPTURE`) and waits up to `result_wait_s` for the results, which the store takes as they arrive. Then it tells the agent there is no active campaign (`CAMPAIGN` 0), takes a final checkpoint, sets the state to `suspended`, and closes the store cleanly. DCS keeps running whatever it has, unmanaged. A repeat of the call under its answered key captures nothing. |
 | Finish | As suspend, with state `finished` and the outcome record. A finished store is read-only: it is never activated or migrated again, only read. |
+| Backup | A backup with reason `manual` (`BackupCampaign`). `ListCampaignBackups` reads the folder without opening the store. |
 | Delete | The folder is removed. Never automatic. |
 
-Every open of a store writes it (it marks the store open), so an open that is not
-followed by a close counts as an unclean stop. A read-only open, for reading a finished
-or suspended campaign through the World and Events services, is not built yet; the
-sidecar opens no finished store.
+A switch of the active campaign (`ActivateCampaign`, or `CreateCampaign` that
+activates) captures and suspends the active one as Suspend does.
+
+### Sidecar start and stop
+
+At start the sidecar takes the lock, opens the server store, and lists the folders. It
+reads each campaign's record and checkpoint without opening its store, and opens its
+events file, applying the retention. A folder whose store or events file cannot be read
+is skipped; its ID is never given to a new campaign. A campaign whose record is
+`active` was active when the sidecar stopped: its store is opened and it is the active
+campaign again, without a mission load. More than one such campaign stops the start.
+
+A store is opened when a call first names its campaign, to read or to change it, and
+when it is activated. It stays open until the campaign is suspended or finished. Every
+open of a store writes it (it marks the store open), so an open that is not followed by
+a close counts as an unclean stop. A clean stop of the sidecar closes every open store;
+the active one takes a checkpoint first and keeps its state `active`. A stop after a
+panic closes nothing. A read-only open, for reading a finished campaign through the
+World and Events services, is S19's; until then the sidecar opens no finished store,
+and those services show a finished campaign's world as empty.
+
+### Timers
+
+While a campaign is active, the driver takes a checkpoint every `checkpoint_s` and
+starts a backup (`scheduled`) `backup_interval_h` after the newest backup kept, or
+after the activation when there is none. A checkpoint that fails stops the sidecar, as
+a failed store write does. A backup that fails is logged and taken again one interval
+later.
 
 ### Restore
 

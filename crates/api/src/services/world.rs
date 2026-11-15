@@ -296,7 +296,7 @@ impl WorldService for World {
         let f = req.get_ref().filter.as_ref();
         let filter = Filter::new(f, false)?;
         let (campaign, revision, entities) = {
-            let g = self.0.lock();
+            let mut g = self.0.lock();
             let campaign = g.resolve_read(f.map_or(0, |f| f.campaign_id))?;
             let (revision, entities) = snapshot(&g, campaign, &filter);
             (campaign, revision, entities)
@@ -331,7 +331,7 @@ impl WorldService for World {
         let every = period(&r, self.0.cfg.position_period_min)?;
         let named = r.filter.as_ref().map_or(0, |f| f.campaign_id);
         let mut watch = {
-            let g = self.0.lock();
+            let mut g = self.0.lock();
             let campaign = g.resolve_read(named)?;
             if g.active != Some(campaign) {
                 return Err(invalid(
@@ -427,7 +427,7 @@ impl WorldService for World {
         require(&req, Access::Observer)?;
         let f = req.get_ref().filter.as_ref();
         let filter = Filter::new(f, true)?;
-        let g = self.0.lock();
+        let mut g = self.0.lock();
         let campaign = g.resolve_read(f.map_or(0, |f| f.campaign_id))?;
         let (revision, entities) = snapshot(&g, campaign, &filter);
         Ok(Response::new(QueryAreaResponse {

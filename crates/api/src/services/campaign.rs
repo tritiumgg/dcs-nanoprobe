@@ -1,8 +1,12 @@
-//! `CampaignService` (plan 4.6). Campaigns are held in memory; step S18
-//! gives each its store file, and steps S18 and S19 build finish, export and
-//! delete and the mission load that activation implies.
+//! `CampaignService` (plan 4.6; spec/persistence.md, "Campaign
+//! operations"). With `[store]` on disk each campaign is a folder; step S19
+//! builds export and delete and the mission load that activation implies.
 
 use std::sync::Arc;
+
+use nanoprobe_sidecar::campaigns::{Backup, BackupReason};
+use nanoprobe_sidecar::ids::CampaignId;
+use prost::Message;
 
 use nanoprobe_proto::errors::status;
 use nanoprobe_proto::v1alpha1::campaign_service_server::CampaignService;
@@ -20,10 +24,39 @@ use tonic::{Code, Request, Response, Status};
 use super::Out;
 use crate::auth::{Access, require};
 use crate::convert::{invalid, not_built};
-use crate::hub::{Call, Hub, Inner, Need, wall_ms};
+use crate::hub::{Call, Hub, Inner, Need, disk_status, wall_ms};
 
 /// The service.
 pub struct Campaigns(pub Arc<Hub>);
+
+/// The refusal of a backup call with the stores in memory.
+fn in_memory() -> Status {
+    status(
+        Code::FailedPrecondition,
+        ErrorReason::Unspecified,
+        "the stores are in memory (`[store] enabled = false`): there are no backups",
+        0,
+        "",
+    )
+}
+
+fn backup_pb(b: &Backup) -> nanoprobe_proto::v1alpha1::Backup {
+    use nanoprobe_proto::v1alpha1::BackupReason as R;
+    nanoprobe_proto::v1alpha1::Backup {
+        id: b.number,
+        created: Some(prost_types::Timestamp {
+            seconds: i64::try_from(b.at_ms / 1000).unwrap_or(i64::MAX),
+            nanos: i32::try_from((b.at_ms % 1000) * 1_000_000).unwrap_or(0),
+        }),
+        size: b.size,
+        schema: b.schema,
+        reason: match b.reason {
+            BackupReason::Scheduled => R::Scheduled,
+            BackupReason::Manual => R::Manual,
+            BackupReason::PreMigration => R::PreMigration,
+        } as i32,
+    }
+}
 
 fn shown(g: &Inner, id: u64) -> PbCampaign {
     let mut c = g.campaigns[&id].meta.clone();
@@ -56,6 +89,11 @@ impl CampaignService for Campaigns {
         let mut hashed = r.clone();
         hashed.lease = None;
         let cfg = self.0.cfg.clone();
+        if r.activate {
+            self.0
+                .capture_live(r.idempotency.as_ref(), r.lease.as_ref(), 0)
+                .await;
+        }
         let resp = self
             .0
             .write(
@@ -110,9 +148,9 @@ impl CampaignService for Campaigns {
                         } else {
                             r.first_theater.clone()
                         },
-                    );
+                    )?;
                     if r.activate {
-                        g.activate(&cfg, id);
+                        g.activate(&cfg, id)?;
                     }
                     Ok((
                         CreateCampaignResponse {
@@ -142,7 +180,7 @@ impl CampaignService for Campaigns {
         req: Request<GetCampaignRequest>,
     ) -> Result<Response<GetCampaignResponse>, Status> {
         require(&req, Access::Observer)?;
-        let g = self.0.lock();
+        let mut g = self.0.lock();
         let id = g.resolve_read(req.get_ref().campaign_id)?;
         Ok(Response::new(GetCampaignResponse {
             campaign: Some(shown(&g, id)),
@@ -161,6 +199,13 @@ impl CampaignService for Campaigns {
         let mut hashed = r.clone();
         hashed.lease = None;
         let cfg = self.0.cfg.clone();
+        // A switch captures the campaign it suspends.
+        let switch = self.0.lock().active.is_some_and(|a| a != r.campaign_id);
+        if switch {
+            self.0
+                .capture_live(r.idempotency.as_ref(), r.lease.as_ref(), 0)
+                .await;
+        }
         let resp = self
             .0
             .write(
@@ -169,11 +214,11 @@ impl CampaignService for Campaigns {
                     key: r.idempotency.as_ref(),
                     lease: r.lease.as_ref(),
                     campaign: r.campaign_id,
-                    need: Need::Campaign,
+                    need: Need::Activate,
                 },
                 &hashed,
                 |g: &mut Inner, id| {
-                    g.activate(&cfg, id);
+                    g.activate(&cfg, id)?;
                     Ok((
                         ActivateCampaignResponse {
                             campaign: Some(shown(g, id)),
@@ -195,6 +240,9 @@ impl CampaignService for Campaigns {
         let mut hashed = r.clone();
         hashed.lease = None;
         let cfg = self.0.cfg.clone();
+        self.0
+            .capture_live(r.idempotency.as_ref(), r.lease.as_ref(), r.campaign_id)
+            .await;
         let resp = self
             .0
             .write(
@@ -207,7 +255,7 @@ impl CampaignService for Campaigns {
                 },
                 &hashed,
                 |g: &mut Inner, id| {
-                    g.suspend(&cfg, id);
+                    g.suspend(&cfg, id, None);
                     Ok((
                         SuspendCampaignResponse {
                             campaign: Some(shown(g, id)),
@@ -222,9 +270,40 @@ impl CampaignService for Campaigns {
 
     async fn finish_campaign(
         &self,
-        _req: Request<FinishCampaignRequest>,
+        req: Request<FinishCampaignRequest>,
     ) -> Result<Response<FinishCampaignResponse>, Status> {
-        Err(not_built("FinishCampaign"))
+        require(&req, Access::Controller)?;
+        let r = req.into_inner();
+        let mut hashed = r.clone();
+        hashed.lease = None;
+        let cfg = self.0.cfg.clone();
+        self.0
+            .capture_live(r.idempotency.as_ref(), r.lease.as_ref(), r.campaign_id)
+            .await;
+        let resp = self
+            .0
+            .write(
+                Call {
+                    method: "FinishCampaign",
+                    key: r.idempotency.as_ref(),
+                    lease: r.lease.as_ref(),
+                    campaign: r.campaign_id,
+                    need: Need::Campaign,
+                },
+                &hashed,
+                |g: &mut Inner, id| {
+                    let outcome = r.outcome.clone().unwrap_or_default().encode_to_vec();
+                    g.suspend(&cfg, id, Some(outcome));
+                    Ok((
+                        FinishCampaignResponse {
+                            campaign: Some(shown(g, id)),
+                        },
+                        id,
+                    ))
+                },
+            )
+            .await?;
+        Ok(Response::new(resp))
     }
 
     async fn export_campaign(
@@ -243,15 +322,105 @@ impl CampaignService for Campaigns {
 
     async fn backup_campaign(
         &self,
-        _req: Request<BackupCampaignRequest>,
+        req: Request<BackupCampaignRequest>,
     ) -> Result<Response<BackupCampaignResponse>, Status> {
-        Err(not_built("BackupCampaign"))
+        require(&req, Access::Controller)?;
+        let r = req.into_inner();
+        let mut hashed = r.clone();
+        hashed.lease = None;
+        // The copy runs on a worker thread, without the lock; the call
+        // answers when it is done (spec/persistence.md, "Backups"). A call
+        // whose key is answered skips it and gets the first answer.
+        let mut named = r.campaign_id;
+        let taken = match self
+            .0
+            .backup_start(r.idempotency.as_ref(), r.lease.as_ref(), r.campaign_id)
+            .await?
+        {
+            None => None,
+            Some((files, id, revision)) => {
+                // The answer names the campaign copied, whatever is active
+                // by then.
+                named = id;
+                let at = wall_ms();
+                let b = tokio::task::spawn_blocking(move || {
+                    files.backup(CampaignId(id), at, revision, BackupReason::Manual)
+                })
+                .await;
+                self.0.lock().backing_up.remove(&id);
+                Some(match b {
+                    Ok(b) => b.map_err(|e| disk_status(id, &e)),
+                    Err(_) => Err(disk_status(
+                        id,
+                        &nanoprobe_sidecar::store::DiskError::Corrupt(
+                            "the backup worker panicked".into(),
+                        ),
+                    )),
+                })
+            }
+        };
+        let resp = self
+            .0
+            .write(
+                Call {
+                    method: "BackupCampaign",
+                    key: r.idempotency.as_ref(),
+                    lease: r.lease.as_ref(),
+                    campaign: named,
+                    need: Need::Campaign,
+                },
+                &hashed,
+                |g: &mut Inner, id| {
+                    g.files().ok_or_else(in_memory)?;
+                    let b = taken.ok_or_else(|| {
+                        status(
+                            Code::Aborted,
+                            ErrorReason::Unspecified,
+                            "the backup was not taken; call again",
+                            0,
+                            "",
+                        )
+                    })??;
+                    Ok((
+                        BackupCampaignResponse {
+                            backup: Some(backup_pb(&b)),
+                        },
+                        id,
+                    ))
+                },
+            )
+            .await?;
+        Ok(Response::new(resp))
     }
 
     async fn list_campaign_backups(
         &self,
-        _req: Request<ListCampaignBackupsRequest>,
+        req: Request<ListCampaignBackupsRequest>,
     ) -> Result<Response<ListCampaignBackupsResponse>, Status> {
-        Err(not_built("ListCampaignBackups"))
+        require(&req, Access::Observer)?;
+        let (files, id) = {
+            let g = self.0.lock();
+            // Listing reads the folder; it does not open the store.
+            let id = match req.get_ref().campaign_id {
+                0 => g.active,
+                n => g.campaigns.contains_key(&n).then_some(n),
+            }
+            .ok_or_else(|| {
+                status(
+                    Code::NotFound,
+                    ErrorReason::CampaignNotFound,
+                    "no such campaign, or none is active",
+                    0,
+                    "campaign_id",
+                )
+            })?;
+            (g.files().cloned().ok_or_else(in_memory)?, id)
+        };
+        let backups = files
+            .backups(CampaignId(id))
+            .map_err(|e| disk_status(id, &e))?;
+        Ok(Response::new(ListCampaignBackupsResponse {
+            backups: backups.iter().map(backup_pb).collect(),
+        }))
     }
 }

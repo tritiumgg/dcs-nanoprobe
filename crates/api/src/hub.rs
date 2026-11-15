@@ -14,12 +14,18 @@ use std::time::{Duration, Instant, SystemTime};
 
 use nanoprobe_proto::errors::status;
 use nanoprobe_proto::v1alpha1::{self as pb, ErrorReason, Health, event};
-use nanoprobe_sidecar::ids::CampaignId;
+use nanoprobe_sidecar::campaigns::{Backup, BackupReason, Campaigns};
+use nanoprobe_sidecar::eventfile::EventFile;
+use nanoprobe_sidecar::ids::{CampaignId, EntityId};
 use nanoprobe_sidecar::players::{Ctx as RosterCtx, Keyring, Roster, Unmanaged};
 use nanoprobe_sidecar::reconciler::{Config as RecConfig, EffectResult, Reconciler};
+use nanoprobe_sidecar::server::{ServerStore, StoreLock};
 use nanoprobe_sidecar::sim::wire::{Body, Command, Input};
 use nanoprobe_sidecar::sim::{Detached, RawRecord, SimAdapter};
-use nanoprobe_sidecar::store::{LostPolicy, Outcome, Store};
+use nanoprobe_sidecar::store::{
+    CampaignRecord, CampaignState, Checkpoint, DiskError, LostPolicy, Outcome, Store, TierPeriod,
+    checkpoint_of,
+};
 use nanoprobe_transport::records::CommandHeader;
 use prost::Message;
 use tokio::sync::{Notify, watch};
@@ -63,7 +69,17 @@ pub trait Backend: Send + 'static {
     fn as_any(&mut self) -> Option<&mut dyn std::any::Any> {
         None
     }
+    /// The periods the sampling tiers achieve now, in seconds: position,
+    /// vitals, ammunition, warehouse, enumeration (the agent's metrics,
+    /// spec/transport.md); `None` when unknown.
+    fn achieved(&self) -> Option<[f64; 5]> {
+        None
+    }
 }
+
+/// The sampling tiers by their `SampleRates` field names, in the order of
+/// [`Backend::achieved`].
+const TIERS: [&str; 5] = ["position", "vitals", "ammo", "warehouse", "enumeration"];
 
 /// One campaign: its description, its store and what the API keeps beside
 /// the store.
@@ -79,6 +95,11 @@ pub struct Slot {
     pub on_lost: LostPolicy,
     /// The theater its next activation loads.
     pub theater: String,
+    /// For a campaign on disk, whether `store` is its file, opened. One not
+    /// opened holds an empty store in memory; the first call that names it
+    /// opens it (spec/persistence.md, "Campaign operations"). Always true
+    /// for a campaign in memory.
+    pub opened: bool,
 }
 
 /// A moderation call sent to DCS, waiting for its result. An applied one
@@ -130,6 +151,46 @@ pub struct Inner {
     /// A `CAMPAIGN 0` is owed to the agent: no campaign is active and the
     /// last `HELLO` named one (spec/commands.md).
     clear_campaign: bool,
+    /// The campaign folders, with `[store]` on disk.
+    files: Option<Campaigns>,
+    /// When the active campaign's next checkpoint is due, wall ms.
+    next_checkpoint_ms: u64,
+    /// When the active campaign's next scheduled backup is due, wall ms.
+    next_backup_ms: u64,
+    /// Why the last scheduled backup failed, empty when it did not. A
+    /// failed backup is taken again at the next interval.
+    pub backup_error: String,
+    /// Campaign folders that could not be read at start, with why. Their IDs
+    /// are never given to a new campaign.
+    pub unreadable: Vec<(u64, String)>,
+    /// The highest command epoch used, the floor of the next.
+    epoch_floor: u64,
+    /// When the event retention next runs, wall ms.
+    next_retention_ms: u64,
+    /// The scheduled backup running on a worker thread.
+    backup_job: Option<BackupJob>,
+    /// Campaigns with a backup running: one at a time each.
+    pub backing_up: std::collections::BTreeSet<u64>,
+    /// The server store, with `[store]` on disk.
+    pub server: Option<ServerStore>,
+    /// The lock on the store dir, held while the hub lives.
+    lock: Option<StoreLock>,
+    /// `idempotency_keep_h`.
+    idem_keep: Duration,
+    /// Stores to close at the end of the call that suspended or finished
+    /// them.
+    closing: Vec<(u64, CampaignState, Option<Vec<u8>>)>,
+    /// Fault injection for tests: the next driver step panics after its
+    /// events commit and before any store write, as a crash there would stop
+    /// the sidecar.
+    #[doc(hidden)]
+    pub crash_after_events: bool,
+}
+
+/// A scheduled backup on its worker thread.
+struct BackupJob {
+    campaign: u64,
+    handle: std::thread::JoinHandle<Result<Backup, DiskError>>,
 }
 
 /// The shared state and its wake-ups.
@@ -152,6 +213,10 @@ pub enum Need {
     Campaign,
     /// The active campaign: the call acts on DCS.
     Active,
+    /// A campaign to activate: as `Campaign`, but its store is not opened
+    /// here; the activation opens it after it suspends the active one
+    /// (spec/persistence.md, "Campaign operations").
+    Activate,
 }
 
 /// A changing call, as [`Hub::write`] runs it.
@@ -223,6 +288,10 @@ impl SimAdapter for Tee<'_> {
         self.seen.extend(v.iter().cloned());
         v
     }
+
+    fn flush(&mut self) {
+        self.inner.flush();
+    }
 }
 
 impl Inner {
@@ -248,9 +317,13 @@ impl Inner {
         self.moderation.clear();
         self.roster.want_resync();
         self.sidecar_boot += 1;
+        let floor = self.epoch_floor;
         self.rec = self.active.map(|id| {
             let rc = self.rec_config(cfg, id);
-            Reconciler::new(rc, &self.campaigns[&id].store)
+            let store = &mut self.campaigns.get_mut(&id).expect("active campaign").store;
+            // The epoch outlives the campaign (spec/commands.md).
+            store.seed_epoch(floor);
+            Reconciler::new(rc, store)
         });
         self.backend.attach(self.sidecar_boot);
     }
@@ -270,17 +343,40 @@ impl Inner {
         Some(f(rec, &mut slot.store, self.backend.sim()))
     }
 
-    /// Put an event read from the agent in its log: the campaign of the
-    /// frame it was made in when the server holds that campaign, otherwise
-    /// the server log.
-    fn log(&mut self, r: Read) {
-        match self.campaigns.get_mut(&r.campaign) {
-            Some(slot) if r.campaign != 0 => {
-                slot.events.push(r.campaign, r.stamp, r.body);
+    /// Put the events read from one agent record in their log: the campaign
+    /// of the frame they were made in when the server holds that campaign,
+    /// otherwise the server log.
+    ///
+    /// Events whose agent record is in the log already are not appended
+    /// again: the record was read again after a crash between the events
+    /// commit and the store commit (spec/persistence.md).
+    fn log(&mut self, reads: Vec<Read>, source: (u64, u64)) {
+        let Some(first) = reads.first() else {
+            return;
+        };
+        let (campaign, log) = match self.campaigns.get_mut(&first.campaign) {
+            Some(slot) if first.campaign != 0 => (first.campaign, &mut slot.events),
+            _ => (0, &mut self.server_log),
+        };
+        let source = (source.0 != 0).then(|| format!("{}:{}", source.0, source.1));
+        if let Some(s) = source.as_deref() {
+            match log.has_source(s) {
+                Ok(false) => {}
+                Ok(true) => return,
+                Err(e) => panic!("the event log could not be read, stopping: {e}"),
             }
-            _ => {
-                self.server_log.push(0, r.stamp, r.body);
-            }
+        }
+        // Every event of one record goes to the same log: they share its
+        // frame's campaign.
+        // The first event's key is the record's; the others are numbered,
+        // since a source is unique (spec/persistence.md, "Event history").
+        for (i, r) in reads.into_iter().enumerate() {
+            let key = match (&source, i) {
+                (Some(s), 0) => Some(s.clone()),
+                (Some(s), i) => Some(format!("{s}:{i}")),
+                (None, _) => None,
+            };
+            log.push_from(campaign, r.stamp, r.body, key);
         }
     }
 
@@ -296,8 +392,9 @@ impl Inner {
         }
     }
 
-    /// One driver step: a frame, then every record read and folded in.
-    fn step(&mut self) {
+    /// One driver step: a frame, every record read and folded in, then the
+    /// checkpoint and backup timers.
+    fn step(&mut self, cfg: &Config) {
         self.backend.frame();
         let records = match (self.active, self.rec.as_mut()) {
             (Some(id), Some(rec)) => {
@@ -306,11 +403,19 @@ impl Inner {
                     inner: self.backend.sim(),
                     seen: Vec::new(),
                 };
-                rec.step(&mut slot.store, &mut tee);
+                rec.step_held(&mut slot.store, &mut tee);
                 // Route progress made from the samples just read.
                 let stamp = self.link.stamp();
                 for e in slot.store.take_route_events() {
-                    slot.events.push(id, stamp, route_body(&e));
+                    // Keyed, so a sample read again after a crash between
+                    // the two commits does not log it twice.
+                    let source = format!(
+                        "route:{}:{}:{}",
+                        e.group.0,
+                        e.order_rev,
+                        e.index.map_or_else(|| "end".to_owned(), |i| i.to_string())
+                    );
+                    push_once(&mut slot.events, id, stamp, route_body(&e), Some(source));
                 }
                 tee.seen
             }
@@ -359,23 +464,23 @@ impl Inner {
                 unit: &unit,
                 roster: Some(&self.roster),
             };
+            let mut group = Vec::new();
             if let Some(read) = self.link.read_with(r, &look) {
-                reads.push(read);
+                group.push(read);
             }
             for n in notes {
-                reads.push(Read {
+                group.push(Read {
                     campaign: self.link.frame_campaign,
                     stamp: self.link.stamp(),
                     body: player_body(n),
                 });
             }
+            reads.push((group, (r.agent_boot, r.number)));
         }
-        for read in reads {
-            self.log(read);
+        for (group, source) in reads {
+            self.log(group, source);
         }
-        // A pair learned in this step is written to the keyring file. A
-        // failed write is tried again at the next step.
-        let _ = self.roster.flush_keys();
+        self.save_keys();
         self.drive_players();
         // With no campaign active the agent must hold none: it idles, and
         // its records stamp campaign 0 (plan 4.6, "Suspend").
@@ -388,6 +493,28 @@ impl Inner {
             if self.backend.sim().send(op, &payload).is_ok() {
                 self.clear_campaign = false;
             }
+        }
+        // The events go to disk before any store write of the step, the
+        // checkpoint included.
+        self.commit_events();
+        if std::mem::take(&mut self.crash_after_events) {
+            panic!("injected: a crash between the events commit and the store commit");
+        }
+        self.timers(cfg);
+        self.settle(None);
+    }
+
+    /// Write the player keys learned since the last step to the server
+    /// store. A failed write is tried again at the next step.
+    fn save_keys(&mut self) {
+        let Some(server) = self.server.as_ref() else {
+            return;
+        };
+        for (key, ucid) in self.roster.keyring().unsaved() {
+            if server.put_player(&key, &ucid).is_err() {
+                return;
+            }
+            self.roster.keyring_mut().saved(&key);
         }
     }
 
@@ -450,8 +577,194 @@ impl Inner {
         }
     }
 
-    /// The campaign a call names: 0 resolves to the active one.
-    pub fn resolve(&self, id: u64, need: Need) -> Result<u64, Status> {
+    /// Keep a call's answer on disk (spec/persistence.md, "Idempotency
+    /// keys"): in the store of the campaign it acted on, written with its
+    /// change by the next commit, or in the server store for a call on no
+    /// campaign. Returns the campaign whose store took it.
+    pub(crate) fn remember(&mut self, key: &str, d: &idem::Digest32, done: &Done) -> Option<u64> {
+        let server = self.server.as_ref()?;
+        let row = nanoprobe_sidecar::store::IdemRow {
+            key: key.to_owned(),
+            at_ms: wall_ms(),
+            request_hash: d.to_vec(),
+            response: idem::encode_done(done),
+        };
+        match self.campaigns.get_mut(&done.campaign) {
+            Some(slot) if slot.opened && slot.store.on_disk() => {
+                slot.store.put_idempotency(row);
+                Some(done.campaign)
+            }
+            _ => {
+                if let Err(e) = server.put_idempotency(&row, None) {
+                    panic!("the server store could not be written, stopping: {e}");
+                }
+                None
+            }
+        }
+    }
+
+    /// A key's row in the server store's index, written before the commit
+    /// that writes the key in the campaign's store: an index row whose key
+    /// the store never got finds nothing, and the repeat runs as new.
+    pub(crate) fn index(&mut self, key: &str, placed: Option<u64>) {
+        let (Some(c), Some(server)) = (placed, self.server.as_ref()) else {
+            return;
+        };
+        let row = nanoprobe_sidecar::store::IdemRow {
+            key: key.to_owned(),
+            at_ms: wall_ms(),
+            request_hash: Vec::new(),
+            response: Vec::new(),
+        };
+        if let Err(e) = server.put_idempotency(&row, Some(c)) {
+            panic!("the server store could not be written, stopping: {e}");
+        }
+    }
+
+    /// A key a store remembers that the table in memory does not: through
+    /// the server store's index, or in the named campaign's store when the
+    /// index row was lost to a crash. Its digest, answer and age.
+    fn recall(&mut self, key: &str, named: u64) -> Option<(idem::Digest32, Done, Duration)> {
+        let server = self.server.as_ref()?;
+        let found = match server.idempotency(key) {
+            Ok(f) => f,
+            Err(e) => panic!("the server store could not be read, stopping: {e}"),
+        };
+        let row = match found {
+            Some(i) if i.campaign.is_none() => i.answer.map(|(h, r)| (h, r, i.at_ms)),
+            Some(i) => {
+                let c = i.campaign.unwrap_or(0);
+                self.stored_key(c, key)
+            }
+            None => {
+                let c = if named == 0 { self.active? } else { named };
+                self.stored_key(c, key)
+            }
+        }?;
+        let (hash, response, at_ms) = row;
+        let d: idem::Digest32 = hash.as_slice().try_into().ok()?;
+        let done = idem::decode_done(&response)?;
+        let age = Duration::from_millis(wall_ms().saturating_sub(at_ms));
+        // A key past `idempotency_keep_h` is forgotten: the call runs as new.
+        if age >= self.idem_keep {
+            return None;
+        }
+        Some((d, done, age))
+    }
+
+    /// A key kept in campaign `c`'s store, opening it if it is not finished.
+    fn stored_key(&mut self, c: u64, key: &str) -> Option<(Vec<u8>, Vec<u8>, u64)> {
+        let slot = self.campaigns.get(&c)?;
+        if slot.meta.state == pb::CampaignState::Finished as i32 {
+            // A finished store is read without being opened.
+            let path = self.files.as_ref()?.store_path(CampaignId(c));
+            return match nanoprobe_sidecar::store::idempotency_of(&path, key) {
+                Ok(r) => r.map(|r| (r.request_hash, r.response, r.at_ms)),
+                Err(e) => panic!("the store of campaign {c} could not be read, stopping: {e}"),
+            };
+        }
+        self.open_store(c).ok()?;
+        let row = match self.campaigns[&c].store.idempotency(key) {
+            Ok(r) => r?,
+            Err(e) => panic!("the store of campaign {c} could not be read, stopping: {e}"),
+        };
+        Some((row.request_hash, row.response, row.at_ms))
+    }
+
+    /// Read the campaign folders (see [`Hub::open`]).
+    fn load(&mut self, cfg: &Config, sf: &crate::config::StoreFiles) -> Result<(), String> {
+        // Two sidecars never write one store dir (spec/persistence.md).
+        self.lock = Some(
+            nanoprobe_sidecar::server::lock(&sf.dir)
+                .map_err(|e| format!("the store folder {}: {e}", sf.dir.display()))?,
+        );
+        let server = ServerStore::open(&sf.dir, wall_ms())
+            .map_err(|e| format!("the server store in {}: {e}", sf.dir.display()))?;
+        server
+            .migrate_players_json(&sf.dir)
+            .map_err(|e| format!("the server store in {}: {e}", sf.dir.display()))?;
+        self.roster = Roster::new(
+            keyring_of(&server)
+                .map_err(|e| format!("the server store in {}: {e}", sf.dir.display()))?,
+        );
+        let mut log = EventFile::open(&server.events_path(), 0)
+            .and_then(|f| EventLog::open(f, cfg.events_keep))
+            .map_err(|e| format!("the server event log: {e}"))?;
+        retain(&mut log, 0, sf.server_log_retention)
+            .map_err(|e| format!("the server event log: {e}"))?;
+        self.server_log = log;
+        self.epoch_floor = server.epoch();
+        self.server = Some(server);
+        let files = Campaigns::new(&sf.dir, cfg.world_changes_keep, sf.backup_keep)
+            .map_err(|e| format!("the store folder {}: {e}", sf.dir.display()))?;
+        let listed = files
+            .list()
+            .map_err(|e| format!("the store folder {}: {e}", sf.dir.display()))?;
+        let mut active = Vec::new();
+        for (id, r) in listed {
+            let path = files.store_path(id);
+            let read = r.and_then(|r| {
+                let (_, schema, _) = nanoprobe_sidecar::store::record_of(&path)?;
+                Ok((r, schema, checkpoint_of(&path)?))
+            });
+            let (record, schema, cp) = match read {
+                Ok(x) => x,
+                Err(e) => {
+                    self.unreadable.push((id.0, e.to_string()));
+                    continue;
+                }
+            };
+            let events = files.events(id).and_then(|f| {
+                let mut l = EventLog::open(f, cfg.events_keep)?;
+                // A finished campaign is read-only: its history is kept whole.
+                if record.state != CampaignState::Finished {
+                    retain(&mut l, id.0, sf.event_retention)?;
+                }
+                Ok(l)
+            });
+            let events = match events {
+                Ok(l) => l,
+                Err(e) => {
+                    self.unreadable.push((id.0, format!("events: {e}")));
+                    continue;
+                }
+            };
+            if record.state == CampaignState::Active {
+                active.push(id.0);
+            }
+            self.campaigns.insert(
+                id.0,
+                Slot {
+                    meta: meta_from(id.0, schema, &record, cp.as_ref()),
+                    store: Store::new(id, cfg.world_changes_keep),
+                    events,
+                    on_lost: self.on_lost,
+                    theater: record.theater.clone(),
+                    opened: false,
+                },
+            );
+        }
+        self.files = Some(files);
+        match active.as_slice() {
+            [] => {}
+            [id] => {
+                self.open_store(*id).map_err(|e| e.message().to_owned())?;
+                self.active = Some(*id);
+                self.start_timers(cfg, *id);
+            }
+            many => {
+                return Err(format!(
+                    "more than one campaign is marked active: {many:?}; suspend all but one \
+                     by restoring a backup, or remove the extra folders"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The campaign a call names: 0 resolves to the active one. A campaign
+    /// on disk that is not finished is opened.
+    pub fn resolve(&mut self, id: u64, need: Need) -> Result<u64, Status> {
         if need == Need::Nothing && id == 0 {
             return Ok(self.active.unwrap_or(0));
         }
@@ -477,14 +790,18 @@ impl Inner {
                 "campaign_id",
             )
         })?;
-        if need != Need::Nothing && slot.meta.state == pb::CampaignState::Finished as i32 {
-            return Err(status(
-                Code::FailedPrecondition,
-                ErrorReason::CampaignReadOnly,
-                format!("campaign {id} is finished"),
-                0,
-                "campaign_id",
-            ));
+        if slot.meta.state == pb::CampaignState::Finished as i32 {
+            if need != Need::Nothing {
+                return Err(status(
+                    Code::FailedPrecondition,
+                    ErrorReason::CampaignReadOnly,
+                    format!("campaign {id} is finished"),
+                    0,
+                    "campaign_id",
+                ));
+            }
+        } else if need != Need::Activate {
+            self.open_store(id)?;
         }
         if need == Need::Active && self.active != Some(id) {
             return Err(status(
@@ -499,7 +816,7 @@ impl Inner {
     }
 
     /// The campaign a read names, active or not; 0 is the active one.
-    pub fn resolve_read(&self, id: u64) -> Result<u64, Status> {
+    pub fn resolve_read(&mut self, id: u64) -> Result<u64, Status> {
         self.resolve(id, Need::Campaign).or_else(|e| {
             // Reads accept a finished campaign.
             if nanoprobe_proto::errors::reason(&e) == ErrorReason::CampaignReadOnly {
@@ -510,69 +827,700 @@ impl Inner {
         })
     }
 
-    /// A new campaign's ID (spec/world.md, "Identities"): the wall clock in
-    /// milliseconds, or one more than the newest.
-    pub fn new_campaign_id(&self) -> u64 {
-        let newest = self.campaigns.keys().next_back().copied().unwrap_or(0);
-        wall_ms().max(newest + 1)
+    /// The campaign folders, when the stores are on disk.
+    pub fn files(&self) -> Option<&Campaigns> {
+        self.files.as_ref()
     }
 
-    /// Add a campaign, suspended, to be loaded on `theater`.
-    pub fn add_campaign(&mut self, cfg: &Config, meta: pb::Campaign, theater: String) {
+    /// Open a campaign's store file if it is on disk and not open yet
+    /// (and migrate it, spec/persistence.md). A finished store is never
+    /// opened.
+    fn open_store(&mut self, id: u64) -> Result<(), Status> {
+        let Some(files) = self.files.as_ref() else {
+            return Ok(());
+        };
+        let Some(slot) = self.campaigns.get_mut(&id) else {
+            return Ok(());
+        };
+        if slot.opened {
+            return Ok(());
+        }
+        let store = files
+            .open(CampaignId(id), wall_ms())
+            .map_err(|e| disk_status(id, &e))?;
+        slot.meta.last_checkpoint = store.last_checkpoint().map(checkpoint_info);
+        // Its keys go into the server store's index: one written by a call
+        // whose index row a crash lost is found again.
+        let since = wall_ms().saturating_sub(ms(self.idem_keep));
+        let keys = store
+            .idempotency_since(since)
+            .map_err(|e| disk_status(id, &e))?;
+        slot.store = store;
+        slot.opened = true;
+        if let Some(server) = self.server.as_ref() {
+            for (key, at_ms) in keys {
+                let row = nanoprobe_sidecar::store::IdemRow {
+                    key,
+                    at_ms,
+                    request_hash: Vec::new(),
+                    response: Vec::new(),
+                };
+                server
+                    .put_idempotency(&row, Some(id))
+                    .map_err(|e| disk_status(id, &e))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Write a campaign's store, if it is open on disk. A failure stops the
+    /// sidecar through its panic path (spec/persistence.md, "Writes").
+    fn commit(&mut self, id: u64) {
+        if let Some(slot) = self.campaigns.get_mut(&id)
+            && slot.opened
+            && let Err(e) = slot.store.commit()
+        {
+            panic!("the store of campaign {id} could not be written, stopping: {e}");
+        }
+    }
+
+    /// End a step or a call: write the store of the campaign it acted on
+    /// and of the active one, then let the commands it sent through
+    /// (spec/persistence.md, "Writes"). An acknowledged change is on disk
+    /// before the call answers, and a command before it reaches DCS.
+    fn settle(&mut self, acted: Option<u64>) {
+        // The events first, then the stores (spec/persistence.md, "A crash
+        // between the two commits").
+        self.commit_events();
+        for (id, state, outcome) in std::mem::take(&mut self.closing) {
+            self.close_store(id, state, outcome);
+        }
+        if let Some(a) = self.active {
+            self.epoch_floor = self.epoch_floor.max(self.campaigns[&a].store.epoch());
+        }
+        if let Some(id) = acted {
+            self.commit(id);
+        }
+        if let Some(a) = self.active
+            && Some(a) != acted
+        {
+            self.commit(a);
+        }
+        // A new epoch is on disk before a command of it reaches DCS.
+        if let Some(server) = self.server.as_mut() {
+            server.raise_epoch(self.epoch_floor);
+            if let Err(e) = server.commit() {
+                panic!("the server store could not be written, stopping: {e}");
+            }
+        }
+        self.backend.sim().flush();
+    }
+
+    /// The periods the sampling tiers achieve now, with the targets the
+    /// campaign set; none when the backend does not know them.
+    fn achieved(&self, id: u64) -> Vec<TierPeriod> {
+        let Some(periods) = self.backend.achieved() else {
+            return Vec::new();
+        };
+        let targets = self
+            .campaigns
+            .get(&id)
+            .and_then(|s| s.store.rates())
+            .map(|r| {
+                [
+                    r.position_s,
+                    r.vitals_s,
+                    r.ammo_s,
+                    r.warehouse_s,
+                    r.enumeration_s,
+                ]
+            })
+            .unwrap_or_default();
+        TIERS
+            .iter()
+            .zip(periods)
+            .zip(targets)
+            .map(|((tier, achieved_s), target_s)| TierPeriod {
+                tier: (*tier).to_owned(),
+                target_s,
+                achieved_s,
+            })
+            .collect()
+    }
+
+    /// Close a campaign's store with a final checkpoint and `state`
+    /// (spec/persistence.md, "Campaign operations"); the slot then holds an
+    /// empty store until the campaign is opened again. Nothing for a store
+    /// in memory or one not open. A failure stops the sidecar.
+    fn close_store(&mut self, id: u64, state: CampaignState, outcome: Option<Vec<u8>>) {
+        let achieved = self.achieved(id);
+        let (Some(files), Some(slot)) = (self.files.as_ref(), self.campaigns.get_mut(&id)) else {
+            return;
+        };
+        if !slot.opened {
+            return;
+        }
+        let at = wall_ms();
+        let r = match outcome {
+            Some(o) => files.finish(&mut slot.store, at, achieved, o),
+            None if state == CampaignState::Finished => {
+                files.finish(&mut slot.store, at, achieved, Vec::new())
+            }
+            None => files.suspend(&mut slot.store, at, achieved),
+        };
+        if let Err(e) = r {
+            panic!("campaign {id} could not be closed, stopping: {e}");
+        }
+        slot.meta.last_checkpoint = slot.store.last_checkpoint().map(checkpoint_info);
+        slot.store = Store::new(CampaignId(id), files.changes_keep());
+        slot.opened = false;
+    }
+
+    /// Set the state in an open store's campaign record and write it.
+    fn set_state(&mut self, id: u64, state: CampaignState) {
+        let Some(slot) = self.campaigns.get_mut(&id) else {
+            return;
+        };
+        if !slot.opened || !slot.store.on_disk() {
+            return;
+        }
+        let Some(mut r) = slot.store.record().cloned() else {
+            return;
+        };
+        r.state = state;
+        if let Err(e) = slot.store.set_record(r) {
+            panic!("the store of campaign {id} could not be written, stopping: {e}");
+        }
+    }
+
+    /// Start the checkpoint and backup timers of the campaign just made
+    /// active: a checkpoint `checkpoint_s` from now, a backup
+    /// `backup_interval_h` after the newest one kept, or from now.
+    fn start_timers(&mut self, cfg: &Config, id: u64) {
+        let (Some(files), Some(sf)) = (self.files.as_ref(), cfg.store.as_ref()) else {
+            return;
+        };
+        let now = wall_ms();
+        let newest = files
+            .backups(CampaignId(id))
+            .ok()
+            .and_then(|b| b.last().map(|b| b.at_ms))
+            .unwrap_or(now);
+        self.next_checkpoint_ms = now.saturating_add(ms(sf.checkpoint));
+        self.next_backup_ms = newest.saturating_add(ms(sf.backup_interval));
+    }
+
+    /// The active campaign's checkpoint and scheduled backup, when due. A
+    /// checkpoint that fails stops the sidecar; a backup that fails is
+    /// reported in `backup_error` and taken again at the next interval.
+    fn timers(&mut self, cfg: &Config) {
+        let Some(sf) = cfg.store.as_ref() else {
+            return;
+        };
+        let now = wall_ms();
+        self.collect_backup(false);
+        if now >= self.next_retention_ms {
+            // Every hour, each log of a campaign not finished.
+            for slot in self.campaigns.values_mut() {
+                if slot.meta.state != pb::CampaignState::Finished as i32
+                    && let Err(e) = retain(&mut slot.events, slot.meta.id, sf.event_retention)
+                {
+                    panic!(
+                        "the event log of campaign {} could not be written, stopping: {e}",
+                        slot.meta.id
+                    );
+                }
+            }
+            if let Err(e) = retain(&mut self.server_log, 0, sf.server_log_retention) {
+                panic!("the server event log could not be written, stopping: {e}");
+            }
+            // Keys past `idempotency_keep_h`, from every store.
+            let before = now.saturating_sub(ms(self.idem_keep));
+            for slot in self.campaigns.values_mut() {
+                if slot.opened
+                    && let Err(e) = slot.store.prune_idempotency(before)
+                {
+                    panic!(
+                        "the store of campaign {} could not be written, stopping: {e}",
+                        slot.meta.id
+                    );
+                }
+            }
+            if let Some(server) = self.server.as_ref()
+                && let Err(e) = server.prune_idempotency(before)
+            {
+                panic!("the server store could not be written, stopping: {e}");
+            }
+            self.next_retention_ms = now.saturating_add(RETENTION_EVERY_MS);
+        }
+        let Some(id) = self.active else {
+            return;
+        };
+        if !self.campaigns.get(&id).is_some_and(|s| s.opened) {
+            return;
+        }
+        if now >= self.next_checkpoint_ms {
+            let achieved = self.achieved(id);
+            let slot = self.campaigns.get_mut(&id).expect("active campaign");
+            match slot.store.checkpoint(now, achieved) {
+                Ok(c) => slot.meta.last_checkpoint = Some(checkpoint_info(&c)),
+                Err(e) => panic!("campaign {id} could not be checkpointed, stopping: {e}"),
+            }
+            self.next_checkpoint_ms = now.saturating_add(ms(sf.checkpoint));
+        }
+        if now >= self.next_backup_ms && !self.backing_up.contains(&id) {
+            // The copy reads the file: write the store and its events first.
+            self.commit_events();
+            self.commit(id);
+            let files = self.files.clone().expect("files with a store on disk");
+            let revision = self.campaigns[&id].store.revision();
+            self.backing_up.insert(id);
+            // The server store is backed up on the same schedule; its
+            // revision is the epoch.
+            let server = self
+                .server
+                .as_ref()
+                .map(|s| (s.backup_folder(sf.backup_keep), s.epoch()));
+            let handle = std::thread::spawn(move || {
+                let b = files.backup(CampaignId(id), now, revision, BackupReason::Scheduled)?;
+                if let Some((folder, epoch)) = server {
+                    folder.take(
+                        now,
+                        nanoprobe_sidecar::server::SCHEMA,
+                        epoch,
+                        BackupReason::Scheduled,
+                    )?;
+                }
+                Ok(b)
+            });
+            self.backup_job = Some(BackupJob {
+                campaign: id,
+                handle,
+            });
+            self.next_backup_ms = now.saturating_add(ms(sf.backup_interval));
+        }
+    }
+
+    /// Take the scheduled backup's result once its worker is done, or wait
+    /// for it with `wait`. A failure is recorded in `backup_error` and the
+    /// backup is taken again at the next interval.
+    fn collect_backup(&mut self, wait: bool) {
+        let done = self
+            .backup_job
+            .as_ref()
+            .is_some_and(|j| wait || j.handle.is_finished());
+        if !done {
+            return;
+        }
+        let job = self.backup_job.take().expect("a job");
+        self.backing_up.remove(&job.campaign);
+        self.backup_error = match job.handle.join() {
+            Ok(Ok(_)) => String::new(),
+            Ok(Err(e)) => format!("campaign {}: {e}", job.campaign),
+            Err(_) => format!("campaign {}: the backup worker panicked", job.campaign),
+        };
+        if !self.backup_error.is_empty() {
+            eprintln!("nanoprobe: scheduled backup failed: {}", self.backup_error);
+        }
+    }
+
+    /// Write every event log's appended events.
+    fn commit_events(&mut self) {
+        for slot in self.campaigns.values_mut() {
+            if let Err(e) = slot.events.commit() {
+                panic!(
+                    "the event log of campaign {} could not be written, stopping: {e}",
+                    slot.meta.id
+                );
+            }
+        }
+        if let Err(e) = self.server_log.commit() {
+            panic!("the server event log could not be written, stopping: {e}");
+        }
+    }
+
+    /// A new campaign's ID (spec/world.md, "Identities" and "Names"): the
+    /// wall clock in milliseconds, or one more than the newest campaign,
+    /// moved forward until its tag is free. Every campaign the stores know
+    /// counts: those listed, finished ones included, folders that could not
+    /// be read, and the deleted ones and the index entries of the server
+    /// store.
+    pub fn new_campaign_id(&self) -> u64 {
+        let mut existing: Vec<CampaignId> = self
+            .campaigns
+            .keys()
+            .copied()
+            .chain(self.unreadable.iter().map(|(id, _)| *id))
+            // A folder named past the largest ID is no campaign.
+            .filter(|id| *id <= nanoprobe_sidecar::ids::MAX_ID)
+            .map(CampaignId)
+            .collect();
+        if let Some(server) = self.server.as_ref() {
+            match server.known_campaigns() {
+                Ok(ids) => existing.extend(ids.into_iter().map(CampaignId)),
+                Err(e) => panic!("the server store could not be read, stopping: {e}"),
+            }
+        }
+        nanoprobe_sidecar::ids::new_campaign(wall_ms(), &existing).0
+    }
+
+    /// Add a campaign, suspended, to be loaded on `theater`. With the
+    /// stores on disk its folder is made, its store opened.
+    pub fn add_campaign(
+        &mut self,
+        cfg: &Config,
+        meta: pb::Campaign,
+        theater: String,
+    ) -> Result<(), Status> {
         let id = meta.id;
+        let (store, events) = match self.files.as_ref() {
+            Some(files) => {
+                let record = record_from(&meta, &theater);
+                let store = files
+                    .create(CampaignId(id), record)
+                    .map_err(|e| disk_status(id, &e))?;
+                let events = files
+                    .events(CampaignId(id))
+                    .and_then(|f| EventLog::open(f, cfg.events_keep))
+                    .map_err(|e| disk_status(id, &e))?;
+                (store, events)
+            }
+            None => (
+                Store::new(CampaignId(id), cfg.world_changes_keep),
+                EventLog::new(cfg.events_keep),
+            ),
+        };
         self.campaigns.insert(
             id,
             Slot {
                 meta,
-                store: Store::new(CampaignId(id), cfg.world_changes_keep),
-                events: EventLog::new(cfg.events_keep),
+                store,
+                events,
                 on_lost: self.on_lost,
                 theater,
+                opened: true,
             },
         );
+        Ok(())
     }
 
-    /// Make a campaign the active one, suspending the one before.
-    pub fn activate(&mut self, cfg: &Config, id: u64) {
+    /// Tell the agent no campaign is active (`CAMPAIGN 0`), now if it is
+    /// attached, otherwise after its next `HELLO`.
+    fn send_no_campaign(&mut self) {
+        let (op, payload) = Command {
+            header: CommandHeader::default(),
+            body: Body::Campaign(0),
+        }
+        .encode();
+        if self.backend.sim().send(op, &payload).is_err() {
+            self.clear_campaign = true;
+        }
+    }
+
+    /// Make a campaign the active one, suspending the one before. The
+    /// caller resolved `id`, which opened its store.
+    pub fn activate(&mut self, cfg: &Config, id: u64) -> Result<(), Status> {
         if self.active == Some(id) {
-            return;
+            return Ok(());
         }
-        if let Some(old) = self.active.take()
-            && let Some(s) = self.campaigns.get_mut(&old)
-        {
-            s.meta.state = pb::CampaignState::Suspended as i32;
-            s.meta.loaded_theater.clear();
+        if let Some(old) = self.active.take() {
+            self.close_store(old, CampaignState::Suspended, None);
+            if let Some(s) = self.campaigns.get_mut(&old) {
+                s.meta.state = pb::CampaignState::Suspended as i32;
+                s.meta.loaded_theater.clear();
+            }
         }
+        // Opened after the suspend: if the open fails, no campaign is active.
+        if let Err(e) = self.open_store(id) {
+            self.send_no_campaign();
+            self.restart(cfg);
+            return Err(e);
+        }
+        self.set_state(id, CampaignState::Active);
         let mut theater = String::new();
         if let Some(s) = self.campaigns.get_mut(&id) {
             s.meta.state = pb::CampaignState::Active as i32;
             theater = s.theater.clone();
         }
         self.active = Some(id);
+        self.start_timers(cfg, id);
         self.restart(cfg);
         // A campaign is restored on the path of a mission load: the
         // reconciler learns the loaded theater from the load's LIFECYCLE.
         self.backend.load_mission(&theater);
+        Ok(())
     }
 
-    /// Suspend a campaign. DCS keeps running whatever it holds, unmanaged.
-    pub fn suspend(&mut self, cfg: &Config, id: u64) {
+    /// Suspend a campaign, or finish it with `outcome` (the encoded
+    /// `google.protobuf.Struct`). The active one first tells the agent no
+    /// campaign is active; then its store takes a final checkpoint and is
+    /// closed (spec/persistence.md, "Campaign operations"). DCS keeps
+    /// running whatever it holds, unmanaged. The caller captured the live
+    /// groups before.
+    pub fn suspend(&mut self, cfg: &Config, id: u64, outcome: Option<Vec<u8>>) {
+        let finished = outcome.is_some();
+        if self.active == Some(id) {
+            self.send_no_campaign();
+        }
+        let state = if finished {
+            CampaignState::Finished
+        } else {
+            CampaignState::Suspended
+        };
+        // Closed at the end of the call, so the call's key goes into the
+        // store in the closing transaction (spec/persistence.md,
+        // "Idempotency keys").
+        self.closing.push((id, state, outcome.clone()));
         if let Some(s) = self.campaigns.get_mut(&id) {
-            s.meta.state = pb::CampaignState::Suspended as i32;
+            s.meta.state = if finished {
+                pb::CampaignState::Finished as i32
+            } else {
+                pb::CampaignState::Suspended as i32
+            };
             s.meta.loaded_theater.clear();
+            if let Some(o) = outcome {
+                s.meta.outcome = prost_types::Struct::decode(o.as_slice()).ok();
+            }
         }
         if self.active == Some(id) {
             self.active = None;
             self.restart(cfg);
         }
     }
+
+    /// Close every open store cleanly, for a sidecar that stops: the active
+    /// one with a checkpoint, keeping its state, so the next start resumes
+    /// it. A failure is returned; the rest are still closed.
+    pub fn close_all(&mut self) -> Result<(), String> {
+        self.collect_backup(true);
+        for (id, state, outcome) in std::mem::take(&mut self.closing) {
+            self.close_store(id, state, outcome);
+        }
+        let mut errors = Vec::new();
+        for slot in self.campaigns.values_mut() {
+            if let Err(e) = slot.events.commit() {
+                errors.push(format!("events of campaign {}: {e}", slot.meta.id));
+            }
+        }
+        if let Err(e) = self.server_log.commit() {
+            errors.push(format!("server events: {e}"));
+        }
+        if let Some(server) = self.server.as_mut() {
+            server.raise_epoch(self.epoch_floor);
+            if let Err(e) = server.close() {
+                errors.push(format!("server store: {e}"));
+            }
+        }
+        // The next sidecar may take the store dir, even while handlers of
+        // this one still hold the hub.
+        self.lock = None;
+        let ids: Vec<u64> = self.campaigns.keys().copied().collect();
+        for id in ids {
+            let achieved = self.achieved(id);
+            let Some(slot) = self.campaigns.get_mut(&id) else {
+                continue;
+            };
+            if !slot.opened || !slot.store.on_disk() {
+                continue;
+            }
+            let r = if self.active == Some(id) {
+                slot.store
+                    .checkpoint(wall_ms(), achieved)
+                    .map(|_| ())
+                    .and_then(|()| slot.store.close())
+            } else {
+                slot.store.close()
+            };
+            if let Err(e) = r {
+                errors.push(format!("campaign {id}: {e}"));
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+}
+
+/// Apply the event retention to a log (spec/persistence.md, "Event
+/// history"). A clock behind the newest event deletes nothing and is logged.
+fn retain(l: &mut EventLog, campaign: u64, retention: Duration) -> Result<(), DiskError> {
+    if retention.is_zero() {
+        return Ok(());
+    }
+    if let nanoprobe_sidecar::eventfile::Retained::ClockBehind { now_ms, newest_ms } =
+        l.retain(retention, wall_ms())?
+    {
+        eprintln!(
+            "nanoprobe: the clock ({now_ms} ms) is behind the newest event of log {campaign} \
+             ({newest_ms} ms): its retention is skipped"
+        );
+    }
+    Ok(())
+}
+
+/// The server's keyring: the secret the server store keeps, made and kept
+/// on first use, and every pair it holds. A secret that cannot be read
+/// stops the server: a new one would give every player a new key.
+fn keyring_of(server: &ServerStore) -> Result<Keyring, nanoprobe_sidecar::store::DiskError> {
+    let secret = match server.player_secret()? {
+        Some(s) => s,
+        None => {
+            let s = Keyring::generate().secret();
+            server.set_player_secret(s)?;
+            s
+        }
+    };
+    let mut keys = Keyring::from_secret(secret);
+    for (key, ucid) in server.players()? {
+        keys.restore(&key, &ucid);
+    }
+    Ok(keys)
+}
+
+/// Append an event unless one made from the same `source` is in the log.
+fn push_once(
+    log: &mut EventLog,
+    campaign: u64,
+    stamp: pb::Stamp,
+    body: event::Body,
+    source: Option<String>,
+) {
+    if let Some(s) = source.as_deref() {
+        match log.has_source(s) {
+            Ok(false) => {}
+            Ok(true) => return,
+            Err(e) => panic!("the event log could not be read, stopping: {e}"),
+        }
+    }
+    log.push_from(campaign, stamp, body, source);
+}
+
+/// How often the event retention runs.
+const RETENTION_EVERY_MS: u64 = 3_600_000;
+
+fn ms(d: Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn timestamp_ms(ms: u64) -> prost_types::Timestamp {
+    prost_types::Timestamp {
+        seconds: i64::try_from(ms / 1000).unwrap_or(i64::MAX),
+        nanos: i32::try_from((ms % 1000) * 1_000_000).unwrap_or(0),
+    }
+}
+
+fn ms_of(t: &prost_types::Timestamp) -> i64 {
+    t.seconds
+        .saturating_mul(1000)
+        .saturating_add(i64::from(t.nanos / 1_000_000))
+}
+
+/// The API's view of a checkpoint (spec/persistence.md, "Achieved
+/// periods"): the achieved periods by tier; the targets are not shown.
+pub fn checkpoint_info(c: &Checkpoint) -> pb::CheckpointInfo {
+    let mut rates = pb::SampleRates::default();
+    for t in &c.achieved {
+        let Ok(d) = Duration::try_from_secs_f64(t.achieved_s) else {
+            continue;
+        };
+        let d = prost_types::Duration::try_from(d).ok();
+        match t.tier.as_str() {
+            "position" => rates.position = d,
+            "vitals" => rates.vitals = d,
+            "ammo" => rates.ammo = d,
+            "warehouse" => rates.warehouse = d,
+            "enumeration" => rates.enumeration = d,
+            _ => {}
+        }
+    }
+    pb::CheckpointInfo {
+        taken: Some(timestamp_ms(c.at_ms)),
+        sim: Some(pb::Stamp {
+            wall: None,
+            model_time: c.model_time,
+            mission_generation: c.mission_gen,
+            frame: 0,
+        }),
+        achieved: (!c.achieved.is_empty()).then_some(rates),
+    }
+}
+
+/// The campaign record of a new campaign.
+fn record_from(meta: &pb::Campaign, theater: &str) -> CampaignRecord {
+    CampaignRecord {
+        name: meta.name.clone(),
+        state: CampaignState::Suspended,
+        theaters: meta.theaters.clone(),
+        theater: theater.to_owned(),
+        clock_ms: meta.clock.as_ref().map(ms_of),
+        created_ms: meta
+            .created
+            .as_ref()
+            .map_or(0, |t| u64::try_from(ms_of(t)).unwrap_or(0)),
+        component_schemas: meta.component_schemas.clone().into_iter().collect(),
+        outcome: None,
+    }
+}
+
+/// The API's campaign from a stored record.
+fn meta_from(id: u64, schema: u32, r: &CampaignRecord, cp: Option<&Checkpoint>) -> pb::Campaign {
+    pb::Campaign {
+        id,
+        name: r.name.clone(),
+        state: match r.state {
+            CampaignState::Active => pb::CampaignState::Active,
+            CampaignState::Suspended => pb::CampaignState::Suspended,
+            CampaignState::Finished => pb::CampaignState::Finished,
+        } as i32,
+        theaters: r.theaters.clone(),
+        loaded_theater: String::new(),
+        clock: r.clock_ms.map(|c| prost_types::Timestamp {
+            seconds: c.div_euclid(1000),
+            nanos: i32::try_from(c.rem_euclid(1000) * 1_000_000).unwrap_or(0),
+        }),
+        platform_schema: schema,
+        component_schemas: r.component_schemas.clone().into_iter().collect(),
+        created: Some(timestamp_ms(r.created_ms)),
+        outcome: r
+            .outcome
+            .as_ref()
+            .and_then(|o| prost_types::Struct::decode(o.as_slice()).ok()),
+        last_checkpoint: cp.map(checkpoint_info),
+    }
+}
+
+/// The status for a store that cannot be created, opened or read.
+pub fn disk_status(id: u64, e: &DiskError) -> Status {
+    status(
+        Code::Internal,
+        ErrorReason::Internal,
+        format!("the store of campaign {id}: {e}"),
+        0,
+        "campaign_id",
+    )
 }
 
 impl Hub {
     /// A hub over a backend. Nothing is attached until [`Hub::start`].
+    ///
+    /// # Panics
+    ///
+    /// With `cfg.store` set, when [`Hub::open`] fails.
     pub fn new(cfg: Config, backend: Box<dyn Backend>) -> Arc<Hub> {
+        Hub::open(cfg, backend).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// A hub over a backend, with the campaigns in `cfg.store`'s folder:
+    /// each listed from its record without being opened, its history read
+    /// and compacted (`event_retention_days`). A campaign whose record says
+    /// active is opened and is the active one again: the sidecar stopped
+    /// while it ran. A folder that cannot be read is skipped and listed in
+    /// [`Inner::unreadable`]. Nothing is attached until [`Hub::start`].
+    pub fn open(cfg: Config, backend: Box<dyn Backend>) -> Result<Arc<Hub>, String> {
         let (tick, _) = watch::channel(0);
-        Arc::new(Hub {
+        let hub = Arc::new(Hub {
             inner: Mutex::new(Inner {
                 backend,
                 campaigns: BTreeMap::new(),
@@ -583,23 +1531,39 @@ impl Hub {
                 idem: Idem::new(cfg.idempotency_keep),
                 server_log: EventLog::new(cfg.events_keep),
                 link: Link::default(),
-                roster: Roster::new(match &cfg.store_dir {
-                    // A keyring file that cannot be read stops the server: a
-                    // new secret would give every player a new key.
-                    Some(dir) => Keyring::open(dir).expect("the keyring file is readable"),
-                    None => Keyring::generate(),
-                }),
+                // With persistence on, `load` replaces it with the server
+                // store's keyring.
+                roster: Roster::new(Keyring::generate()),
                 moderation: Vec::new(),
                 players_cmd: None,
                 on_lost: LostPolicy::Report,
                 clear_campaign: false,
+                files: None,
+                next_checkpoint_ms: 0,
+                next_backup_ms: 0,
+                backup_error: String::new(),
+                unreadable: Vec::new(),
+                epoch_floor: 0,
+                next_retention_ms: 0,
+                backup_job: None,
+                backing_up: std::collections::BTreeSet::new(),
+                server: None,
+                lock: None,
+                idem_keep: cfg.idempotency_keep,
+                crash_after_events: false,
+                closing: Vec::new(),
             }),
             tick,
             settled: Notify::new(),
             closing: std::sync::atomic::AtomicBool::new(false),
             poisoned: std::sync::atomic::AtomicBool::new(false),
             cfg,
-        })
+        });
+        if let Some(sf) = hub.cfg.store.clone() {
+            let mut g = hub.lock();
+            g.load(&hub.cfg, &sf)?;
+        }
+        Ok(hub)
     }
 
     /// The shared state. Never hold the guard across an `.await`.
@@ -643,7 +1607,12 @@ impl Hub {
             return Err(crate::services::stopping());
         }
         let inner: &mut Inner = &mut g;
-        catch_unwind(AssertUnwindSafe(|| f(inner))).unwrap_or_else(|_| {
+        catch_unwind(AssertUnwindSafe(|| {
+            let r = f(inner);
+            inner.settle(None);
+            r
+        }))
+        .unwrap_or_else(|_| {
             drop(g);
             self.poison();
             Err(status(
@@ -673,7 +1642,7 @@ impl Hub {
     pub fn step(&self) -> Result<(), String> {
         let r = {
             let mut g = self.lock();
-            catch_unwind(AssertUnwindSafe(|| g.step()))
+            catch_unwind(AssertUnwindSafe(|| g.step(&self.cfg)))
         };
         if r.is_err() {
             self.poison();
@@ -703,6 +1672,123 @@ impl Hub {
                 return Err("a call panicked; the state may be half-changed".into());
             }
             self.step()?;
+        }
+    }
+
+    /// Start a manual backup of `campaign` (0 for the active one): check
+    /// the lease, open the store, wait for a backup of it already running,
+    /// write the store and its events, and mark it backing up. Returns the
+    /// folders, the campaign and the revision the copy will hold; `None`
+    /// when the call's key is answered or running, so the call is a repeat.
+    /// The caller copies, then removes the campaign from
+    /// [`Inner::backing_up`].
+    pub async fn backup_start(
+        &self,
+        key: Option<&pb::Idempotency>,
+        lease: Option<&pb::Lease>,
+        campaign: u64,
+    ) -> Result<Option<(Campaigns, u64, u64)>, Status> {
+        let mut ticks = self.tick();
+        loop {
+            {
+                let mut g = self.lock();
+                if self.closing() {
+                    return Err(crate::services::stopping());
+                }
+                let now = Instant::now();
+                let k = key.map(|k| k.key.as_str()).unwrap_or_default();
+                if k.is_empty() || g.idem.running(k) || g.idem.get(now, k).is_some() {
+                    return Ok(None);
+                }
+                // A key a store remembers from before a restart: a repeat.
+                if g.recall(k, campaign).is_some() {
+                    return Ok(None);
+                }
+                g.leases
+                    .check(now, lease.map(|l| (l.epoch, l.lease_id.as_str())))
+                    .map_err(lease_status)?;
+                let id = g.resolve(campaign, Need::Campaign)?;
+                let Some(files) = g.files.clone() else {
+                    return Ok(None);
+                };
+                if !g.backing_up.contains(&id) {
+                    g.commit_events();
+                    g.commit(id);
+                    g.backing_up.insert(id);
+                    let revision = g.campaigns[&id].store.revision();
+                    return Ok(Some((files, id, revision)));
+                }
+            }
+            if ticks.changed().await.is_err() {
+                return Err(crate::services::stopping());
+            }
+        }
+    }
+
+    /// Before a suspend, a finish or a switch of the active campaign:
+    /// capture every group and static DCS holds of the active campaign
+    /// (`campaign`, 0 for the active one) and wait up to `result_wait` for
+    /// the results, which the store takes as they arrive (spec/persistence.md,
+    /// "Campaign operations"). Nothing when that campaign is not active, the
+    /// lease is refused, the call's key is answered or running, or DCS is
+    /// not ready. A repeat of the call that arrives while the first waits
+    /// captures again: a capture is a query.
+    pub async fn capture_live(
+        &self,
+        key: Option<&pb::Idempotency>,
+        lease: Option<&pb::Lease>,
+        campaign: u64,
+    ) {
+        let sent: Vec<(u64, u64)> = {
+            let mut g = self.lock();
+            if self.closing() {
+                return;
+            }
+            let now = Instant::now();
+            let key = key.map(|k| k.key.as_str()).unwrap_or_default();
+            if key.is_empty() || g.idem.running(key) || g.idem.get(now, key).is_some() {
+                return;
+            }
+            if g.leases
+                .check(now, lease.map(|l| (l.epoch, l.lease_id.as_str())))
+                .is_err()
+            {
+                return;
+            }
+            let Some(id) = g.active.filter(|a| campaign == 0 || campaign == *a) else {
+                return;
+            };
+            g.with_rec(id, |rec, store, sim| {
+                let live: Vec<EntityId> = store
+                    .groups()
+                    .filter(|grp| !grp.removed && rec.is_bound(grp.id))
+                    .map(|grp| grp.id)
+                    .collect();
+                live.into_iter()
+                    .filter_map(|e| rec.capture(store, sim, e))
+                    .collect()
+            })
+            .unwrap_or_default()
+        };
+        if sent.is_empty() {
+            return;
+        }
+        let mut ticks = self.tick();
+        let deadline = tokio::time::Instant::now() + self.cfg.result_wait;
+        loop {
+            {
+                let g = self.lock();
+                let done = g.rec.as_ref().is_none_or(|r| {
+                    sent.iter().all(|k| {
+                        r.effect_result(*k).is_some()
+                            || !r.inflight().any(|j| (j.epoch, j.seq) == *k)
+                    })
+                });
+                if done || self.closing() || tokio::time::Instant::now() >= deadline {
+                    return;
+                }
+            }
+            let _ = tokio::time::timeout_at(deadline, ticks.changed()).await;
         }
     }
 
@@ -760,6 +1846,11 @@ impl Hub {
                 let now = Instant::now();
                 match g.idem.begin(now, key, d) {
                     Begin::Run => {
+                        // A key a store remembers from before a restart.
+                        if let Some((sd, done, age)) = g.recall(key, campaign) {
+                            g.idem.restore(now, key, sd, done, age);
+                            continue;
+                        }
                         let result = g
                             .leases
                             .check(now, lease.map(|l| (l.epoch, l.lease_id.as_str())))
@@ -768,7 +1859,22 @@ impl Hub {
                             .and_then(|c| {
                                 let f = f.take().expect("a call runs once");
                                 let inner: &mut Inner = &mut g;
-                                catch_unwind(AssertUnwindSafe(|| f(inner, c))).map_err(|_| {
+                                catch_unwind(AssertUnwindSafe(|| {
+                                    let r = f(inner, c);
+                                    if let Ok((resp, acted)) = &r {
+                                        let done = Done {
+                                            method,
+                                            response: resp.encode_to_vec(),
+                                            campaign: *acted,
+                                            pending: None,
+                                        };
+                                        let placed = inner.remember(key, &d, &done);
+                                        inner.index(key, placed);
+                                        inner.settle(Some(*acted));
+                                    }
+                                    r
+                                }))
+                                .map_err(|_| {
                                     // Under the lock, so no other call runs
                                     // between the panic and the refusal.
                                     self.poisoned
@@ -884,6 +1990,12 @@ pub fn settle(g: &mut Inner, key: &str, done: Done) -> Done {
         ..done
     };
     g.idem.update(key, settled.clone());
+    if let Some(d) = g.idem.digest_of(key) {
+        let placed = g.remember(key, &d, &settled);
+        g.index(key, placed);
+        let c = settled.campaign;
+        g.settle(Some(c));
+    }
     settled
 }
 
@@ -939,6 +2051,11 @@ impl Hub {
                 let now = Instant::now();
                 match g.idem.begin(now, key, d) {
                     Begin::Run => {
+                        // A key a store remembers from before a restart.
+                        if let Some((sd, done, age)) = g.recall(key, campaign) {
+                            g.idem.restore(now, key, sd, done, age);
+                            continue;
+                        }
                         let result = g
                             .leases
                             .check(now, lease.map(|l| (l.epoch, l.lease_id.as_str())))
@@ -947,21 +2064,40 @@ impl Hub {
                             .and_then(|c| {
                                 let start = start.take().expect("a call runs once");
                                 let inner: &mut Inner = &mut g;
-                                catch_unwind(AssertUnwindSafe(|| start(inner, c)))
-                                    .map_err(|_| {
-                                        self.poisoned
-                                            .store(true, std::sync::atomic::Ordering::SeqCst);
-                                        self.closing
-                                            .store(true, std::sync::atomic::Ordering::SeqCst);
-                                        status(
-                                            Code::Internal,
-                                            ErrorReason::Internal,
-                                            "the call failed inside the server, which stops",
-                                            0,
-                                            "",
-                                        )
-                                    })?
-                                    .map(|k| (k, c))
+                                catch_unwind(AssertUnwindSafe(|| {
+                                    let r = start(inner, c);
+                                    if let Ok(cmd) = &r {
+                                        // The key is kept with the command:
+                                        // a repeat after a crash never sends
+                                        // it again.
+                                        let done = Done {
+                                            method,
+                                            response: effect_response(inner, c, kind, None),
+                                            campaign: c,
+                                            pending: Some(Pending { cmd: *cmd, kind }),
+                                        };
+                                        let placed = inner.remember(key, &d, &done);
+                                        inner.index(key, placed);
+                                        inner.settle(Some(c));
+                                    } else {
+                                        inner.settle(Some(c));
+                                    }
+                                    r
+                                }))
+                                .map_err(|_| {
+                                    self.poisoned
+                                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                                    self.closing
+                                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                                    status(
+                                        Code::Internal,
+                                        ErrorReason::Internal,
+                                        "the call failed inside the server, which stops",
+                                        0,
+                                        "",
+                                    )
+                                })?
+                                .map(|k| (k, c))
                             });
                         match result {
                             Ok(sent) => break sent,
@@ -1014,16 +2150,16 @@ impl Hub {
                     let pending = found.is_none().then_some(Pending { cmd, kind });
                     let response = effect_response(&mut g, c, kind, found.as_ref());
                     let r = R::decode(response.as_slice()).unwrap_or_default();
-                    g.idem.finish(
-                        Instant::now(),
-                        key,
-                        Done {
-                            method,
-                            response,
-                            campaign: c,
-                            pending,
-                        },
-                    );
+                    let done = Done {
+                        method,
+                        response,
+                        campaign: c,
+                        pending,
+                    };
+                    let placed = g.remember(key, &d, &done);
+                    g.index(key, placed);
+                    g.settle(Some(c));
+                    g.idem.finish(Instant::now(), key, done);
                     drop(g);
                     self.settled.notify_waiters();
                     break r;
@@ -1054,6 +2190,8 @@ mod tests {
         fn read(&mut self) -> Vec<RawRecord> {
             Vec::new()
         }
+
+        fn flush(&mut self) {}
     }
 
     impl Backend for Silent {

@@ -407,9 +407,15 @@ pub struct FakeSim {
     attached: bool,
     sidecar_boot: u64,
     inbound: VecDeque<(u64, u16, Vec<u8>)>,
+    /// Commands written and held back until the sidecar's flush: the agent
+    /// does not see them yet.
+    held: VecDeque<(u64, u16, Vec<u8>)>,
     in_tail: u64,
     in_head: u64,
     out: Vec<RawRecord>,
+    /// Records read and not yet acknowledged by the sidecar's flush: a
+    /// sidecar that attaches again to this agent boot reads them again.
+    unacked: Vec<RawRecord>,
     queue: VecDeque<(Stamp, Input)>,
     gap: Option<Gap>,
     // The world.
@@ -532,9 +538,11 @@ impl FakeSim {
             attached: false,
             sidecar_boot: 0,
             inbound: VecDeque::new(),
+            held: VecDeque::new(),
             in_tail: 0,
             in_head: 0,
             out: Vec::new(),
+            unacked: Vec::new(),
             queue: VecDeque::new(),
             gap: None,
             groups: BTreeMap::new(),
@@ -1525,9 +1533,11 @@ impl FakeSim {
         out
     }
 
-    /// The link drops: the agent detaches and queues its records.
+    /// The link drops: the agent detaches and queues its records. Commands
+    /// the sidecar held back never reach it.
     pub fn detach(&mut self) {
         self.attached = false;
+        self.held.clear();
     }
 
     /// A sidecar attaches (spec/transport.md, "Attaching"): commands written
@@ -1540,6 +1550,17 @@ impl FakeSim {
         self.attached = true;
         self.sidecar_boot = sidecar_boot;
         self.inbound.clear();
+        self.held.clear();
+        // Records the last sidecar read and never acknowledged come first:
+        // they are older than anything still in the ring. Those of an agent
+        // boot that is gone went with it.
+        let boot = self.agent_boot;
+        let mut reread: Vec<RawRecord> = std::mem::take(&mut self.unacked)
+            .into_iter()
+            .filter(|r| r.agent_boot == boot)
+            .collect();
+        reread.append(&mut self.out);
+        self.out = reread;
         self.in_tail = self.in_head;
         let queued: Vec<(Stamp, Input)> = self.queue.drain(..).collect();
         let mut last_frame = None;
@@ -2983,12 +3004,19 @@ impl SimAdapter for FakeSim {
             return Err(Detached);
         }
         self.in_tail += 1;
-        self.inbound.push_back((self.in_tail, op, payload.to_vec()));
+        self.held.push_back((self.in_tail, op, payload.to_vec()));
         Ok(self.in_tail)
     }
 
     fn read(&mut self) -> Vec<RawRecord> {
-        std::mem::take(&mut self.out)
+        let v = std::mem::take(&mut self.out);
+        self.unacked.extend(v.iter().cloned());
+        v
+    }
+
+    fn flush(&mut self) {
+        self.inbound.extend(self.held.drain(..));
+        self.unacked.clear();
     }
 }
 

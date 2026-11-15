@@ -14,8 +14,6 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
-use std::io;
-use std::path::{Path, PathBuf};
 
 use nanoprobe_transport::codec::Lv;
 use nanoprobe_transport::layout::result as rc;
@@ -48,20 +46,17 @@ const FIELD_INITIATOR_MISSION_ID: u64 = 21;
 /// The most finished occupancies kept.
 pub const HISTORY_KEPT: usize = 20_000;
 
-/// The server's secret and the map from key to ucid: what the server-scoped
-/// store keeps (spec/world.md, "Players"). Neither is ever logged or shown.
+/// The server's secret and the map from key to ucid: what the server store
+/// keeps (spec/world.md, "Players"). Neither is ever logged or shown. The
+/// keyring is in memory; the hub writes the pairs it learns to the server
+/// store ([`Keyring::unsaved`]).
 #[derive(Clone)]
 pub struct Keyring {
     secret: [u8; 32],
     ucids: BTreeMap<String, String>,
-    /// The file the keyring is kept in, when persistence is on.
-    file: Option<PathBuf>,
-    /// A pair or the secret is not in the file yet.
-    dirty: bool,
+    /// Keys learned and not yet in the server store.
+    unsaved: BTreeSet<String>,
 }
-
-/// The keyring's file name inside the store directory (`[store] dir`).
-pub const KEYRING_FILE: &str = "players.json";
 
 impl fmt::Debug for Keyring {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -85,75 +80,21 @@ impl Keyring {
         Keyring {
             secret,
             ucids: BTreeMap::new(),
-            file: None,
-            dirty: false,
+            unsaved: BTreeSet::new(),
         }
     }
 
-    /// The keyring kept in `dir`, which is the store directory: the file
-    /// [`KEYRING_FILE`] there, read when it exists, made with a new secret
-    /// when it does not. The keyring is written again by [`Keyring::flush`]
-    /// whenever a pair was learned. A file that cannot be read is an error:
-    /// a new secret would give every player a new key.
-    pub fn open(dir: &Path) -> io::Result<Keyring> {
-        let file = dir.join(KEYRING_FILE);
-        let mut ring = match std::fs::read(&file) {
-            Ok(bytes) => Keyring::parse(&bytes)?,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                let mut r = Keyring::generate();
-                r.dirty = true;
-                r
-            }
-            Err(e) => return Err(e),
-        };
-        ring.file = Some(file);
-        ring.flush()?;
-        Ok(ring)
+    /// The pairs learned since they were last marked saved, key first.
+    pub fn unsaved(&self) -> Vec<(String, String)> {
+        self.unsaved
+            .iter()
+            .filter_map(|k| self.ucids.get(k).map(|u| (k.clone(), u.clone())))
+            .collect()
     }
 
-    fn parse(bytes: &[u8]) -> io::Result<Keyring> {
-        // The message names no content: the file holds the secret.
-        let bad = || io::Error::new(io::ErrorKind::InvalidData, "players.json is malformed");
-        let v: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| bad())?;
-        let hex = v.get("secret").and_then(|s| s.as_str()).ok_or_else(bad)?;
-        if hex.len() != 64 || !hex.is_ascii() {
-            return Err(bad());
-        }
-        let mut secret = [0u8; 32];
-        for (i, b) in secret.iter_mut().enumerate() {
-            *b = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).map_err(|_| bad())?;
-        }
-        let mut ring = Keyring::from_secret(secret);
-        if let Some(players) = v.get("players") {
-            for (key, ucid) in players.as_object().ok_or_else(bad)? {
-                ring.restore(key, ucid.as_str().ok_or_else(bad)?);
-            }
-        }
-        Ok(ring)
-    }
-
-    /// Write the keyring when something changed since the last write: to a
-    /// temporary file with mode 0600, then renamed over [`KEYRING_FILE`].
-    /// Nothing happens when persistence is off. On an error the keyring
-    /// stays unwritten and the next call tries again.
-    pub fn flush(&mut self) -> io::Result<()> {
-        let Some(file) = self.file.clone() else {
-            return Ok(());
-        };
-        if !self.dirty {
-            return Ok(());
-        }
-        let secret: String = self.secret.iter().map(|b| format!("{b:02x}")).collect();
-        let doc = serde_json::json!({ "secret": secret, "players": &self.ucids });
-        let bytes = serde_json::to_vec_pretty(&doc).map_err(io::Error::other)?;
-        if let Some(dir) = file.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let tmp = file.with_extension("json.tmp");
-        write_private(&tmp, &bytes)?;
-        std::fs::rename(&tmp, &file)?;
-        self.dirty = false;
-        Ok(())
+    /// Mark a pair written to the server store.
+    pub fn saved(&mut self, key: &str) {
+        self.unsaved.remove(key);
     }
 
     /// The secret, for the server-scoped store.
@@ -182,7 +123,7 @@ impl Keyring {
         let key = self.key_of(ucid);
         if !self.ucids.contains_key(&key) {
             self.ucids.insert(key.clone(), ucid.to_owned());
-            self.dirty = true;
+            self.unsaved.insert(key.clone());
         }
         key
     }
@@ -191,27 +132,6 @@ impl Keyring {
     pub fn ucid_of(&self, key: &str) -> Option<&str> {
         self.ucids.get(key).map(String::as_str)
     }
-}
-
-/// Write a file only its owner can read.
-fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    use std::io::Write;
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    let mut f = opts.open(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        // A temporary file left by an earlier run keeps its old mode.
-        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    }
-    f.write_all(bytes)?;
-    f.sync_all()
 }
 
 /// HMAC-SHA-256 (RFC 2104).
@@ -469,10 +389,9 @@ impl Roster {
         self.keys.learn(ucid)
     }
 
-    /// Write the keyring if it changed. A failed write is tried again at
-    /// the next call.
-    pub fn flush_keys(&mut self) -> io::Result<()> {
-        self.keys.flush()
+    /// The keyring, to mark pairs written to the server store.
+    pub fn keyring_mut(&mut self) -> &mut Keyring {
+        &mut self.keys
     }
 
     /// The ucid of a key: for the one caller that writes a `MODERATE`.
@@ -1699,76 +1618,22 @@ mod tests {
         assert_eq!(r.occupied_units(), BTreeSet::from([EntityId(907)]));
     }
 
-    /// A scratch folder's path, removed when the test ends, whether it passes
-    /// or fails.
-    struct Scratch(PathBuf);
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    impl std::ops::Deref for Scratch {
-        type Target = std::path::Path;
-        fn deref(&self) -> &std::path::Path {
-            &self.0
-        }
-    }
-
-    impl AsRef<std::path::Path> for Scratch {
-        fn as_ref(&self) -> &std::path::Path {
-            &self.0
-        }
-    }
-
-    fn scratch(name: &str) -> Scratch {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        Scratch(
-            std::env::temp_dir().join(format!("nanoprobe-{name}-{}-{nanos}", std::process::id())),
-        )
-    }
-
     #[test]
-    fn the_keyring_file_round_trips_with_mode_0600_and_keeps_keys_stable() {
-        let dir = scratch("keyring");
-        let mut a = Keyring::open(&dir).expect("opens");
+    fn a_learned_pair_is_unsaved_until_marked_and_keys_stay_stable() {
+        let mut a = Keyring::from_secret([7; 32]);
         let key = a.learn("ucid-a");
-        a.flush().expect("writes");
-        let file = dir.join(KEYRING_FILE);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&file).expect("file").permissions().mode();
-            assert_eq!(mode & 0o777, 0o600);
-        }
-        assert!(!dir.join("players.json.tmp").exists());
-        let b = Keyring::open(&dir).expect("opens again");
+        assert_eq!(a.unsaved(), vec![(key.clone(), "ucid-a".to_owned())]);
+        // Learning it again adds nothing.
+        a.learn("ucid-a");
+        assert_eq!(a.unsaved().len(), 1);
+        a.saved(&key);
+        assert!(a.unsaved().is_empty());
+        // A keyring restored from the store gives the same key.
+        let mut b = Keyring::from_secret(a.secret());
+        b.restore(&key, "ucid-a");
         assert_eq!(b.key_of("ucid-a"), key);
         assert_eq!(b.ucid_of(&key), Some("ucid-a"));
-        assert_eq!(b.secret(), a.secret());
-        // A second flush with nothing new leaves the file as it is.
-        let before = std::fs::read(&file).expect("read");
-        let mut c = Keyring::open(&dir).expect("opens");
-        c.flush().expect("flush");
-        assert_eq!(std::fs::read(&file).expect("read"), before);
-    }
-
-    #[test]
-    fn a_malformed_keyring_file_is_an_error_that_names_no_content() {
-        let dir = scratch("keyring-bad");
-        std::fs::create_dir_all(&dir).expect("dir");
-        std::fs::write(dir.join(KEYRING_FILE), br#"{"secret":"zz-ucid-leak"}"#).expect("write");
-        let e = Keyring::open(&dir).expect_err("malformed");
-        assert!(!e.to_string().contains("leak"), "{e}");
-        // Nothing was replaced.
-        assert!(
-            std::fs::read_to_string(dir.join(KEYRING_FILE))
-                .expect("read")
-                .contains("leak")
-        );
+        assert!(b.unsaved().is_empty());
     }
 
     fn players_result(rows: Vec<Lv>) -> RawRecord {
@@ -1862,17 +1727,5 @@ mod tests {
         assert!(r.players_of(5).is_empty());
         let n = run(&mut r, &[fr(2, 1), birth(6, "77")]);
         assert!(matches!(&n[..], [Note::Enter { .. }]), "{n:?}");
-    }
-
-    #[test]
-    fn with_persistence_off_no_file_is_written() {
-        let mut k = Keyring::generate();
-        k.learn("ucid-a");
-        assert!(k.file.is_none(), "a generated keyring has no file");
-        k.flush().expect("nothing to write");
-        assert!(
-            !Path::new(KEYRING_FILE).exists(),
-            "no keyring file in the working directory"
-        );
     }
 }

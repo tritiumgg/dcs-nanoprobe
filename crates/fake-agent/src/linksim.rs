@@ -41,6 +41,8 @@ struct Shared {
     predict: Option<Producer>,
     /// Commands queued for the link, with the end each was predicted at.
     queue: VecDeque<(Command, u64)>,
+    /// Commands sent and held back until [`SimAdapter::flush`].
+    held: VecDeque<(Command, u64)>,
     /// Records read, for [`SimAdapter::read`].
     records: Vec<RawRecord>,
     /// The highest record number read, per agent boot.
@@ -154,7 +156,7 @@ impl SimAdapter for LinkSim {
         };
         let end = p.tail() + p.cost(payload.len());
         *p = Producer::new(p.ring(), end);
-        s.queue.push_back((
+        s.held.push_back((
             Command {
                 opcode,
                 payload: payload.to_vec(),
@@ -167,6 +169,12 @@ impl SimAdapter for LinkSim {
     fn read(&mut self) -> Vec<RawRecord> {
         std::mem::take(&mut lock(&self.shared).records)
     }
+
+    fn flush(&mut self) {
+        let mut s = lock(&self.shared);
+        let held: Vec<_> = s.held.drain(..).collect();
+        s.queue.extend(held);
+    }
 }
 
 impl Sink for LinkSink {
@@ -178,6 +186,7 @@ impl Sink for LinkSink {
         let mut s = lock(&self.shared);
         // A new session: what the last one queued never reached the ring.
         s.queue.clear();
+        s.held.clear();
         s.predict = None;
         s.ring = ring;
         s.agent_boot = agent_boot;

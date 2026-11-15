@@ -19,8 +19,9 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use nanoprobe_transport::records::Rates;
 
 use super::{
-    Authority, CapturedMore, DesiredOwner, DesiredStock, Entry, Extension, Group, Journalled, Kind,
-    LeftAs, Loaded, LostPolicy, Outcome, Point, RouteEvent, Store, Unit, UnitState,
+    Authority, CapturedMore, DesiredOwner, DesiredStock, Entry, Extension, Group, IdemRow,
+    Journalled, Kind, LeftAs, Loaded, LostPolicy, Outcome, Point, RouteEvent, Store, Unit,
+    UnitState, check_lv,
 };
 use crate::ids::{CampaignId, EntityId};
 use crate::intents::{Intent, Waypoint};
@@ -50,6 +51,8 @@ pub enum DiskError {
     Io(std::io::Error),
     /// The campaign is finished: its store is read-only.
     Finished(CampaignId),
+    /// A value does not encode whole (spec/persistence.md, "Encodings").
+    TooLarge(String),
 }
 
 impl fmt::Display for DiskError {
@@ -64,6 +67,7 @@ impl fmt::Display for DiskError {
             DiskError::Exists(p) => write!(f, "store: {} exists", p.display()),
             DiskError::Io(e) => write!(f, "store: {e}"),
             DiskError::Finished(id) => write!(f, "campaign {} is finished", id.0),
+            DiskError::TooLarge(m) => write!(f, "store: a value does not encode: {m}"),
         }
     }
 }
@@ -164,8 +168,13 @@ pub struct Disk {
     extensions: BTreeMap<String, Extension>,
     /// The revision floors of removed extensions, as the file holds them.
     floors: BTreeMap<String, u64>,
+    /// Entries of `Store::journal` already written.
     journal_written: usize,
+    /// The last journal row's `seq`.
+    journal_seq: u64,
     world: Vec<u8>,
+    /// The model time of the samples last written, by a checkpoint.
+    sample_time: f64,
     record: CampaignRecord,
     record_written: bool,
     last_checkpoint: Option<Checkpoint>,
@@ -200,6 +209,24 @@ impl fmt::Debug for Slot {
     }
 }
 
+/// `path` with `suffix` after its whole name: SQLite's `-wal` and `-shm`.
+fn wal(path: &Path, suffix: &str) -> PathBuf {
+    let mut p = path.as_os_str().to_owned();
+    p.push(suffix);
+    PathBuf::from(p)
+}
+
+/// Flush a folder's entries, so a rename in it survives a power loss. Not
+/// possible on Windows, where the rename is flushed with the file system.
+fn sync_dir(dir: &Path) {
+    #[cfg(unix)]
+    if let Ok(d) = std::fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+}
+
 fn connect(path: &Path) -> Result<Connection, DiskError> {
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -211,7 +238,9 @@ const TABLES: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value BLOB NOT NULL);
 CREATE TABLE entity (id INTEGER NOT NULL, kind TEXT NOT NULL, body BLOB NOT NULL, PRIMARY KEY (id, kind));
 CREATE TABLE extension (name TEXT PRIMARY KEY, body BLOB NOT NULL);
-CREATE TABLE journal (seq INTEGER PRIMARY KEY, body BLOB NOT NULL);
+CREATE TABLE journal (seq INTEGER PRIMARY KEY, at_ms INTEGER NOT NULL, kind TEXT NOT NULL, entity INTEGER NOT NULL, body BLOB NOT NULL);
+CREATE TABLE inflight (epoch INTEGER NOT NULL, seq INTEGER NOT NULL, body BLOB NOT NULL, PRIMARY KEY (epoch, seq));
+CREATE TABLE idempotency (key TEXT PRIMARY KEY, at_ms INTEGER NOT NULL, request_hash BLOB NOT NULL, response BLOB NOT NULL);
 CREATE TABLE checkpoint (seq INTEGER PRIMARY KEY, body BLOB NOT NULL);
 ";
 
@@ -246,6 +275,66 @@ pub fn record_of(path: &Path) -> Result<(CampaignId, u32, CampaignRecord), DiskE
     Ok((campaign, schema, record))
 }
 
+/// The last checkpoint in the store file at `path`, read without opening
+/// the store. The caller has checked the schema is not newer than this
+/// sidecar's.
+pub fn checkpoint_of(path: &Path) -> Result<Option<Checkpoint>, DiskError> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let body: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT body FROM checkpoint ORDER BY seq DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match body {
+        Some(b) => Ok(Some(dec_checkpoint(&decode(&b)?)?)),
+        None => Ok(None),
+    }
+}
+
+/// The store revision in the store file at `path`, read without opening the
+/// store.
+pub fn revision_of(path: &Path) -> Result<u64, DiskError> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    Rd(&get_meta(&conn, "world")?).u("revision")
+}
+
+/// A key kept in the store file at `path`, read without opening the store:
+/// for a finished campaign, whose store is never opened again.
+pub fn idempotency_of(path: &Path, key: &str) -> Result<Option<IdemRow>, DiskError> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    Ok(conn
+        .query_row(
+            "SELECT key, at_ms, request_hash, response FROM idempotency WHERE key = ?1",
+            [key],
+            |r| {
+                Ok(IdemRow {
+                    key: r.get(0)?,
+                    at_ms: u64::try_from(r.get::<_, i64>(1)?).unwrap_or(0),
+                    request_hash: r.get(2)?,
+                    response: r.get(3)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// Every journal entry in the store file at `path`, oldest first, read
+/// without opening the store. The sidecar never reads its journal back; this
+/// is for audits and tests.
+pub fn journal_of(path: &Path) -> Result<Vec<Entry>, DiskError> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut st = conn.prepare("SELECT body FROM journal ORDER BY seq")?;
+    let mut rows = st.query([])?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        let body: Vec<u8> = row.get(0)?;
+        out.push(dec_entry(&decode(&body)?)?);
+    }
+    Ok(out)
+}
+
 /// The state in the campaign record of the store file at `path`, read
 /// without opening the store. Only the record's `state` key is read, which
 /// keeps its layout in every schema version.
@@ -276,7 +365,11 @@ fn read_schema(conn: &Connection) -> Result<u32, DiskError> {
 /// Copy the store file at `path` to `dest` consistently, with SQLite's
 /// `VACUUM INTO`, whether or not a store has it open.
 pub fn backup_file(path: &Path, dest: &Path) -> Result<(), DiskError> {
-    let conn = Connection::open(path)?;
+    // Never create: a missing store is an error, not an empty backup.
+    let conn = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
     vacuum_into(&conn, dest)
 }
 
@@ -307,34 +400,49 @@ impl Store {
     }
 
     /// Write this store, as it is, to a new store file at `path` and keep it
-    /// linked. A store already on disk is unlinked from its old file.
+    /// linked. A store already on disk is unlinked from its old file. The
+    /// file is made under a temporary name in one transaction, flushed and
+    /// renamed into place, so a crash leaves no file or a whole one.
     pub fn save_as(&mut self, path: &Path, record: CampaignRecord) -> Result<(), DiskError> {
         if path.exists() {
             return Err(DiskError::Exists(path.to_owned()));
         }
-        let mut conn = connect(path)?;
-        {
-            let tx = conn.transaction()?;
-            tx.execute_batch(TABLES)?;
-            put_meta(&tx, "schema", &Lv::Number(f64::from(SCHEMA)))?;
-            put_meta(&tx, "campaign_id", &u(self.campaign.0))?;
-            tx.commit()?;
+        let tmp = path.with_extension("sqlite.new");
+        for p in [tmp.clone(), wal(&tmp, "-wal"), wal(&tmp, "-shm")] {
+            match std::fs::remove_file(&p) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+                _ => {}
+            }
         }
-        self.disk = Slot(Some(Box::new(Disk {
+        let mut d = Disk {
             path: path.to_owned(),
-            conn,
+            conn: connect(&tmp)?,
             groups: BTreeMap::new(),
             units: BTreeMap::new(),
             extensions: BTreeMap::new(),
             floors: BTreeMap::new(),
             journal_written: 0,
+            journal_seq: 0,
             world: Vec::new(),
+            sample_time: 0.0,
             record,
             record_written: false,
             last_checkpoint: None,
             open: true,
-        })));
-        self.commit()
+        };
+        d.write_with(self, None, true)?;
+        // The last connection's close folds the WAL into the file.
+        let conn = std::mem::replace(&mut d.conn, Connection::open_in_memory()?);
+        conn.close().map_err(|(_, e)| DiskError::Sql(e))?;
+        std::fs::File::open(&tmp)?.sync_all()?;
+        std::fs::rename(&tmp, path)?;
+        if let Some(dir) = path.parent() {
+            sync_dir(dir);
+        }
+        d.conn = connect(path)?;
+        self.disk = Slot(Some(Box::new(d)));
+        self.drain_journal();
+        Ok(())
     }
 
     /// Open the store file at `path` at this sidecar's schema version. An
@@ -392,16 +500,22 @@ impl Store {
         };
         let r = d.write(self);
         self.disk.0 = Some(d);
+        if r.is_ok() {
+            self.drain_journal();
+        }
         r
     }
 
-    /// [`Store::commit`] for the write that must happen before a command is
-    /// sent or after a fact arrives. A failure stops the sidecar through its
-    /// panic path: it never sends a command it could not journal
-    /// (spec/persistence.md, "Writes").
-    pub(super) fn commit_or_stop(&mut self) {
-        if let Err(e) = self.commit() {
-            panic!("the store could not be written, stopping: {e}");
+    /// Drop the journal entries and idempotency rows written, unless the
+    /// store keeps its journal ([`Store::keep_journal`]).
+    fn drain_journal(&mut self) {
+        self.idempotency.clear();
+        if self.keep_journal {
+            return;
+        }
+        if let Some(d) = self.disk.0.as_mut() {
+            self.journal.drain(..d.journal_written);
+            d.journal_written = 0;
         }
     }
 
@@ -425,6 +539,16 @@ impl Store {
                 achieved,
             });
         };
+        if let Some(last) = d
+            .last_checkpoint
+            .as_ref()
+            .filter(|c| c.revision == revision)
+        {
+            // Nothing moved: no new checkpoint.
+            let last = last.clone();
+            self.disk.0 = Some(d);
+            return Ok(last);
+        }
         let r = (|| {
             let seq = d.last_checkpoint.as_ref().map_or(0, |c| c.seq) + 1;
             let c = Checkpoint {
@@ -435,12 +559,65 @@ impl Store {
                 mission_gen,
                 achieved,
             };
-            d.write_with(self, Some(&c))?;
+            d.write_with(self, Some(&c), false)?;
             d.last_checkpoint = Some(c.clone());
             Ok(c)
         })();
         self.disk.0 = Some(d);
+        if r.is_ok() {
+            self.drain_journal();
+        }
         r
+    }
+
+    /// Close the store in one transaction (spec/persistence.md, "Campaign
+    /// operations"): the final checkpoint, `record`, the keys staged with
+    /// [`Store::put_idempotency`], and the closed mark. On a failure the
+    /// store stays open. The caller then drops it.
+    pub fn close_with(
+        &mut self,
+        at_ms: u64,
+        achieved: Vec<TierPeriod>,
+        record: CampaignRecord,
+    ) -> Result<Checkpoint, DiskError> {
+        let revision = self.rev;
+        let model_time = self.sample_time;
+        let mission_gen = self.loaded.as_ref().map_or(0, |l| l.mission_gen);
+        let Some(mut d) = self.disk.0.take() else {
+            return Ok(Checkpoint {
+                seq: 0,
+                at_ms,
+                revision,
+                model_time,
+                mission_gen,
+                achieved,
+            });
+        };
+        let (old_record, old_open) = (d.record.clone(), d.open);
+        d.record = record;
+        d.record_written = false;
+        d.open = false;
+        let c = Checkpoint {
+            seq: d.last_checkpoint.as_ref().map_or(0, |c| c.seq) + 1,
+            at_ms,
+            revision,
+            model_time,
+            mission_gen,
+            achieved,
+        };
+        let r = d.write_with(self, Some(&c), false);
+        match r {
+            Ok(()) => d.last_checkpoint = Some(c.clone()),
+            Err(_) => {
+                d.record = old_record;
+                d.open = old_open;
+            }
+        }
+        self.disk.0 = Some(d);
+        r.map(|()| {
+            self.drain_journal();
+            c
+        })
     }
 
     /// Close the store cleanly: write everything and mark it closed, so the
@@ -457,6 +634,61 @@ impl Store {
             d.open = true;
         }
         r
+    }
+
+    /// A changing call's answer kept in this store under `key`, written or
+    /// waiting for the next commit.
+    pub fn idempotency(&self, key: &str) -> Result<Option<IdemRow>, DiskError> {
+        if let Some(r) = self.idempotency.iter().rev().find(|r| r.key == key) {
+            return Ok(Some(r.clone()));
+        }
+        let Some(d) = self.disk.0.as_ref() else {
+            return Ok(None);
+        };
+        Ok(d.conn
+            .query_row(
+                "SELECT key, at_ms, request_hash, response FROM idempotency WHERE key = ?1",
+                [key],
+                |r| {
+                    Ok(IdemRow {
+                        key: r.get(0)?,
+                        at_ms: u64::try_from(r.get::<_, i64>(1)?).unwrap_or(0),
+                        request_hash: r.get(2)?,
+                        response: r.get(3)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// The keys of the calls answered at or after `since_ms`, for the server
+    /// store's index (spec/persistence.md, "Idempotency keys").
+    pub fn idempotency_since(&self, since_ms: u64) -> Result<Vec<(String, u64)>, DiskError> {
+        let Some(d) = self.disk.0.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let mut st = d
+            .conn
+            .prepare("SELECT key, at_ms FROM idempotency WHERE at_ms >= ?1")?;
+        let rows = st.query_map([i64::try_from(since_ms).unwrap_or(i64::MAX)], |r| {
+            Ok((r.get(0)?, u64::try_from(r.get::<_, i64>(1)?).unwrap_or(0)))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Delete the keys answered before `before_ms`.
+    pub fn prune_idempotency(&mut self, before_ms: u64) -> Result<usize, DiskError> {
+        let Some(d) = self.disk.0.as_ref() else {
+            return Ok(0);
+        };
+        Ok(d.conn.execute(
+            "DELETE FROM idempotency WHERE at_ms < ?1",
+            [i64::try_from(before_ms).unwrap_or(i64::MAX)],
+        )?)
     }
 
     /// The last checkpoint written, if any.
@@ -493,19 +725,34 @@ impl Store {
 
 impl Disk {
     fn write(&mut self, store: &Store) -> Result<(), DiskError> {
-        self.write_with(store, None)
+        self.write_with(store, None, false)
     }
 
-    fn write_with(&mut self, store: &Store, cp: Option<&Checkpoint>) -> Result<(), DiskError> {
+    /// Write one transaction: the journal entries since the last one with
+    /// the `inflight` rows they insert or delete, every row whose durable
+    /// fields changed, `meta`, the idempotency rows, and with a checkpoint
+    /// `cp` the sampled state and the checkpoint row (spec/persistence.md,
+    /// "Writes"). `init` makes the tables first, for a new file.
+    fn write_with(
+        &mut self,
+        store: &Store,
+        cp: Option<&Checkpoint>,
+        init: bool,
+    ) -> Result<(), DiskError> {
         let Store {
-            campaign: _,
+            campaign,
             next_entity,
             rev,
-            epoch,
+            epoch: _,
             loaded,
             groups,
             units,
             journal,
+            inflight: _,
+            last_record,
+            last_stamp,
+            keep_journal: _,
+            idempotency,
             changes: _,
             changes_keep: _,
             grid: _,
@@ -519,17 +766,40 @@ impl Disk {
             disk: _,
             markers: _,
         } = store;
+        let _ = take_overflow();
+        let at_ms = now_ms();
         let tx = self.conn.transaction()?;
+        if init {
+            tx.execute_batch(TABLES)?;
+            put_meta(&tx, "schema", &Lv::Number(f64::from(SCHEMA)))?;
+            put_meta(&tx, "campaign_id", &u(campaign.0))?;
+        }
+        let full = cp.is_some();
         let mut changed_groups = Vec::new();
         for (id, g) in groups {
-            if self.groups.get(id) != Some(g) {
+            let differs = match self.groups.get(id) {
+                None => true,
+                Some(w) if full => w != g,
+                // The lead position is sampled bookkeeping.
+                Some(w) => {
+                    let mut same = g.clone();
+                    same.last_lead = w.last_lead;
+                    *w != same
+                }
+            };
+            if differs {
                 put_entity(&tx, *id, "group", &enc_group(g))?;
                 changed_groups.push(*id);
             }
         }
         let mut changed_units = Vec::new();
         for (id, un) in units {
-            if self.units.get(id) != Some(un) {
+            let differs = match self.units.get(id) {
+                None => true,
+                Some(w) if full => w != un,
+                Some(w) => !durable_eq(w, un),
+            };
+            if differs {
                 put_entity(&tx, *id, "unit", &enc_unit(un))?;
                 changed_units.push(*id);
             }
@@ -577,19 +847,56 @@ impl Disk {
                 changed_floors.push((name.clone(), *rev));
             }
         }
-        let first = self.journal_written;
-        for (i, e) in journal.iter().enumerate().skip(first) {
+        let mut seq = self.journal_seq;
+        for e in journal.iter().skip(self.journal_written) {
+            seq += 1;
+            let body = enc_entry(e);
+            let (kind, entity) = entry_key(&body);
             tx.execute(
-                "INSERT INTO journal (seq, body) VALUES (?1, ?2)",
-                params![(i + 1) as i64, encode(&enc_entry(e))],
+                "INSERT INTO journal (seq, at_ms, kind, entity, body) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![seq as i64, at_ms as i64, kind, entity as i64, encode(&body)],
+            )?;
+            match e {
+                Entry::Command(c) => {
+                    tx.execute(
+                        "INSERT OR REPLACE INTO inflight (epoch, seq, body) VALUES (?1, ?2, ?3)",
+                        params![c.epoch as i64, c.seq as i64, encode(&body)],
+                    )?;
+                }
+                Entry::Outcome { epoch, seq, .. } => {
+                    tx.execute(
+                        "DELETE FROM inflight WHERE epoch = ?1 AND seq = ?2",
+                        params![*epoch as i64, *seq as i64],
+                    )?;
+                }
+                _ => {}
+            }
+        }
+        for r in idempotency {
+            tx.execute(
+                "INSERT OR REPLACE INTO idempotency (key, at_ms, request_hash, response) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![r.key, r.at_ms as i64, r.request_hash, r.response],
             )?;
         }
+        // Sampled state moves only at a checkpoint.
+        let sample_time = if full { *sample_time } else { self.sample_time };
         let world = encode(&t(vec![
             ("next_entity", u(*next_entity)),
             ("open", b(self.open)),
             ("revision", u(*rev)),
-            ("epoch", u(*epoch)),
             ("loaded", loaded.as_ref().map_or(Lv::Nil, enc_loaded)),
+            ("last_record", opt_record(*last_record)),
+            (
+                "last_stamp",
+                last_stamp.map_or(Lv::Nil, |(a, g, c)| {
+                    list(vec![
+                        s(&a.to_string()),
+                        s(&g.to_string()),
+                        s(&c.to_string()),
+                    ])
+                }),
+            ),
             ("owners", enc_owners(owners)),
             ("stocks", enc_stocks(stocks)),
             ("rates", rates.as_ref().map_or(Lv::Nil, enc_rates)),
@@ -597,7 +904,7 @@ impl Disk {
                 "countries",
                 countries.as_ref().map_or(Lv::Nil, enc_countries),
             ),
-            ("sample_time", f(*sample_time)),
+            ("sample_time", f(sample_time)),
             (
                 "route_events",
                 list(route_events.iter().map(enc_route_event).collect()),
@@ -610,10 +917,15 @@ impl Disk {
             put_meta(&tx, "campaign", &enc_record(&self.record))?;
         }
         if let Some(c) = cp {
+            tx.execute("DELETE FROM checkpoint", [])?;
             tx.execute(
                 "INSERT INTO checkpoint (seq, body) VALUES (?1, ?2)",
                 params![c.seq as i64, encode(&enc_checkpoint(c))],
             )?;
+        }
+        if let Some(e) = take_overflow() {
+            // Dropping the transaction rolls it back.
+            return Err(DiskError::TooLarge(e));
         }
         tx.commit()?;
         for id in changed_groups {
@@ -635,11 +947,69 @@ impl Disk {
         }
         self.extensions.retain(|n, _| extensions.contains_key(n));
         self.floors.extend(changed_floors);
+        self.journal_seq = seq;
         self.journal_written = journal.len();
         self.world = world;
+        self.sample_time = sample_time;
         self.record_written = true;
         Ok(())
     }
+}
+
+/// Whether two versions of a unit differ only in sampled state: the state a
+/// journal or API commit does not write (spec/persistence.md, "Writes").
+fn durable_eq(a: &Unit, b: &Unit) -> bool {
+    let Unit {
+        id,
+        group,
+        type_name,
+        state: _,
+        dead,
+        missing,
+        removed,
+        left_logged,
+        object,
+        label,
+        skill,
+        captured,
+        extra,
+    } = a;
+    *id == b.id
+        && *group == b.group
+        && *type_name == b.type_name
+        && *dead == b.dead
+        && *missing == b.missing
+        && *removed == b.removed
+        && *left_logged == b.left_logged
+        && *object == b.object
+        && *label == b.label
+        && *skill == b.skill
+        && *captured == b.captured
+        && *extra == b.extra
+}
+
+/// A journal entry's `kind` and the entity it names, 0 for none, from its
+/// encoded body.
+fn entry_key(body: &Lv) -> (String, u64) {
+    let r = Rd(body);
+    let kind = r.s("kind").unwrap_or_default();
+    let entity = ["entity", "unit", "group"]
+        .iter()
+        .find_map(|k| r.u(k).ok().filter(|v| *v != 0))
+        .unwrap_or(0);
+    (kind, entity)
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+fn opt_record(v: Option<(u64, u64)>) -> Lv {
+    v.map_or(Lv::Nil, |(a, n)| {
+        list(vec![s(&a.to_string()), s(&n.to_string())])
+    })
 }
 
 fn load(path: &Path, conn: Connection, changes_keep: usize) -> Result<Store, DiskError> {
@@ -660,7 +1030,21 @@ fn load(path: &Path, conn: Connection, changes_keep: usize) -> Result<Store, Dis
         if w.b("open")? {
             store.rev += REVISION_RESERVE;
         }
-        store.epoch = w.u("epoch")?;
+        store.last_record = match w.list("last_record")?.as_slice() {
+            [] => None,
+            [boot, n] => Some((dec_u(boot, "last_record")?, dec_u(n, "last_record")?)),
+            _ => return Err(DiskError::Corrupt("last_record".into())),
+        };
+        store.last_stamp = match w.list("last_stamp")?.as_slice() {
+            [] => None,
+            [a, g, c] => Some((
+                dec_u(a, "last_stamp")?,
+                u32::try_from(dec_u(g, "last_stamp")?)
+                    .map_err(|_| DiskError::Corrupt("last_stamp".into()))?,
+                dec_u(c, "last_stamp")?,
+            )),
+            _ => return Err(DiskError::Corrupt("last_stamp".into())),
+        };
         store.loaded = match w.get("loaded") {
             Lv::Nil => None,
             l => Some(dec_loaded(l)?),
@@ -733,21 +1117,25 @@ fn load(path: &Path, conn: Connection, changes_keep: usize) -> Result<Store, Dis
             }
         }
     }
-    let mut journal = Vec::new();
+    // The journal is not read: what a restart needs of it is in `inflight`.
+    let mut inflight = BTreeMap::new();
     {
-        let mut st = conn.prepare("SELECT seq, body FROM journal ORDER BY seq")?;
+        let mut st = conn.prepare("SELECT epoch, seq, body FROM inflight ORDER BY epoch, seq")?;
         let mut rows = st.query([])?;
         while let Some(row) = rows.next()? {
-            let seq: i64 = row.get(0)?;
-            if seq != journal.len() as i64 + 1 {
-                return Err(DiskError::Corrupt(format!(
-                    "journal entry {seq} out of order"
-                )));
+            let body: Vec<u8> = row.get(2)?;
+            match dec_entry(&decode(&body)?)? {
+                Entry::Command(c) => {
+                    inflight.insert((c.epoch, c.seq), c);
+                }
+                e => {
+                    return Err(DiskError::Corrupt(format!("inflight row holds {e:?}")));
+                }
             }
-            let body: Vec<u8> = row.get(1)?;
-            journal.push(dec_entry(&decode(&body)?)?);
         }
     }
+    let journal_seq: Option<i64> =
+        conn.query_row("SELECT max(seq) FROM journal", [], |r| r.get(0))?;
     let last_checkpoint: Option<Vec<u8>> = conn
         .query_row(
             "SELECT body FROM checkpoint ORDER BY seq DESC LIMIT 1",
@@ -800,8 +1188,9 @@ fn load(path: &Path, conn: Connection, changes_keep: usize) -> Result<Store, Dis
     store.units = units.clone();
     store.extensions = extensions.clone();
     store.set_extension_floors(floors.clone());
-    store.journal = journal;
-    let journal_written = store.journal.len();
+    store.inflight = inflight;
+    store.keep_journal = false;
+    let sample_time = store.sample_time;
     store.disk = Slot(Some(Box::new(Disk {
         path: path.to_owned(),
         conn,
@@ -809,8 +1198,10 @@ fn load(path: &Path, conn: Connection, changes_keep: usize) -> Result<Store, Dis
         units,
         extensions,
         floors,
-        journal_written,
+        journal_written: 0,
+        journal_seq: u64::try_from(journal_seq.unwrap_or(0)).unwrap_or(0),
         world,
+        sample_time,
         record,
         record_written: true,
         last_checkpoint,
@@ -854,7 +1245,25 @@ fn get_meta(conn: &Connection, key: &str) -> Result<Lv, DiskError> {
 
 // ---- lv helpers ----
 
+thread_local! {
+    /// Why a value encoded since the last [`take_overflow`] did not encode
+    /// whole, if one did not.
+    static OVERFLOW: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Take what [`encode`] found since the last call.
+fn take_overflow() -> Option<String> {
+    OVERFLOW.with(|o| o.borrow_mut().take())
+}
+
+/// Encode `v`. A value that does not encode whole ([`check_lv`]) is noted,
+/// and the transaction that writes it fails before it commits.
 fn encode(v: &Lv) -> Vec<u8> {
+    if let Err(e) = check_lv(v) {
+        OVERFLOW.with(|o| {
+            o.borrow_mut().get_or_insert(e);
+        });
+    }
     let mut w = Writer::new();
     w.lv(v);
     w.finish()
@@ -2146,6 +2555,146 @@ fn dec_route_event(v: &Lv) -> Result<RouteEvent, DiskError> {
 mod tests {
     use super::*;
 
+    /// The golden file of the store's row encodings (spec/persistence.md,
+    /// "Encodings"): `<name> <hex>` per line. Set `NANOPROBE_BLESS=1` to
+    /// write it after an intended change, with a new schema version.
+    const GOLDEN: &str = include_str!("../../../../spec/persistence.golden");
+
+    fn golden_rows() -> Vec<(String, Vec<u8>)> {
+        let mut s = Store::new(CampaignId(7), 10);
+        let g = s
+            .create_group(super::super::NewGroup {
+                theater: "Caucasus".into(),
+                country: 2,
+                category: 2,
+                coalition: 2,
+                units: vec![super::super::NewUnit::new(
+                    "M-113",
+                    UnitState {
+                        at: Point {
+                            x: 1.5,
+                            y: 0.0,
+                            z: -2.25,
+                        },
+                        heading: 0.5,
+                        life: 1.0,
+                        fuel: 0.75,
+                    },
+                )],
+                authority: Authority::Sim,
+                label: "g".into(),
+                extra: Lv::Table(vec![(Lv::String(b"k".to_vec()), Lv::Number(1.0))]),
+            })
+            .expect("group");
+        let m = s.group(g).expect("g").members[0];
+        let command = Entry::Command(Journalled {
+            agent_boot: 11,
+            epoch: 3,
+            seq: 4,
+            opcode: 16,
+            entity: g,
+            rev: 1,
+            mission_gen: 2,
+            position: 64,
+            units: vec![m],
+        });
+        let checkpoint = Checkpoint {
+            seq: 1,
+            at_ms: 1_700_000_000_000,
+            revision: 9,
+            model_time: 12.5,
+            mission_gen: 2,
+            achieved: vec![TierPeriod {
+                tier: "position".into(),
+                target_s: 1.0,
+                achieved_s: 1.25,
+            }],
+        };
+        let mut rows = vec![
+            (
+                "group".to_owned(),
+                encode(&enc_group(s.group(g).expect("g"))),
+            ),
+            ("unit".to_owned(), encode(&enc_unit(s.unit(m).expect("u")))),
+            ("entry.command".to_owned(), encode(&enc_entry(&command))),
+            (
+                "entry.death".to_owned(),
+                encode(&enc_entry(&Entry::Death { unit: m })),
+            ),
+            (
+                "checkpoint".to_owned(),
+                encode(&enc_checkpoint(&checkpoint)),
+            ),
+            ("record".to_owned(), encode(&enc_record(&record()))),
+        ];
+        for (i, e) in s.entries().iter().enumerate() {
+            rows.push((format!("entry.created.{i}"), encode(&enc_entry(e))));
+        }
+        rows
+    }
+
+    #[test]
+    fn store_rows_encode_as_the_golden_file_says() {
+        let text: String = golden_rows()
+            .iter()
+            .map(|(name, b)| {
+                let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+                format!("store.{name} {hex}\n")
+            })
+            .collect();
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../spec/persistence.golden");
+        if std::env::var_os("NANOPROBE_BLESS").is_some() {
+            let others: String = GOLDEN
+                .lines()
+                .filter(|l| !l.starts_with("store."))
+                .map(|l| format!("{l}\n"))
+                .collect();
+            std::fs::write(path, others + &text).expect("bless");
+            return;
+        }
+        let have: String = GOLDEN
+            .lines()
+            .filter(|l| l.starts_with("store."))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        assert_eq!(
+            have, text,
+            "the store's encoding changed; see spec/persistence.md"
+        );
+        // Every row decodes back.
+        for (name, b) in golden_rows() {
+            decode(&b).unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
+    }
+
+    #[test]
+    fn a_value_too_deep_or_too_wide_is_refused_not_written_as_nil() {
+        let mut deep = Lv::Number(1.0);
+        for _ in 0..nanoprobe_transport::codec::MAX_DEPTH {
+            deep = Lv::Table(vec![(Lv::Number(1.0), deep)]);
+        }
+        assert!(check_lv(&deep).is_ok(), "the codec's own depth fits");
+        deep = Lv::Table(vec![(Lv::Number(1.0), deep)]);
+        assert!(check_lv(&deep).is_err());
+        let d = tempfile::tempdir().expect("dir");
+        let mut s = Store::new(CampaignId(7), 10);
+        s.save_as(&d.path().join("store.sqlite"), record())
+            .expect("save");
+        let e = s
+            .create_group(super::super::NewGroup {
+                theater: "Caucasus".into(),
+                country: 2,
+                category: 2,
+                coalition: 2,
+                units: vec![super::super::NewUnit::new("M-113", UnitState::default())],
+                authority: Authority::Sim,
+                label: String::new(),
+                extra: deep,
+            })
+            .expect_err("too deep");
+        assert!(matches!(e, super::super::StoreError::TooLarge(_)));
+    }
+
     fn record() -> CampaignRecord {
         CampaignRecord {
             name: "a".into(),
@@ -2208,8 +2757,9 @@ mod tests {
                 "unit row 9 holds 3",
             ),
             (
-                "INSERT INTO journal (seq, body) SELECT seq + 10, body FROM journal;",
-                "out of order",
+                "INSERT INTO inflight (epoch, seq, body) \
+                 SELECT 1, seq, body FROM journal WHERE kind = 'spec' LIMIT 1;",
+                "inflight row holds",
             ),
         ] {
             match damaged(sql) {

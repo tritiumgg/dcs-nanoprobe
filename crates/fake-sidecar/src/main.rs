@@ -3,18 +3,20 @@
 use std::process::ExitCode;
 use std::time::Duration;
 
-use nanoprobe_api::config::Config;
+use nanoprobe_api::config::{Config, StoreFiles};
 use nanoprobe_fake_sidecar::{fake_config, start};
 
 const USAGE: &str = "\
 Usage: nanoprobe-fake-sidecar [--listen ADDR] [--tokens PATH] [--frame-ms MS]
-                              [--run PROGRAM [ARGS...]]
+                              [--store DIR] [--run PROGRAM [ARGS...]]
 
 Serve the nanoprobe API over a fake DCS, for development and tests.
 
 --listen ADDR   Where to listen (default 127.0.0.1:47311; port 0 picks one).
 --tokens PATH   A tokens file (spec/config.md); required off loopback.
 --frame-ms MS   Milliseconds per fake frame (default 20).
+--store DIR     Keep the campaigns in DIR (spec/persistence.md). Without it
+                they are in memory and end with the process.
 --run PROGRAM   Run PROGRAM with NANOPROBE_ADDR set to the server's URL, then
                 stop and exit with its exit code. Without it, serve until
                 Ctrl-C.
@@ -54,6 +56,10 @@ fn parse(args: &[String]) -> Result<Args, String> {
                     return Err("--frame-ms is at least 1".into());
                 }
                 cfg.step = Duration::from_millis(ms);
+                i += 2;
+            }
+            "--store" => {
+                cfg.store = Some(StoreFiles::new(value(i)?.into()));
                 i += 2;
             }
             "--run" => {

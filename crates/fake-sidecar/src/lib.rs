@@ -66,6 +66,18 @@ impl Backend for Fake {
     fn as_any(&mut self) -> Option<&mut dyn std::any::Any> {
         Some(&mut self.0)
     }
+
+    fn achieved(&self) -> Option<[f64; 5]> {
+        // The fake samples at the rates it was told, never starved.
+        let (r, received) = self.0.rates();
+        (received > 0).then_some([
+            r.position_s,
+            r.vitals_s,
+            r.ammo_s,
+            r.warehouse_s,
+            r.enumeration_s,
+        ])
+    }
 }
 
 /// The fake sim's settings for the server: a quick mission load, and units
@@ -109,18 +121,24 @@ impl Running {
 /// A setting the server refuses (a non-loopback listener without tokens, a
 /// bad tokens file) fails here, before anything is bound.
 pub async fn start(cfg: Config, fake: FakeConfig) -> Result<Running, String> {
+    start_with(cfg, FakeSim::new(fake)).await
+}
+
+/// [`start`] over a fake sim that already runs: a sidecar that starts
+/// again while DCS goes on.
+pub async fn start_with(cfg: Config, sim: FakeSim) -> Result<Running, String> {
     let tokens = nanoprobe_api::server::tokens_for(&cfg)?;
     let listener = TcpListener::bind(cfg.listen)
         .await
         .map_err(|e| format!("cannot listen on {}: {e}", cfg.listen))?;
     let addr = listener.local_addr().map_err(|e| e.to_string())?;
-    let hub = Hub::new(
+    let hub = Hub::open(
         Config {
             listen: addr,
             ..cfg
         },
-        Box::new(Fake(FakeSim::new(fake))),
-    );
+        Box::new(Fake(sim)),
+    )?;
     let routes = nanoprobe_api::server::routes(&hub, tokens)?;
     let (stop, stopped) = oneshot::channel::<()>();
     let task = tokio::spawn(nanoprobe_api::server::serve(
@@ -144,7 +162,7 @@ pub async fn start(cfg: Config, fake: FakeConfig) -> Result<Running, String> {
 /// channel to it. The server and its driver stop when the runtime does.
 pub async fn in_process(cfg: Config, fake: FakeConfig) -> Result<(Arc<Hub>, Channel), String> {
     let tokens = nanoprobe_api::server::tokens_for(&cfg)?;
-    let hub = Hub::new(cfg, Box::new(Fake(FakeSim::new(fake))));
+    let hub = Hub::open(cfg, Box::new(Fake(FakeSim::new(fake))))?;
     let routes = nanoprobe_api::server::routes(&hub, tokens)?;
     hub.start();
     tokio::spawn(Arc::clone(&hub).drive());

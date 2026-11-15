@@ -82,7 +82,8 @@ pub const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(2
 /// `shutdown`. At `shutdown` every open stream ends with `UNAVAILABLE`, and
 /// calls in flight get [`SHUTDOWN_GRACE`] to finish. A driver
 /// that stops (a panic in a step) ends the server with an error, so the
-/// process exits and its supervisor can restart it.
+/// process exits and its supervisor can restart it. A clean stop closes
+/// every open store ([`crate::hub::Inner::close_all`]).
 pub async fn serve(
     hub: Arc<Hub>,
     routes: Routes,
@@ -126,5 +127,10 @@ pub async fn serve(
         }
     };
     driver.abort();
+    // A clean stop closes the stores cleanly; after a panic the state may
+    // be half-changed, and the next open treats the stop as unclean.
+    if result.is_ok() {
+        hub.lock().close_all()?;
+    }
     result
 }

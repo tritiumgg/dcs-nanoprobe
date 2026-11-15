@@ -45,4 +45,11 @@ pub trait SimAdapter {
 
     /// The records read since the last call, in ring order.
     fn read(&mut self) -> Vec<RawRecord>;
+
+    /// Everything sent and read so far is in the store (spec/persistence.md,
+    /// "Writes"): the commands sent since the last flush may now reach the
+    /// agent, and the records read may be acknowledged. Until then a
+    /// command is held back, and a sidecar that dies before the flush never
+    /// delivers it.
+    fn flush(&mut self);
 }

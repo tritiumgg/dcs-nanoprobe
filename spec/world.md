@@ -97,8 +97,11 @@ Known limits:
 
 - A tag can equal the tag of a campaign the stores have never held, for example one from
   another server or from lost stores, with probability 1 in 238,328 per pair.
-- The check at creation covers only the campaigns the stores hold. A deleted campaign's
-  tag can be given to a new campaign.
+- The check at creation covers the campaigns the stores know: every campaign folder,
+  readable or not, and the campaign IDs the server store keeps (deleted campaigns and
+  its idempotency index; spec/persistence.md, "The server store"). A campaign folder
+  removed by hand, or lost with the server store, leaves no trace, and its tag can be
+  given to a new campaign.
 
 In both cases the other campaign's objects, in a mission DCS still runs or one saved
 with them, read as the active campaign's.
@@ -359,17 +362,17 @@ the waypoint (spec/sampling.md). No script runs in DCS for it.
 Events are numbered per campaign and kept in the campaign's event history
 (spec/persistence.md, "Event history"). While no campaign
 is active, events still happen: players connect and chat, and a plain mission runs.
-Those events go to a log in the server-scoped store, with its own sequence numbers and
-the retention of spec/config.md. The Events service reads it when the request asks for
-the server log.
+Those events go to the server event log (spec/persistence.md, "The server store"), with
+its own sequence numbers and the retention of spec/config.md. The Events service reads
+it when the request asks for the server log.
 
-**The server-scoped player file.** The player-key secret and the key-to-ucid pairs
-("Players") are kept in `players.json`, directly in the store's
-directory beside the campaign folders. It is written whole to a temporary file and
-renamed into place, with mode 0600. Campaign backups do not include it, and no
-diagnostics bundle reads it. With persistence off it is not written, and the keys last
-as long as the sidecar process. This file is the server-scoped store's current form for
-players.
+**Where player keys are kept.** The player-key secret and the key-to-ucid pairs
+("Players") are kept in the server store, in a folder only the sidecar's user may
+enter (spec/persistence.md, "The server store"). A
+pair learned in a step is written there by the end of the step; a failed write is
+tried again at the next. Campaign backups do not include the server store, and no
+diagnostics bundle reads it. With persistence off nothing is written, and the keys last
+as long as the sidecar process.
 
 **Kill attribution.** DCS sends a weapon kill's `KILL` and `SCORE` with the late death
 event, up to 77.1 s after the object stops existing (LIVE,

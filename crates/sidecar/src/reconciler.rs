@@ -360,7 +360,9 @@ impl Reconciler {
             epoch: 0,
             next_seq: 1,
             lifecycle: 0,
-            stamp: (0, 0, 0),
+            // Records delivered again after a restart come before the next
+            // FRAME: they keep the stamp they were first read under.
+            stamp: store.last_stamp().unwrap_or((0, 0, 0)),
             inflight,
             binding: HashMap::new(),
             run: None,
@@ -439,10 +441,30 @@ impl Reconciler {
 
     /// Read and fold in every record, then write the commands that close the
     /// difference.
+    /// Then write the store in one transaction and let the step's commands
+    /// through (spec/persistence.md, "Writes"). A failed write stops the
+    /// sidecar through its panic path: no command of the step reaches DCS.
     pub fn step(&mut self, store: &mut Store, sim: &mut dyn SimAdapter) {
+        self.step_held(store, sim);
+        if let Err(e) = store.commit() {
+            panic!("the store could not be written, stopping: {e}");
+        }
+        sim.flush();
+    }
+
+    /// [`Reconciler::step`] without the write and the flush, for a driver
+    /// that writes other files in the same step first. The commands it sent
+    /// stay held until the driver's flush.
+    pub fn step_held(&mut self, store: &mut Store, sim: &mut dyn SimAdapter) {
         self.adopt_refresh(store);
         for r in sim.read() {
+            if store.folded(&r) {
+                continue;
+            }
             self.record(store, &r);
+            if r.agent_boot != 0 {
+                store.set_last_record(r.agent_boot, r.number, self.stamp);
+            }
         }
         self.plan(store, sim);
     }

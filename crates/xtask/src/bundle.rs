@@ -445,13 +445,19 @@ mod tests {
             "nanoprobe/logs/sidecar.log",
             &format!("pairs {{\"{lower}\":\"{ucid}\"}} but not {lower}0 or 0{lower}\n"),
         );
-        // The keyring file sits in the store directory, which no collected
-        // path names; wherever it is placed in the profile it stays out.
+        // The server store and a `players.json` not yet migrated sit in the
+        // store directory, which no collected path names; wherever they are
+        // placed in the profile they stay out.
         let secret = "KEYRING-SECRET-PLANTED";
         for place in [
             "players.json",
             "nanoprobe/players.json",
             "campaigns/players.json",
+            "server/store.sqlite",
+            "nanoprobe/server/store.sqlite",
+            "players.json.migrated",
+            "server/events.sqlite",
+            "server/backups/store-1.sqlite",
         ] {
             write(
                 place,

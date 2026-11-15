@@ -4,8 +4,10 @@
 //! Each campaign has a log numbered from 1, and so does the server log, which
 //! holds events recorded while no campaign is active. A log is never
 //! conflated: a consumer reads every event in order from a sequence number,
-//! and a lost span is an explicit `Gap`. Step S18 keeps the logs in the
-//! stores; here they are in memory and keep the newest `events_keep`.
+//! and a lost span is an explicit `Gap`. A log on disk is backed by an
+//! events file (spec/persistence.md, "Event history"): the driver commits
+//! the events of a step before it publishes them. A log keeps its newest
+//! events in memory and reads older ones from the file.
 
 use std::collections::VecDeque;
 use std::time::{Duration, SystemTime};
@@ -14,46 +16,145 @@ use nanoprobe_proto::v1alpha1::{
     self as pb, AuthorEvent, Event, Gap as PbGap, LifecycleEvent, MenuAttribution, MenuEvent,
     PlayerEvent, PlayerEventKind, SimState, WorldEvent, event,
 };
+use nanoprobe_sidecar::eventfile::{EventFile, EventRow, Retained};
 use nanoprobe_sidecar::players::{LaunchRule, Note, Roster};
 use nanoprobe_sidecar::sim::RawRecord;
 use nanoprobe_sidecar::sim::wire::Input;
+use nanoprobe_sidecar::store::DiskError;
 use nanoprobe_transport::layout::{gap_class, lifecycle as lc};
 use nanoprobe_transport::records;
 
+use prost::Message;
+
 use crate::lua::from_lua;
 
+/// The most events a log on disk keeps in memory.
+pub const DISK_WINDOW: usize = 10_000;
+
 /// One numbered log.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct EventLog {
     keep: usize,
     next: u64,
     events: VecDeque<Event>,
+    file: Option<EventFile>,
+}
+
+fn wall_ms_of(e: &Event) -> u64 {
+    e.stamp
+        .as_ref()
+        .and_then(|s| s.wall)
+        .map_or_else(now_ms, |t| {
+            u64::try_from(t.seconds)
+                .unwrap_or(0)
+                .saturating_mul(1000)
+                .saturating_add(u64::try_from(t.nanos / 1_000_000).unwrap_or(0))
+        })
+}
+
+fn decode(r: &EventRow) -> Result<Event, DiskError> {
+    Event::decode(r.body.as_slice())
+        .map_err(|e| DiskError::Corrupt(format!("event {} does not decode: {e}", r.seq)))
 }
 
 impl EventLog {
-    /// An empty log keeping the newest `keep` events.
+    /// An empty log in memory keeping the newest `keep` events.
     pub fn new(keep: usize) -> EventLog {
         EventLog {
             keep: keep.max(1),
             next: 1,
             events: VecDeque::new(),
+            file: None,
         }
     }
 
-    /// Append an event, numbering it. Returns its sequence number.
-    pub fn push(&mut self, campaign: u64, stamp: pb::Stamp, body: event::Body) -> u64 {
+    /// A log backed by `file`, keeping its newest `keep` events, at most
+    /// [`DISK_WINDOW`], in memory.
+    pub fn open(file: EventFile, keep: usize) -> Result<EventLog, DiskError> {
+        let keep = keep.clamp(1, DISK_WINDOW);
+        let next = file.next_seq();
+        let from = next.saturating_sub(keep as u64).max(1);
+        let mut events = VecDeque::new();
+        for r in file.read_from(from, keep)? {
+            events.push_back(decode(&r)?);
+        }
+        Ok(EventLog {
+            keep,
+            next,
+            events,
+            file: Some(file),
+        })
+    }
+
+    /// Append an event, numbering it, made from the agent record `source` if
+    /// any. Returns its sequence number. A log on disk writes it at the next
+    /// [`EventLog::commit`], before it is published.
+    pub fn push_from(
+        &mut self,
+        campaign: u64,
+        stamp: pb::Stamp,
+        body: event::Body,
+        source: Option<String>,
+    ) -> u64 {
         let sequence = self.next;
-        self.next += 1;
-        self.events.push_back(Event {
+        let e = Event {
             sequence,
             stamp: Some(stamp),
             body: Some(body),
             campaign_id: campaign,
-        });
+        };
+        if let Some(f) = self.file.as_mut() {
+            f.push(EventRow {
+                seq: sequence,
+                wall_ms: wall_ms_of(&e),
+                source,
+                body: e.encode_to_vec(),
+            });
+        }
+        self.next += 1;
+        self.events.push_back(e);
         while self.events.len() > self.keep {
             self.events.pop_front();
         }
         sequence
+    }
+
+    /// [`EventLog::push_from`] for an event the sidecar made.
+    pub fn push(&mut self, campaign: u64, stamp: pb::Stamp, body: event::Body) -> u64 {
+        self.push_from(campaign, stamp, body, None)
+    }
+
+    /// Whether an event made from `source` is in the log already.
+    pub fn has_source(&self, source: &str) -> Result<bool, DiskError> {
+        match self.file.as_ref() {
+            Some(f) => f.has_source(source),
+            None => Ok(false),
+        }
+    }
+
+    /// Write the events appended since the last commit.
+    pub fn commit(&mut self) -> Result<(), DiskError> {
+        match self.file.as_mut() {
+            Some(f) => f.commit(),
+            None => Ok(()),
+        }
+    }
+
+    /// Apply the retention to the file (spec/persistence.md, "Event
+    /// history"), then drop from memory what it deleted.
+    pub fn retain(&mut self, retention: Duration, now_ms: u64) -> Result<Retained, DiskError> {
+        let Some(f) = self.file.as_mut() else {
+            return Ok(Retained::Kept);
+        };
+        let r = f.retain(
+            u64::try_from(retention.as_millis()).unwrap_or(u64::MAX),
+            now_ms,
+        )?;
+        let first = self.first();
+        while self.events.front().is_some_and(|e| e.sequence < first) {
+            self.events.pop_front();
+        }
+        Ok(r)
     }
 
     /// The newest sequence number, 0 for none yet.
@@ -63,7 +164,10 @@ impl EventLog {
 
     /// The oldest sequence number kept, or the next one when empty.
     pub fn first(&self) -> u64 {
-        self.events.front().map_or(self.next, |e| e.sequence)
+        match self.file.as_ref() {
+            Some(f) => f.first_seq().unwrap_or(self.next),
+            None => self.events.front().map_or(self.next, |e| e.sequence),
+        }
     }
 
     /// Whether a reader that has every event up to `after` can go on from
@@ -73,11 +177,40 @@ impl EventLog {
         after <= self.last() && after + 1 >= self.first()
     }
 
-    /// Up to `limit` events after `after`, in order.
-    pub fn after(&self, after: u64, limit: usize) -> impl Iterator<Item = &Event> {
-        let first = self.first();
-        let skip = usize::try_from((after + 1).saturating_sub(first)).unwrap_or(usize::MAX);
-        self.events.iter().skip(skip).take(limit)
+    /// Up to `limit` events after `after`, in order: from memory, or from
+    /// the file for those older than memory holds. A read of the file that
+    /// fails returns what memory holds from there.
+    pub fn after(&self, after: u64, limit: usize) -> Vec<Event> {
+        let mem_first = self.events.front().map_or(self.next, |e| e.sequence);
+        let mut out = Vec::new();
+        if after + 1 < mem_first
+            && let Some(f) = self.file.as_ref()
+        {
+            let want = usize::try_from(mem_first - (after + 1)).unwrap_or(usize::MAX);
+            if let Ok(rows) = f.read_from(after + 1, want.min(limit)) {
+                for r in rows {
+                    match decode(&r) {
+                        Ok(e) => out.push(e),
+                        Err(_) => return out,
+                    }
+                }
+            }
+            if out.len() < want.min(limit) {
+                // The file lost rows the reader needs: stop, and let the
+                // reader find the gap.
+                return out;
+            }
+        }
+        let from = out.last().map_or(after, |e| e.sequence);
+        let skip = usize::try_from((from + 1).saturating_sub(mem_first)).unwrap_or(usize::MAX);
+        out.extend(
+            self.events
+                .iter()
+                .skip(skip)
+                .take(limit.saturating_sub(out.len()))
+                .cloned(),
+        );
+        out
     }
 }
 
@@ -247,6 +380,12 @@ fn wall(seconds: f64) -> Option<prost_types::Timestamp> {
         seconds: i64::try_from(d.as_secs()).ok()?,
         nanos: i32::try_from(d.subsec_nanos()).ok()?,
     })
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 fn now_s() -> f64 {
@@ -588,11 +727,79 @@ pub fn passes(e: &Event, dcs_ids: &[u32], player_key: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// An event body as the events file keeps it, pinned in
+    /// spec/persistence.golden next to the store's rows.
+    #[test]
+    fn an_event_body_encodes_as_the_golden_file_says() {
+        const GOLDEN: &str = include_str!("../../../spec/persistence.golden");
+        let e = Event {
+            sequence: 3,
+            stamp: Some(pb::Stamp {
+                wall: Some(prost_types::Timestamp {
+                    seconds: 1_700_000_000,
+                    nanos: 5_000_000,
+                }),
+                model_time: 12.5,
+                mission_generation: 2,
+                frame: 77,
+            }),
+            body: Some(body(9)),
+            campaign_id: 7,
+        };
+        let hex: String = e
+            .encode_to_vec()
+            .iter()
+            .map(|x| format!("{x:02x}"))
+            .collect();
+        let line = format!("event.world {hex}\n");
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../spec/persistence.golden");
+        if std::env::var_os("NANOPROBE_BLESS").is_some() {
+            let others: String = GOLDEN
+                .lines()
+                .filter(|l| !l.starts_with("event."))
+                .map(|l| format!("{l}\n"))
+                .collect();
+            std::fs::write(path, others + &line).expect("bless");
+            return;
+        }
+        let have: String = GOLDEN
+            .lines()
+            .filter(|l| l.starts_with("event."))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        assert_eq!(
+            have, line,
+            "the event body changed; see spec/persistence.md"
+        );
+    }
+
     fn body(id: u32) -> event::Body {
         event::Body::World(WorldEvent {
             dcs_id: id,
             ..WorldEvent::default()
         })
+    }
+
+    /// A log on disk reads older events from its file and newer ones from
+    /// memory, with no gap and no repeat where the two meet.
+    #[test]
+    fn a_log_on_disk_reads_across_the_memory_boundary() {
+        let d = tempfile::tempdir().expect("dir");
+        let file = EventFile::open(&d.path().join("events.sqlite"), 1).expect("file");
+        let mut l = EventLog::open(file, 3).expect("log");
+        for i in 0..10 {
+            l.push(1, pb::Stamp::default(), body(i));
+        }
+        l.commit().expect("commit");
+        let seqs = |after, limit| -> Vec<u64> {
+            l.after(after, limit).iter().map(|e| e.sequence).collect()
+        };
+        assert_eq!(seqs(0, 100), (1..=10).collect::<Vec<u64>>());
+        assert_eq!(seqs(5, 2), vec![6, 7]);
+        assert_eq!(seqs(6, 100), vec![7, 8, 9, 10]);
+        assert_eq!(seqs(7, 100), vec![8, 9, 10]);
+        assert_eq!(seqs(9, 100), vec![10]);
+        assert!(seqs(10, 100).is_empty());
     }
 
     #[test]
@@ -610,9 +817,9 @@ mod tests {
         // A reader ahead of the log is not covered: it would skip events.
         assert!(!l.covers(6));
         assert!(!EventLog::new(3).covers(1));
-        let seqs: Vec<u64> = l.after(3, 10).map(|e| e.sequence).collect();
+        let seqs: Vec<u64> = l.after(3, 10).iter().map(|e| e.sequence).collect();
         assert_eq!(seqs, vec![4, 5]);
-        let seqs: Vec<u64> = l.after(0, 2).map(|e| e.sequence).collect();
+        let seqs: Vec<u64> = l.after(0, 2).iter().map(|e| e.sequence).collect();
         assert_eq!(seqs, vec![3, 4]);
     }
 
@@ -728,6 +935,7 @@ mod tests {
         l.push(0, pb::Stamp::default(), event::Body::Gap(PbGap::default()));
         let got: Vec<u64> = l
             .after(0, 10)
+            .iter()
             .filter(|e| passes(e, &[1], ""))
             .map(|e| e.sequence)
             .collect();

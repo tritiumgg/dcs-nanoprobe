@@ -1865,6 +1865,9 @@ fn a_rebuilt_reconciler_removes_the_markers_of_an_adoption_that_ended() {
                 },
             )
             .unwrap();
+        // The first step's commit lets the `BIND`s through; the agent
+        // applies them at the next frame.
+        w.tick().unwrap();
         w.tick().unwrap();
         assert!(!w.store.marker(menu).unwrap().removed);
 

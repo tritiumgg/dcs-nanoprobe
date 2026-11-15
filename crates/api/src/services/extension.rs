@@ -160,7 +160,7 @@ impl ExtensionService for Extension {
         req: Request<ListLuaRequest>,
     ) -> Result<Response<ListLuaResponse>, Status> {
         require(&req, Access::Observer)?;
-        let g = self.0.lock();
+        let mut g = self.0.lock();
         let c = g.resolve_read(req.get_ref().campaign_id)?;
         let slot = g.campaigns.get(&c).expect("resolved campaign");
         // The agent's answers and records are about the active campaign.

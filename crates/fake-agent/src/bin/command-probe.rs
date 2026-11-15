@@ -123,6 +123,10 @@ impl SimAdapter for Tap<'_> {
         }
         records
     }
+
+    fn flush(&mut self) {
+        self.sim.flush();
+    }
 }
 
 fn arg(args: &[String], name: &str) -> Option<String> {

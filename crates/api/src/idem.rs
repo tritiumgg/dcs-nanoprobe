@@ -79,6 +79,129 @@ pub struct Pending {
     pub kind: EffectKind,
 }
 
+/// Every changing method's name, so an answer read back from a store gets
+/// its `&'static str`. A test checks it against every method the services
+/// name.
+const METHODS: &[&str] = &[
+    "ActivateCampaign",
+    "AdjustWarehouseStock",
+    "BackupCampaign",
+    "Ban",
+    "Capture",
+    "CreateCampaign",
+    "Dematerialize",
+    "DoEffect",
+    "EvalLua",
+    "FinishCampaign",
+    "InvokeLua",
+    "Kick",
+    "ListBans",
+    "Materialize",
+    "MovePlayer",
+    "PutDrawing",
+    "PutGroup",
+    "PutMark",
+    "PutMenuItem",
+    "PutStatic",
+    "RegisterLua",
+    "RemoveEntity",
+    "RemoveLua",
+    "SendChat",
+    "SendMessage",
+    "SetAirbaseOwner",
+    "SetLostPolicy",
+    "SetOptions",
+    "SetOrder",
+    "SetSampleRates",
+    "SetWarehouseStock",
+    "SuspendCampaign",
+    "Unban",
+];
+
+/// An answer as a store keeps it (spec/persistence.md, "Idempotency keys"):
+/// an `lv` table of the method, the response, the campaign and, for a
+/// pending effect, the command and what to build.
+pub fn encode_done(done: &Done) -> Vec<u8> {
+    use nanoprobe_transport::codec::{Lv, Writer};
+    let s = |v: &str| Lv::String(v.as_bytes().to_vec());
+    let mut pairs = vec![
+        (s("method"), s(done.method)),
+        (s("response"), Lv::String(done.response.clone())),
+        (s("campaign"), s(&done.campaign.to_string())),
+    ];
+    if let Some(p) = done.pending {
+        let (kind, entity) = match p.kind {
+            EffectKind::Adjust => ("adjust", 0),
+            EffectKind::Damage => ("damage", 0),
+            EffectKind::Capture(e) => ("capture", e),
+            EffectKind::Message => ("message", 0),
+            EffectKind::Chat => ("chat", 0),
+            EffectKind::Invoke => ("invoke", 0),
+            EffectKind::Eval => ("eval", 0),
+            EffectKind::Kick => ("kick", 0),
+            EffectKind::Ban => ("ban", 0),
+            EffectKind::Unban => ("unban", 0),
+            EffectKind::Bans => ("bans", 0),
+            EffectKind::Move => ("move", 0),
+        };
+        pairs.push((s("epoch"), s(&p.cmd.0.to_string())));
+        pairs.push((s("seq"), s(&p.cmd.1.to_string())));
+        pairs.push((s("kind"), s(kind)));
+        pairs.push((s("entity"), s(&entity.to_string())));
+    }
+    let mut w = Writer::new();
+    w.lv(&Lv::Table(pairs));
+    w.finish()
+}
+
+/// [`encode_done`] read back; `None` for bytes it did not write.
+pub fn decode_done(bytes: &[u8]) -> Option<Done> {
+    use nanoprobe_transport::codec::{Lv, Reader};
+    let Lv::Table(pairs) = Reader::new(bytes).lv().ok()? else {
+        return None;
+    };
+    let get = |k: &str| {
+        pairs
+            .iter()
+            .find(|(key, _)| matches!(key, Lv::String(t) if t == k.as_bytes()))
+            .and_then(|(_, v)| match v {
+                Lv::String(t) => Some(t.clone()),
+                _ => None,
+            })
+    };
+    let text = |k: &str| get(k).and_then(|t| String::from_utf8(t).ok());
+    let num = |k: &str| text(k).and_then(|t| t.parse::<u64>().ok());
+    let method = text("method")?;
+    let method = METHODS.iter().copied().find(|m| *m == method)?;
+    let pending = match text("kind").as_deref() {
+        None => None,
+        Some(k) => Some(Pending {
+            cmd: (num("epoch")?, num("seq")?),
+            kind: match k {
+                "adjust" => EffectKind::Adjust,
+                "damage" => EffectKind::Damage,
+                "capture" => EffectKind::Capture(num("entity")?),
+                "message" => EffectKind::Message,
+                "chat" => EffectKind::Chat,
+                "invoke" => EffectKind::Invoke,
+                "eval" => EffectKind::Eval,
+                "kick" => EffectKind::Kick,
+                "ban" => EffectKind::Ban,
+                "unban" => EffectKind::Unban,
+                "bans" => EffectKind::Bans,
+                "move" => EffectKind::Move,
+                _ => return None,
+            },
+        }),
+    };
+    Some(Done {
+        method,
+        response: get("response")?,
+        campaign: num("campaign")?,
+        pending,
+    })
+}
+
 /// What a call with a key should do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Begin {
@@ -181,6 +304,26 @@ impl Idem {
         }
     }
 
+    /// Put back a call a store remembered, answered `age` ago, in place of
+    /// whatever the table holds for `key`. A key past `keep` is not put back.
+    pub fn restore(&mut self, now: Instant, key: &str, d: Digest32, done: Done, age: Duration) {
+        if age >= self.keep {
+            return;
+        }
+        let at = now.checked_sub(age).unwrap_or(now);
+        self.slots.insert(key.to_owned(), Slot::Done(d, done, at));
+        // `order` is kept sorted: the entry goes where its time belongs.
+        let i = self.order.partition_point(|(t, _)| *t <= at);
+        self.order.insert(i, (at, key.to_owned()));
+    }
+
+    /// The request digest a key was used with.
+    pub fn digest_of(&self, key: &str) -> Option<Digest32> {
+        match self.slots.get(key)? {
+            Slot::Running(d) | Slot::Done(d, _, _) => Some(*d),
+        }
+    }
+
     /// Whether a call with `key` is running.
     pub fn running(&self, key: &str) -> bool {
         matches!(self.slots.get(key), Some(Slot::Running(_)))
@@ -199,6 +342,88 @@ impl Idem {
 
 #[cfg(test)]
 mod tests {
+    /// Every method name a service passes to `changing!`, `moderating!` or
+    /// a `Call`, read from the services' source.
+    fn service_methods() -> Vec<String> {
+        let sources = [
+            include_str!("services/campaign.rs"),
+            include_str!("services/commands.rs"),
+            include_str!("services/extension.rs"),
+            include_str!("services/moderation.rs"),
+            include_str!("services/players.rs"),
+        ];
+        let mut out = Vec::new();
+        for src in sources {
+            for start in ["changing!(", "moderating!(", "method: \""] {
+                for (i, _) in src.match_indices(start) {
+                    let rest = &src[i + start.len()..];
+                    // A field's literal starts right away; a macro's is the
+                    // first one after its name, unless the call ends first.
+                    let lit = if start.ends_with('"') {
+                        rest
+                    } else {
+                        let Some(q) = rest.find('"') else { continue };
+                        if rest[..q].contains(')') {
+                            continue;
+                        }
+                        &rest[q + 1..]
+                    };
+                    let Some(end) = lit.find('"') else { continue };
+                    let name = &lit[..end];
+                    if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric()) {
+                        out.push(name.to_owned());
+                    }
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    #[test]
+    fn every_service_method_round_trips_through_a_store() {
+        let methods = service_methods();
+        assert!(methods.len() >= 30, "found only {methods:?}");
+        for m in &methods {
+            let method = METHODS
+                .iter()
+                .copied()
+                .find(|x| x == m)
+                .unwrap_or_else(|| panic!("{m} is not in METHODS"));
+            let done = Done {
+                method,
+                response: vec![1, 2],
+                campaign: 3,
+                pending: None,
+            };
+            assert_eq!(decode_done(&encode_done(&done)), Some(done), "{m}");
+        }
+        let kinds = [
+            EffectKind::Adjust,
+            EffectKind::Damage,
+            EffectKind::Capture(9),
+            EffectKind::Message,
+            EffectKind::Chat,
+            EffectKind::Invoke,
+            EffectKind::Eval,
+            EffectKind::Kick,
+            EffectKind::Ban,
+            EffectKind::Unban,
+            EffectKind::Bans,
+            EffectKind::Move,
+        ];
+        for kind in kinds {
+            let done = Done {
+                method: "DoEffect",
+                response: Vec::new(),
+                campaign: 1,
+                pending: Some(Pending { cmd: (4, 5), kind }),
+            };
+            assert_eq!(decode_done(&encode_done(&done)), Some(done), "{kind:?}");
+        }
+    }
+
     use super::*;
     use proptest::prelude::*;
     use std::collections::HashMap as Map;

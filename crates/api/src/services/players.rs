@@ -312,7 +312,7 @@ impl PlayersService for Players {
     ) -> Result<Response<ListOccupancyResponse>, Status> {
         require(&req, Access::Observer)?;
         let r = req.into_inner();
-        let g = self.0.lock();
+        let mut g = self.0.lock();
         let campaign = g.resolve_read(r.campaign_id)?;
         let secs = |t: &Option<prost_types::Timestamp>| {
             t.as_ref()

@@ -91,13 +91,14 @@ fn same_world(a: &Store, b: &Store) {
         a.revision(),
         b.revision()
     );
-    assert_eq!(a.epoch(), b.epoch());
     assert_eq!(a.loaded(), b.loaded());
     let ga: Vec<&Group> = a.groups().collect();
     let gb: Vec<&Group> = b.groups().collect();
     assert_eq!(ga, gb);
     assert_eq!(units(a), units(b));
-    assert_eq!(a.entries(), b.entries());
+    // The journal is written, never read back; what a restart reads of it
+    // is the commands in flight.
+    assert_eq!(a.unanswered(), b.unanswered());
     let ea: Vec<_> = a.extensions().collect();
     let eb: Vec<_> = b.extensions().collect();
     assert_eq!(ea, eb);
@@ -140,12 +141,19 @@ fn same_world(a: &Store, b: &Store) {
 
 /// GROUP_ORDER commands sent to a group that already held that order: the
 /// agent answers them `AT_REVISION`. DCS never applies one twice (the agent
+/// Every journal entry the sidecar wrote: from the file for a store on disk,
+/// which drops written entries from memory after a reopen, else from memory.
+fn journal(w: &World) -> Vec<nanoprobe_sidecar::store::Entry> {
+    match w.store.path() {
+        Some(p) => nanoprobe_sidecar::store::journal_of(p).expect("journal"),
+        None => w.store.entries().to_vec(),
+    }
+}
+
 /// keeps the applied revision), so this is the sidecar issuing it twice.
 fn orders_issued_twice(w: &World) -> Vec<(u64, u32, EntityId, u64)> {
-    let journalled: BTreeMap<(u64, u64, u64), _> = w
-        .store
-        .entries()
-        .iter()
+    let journalled: BTreeMap<(u64, u64, u64), _> = journal(w)
+        .into_iter()
         .filter_map(|e| match e {
             nanoprobe_sidecar::store::Entry::Command(j) => {
                 Some(((j.agent_boot, j.epoch, j.seq), j))
@@ -169,10 +177,8 @@ fn orders_issued_twice(w: &World) -> Vec<(u64, u32, EntityId, u64)> {
 /// GROUP_ORDER results the agent gave for commands in the journal: the
 /// order checks below look at these, so a test asserts there are some.
 fn order_results(w: &World) -> usize {
-    let journalled: BTreeSet<(u64, u64, u64)> = w
-        .store
-        .entries()
-        .iter()
+    let journalled: BTreeSet<(u64, u64, u64)> = journal(w)
+        .into_iter()
         .filter_map(|e| match e {
             nanoprobe_sidecar::store::Entry::Command(j) if j.opcode == opcode::GROUP_ORDER => {
                 Some((j.agent_boot, j.epoch, j.seq))
@@ -191,10 +197,8 @@ fn order_results(w: &World) -> usize {
 /// GROUP_ORDER commands DCS applied more than once for one order revision
 /// in one generation of one agent boot.
 fn orders_applied_twice(w: &World) -> Vec<(u64, u32, EntityId, u64)> {
-    let journalled: BTreeMap<(u64, u64, u64), _> = w
-        .store
-        .entries()
-        .iter()
+    let journalled: BTreeMap<(u64, u64, u64), _> = journal(w)
+        .into_iter()
         .filter_map(|e| match e {
             nanoprobe_sidecar::store::Entry::Command(j) => {
                 Some(((j.agent_boot, j.epoch, j.seq), j))
@@ -310,11 +314,12 @@ fn a_store_reads_back_exactly_as_written() {
             let op = s.op_late();
             w.apply(&op).expect("op");
             if i % 25 == 24 {
-                w.store.commit().expect("commit");
+                // A checkpoint writes the sampled state too.
+                w.store.checkpoint(1, Vec::new()).expect("checkpoint");
                 same(&w.store, &read_back(&path).1);
             }
         }
-        w.store.commit().expect("commit");
+        w.store.checkpoint(1, Vec::new()).expect("checkpoint");
         same(&w.store, &read_back(&path).1);
     }
 }
@@ -352,6 +357,59 @@ fn a_removal_the_agent_has_not_confirmed_is_sent_again_after_a_reopen() {
     assert_eq!(w.sim.extension_rev("probe"), 0);
     assert_eq!(w.sim.ledger().extension_removals, vec!["probe".to_owned()]);
     assert_eq!(w.store.extension_removals().count(), 0);
+}
+
+/// A plain commit writes every fact and the spec but not the sampled state:
+/// the file's units equal memory's in every field except `state`, and a
+/// unit's `state` in the file is the one of the last checkpoint.
+#[test]
+fn a_commit_without_a_checkpoint_leaves_the_sampled_state_at_the_checkpoint() {
+    let mut any_moved = false;
+    for seed in 0..12u64 {
+        let d = temp();
+        let path = d.path().join("store.sqlite");
+        let mut w = World::new_late(3, 1, LostPolicy::Respawn, seed);
+        w.store.save_as(&path, record("a")).expect("save");
+        let mut s = Schedule::new(seed);
+        for _ in 0..60 {
+            w.apply(&s.op_late()).expect("op");
+        }
+        w.store.checkpoint(1, Vec::new()).expect("checkpoint");
+        for _ in 0..90 {
+            w.apply(&s.op_late()).expect("op");
+        }
+        w.store.commit().expect("commit");
+        let file = units(&read_back(&path).1);
+        let memory = units(&w.store);
+        let strip = |u: &Unit| -> Unit {
+            let mut u = u.clone();
+            u.state = Default::default();
+            u
+        };
+        let stripped = |us: &[Unit]| us.iter().map(strip).collect::<Vec<_>>();
+        assert_eq!(stripped(&file), stripped(&memory), "seed {seed}");
+        // A sample alone writes nothing: move every live unit, commit, and
+        // the file still holds the state of the last checkpoint.
+        w.store.checkpoint(2, Vec::new()).expect("checkpoint");
+        let cp: BTreeMap<_, _> = units(&w.store).into_iter().map(|u| (u.id, u)).collect();
+        for u in cp.values().filter(|u| !u.dead) {
+            let mut at = u.state.at;
+            at.x += 111.0;
+            w.store.observe_position(u.id, at);
+            w.store.observe_vitals(u.id, 0.25, 0.75);
+        }
+        w.store.commit().expect("commit");
+        let file = units(&read_back(&path).1);
+        let memory: BTreeMap<_, _> = units(&w.store).into_iter().map(|u| (u.id, u)).collect();
+        any_moved |= memory.values().any(|u| u.state != cp[&u.id].state);
+        for f in &file {
+            assert_eq!(f.state, cp[&f.id].state, "seed {seed}: unit {:?}", f.id);
+        }
+    }
+    assert!(
+        any_moved,
+        "memory's sampled state moved past the checkpoint"
+    );
 }
 
 /// One seed of the deterministic simulation's late schedule, 300 operations
@@ -903,11 +961,17 @@ fn a_stored_campaign_migrates_from_one_schema_version_to_the_next() {
         .iter()
         .filter(|b| b.reason == BackupReason::PreMigration)
         .collect();
-    assert_eq!(migration.len(), 2, "one before each attempt");
+    // The failed attempt left the store as it was: the second attempt found
+    // a backup of that same schema and revision and took none.
+    assert_eq!(
+        migration.len(),
+        1,
+        "one backup of the state before migration"
+    );
     let copy: PathBuf = c
         .folder(id)
         .join("backups")
-        .join(migration[1].number.to_string())
+        .join(migration[0].number.to_string())
         .join("store.sqlite");
     assert_eq!(schema_of(&copy).expect("schema"), 1, "the backup is at N");
 
@@ -922,19 +986,27 @@ fn a_stored_campaign_migrates_from_one_schema_version_to_the_next() {
     assert_eq!(c.backups(id).expect("backups").len(), n);
 }
 
-/// Backups keep the newest `backup_keep`, number up without reuse, and
-/// share one history copy that grows by what the history gained.
+/// Backups keep the newest `backup_keep` scheduled and manual ones, number up
+/// without reuse, and share one events copy that grows by what the events
+/// gained. The newest pre-migration backup of each schema version is kept
+/// apart.
 #[test]
-fn backups_are_pruned_numbered_up_and_share_the_history() {
+fn backups_are_pruned_numbered_up_and_share_the_events() {
+    use nanoprobe_sidecar::eventfile::EventRow;
     let d = temp();
     let c = Campaigns::new(d.path(), 10_000, 2).expect("campaigns");
     let id = CampaignId(CAMPAIGN);
-    let mut s = c.create(id, record("a")).expect("create");
-    let mut h = c.history(id).expect("history");
+    let s = c.create(id, record("a")).expect("create");
+    let mut h = c.events(id).expect("events");
     for i in 1..=5u64 {
-        h.append(i, i, &[i as u8; 64]).expect("append");
-        h.flush().expect("flush");
-        c.backup(&mut s, i * 1_000, BackupReason::Manual)
+        h.push(EventRow {
+            seq: i,
+            wall_ms: i,
+            source: None,
+            body: vec![i as u8; 64],
+        });
+        h.commit().expect("commit");
+        c.backup(id, i * 1_000, s.revision(), BackupReason::Manual)
             .expect("backup");
     }
     let kept: Vec<u32> = c
@@ -944,12 +1016,60 @@ fn backups_are_pruned_numbered_up_and_share_the_history() {
         .map(|b| b.number)
         .collect();
     assert_eq!(kept, vec![4, 5]);
-    let copy = std::fs::read(c.folder(id).join("backups/history.log")).expect("copy");
-    let orig = std::fs::read(c.folder(id).join("history.log")).expect("history");
-    assert_eq!(copy, orig);
-    c.backup(&mut s, 9_000, BackupReason::Scheduled)
+    let copy = nanoprobe_sidecar::eventfile::EventFile::open(
+        &c.folder(id).join("backups/events.sqlite"),
+        id.0,
+    )
+    .expect("copy");
+    assert_eq!(
+        copy.read_from(0, 10).expect("read"),
+        h.read_from(0, 10).expect("read")
+    );
+    c.backup(id, 9_000, s.revision(), BackupReason::Scheduled)
         .expect("backup");
     assert_eq!(c.backups(id).expect("backups").last().expect("b").number, 6);
+}
+
+/// A pre-migration backup is kept outside `backup_keep`, only the newest of
+/// its schema version, and is skipped when the newest backup already holds
+/// the same schema and revision.
+#[test]
+fn pre_migration_backups_are_kept_apart_and_not_repeated() {
+    fn step(tx: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS later (x);")
+    }
+    let d = temp();
+    let c = Campaigns::new(d.path(), 10_000, 1).expect("campaigns");
+    let id = CampaignId(CAMPAIGN);
+    let mut s = c.create(id, record("a")).expect("create");
+    s.close().expect("close");
+    drop(s);
+    // Version 1 opened by a sidecar that knows version 2: a backup first.
+    let steps = [nanoprobe_sidecar::store::Migration { to: 2, run: step }];
+    let backup_file = |n: u32| c.folder(id).join(format!("backups/{n}/backup.txt"));
+    let mut s = c.open_with(id, 1, &steps).expect("migrate");
+    assert!(backup_file(1).exists());
+    // Scheduled backups beyond backup_keep never evict it.
+    for i in 0..3 {
+        c.backup(id, 10 + i, s.revision(), BackupReason::Scheduled)
+            .expect("backup");
+    }
+    let reasons: Vec<BackupReason> = c
+        .backups(id)
+        .expect("backups")
+        .iter()
+        .map(|b| b.reason)
+        .collect();
+    assert_eq!(
+        reasons,
+        vec![BackupReason::PreMigration, BackupReason::Scheduled]
+    );
+    s.close().expect("close");
+    drop(s);
+    // The file is at version 2 now: reopening it at version 2 takes none.
+    let n = c.backups(id).expect("backups").len();
+    drop(c.open_with(id, 2, &steps).expect("open"));
+    assert_eq!(c.backups(id).expect("backups").len(), n);
 }
 
 /// What one write costs with 2,000 units, every one moved since the last:
@@ -975,20 +1095,21 @@ fn the_cost_of_a_write_with_two_thousand_units() {
                 },
             );
         }
-        let t = Instant::now();
-        s.commit().expect("commit");
-        moved.push(t.elapsed());
+        // A step's commit writes no sampled state.
         let t = Instant::now();
         s.commit().expect("commit");
         idle.push(t.elapsed());
+        let t = Instant::now();
+        s.checkpoint(round as u64, Vec::new()).expect("checkpoint");
+        moved.push(t.elapsed());
     }
     moved.sort();
     idle.sort();
     println!(
-        "write with {} units: all moved median {:?}, nothing changed median {:?}",
+        "write with {} units, all moved: a step's commit median {:?}, a checkpoint median {:?}",
         ids.len(),
-        moved[5],
-        idle[5]
+        idle[5],
+        moved[5]
     );
 }
 
