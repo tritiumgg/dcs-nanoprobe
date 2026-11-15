@@ -368,8 +368,15 @@ impl Inner {
         }
         // Every event of one record goes to the same log: they share its
         // frame's campaign.
-        for r in reads {
-            log.push_from(campaign, r.stamp, r.body, source.clone());
+        // The first event's key is the record's; the others are numbered,
+        // since a source is unique (spec/persistence.md, "Event history").
+        for (i, r) in reads.into_iter().enumerate() {
+            let key = match (&source, i) {
+                (Some(s), 0) => Some(s.clone()),
+                (Some(s), i) => Some(format!("{s}:{i}")),
+                (None, _) => None,
+            };
+            log.push_from(campaign, r.stamp, r.body, key);
         }
     }
 
@@ -1353,7 +1360,6 @@ fn retain(l: &mut EventLog, campaign: u64, retention: Duration) -> Result<(), Di
     Ok(())
 }
 
-/// Append an event unless one made from the same `source` is in the log.
 /// The server's keyring: the secret the server store keeps, made and kept
 /// on first use, and every pair it holds. A secret that cannot be read
 /// stops the server: a new one would give every player a new key.
@@ -1373,6 +1379,7 @@ fn keyring_of(server: &ServerStore) -> Result<Keyring, nanoprobe_sidecar::store:
     Ok(keys)
 }
 
+/// Append an event unless one made from the same `source` is in the log.
 fn push_once(
     log: &mut EventLog,
     campaign: u64,

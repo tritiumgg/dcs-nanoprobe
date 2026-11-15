@@ -367,7 +367,8 @@ its own sequence numbers and the retention of spec/config.md. The Events service
 it when the request asks for the server log.
 
 **Where player keys are kept.** The player-key secret and the key-to-ucid pairs
-("Players") are kept in the server store (spec/persistence.md, "The server store"). A
+("Players") are kept in the server store, in a folder only the sidecar's user may
+enter (spec/persistence.md, "The server store"). A
 pair learned in a step is written there by the end of the step; a failed write is
 tried again at the next. Campaign backups do not include the server store, and no
 diagnostics bundle reads it. With persistence off nothing is written, and the keys last

@@ -151,6 +151,21 @@ fn connect(path: &Path) -> Result<Connection, DiskError> {
     Ok(conn)
 }
 
+/// Set a file's or a folder's mode on Linux and macOS. Elsewhere the
+/// profile's own access rules apply.
+fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+        Ok(())
+    }
+}
+
 impl ServerStore {
     /// Open the server store in `store_dir`'s server folder, making it if it
     /// is missing. An older schema is backed up and migrated as a campaign
@@ -167,6 +182,8 @@ impl ServerStore {
     ) -> Result<ServerStore, DiskError> {
         let dir = store_dir.join(FOLDER);
         fs::create_dir_all(dir.join("backups"))?;
+        // The folder holds the player secret: only the owner may enter it.
+        set_mode(&dir, 0o700)?;
         let path = dir.join(STORE);
         let known = steps.last().map_or(SCHEMA, |s| s.to);
         if !path.exists() {
@@ -361,6 +378,8 @@ impl ServerStore {
         for (k, u) in pairs {
             self.put_player(&k, &u)?;
         }
+        // The file holds the secret; it is kept as the record of the migration.
+        set_mode(&path, 0o600)?;
         fs::rename(&path, store_dir.join(format!("{PLAYERS_JSON}.migrated")))?;
         Ok(true)
     }
@@ -554,6 +573,28 @@ mod tests {
         assert!(!d.path().join(PLAYERS_JSON).exists());
         assert!(d.path().join("players.json.migrated").exists());
         assert!(!s.migrate_players_json(d.path()).expect("again"));
+    }
+
+    /// The server folder is the owner's alone, made so and set so at every
+    /// open, and the migrated `players.json` is the owner's alone.
+    #[cfg(unix)]
+    #[test]
+    fn the_server_folder_and_the_migrated_file_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| fs::metadata(p).expect("meta").permissions().mode() & 0o777;
+        let d = tempfile::tempdir().expect("dir");
+        let json = d.path().join(PLAYERS_JSON);
+        fs::write(&json, format!(r#"{{"secret":"{}"}}"#, "ab".repeat(32))).expect("write");
+        fs::set_permissions(&json, fs::Permissions::from_mode(0o644)).expect("chmod");
+        let s = ServerStore::open(d.path(), 1).expect("open");
+        assert_eq!(mode(s.dir()), 0o700);
+        s.migrate_players_json(d.path()).expect("migrate");
+        assert_eq!(mode(&d.path().join("players.json.migrated")), 0o600);
+        drop(s);
+        fs::set_permissions(d.path().join(FOLDER), fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+        let s = ServerStore::open(d.path(), 2).expect("open again");
+        assert_eq!(mode(s.dir()), 0o700, "set again at open");
     }
 
     /// A store that holds another secret refuses the file and leaves it in

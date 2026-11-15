@@ -274,8 +274,16 @@ the copy too, so `backup_keep` does not multiply the history.
 | `meta` | `key TEXT PRIMARY KEY`, `value BLOB` | `format` (1, a number), `campaign_id` (decimal text; 0 for the server log), `package` (the Protobuf package of the bodies, `nanoprobe.v1alpha1`) |
 | `event` | `seq INTEGER PRIMARY KEY`, `wall_ms INTEGER`, `source TEXT`, `body BLOB` | One per event |
 
-`source` is the agent record the event was made from, as `<agent boot>:<record
-number>`, or null for an event the sidecar made. It is unique where it is not null.
+`source` names what the event was made from, so an event made again after a crash is
+not logged twice. It is unique where it is not null:
+
+- An event made from an agent record: `<agent boot>:<record number>` for the record's
+  first event, and `<agent boot>:<record number>:<i>` for its event at index `i`
+  (from 1) when one record makes several. A record's events are logged in one
+  transaction, so the first one's key stands for all of them.
+- A route event (spec/world.md), which the sidecar makes again from samples read
+  again: `route:<group EntityId>:<order revision>:<waypoint index or end>`.
+- Any other event the sidecar makes: null.
 
 Sequence numbers grow by one from row to row. The driver commits the events of a step
 in one transaction before it publishes them (above), so a number a client has seen is
@@ -315,8 +323,11 @@ A player's key is the same in every campaign of the server. An existing
 `players.json` in `[store] dir` (written before the server store) is read once into the
 server store and renamed `players.json.migrated`.
 
-Neither the server store nor `players.json` is ever put in a diagnostics bundle or a
-campaign backup.
+The `server` folder is made with mode 0700 on Linux and macOS, and set to it at every
+open: it holds the player secret, the key-to-ucid pairs and their backups.
+`players.json.migrated` is set to mode 0600 before it is renamed and is kept as the
+record of the migration. Nothing in the `server` folder, `players.json` or
+`players.json.migrated` is ever put in a diagnostics bundle or a campaign backup.
 
 ## Idempotency keys
 

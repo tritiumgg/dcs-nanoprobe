@@ -453,6 +453,9 @@ mod tests {
             "campaigns/players.json",
             "server/store.sqlite",
             "nanoprobe/server/store.sqlite",
+            "players.json.migrated",
+            "server/events.sqlite",
+            "server/backups/store-1.sqlite",
         ] {
             write(
                 place,

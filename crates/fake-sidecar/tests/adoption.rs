@@ -341,6 +341,54 @@ async fn events_carry_types_late_kills_dates_and_launch_players() {
     assert!(dated > 0.0 && dated < 150.0, "{dated}");
 }
 
+async fn campaign_keyed(ch: &Channel, l: &Lease, key: &str) -> u64 {
+    CampaignServiceClient::new(ch.clone())
+        .create_campaign(CreateCampaignRequest {
+            lease: Some(l.clone()),
+            name: key.into(),
+            theaters: vec!["Caucasus".into()],
+            activate: true,
+            idempotency: Some(Idempotency { key: key.into() }),
+            ..CreateCampaignRequest::default()
+        })
+        .await
+        .expect("create")
+        .into_inner()
+        .campaign
+        .expect("campaign")
+        .id
+}
+
+/// The key the API gives the one connected player, after it connects.
+async fn key_on_join(hub: &Hub, ch: &Channel, conn: u32) -> String {
+    until(|| async { fake(hub, |s| s.attached()) }).await;
+    fake(hub, |s| {
+        s.connect_client(conn, UCID, "Ann", 2);
+    });
+    until(|| async { players_now(ch).await.len() == 1 }).await;
+    let key = players_now(ch).await[0].key.clone();
+    fake(hub, |s| s.disconnect_client(conn));
+    until(|| async { players_now(ch).await.is_empty() }).await;
+    key
+}
+
+/// Every `events.sqlite` of a campaign under `dir`.
+fn campaign_event_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut todo = vec![dir.to_owned()];
+    while let Some(d) = todo.pop() {
+        for e in std::fs::read_dir(&d).expect("dir").flatten() {
+            let p = e.path();
+            if p.is_dir() && p.file_name().is_some_and(|n| n != "server") {
+                todo.push(p);
+            } else if p.file_name().is_some_and(|n| n == "events.sqlite") {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn keys_are_stable_across_a_restart_with_persistence() {
     let dir = std::env::temp_dir().join(format!("nanoprobe-adoption-{}", std::process::id()));
@@ -349,32 +397,96 @@ async fn keys_are_stable_across_a_restart_with_persistence() {
         store: Some(StoreFiles::new(dir.clone())),
         ..cfg()
     };
-    let mut keys = Vec::new();
-    for _ in 0..2 {
-        let (hub, ch) = in_process(with_dir(), fake_config()).await.expect("server");
-        let l = lease(&ch).await;
-        let _ = campaign(&ch, &l).await;
-        until(|| async { fake(&hub, |s| s.attached()) }).await;
-        fake(&hub, |s| {
-            s.connect_client(2, UCID, "Ann", 2);
-        });
-        until(|| async { players_now(&ch).await.len() == 1 }).await;
-        keys.push(players_now(&ch).await[0].key.clone());
-        // The pair reaches the server store within a step.
-        until(|| async { hub.lock().roster.keyring().unsaved().is_empty() }).await;
-        // A clean stop releases the store dir for the next sidecar.
-        hub.lock().close_all().expect("closes");
-        hub.close();
-    }
-    assert_eq!(keys[0], keys[1]);
+    // The key the API gives in campaign a, in campaign b, and in b again
+    // after a restart.
+    let (hub, ch) = in_process(with_dir(), fake_config()).await.expect("server");
+    let l = lease(&ch).await;
+    campaign_keyed(&ch, &l, "a").await;
+    let in_a = key_on_join(&hub, &ch, 2).await;
+    campaign_keyed(&ch, &l, "b").await;
+    let in_b = key_on_join(&hub, &ch, 3).await;
+    until(|| async { hub.lock().roster.keyring().unsaved().is_empty() }).await;
+    // A clean stop releases the store dir for the next sidecar.
+    hub.lock().close_all().expect("closes");
+    hub.close();
+    let (hub, ch) = in_process(with_dir(), fake_config())
+        .await
+        .expect("restart");
+    let after = key_on_join(&hub, &ch, 4).await;
+    hub.lock().close_all().expect("closes");
+    hub.close();
+    assert!(!in_a.is_empty());
+    assert_eq!(in_a, in_b, "the same key in two campaigns");
+    assert_eq!(in_a, after, "the same key after a restart");
     let server = ServerStore::open(&dir, 0).expect("server store");
     assert_eq!(
         server.players().expect("players"),
-        vec![(keys[0].clone(), UCID.to_owned())],
+        vec![(in_a.clone(), UCID.to_owned())],
         "the server store is the one place a ucid is kept"
     );
     assert!(!dir.join("players.json").exists());
-    assert!(!keys[0].is_empty());
     drop(server);
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+/// One agent record that makes two events (a returning player under a new
+/// name: a connect and a rename) is logged with a key for each, and the
+/// sidecar goes on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_record_with_two_events_is_logged_with_two_sources() {
+    let dir = std::env::temp_dir().join(format!("nanoprobe-two-events-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (hub, ch) = in_process(
+        Config {
+            store: Some(StoreFiles::new(dir.clone())),
+            ..cfg()
+        },
+        fake_config(),
+    )
+    .await
+    .expect("server");
+    let l = lease(&ch).await;
+    campaign_keyed(&ch, &l, "a").await;
+    key_on_join(&hub, &ch, 2).await;
+    fake(&hub, |s| {
+        s.connect_client(3, UCID, "Bob", 2);
+    });
+    until(|| async {
+        players_now(&ch)
+            .await
+            .first()
+            .is_some_and(|p| p.name == "Bob")
+    })
+    .await;
+    // A later step still runs: the driver did not stop on the write.
+    fake(&hub, |s| s.disconnect_client(3));
+    until(|| async { players_now(&ch).await.is_empty() }).await;
+    hub.lock().close_all().expect("closes");
+    hub.close();
+    let files = campaign_event_files(&dir);
+    assert_eq!(files.len(), 1, "{files:?}");
+    let c = rusqlite::Connection::open(&files[0]).expect("events");
+    let mut st = c
+        .prepare("SELECT source FROM event WHERE source IS NOT NULL")
+        .expect("query");
+    let sources: Vec<String> = st
+        .query_map([], |r| r.get(0))
+        .expect("rows")
+        .map(|r| r.expect("row"))
+        .collect();
+    let numbered: Vec<&String> = sources
+        .iter()
+        .filter(|s| s.split(':').count() == 3)
+        .collect();
+    assert!(
+        !numbered.is_empty(),
+        "no record made two events: {sources:?}"
+    );
+    for n in numbered {
+        let first = n.rsplit_once(':').expect("numbered").0;
+        assert!(sources.iter().any(|s| s == first), "{n} without {first}");
+    }
+    drop(st);
+    drop(c);
     std::fs::remove_dir_all(&dir).expect("cleanup");
 }

@@ -80,7 +80,8 @@ pub struct Pending {
 }
 
 /// Every changing method's name, so an answer read back from a store gets
-/// its `&'static str`.
+/// its `&'static str`. A test checks it against every method the services
+/// name.
 const METHODS: &[&str] = &[
     "ActivateCampaign",
     "AdjustWarehouseStock",
@@ -97,9 +98,14 @@ const METHODS: &[&str] = &[
     "ListBans",
     "Materialize",
     "MovePlayer",
+    "PutDrawing",
     "PutGroup",
+    "PutMark",
+    "PutMenuItem",
     "PutStatic",
+    "RegisterLua",
     "RemoveEntity",
+    "RemoveLua",
     "SendChat",
     "SendMessage",
     "SetAirbaseOwner",
@@ -336,6 +342,88 @@ impl Idem {
 
 #[cfg(test)]
 mod tests {
+    /// Every method name a service passes to `changing!`, `moderating!` or
+    /// a `Call`, read from the services' source.
+    fn service_methods() -> Vec<String> {
+        let sources = [
+            include_str!("services/campaign.rs"),
+            include_str!("services/commands.rs"),
+            include_str!("services/extension.rs"),
+            include_str!("services/moderation.rs"),
+            include_str!("services/players.rs"),
+        ];
+        let mut out = Vec::new();
+        for src in sources {
+            for start in ["changing!(", "moderating!(", "method: \""] {
+                for (i, _) in src.match_indices(start) {
+                    let rest = &src[i + start.len()..];
+                    // A field's literal starts right away; a macro's is the
+                    // first one after its name, unless the call ends first.
+                    let lit = if start.ends_with('"') {
+                        rest
+                    } else {
+                        let Some(q) = rest.find('"') else { continue };
+                        if rest[..q].contains(')') {
+                            continue;
+                        }
+                        &rest[q + 1..]
+                    };
+                    let Some(end) = lit.find('"') else { continue };
+                    let name = &lit[..end];
+                    if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric()) {
+                        out.push(name.to_owned());
+                    }
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    #[test]
+    fn every_service_method_round_trips_through_a_store() {
+        let methods = service_methods();
+        assert!(methods.len() >= 30, "found only {methods:?}");
+        for m in &methods {
+            let method = METHODS
+                .iter()
+                .copied()
+                .find(|x| x == m)
+                .unwrap_or_else(|| panic!("{m} is not in METHODS"));
+            let done = Done {
+                method,
+                response: vec![1, 2],
+                campaign: 3,
+                pending: None,
+            };
+            assert_eq!(decode_done(&encode_done(&done)), Some(done), "{m}");
+        }
+        let kinds = [
+            EffectKind::Adjust,
+            EffectKind::Damage,
+            EffectKind::Capture(9),
+            EffectKind::Message,
+            EffectKind::Chat,
+            EffectKind::Invoke,
+            EffectKind::Eval,
+            EffectKind::Kick,
+            EffectKind::Ban,
+            EffectKind::Unban,
+            EffectKind::Bans,
+            EffectKind::Move,
+        ];
+        for kind in kinds {
+            let done = Done {
+                method: "DoEffect",
+                response: Vec::new(),
+                campaign: 1,
+                pending: Some(Pending { cmd: (4, 5), kind }),
+            };
+            assert_eq!(decode_done(&encode_done(&done)), Some(done), "{kind:?}");
+        }
+    }
+
     use super::*;
     use proptest::prelude::*;
     use std::collections::HashMap as Map;
