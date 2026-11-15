@@ -158,6 +158,9 @@ async fn a_player_in_an_unmanaged_aircraft_enters_a_unit_with_an_id_and_is_subsc
     until(|| async { fake(&hub, |s| s.attached()) }).await;
     let object = pilot(&hub, &ch, 77).await;
     let p = players_now(&ch).await.remove(0);
+    // The API shows the EntityId the sidecar allocated as soon as it joins the
+    // occupant; the agent binds it when the BIND arrives, a step later.
+    until(|| async { fake(&hub, |s| s.binding_of(object)).is_some_and(|(u, _)| u != 0) }).await;
     let (unit_entity, group_entity) = fake(&hub, |s| s.binding_of(object)).expect("a row");
     assert_eq!(p.unit_id, unit_entity);
     assert_ne!(group_entity, 0);
@@ -317,18 +320,20 @@ async fn events_carry_types_late_kills_dates_and_launch_players() {
     fake(&hub, |s| {
         s.emit_event(8, vec![(1, Lv::Number(150.0)), (2, n(victim2))]);
     });
-    until(|| async { !world_events(&ch, c, 8).await.is_empty() }).await;
+    // The kill above may already have sent a death of its own: wait for this one.
+    let late = |w: &pb::WorldEvent| {
+        w.extra
+            .as_ref()
+            .and_then(|x| x.fields.get("time"))
+            .is_some_and(|v| {
+                matches!(&v.kind, Some(prost_types::value::Kind::NumberValue(t)) if *t == 150.0)
+            })
+    };
+    until(|| async { world_events(&ch, c, 8).await.iter().any(late) }).await;
     let dead = world_events(&ch, c, 8)
         .await
         .into_iter()
-        .find(|w| {
-            w.extra
-                .as_ref()
-                .and_then(|x| x.fields.get("time"))
-                .is_some_and(|v| {
-                    matches!(&v.kind, Some(prost_types::value::Kind::NumberValue(t)) if *t == 150.0)
-                })
-        })
+        .find(late)
         .expect("the late death");
     assert_eq!(dead.initiator_type.as_deref(), Some("Su-25"));
     let dated = dead.dated_time.expect("dated from the removal");

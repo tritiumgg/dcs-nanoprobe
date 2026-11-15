@@ -556,7 +556,7 @@ event, so a cut `EVENT` always fits (see "Oversized records").
 | 18 | TARGET_CATEGORY | number | `event.target_data.object_category` |
 | 19 | INITIATOR_TYPE | string | `event.initiator_data.unit_type` |
 | 20 | TARGET_TYPE | string | `event.target_data.unit_type` |
-| 21 | INITIATOR_MISSION_ID | string | `event.initiator_data.mission_id`, on `S_EVENT_BIRTH` only |
+| 21 | INITIATOR_MISSION_ID | string | `event.initiator_data.mission_id` |
 
 `INITIATOR_TYPE` and `TARGET_TYPE` are the DCS type names, present on every `DEAD`,
 `HIT` and `KILL` in the catalogue, scenery included (LIVE). The API reports them as
@@ -564,7 +564,8 @@ event, so a cut `EVENT` always fits (see "Oversized records").
 `INITIATOR_MISSION_ID` joins a player's slot to the unit born in it (spec/world.md,
 "Players"); that it equals the slot ID DCS gives the player is UNVERIFIED (step S16).
 The agent reads `INITIATOR_TYPE` on every event type whose row below lists
-`INITIATOR_CATEGORY`, and `TARGET_TYPE` on every one that lists `TARGET_CATEGORY`.
+`INITIATOR_CATEGORY`, `TARGET_TYPE` on every one that lists `TARGET_CATEGORY`, and
+`INITIATOR_MISSION_ID` on `S_EVENT_BIRTH` only.
 
 `INITIATOR_CATEGORY` and `TARGET_CATEGORY` are DCS's `Object.Category` numbers. In the
 event catalogue (LIVE, `docs/results/2026-11-13-event-catalogue.md`) a spawned unit's
