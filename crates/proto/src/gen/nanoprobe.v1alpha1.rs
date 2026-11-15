@@ -443,6 +443,727 @@ impl ErrorReason {
         }
     }
 }
+/// Every field but sequence and stamp is optional: DCS does not always send
+/// the same fields for one event type.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Event {
+    /// Grows by one per event within a campaign, or within the server log.
+    #[prost(uint64, tag = "1")]
+    pub sequence: u64,
+    #[prost(message, optional, tag = "2")]
+    pub stamp: ::core::option::Option<Stamp>,
+    /// The campaign the sequence number belongs to, 0 for the server log.
+    #[prost(uint64, tag = "9")]
+    pub campaign_id: u64,
+    #[prost(oneof = "event::Body", tags = "3, 4, 5, 6, 7, 8, 10")]
+    pub body: ::core::option::Option<event::Body>,
+}
+/// Nested message and enum types in `Event`.
+pub mod event {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Body {
+        #[prost(message, tag = "3")]
+        World(super::WorldEvent),
+        #[prost(message, tag = "4")]
+        Player(super::PlayerEvent),
+        #[prost(message, tag = "5")]
+        Author(super::AuthorEvent),
+        #[prost(message, tag = "6")]
+        Menu(super::MenuEvent),
+        #[prost(message, tag = "7")]
+        Gap(super::Gap),
+        #[prost(message, tag = "8")]
+        Lifecycle(super::LifecycleEvent),
+        #[prost(message, tag = "10")]
+        Route(super::RouteEvent),
+    }
+}
+/// A DCS world event.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct WorldEvent {
+    /// The DCS event ID.
+    #[prost(uint32, tag = "1")]
+    pub dcs_id: u32,
+    /// The event's name where the platform knows it, such as "kill".
+    #[prost(string, tag = "2")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(uint64, optional, tag = "3")]
+    pub initiator_id: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "4")]
+    pub target_id: ::core::option::Option<u64>,
+    /// Player keys in the initiator and in the target when it happened.
+    #[prost(string, repeated, tag = "5")]
+    pub initiator_players: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "6")]
+    pub target_players: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "7")]
+    pub weapon: ::core::option::Option<::prost::alloc::string::String>,
+    /// The airbase the event names.
+    #[prost(string, optional, tag = "8")]
+    pub place: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(message, optional, tag = "9")]
+    pub position: ::core::option::Option<Position>,
+    #[prost(string, optional, tag = "10")]
+    pub text: ::core::option::Option<::prost::alloc::string::String>,
+    /// Rounds expended, for a shooting-end event: from the event where DCS
+    /// sends a count, otherwise from the ammunition difference.
+    #[prost(uint32, optional, tag = "11")]
+    pub rounds: ::core::option::Option<u32>,
+    /// Fields the platform read and has no typed field for.
+    #[prost(message, optional, tag = "12")]
+    pub extra: ::core::option::Option<::prost_types::Struct>,
+}
+/// Progress of a group along its route order (spec/world.md, "Route
+/// progress"). The sidecar writes it from position samples, so it is as
+/// current as they are.
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct RouteEvent {
+    #[prost(enumeration = "RouteEventKind", tag = "1")]
+    pub kind: i32,
+    /// The group.
+    #[prost(uint64, tag = "2")]
+    pub group_id: u64,
+    /// The order revision the route was given at.
+    #[prost(uint64, tag = "3")]
+    pub order_revision: u64,
+    /// The waypoint's index in the order's own numbering, from 0. Not set for
+    /// ROUTE_COMPLETE.
+    #[prost(uint32, optional, tag = "4")]
+    pub waypoint_index: ::core::option::Option<u32>,
+    /// Model time of the position sample that showed it, in seconds.
+    #[prost(double, tag = "5")]
+    pub model_time: f64,
+    /// True when the position was observed in DCS, false when the controller
+    /// wrote it.
+    #[prost(bool, tag = "6")]
+    pub observed: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PlayerEvent {
+    #[prost(enumeration = "PlayerEventKind", tag = "1")]
+    pub kind: i32,
+    #[prost(string, tag = "2")]
+    pub player_key: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(uint64, optional, tag = "4")]
+    pub unit_id: ::core::option::Option<u64>,
+    #[prost(uint32, optional, tag = "5")]
+    pub seat: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "6")]
+    pub text: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(enumeration = "Coalition", tag = "7")]
+    pub coalition: i32,
+}
+/// An event from emit, an extension or PublishEvent.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AuthorEvent {
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+    /// Any value: emit accepts nil, a boolean, a number, a string or a table.
+    #[prost(message, optional, tag = "2")]
+    pub payload: ::core::option::Option<::prost_types::Value>,
+    #[prost(string, repeated, tag = "3")]
+    pub player_keys: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// The units the event is about.
+    #[prost(uint64, repeated, tag = "4")]
+    pub entity_ids: ::prost::alloc::vec::Vec<u64>,
+}
+/// A player selected a menu item.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MenuEvent {
+    #[prost(uint64, tag = "1")]
+    pub item_id: u64,
+    /// The player where DCS identifies one; otherwise the players the item was
+    /// shown to.
+    #[prost(string, repeated, tag = "2")]
+    pub player_keys: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+/// Events in this span were lost. A consumer marks what overlaps it as
+/// incomplete.
+/// The agent reports a gap in DCS real time; the server converts the ends to
+/// wall-clock time with the offset it tracks, so the wall times are estimates.
+/// The stamps carry no frame.
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct Gap {
+    #[prost(message, optional, tag = "1")]
+    pub from: ::core::option::Option<Stamp>,
+    #[prost(message, optional, tag = "2")]
+    pub to: ::core::option::Option<Stamp>,
+    #[prost(uint32, tag = "3")]
+    pub lost: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LifecycleEvent {
+    #[prost(enumeration = "SimState", tag = "1")]
+    pub state: i32,
+    #[prost(string, tag = "2")]
+    pub theater: ::prost::alloc::string::String,
+}
+/// Gap and lifecycle events pass every filter.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EventFilter {
+    /// The campaign to read, 0 for the active one.
+    #[prost(uint64, tag = "1")]
+    pub campaign_id: u64,
+    /// Only these DCS event IDs; empty for all.
+    #[prost(uint32, repeated, tag = "2")]
+    pub dcs_ids: ::prost::alloc::vec::Vec<u32>,
+    /// Only events that name this player.
+    #[prost(string, tag = "3")]
+    pub player_key: ::prost::alloc::string::String,
+    /// Read the server log: events recorded while no campaign was active.
+    /// campaign_id must be 0.
+    #[prost(bool, tag = "4")]
+    pub server_log: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SubscribeEventsRequest {
+    #[prost(message, optional, tag = "1")]
+    pub filter: ::core::option::Option<EventFilter>,
+    /// Send events after this sequence number. 0 starts at the oldest retained.
+    #[prost(uint64, tag = "2")]
+    pub after_sequence: u64,
+    /// Start at the newest event instead.
+    #[prost(bool, tag = "3")]
+    pub live_only: bool,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SubscribeEventsResponse {
+    #[prost(message, optional, tag = "1")]
+    pub event: ::core::option::Option<Event>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ReadEventsRequest {
+    #[prost(message, optional, tag = "1")]
+    pub filter: ::core::option::Option<EventFilter>,
+    #[prost(uint64, tag = "2")]
+    pub after_sequence: u64,
+    #[prost(uint32, tag = "3")]
+    pub limit: u32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ReadEventsResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub events: ::prost::alloc::vec::Vec<Event>,
+    /// True when more history follows the last event.
+    #[prost(bool, tag = "2")]
+    pub more: bool,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum RouteEventKind {
+    Unspecified = 0,
+    /// A waypoint of the group's route was reached.
+    WaypointReached = 1,
+    /// The last waypoint was reached; one per route, after its last
+    /// WAYPOINT_REACHED.
+    RouteComplete = 2,
+}
+impl RouteEventKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "ROUTE_EVENT_KIND_UNSPECIFIED",
+            Self::WaypointReached => "ROUTE_EVENT_KIND_WAYPOINT_REACHED",
+            Self::RouteComplete => "ROUTE_EVENT_KIND_ROUTE_COMPLETE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "ROUTE_EVENT_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "ROUTE_EVENT_KIND_WAYPOINT_REACHED" => Some(Self::WaypointReached),
+            "ROUTE_EVENT_KIND_ROUTE_COMPLETE" => Some(Self::RouteComplete),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum PlayerEventKind {
+    Unspecified = 0,
+    Connect = 1,
+    Disconnect = 2,
+    EnterUnit = 3,
+    LeaveUnit = 4,
+    Chat = 5,
+    Rename = 6,
+}
+impl PlayerEventKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "PLAYER_EVENT_KIND_UNSPECIFIED",
+            Self::Connect => "PLAYER_EVENT_KIND_CONNECT",
+            Self::Disconnect => "PLAYER_EVENT_KIND_DISCONNECT",
+            Self::EnterUnit => "PLAYER_EVENT_KIND_ENTER_UNIT",
+            Self::LeaveUnit => "PLAYER_EVENT_KIND_LEAVE_UNIT",
+            Self::Chat => "PLAYER_EVENT_KIND_CHAT",
+            Self::Rename => "PLAYER_EVENT_KIND_RENAME",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "PLAYER_EVENT_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "PLAYER_EVENT_KIND_CONNECT" => Some(Self::Connect),
+            "PLAYER_EVENT_KIND_DISCONNECT" => Some(Self::Disconnect),
+            "PLAYER_EVENT_KIND_ENTER_UNIT" => Some(Self::EnterUnit),
+            "PLAYER_EVENT_KIND_LEAVE_UNIT" => Some(Self::LeaveUnit),
+            "PLAYER_EVENT_KIND_CHAT" => Some(Self::Chat),
+            "PLAYER_EVENT_KIND_RENAME" => Some(Self::Rename),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum SimState {
+    Unspecified = 0,
+    Starting = 1,
+    Loading = 2,
+    Running = 3,
+    Paused = 4,
+    Stopping = 5,
+    Disabled = 6,
+    /// The health verdict is gone: no DCS process holds a running agent. A DCS
+    /// the server is not attached to still reports its own state.
+    Gone = 7,
+}
+impl SimState {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "SIM_STATE_UNSPECIFIED",
+            Self::Starting => "SIM_STATE_STARTING",
+            Self::Loading => "SIM_STATE_LOADING",
+            Self::Running => "SIM_STATE_RUNNING",
+            Self::Paused => "SIM_STATE_PAUSED",
+            Self::Stopping => "SIM_STATE_STOPPING",
+            Self::Disabled => "SIM_STATE_DISABLED",
+            Self::Gone => "SIM_STATE_GONE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SIM_STATE_UNSPECIFIED" => Some(Self::Unspecified),
+            "SIM_STATE_STARTING" => Some(Self::Starting),
+            "SIM_STATE_LOADING" => Some(Self::Loading),
+            "SIM_STATE_RUNNING" => Some(Self::Running),
+            "SIM_STATE_PAUSED" => Some(Self::Paused),
+            "SIM_STATE_STOPPING" => Some(Self::Stopping),
+            "SIM_STATE_DISABLED" => Some(Self::Disabled),
+            "SIM_STATE_GONE" => Some(Self::Gone),
+            _ => None,
+        }
+    }
+}
+/// Generated client implementations.
+pub mod events_service_client {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    use tonic::codegen::http::Uri;
+    #[derive(Debug, Clone)]
+    pub struct EventsServiceClient<T> {
+        inner: tonic::client::Grpc<T>,
+    }
+    impl EventsServiceClient<tonic::transport::Channel> {
+        /// Attempt to create a new client by connecting to a given endpoint.
+        pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
+        where
+            D: TryInto<tonic::transport::Endpoint>,
+            D::Error: Into<StdError>,
+        {
+            let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
+            Ok(Self::new(conn))
+        }
+    }
+    impl<T> EventsServiceClient<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::Body>,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
+    {
+        pub fn new(inner: T) -> Self {
+            let inner = tonic::client::Grpc::new(inner);
+            Self { inner }
+        }
+        pub fn with_origin(inner: T, origin: Uri) -> Self {
+            let inner = tonic::client::Grpc::with_origin(inner, origin);
+            Self { inner }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> EventsServiceClient<InterceptedService<T, F>>
+        where
+            F: tonic::service::Interceptor,
+            T::ResponseBody: Default,
+            T: tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+                Response = http::Response<
+                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
+                >,
+            >,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+        {
+            EventsServiceClient::new(InterceptedService::new(inner, interceptor))
+        }
+        /// Compress requests with the given encoding.
+        ///
+        /// This requires the server to support it otherwise it might respond with an
+        /// error.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.send_compressed(encoding);
+            self
+        }
+        /// Enable decompressing responses.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.accept_compressed(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_encoding_message_size(limit);
+            self
+        }
+        /// Events from a sequence number onward, then live.
+        pub async fn subscribe_events(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SubscribeEventsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<tonic::codec::Streaming<super::SubscribeEventsResponse>>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nanoprobe.v1alpha1.EventsService/SubscribeEvents",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "nanoprobe.v1alpha1.EventsService",
+                        "SubscribeEvents",
+                    ),
+                );
+            self.inner.server_streaming(req, path, codec).await
+        }
+        /// A page of history.
+        pub async fn read_events(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ReadEventsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ReadEventsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nanoprobe.v1alpha1.EventsService/ReadEvents",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("nanoprobe.v1alpha1.EventsService", "ReadEvents"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+    }
+}
+/// Generated server implementations.
+pub mod events_service_server {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    /// Generated trait containing gRPC methods that should be implemented for use with EventsServiceServer.
+    #[async_trait]
+    pub trait EventsService: std::marker::Send + std::marker::Sync + 'static {
+        /// Server streaming response type for the SubscribeEvents method.
+        type SubscribeEventsStream: tonic::codegen::tokio_stream::Stream<
+                Item = std::result::Result<super::SubscribeEventsResponse, tonic::Status>,
+            >
+            + std::marker::Send
+            + 'static;
+        /// Events from a sequence number onward, then live.
+        async fn subscribe_events(
+            &self,
+            request: tonic::Request<super::SubscribeEventsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<Self::SubscribeEventsStream>,
+            tonic::Status,
+        >;
+        /// A page of history.
+        async fn read_events(
+            &self,
+            request: tonic::Request<super::ReadEventsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ReadEventsResponse>,
+            tonic::Status,
+        >;
+    }
+    #[derive(Debug)]
+    pub struct EventsServiceServer<T> {
+        inner: Arc<T>,
+        accept_compression_encodings: EnabledCompressionEncodings,
+        send_compression_encodings: EnabledCompressionEncodings,
+        max_decoding_message_size: Option<usize>,
+        max_encoding_message_size: Option<usize>,
+    }
+    impl<T> EventsServiceServer<T> {
+        pub fn new(inner: T) -> Self {
+            Self::from_arc(Arc::new(inner))
+        }
+        pub fn from_arc(inner: Arc<T>) -> Self {
+            Self {
+                inner,
+                accept_compression_encodings: Default::default(),
+                send_compression_encodings: Default::default(),
+                max_decoding_message_size: None,
+                max_encoding_message_size: None,
+            }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> InterceptedService<Self, F>
+        where
+            F: tonic::service::Interceptor,
+        {
+            InterceptedService::new(Self::new(inner), interceptor)
+        }
+        /// Enable decompressing requests with the given encoding.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.accept_compression_encodings.enable(encoding);
+            self
+        }
+        /// Compress responses with the given encoding, if the client supports it.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.send_compression_encodings.enable(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.max_decoding_message_size = Some(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.max_encoding_message_size = Some(limit);
+            self
+        }
+    }
+    impl<T, B> tonic::codegen::Service<http::Request<B>> for EventsServiceServer<T>
+    where
+        T: EventsService,
+        B: Body + std::marker::Send + 'static,
+        B::Error: Into<StdError> + std::marker::Send + 'static,
+    {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: http::Request<B>) -> Self::Future {
+            match req.uri().path() {
+                "/nanoprobe.v1alpha1.EventsService/SubscribeEvents" => {
+                    #[allow(non_camel_case_types)]
+                    struct SubscribeEventsSvc<T: EventsService>(pub Arc<T>);
+                    impl<
+                        T: EventsService,
+                    > tonic::server::ServerStreamingService<
+                        super::SubscribeEventsRequest,
+                    > for SubscribeEventsSvc<T> {
+                        type Response = super::SubscribeEventsResponse;
+                        type ResponseStream = T::SubscribeEventsStream;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::ResponseStream>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SubscribeEventsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as EventsService>::subscribe_events(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SubscribeEventsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.server_streaming(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/nanoprobe.v1alpha1.EventsService/ReadEvents" => {
+                    #[allow(non_camel_case_types)]
+                    struct ReadEventsSvc<T: EventsService>(pub Arc<T>);
+                    impl<
+                        T: EventsService,
+                    > tonic::server::UnaryService<super::ReadEventsRequest>
+                    for ReadEventsSvc<T> {
+                        type Response = super::ReadEventsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ReadEventsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as EventsService>::read_events(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ReadEventsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                _ => {
+                    Box::pin(async move {
+                        let mut response = http::Response::new(
+                            tonic::body::Body::default(),
+                        );
+                        let headers = response.headers_mut();
+                        headers
+                            .insert(
+                                tonic::Status::GRPC_STATUS,
+                                (tonic::Code::Unimplemented as i32).into(),
+                            );
+                        headers
+                            .insert(
+                                http::header::CONTENT_TYPE,
+                                tonic::metadata::GRPC_CONTENT_TYPE,
+                            );
+                        Ok(response)
+                    })
+                }
+            }
+        }
+    }
+    impl<T> Clone for EventsServiceServer<T> {
+        fn clone(&self) -> Self {
+            let inner = self.inner.clone();
+            Self {
+                inner,
+                accept_compression_encodings: self.accept_compression_encodings,
+                send_compression_encodings: self.send_compression_encodings,
+                max_decoding_message_size: self.max_decoding_message_size,
+                max_encoding_message_size: self.max_encoding_message_size,
+            }
+        }
+    }
+    /// Generated gRPC service name
+    pub const SERVICE_NAME: &str = "nanoprobe.v1alpha1.EventsService";
+    impl<T> tonic::server::NamedService for EventsServiceServer<T> {
+        const NAME: &'static str = SERVICE_NAME;
+    }
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct HelloRequest {
     /// The client's name, for logs.
@@ -1101,6 +1822,602 @@ pub mod session_service_server {
         const NAME: &'static str = SERVICE_NAME;
     }
 }
+/// Achieved period of each sampling tier, so a controller sees how stale its
+/// view is.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SampleRates {
+    #[prost(message, optional, tag = "1")]
+    pub position: ::core::option::Option<::prost_types::Duration>,
+    #[prost(message, optional, tag = "2")]
+    pub vitals: ::core::option::Option<::prost_types::Duration>,
+    #[prost(message, optional, tag = "3")]
+    pub ammo: ::core::option::Option<::prost_types::Duration>,
+    #[prost(message, optional, tag = "4")]
+    pub warehouse: ::core::option::Option<::prost_types::Duration>,
+    #[prost(message, optional, tag = "5")]
+    pub enumeration: ::core::option::Option<::prost_types::Duration>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ServerStatus {
+    #[prost(enumeration = "Health", tag = "1")]
+    pub health: i32,
+    /// Time since the agent's last heartbeat.
+    #[prost(message, optional, tag = "2")]
+    pub heartbeat_age: ::core::option::Option<::prost_types::Duration>,
+    #[prost(enumeration = "SimState", tag = "3")]
+    pub sim_state: i32,
+    #[prost(string, tag = "4")]
+    pub theater: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "5")]
+    pub now: ::core::option::Option<Stamp>,
+    /// The active campaign, 0 for none.
+    #[prost(uint64, tag = "6")]
+    pub campaign_id: u64,
+    #[prost(message, optional, tag = "7")]
+    pub achieved: ::core::option::Option<SampleRates>,
+    /// Agent overhead as a share of real time over the last minute.
+    #[prost(double, tag = "8")]
+    pub overhead_share: f64,
+    /// Commands waiting to be applied.
+    #[prost(uint32, tag = "9")]
+    pub commands_queued: u32,
+    /// Commands over the commanded-work budget since DCS started.
+    #[prost(uint64, tag = "10")]
+    pub commands_over_budget: u64,
+    #[prost(uint64, tag = "11")]
+    pub samples_dropped: u64,
+    #[prost(uint64, tag = "12")]
+    pub event_gaps: u64,
+    #[prost(string, tag = "13")]
+    pub agent_build: ::prost::alloc::string::String,
+    #[prost(string, tag = "14")]
+    pub dcs_version: ::prost::alloc::string::String,
+    /// Whether the sidecar is attached to the agent. Not part of health: a DCS
+    /// whose heartbeat advances is healthy even when the sidecar cannot attach.
+    #[prost(bool, tag = "15")]
+    pub attached: bool,
+    /// The reason of the last refused handshake, empty for none.
+    #[prost(string, tag = "16")]
+    pub attach_error: ::prost::alloc::string::String,
+    /// The agent DLL's interface version from its last HELLO, 0 before one: the
+    /// ABI between the DLL and its Lua hook and shim. Reported, not checked.
+    #[prost(uint32, tag = "17")]
+    pub agent_interface: u32,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetServerStatusRequest {}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetServerStatusResponse {
+    #[prost(message, optional, tag = "1")]
+    pub status: ::core::option::Option<ServerStatus>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct NextMission {
+    /// The theater to load. Empty keeps the loaded one.
+    #[prost(string, tag = "1")]
+    pub theater: ::prost::alloc::string::String,
+    /// The mission's date and start time. Absent carries the campaign clock.
+    #[prost(message, optional, tag = "2")]
+    pub start: ::core::option::Option<::prost_types::Timestamp>,
+    /// The DCS weather table. Absent keeps the template's.
+    #[prost(message, optional, tag = "3")]
+    pub weather: ::core::option::Option<::prost_types::Struct>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SetNextMissionRequest {
+    #[prost(message, optional, tag = "1")]
+    pub write: ::core::option::Option<Write>,
+    #[prost(message, optional, tag = "2")]
+    pub next: ::core::option::Option<NextMission>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetNextMissionResponse {}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ReloadRequest {
+    #[prost(message, optional, tag = "1")]
+    pub write: ::core::option::Option<Write>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ReloadResponse {
+    #[prost(message, optional, tag = "1")]
+    pub result: ::core::option::Option<CommandResult>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum Health {
+    Unspecified = 0,
+    Healthy = 1,
+    Hung = 2,
+    Gone = 3,
+    Disabled = 4,
+}
+impl Health {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "HEALTH_UNSPECIFIED",
+            Self::Healthy => "HEALTH_HEALTHY",
+            Self::Hung => "HEALTH_HUNG",
+            Self::Gone => "HEALTH_GONE",
+            Self::Disabled => "HEALTH_DISABLED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "HEALTH_UNSPECIFIED" => Some(Self::Unspecified),
+            "HEALTH_HEALTHY" => Some(Self::Healthy),
+            "HEALTH_HUNG" => Some(Self::Hung),
+            "HEALTH_GONE" => Some(Self::Gone),
+            "HEALTH_DISABLED" => Some(Self::Disabled),
+            _ => None,
+        }
+    }
+}
+/// Generated client implementations.
+pub mod mission_service_client {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    use tonic::codegen::http::Uri;
+    #[derive(Debug, Clone)]
+    pub struct MissionServiceClient<T> {
+        inner: tonic::client::Grpc<T>,
+    }
+    impl MissionServiceClient<tonic::transport::Channel> {
+        /// Attempt to create a new client by connecting to a given endpoint.
+        pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
+        where
+            D: TryInto<tonic::transport::Endpoint>,
+            D::Error: Into<StdError>,
+        {
+            let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
+            Ok(Self::new(conn))
+        }
+    }
+    impl<T> MissionServiceClient<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::Body>,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
+    {
+        pub fn new(inner: T) -> Self {
+            let inner = tonic::client::Grpc::new(inner);
+            Self { inner }
+        }
+        pub fn with_origin(inner: T, origin: Uri) -> Self {
+            let inner = tonic::client::Grpc::with_origin(inner, origin);
+            Self { inner }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> MissionServiceClient<InterceptedService<T, F>>
+        where
+            F: tonic::service::Interceptor,
+            T::ResponseBody: Default,
+            T: tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+                Response = http::Response<
+                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
+                >,
+            >,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+        {
+            MissionServiceClient::new(InterceptedService::new(inner, interceptor))
+        }
+        /// Compress requests with the given encoding.
+        ///
+        /// This requires the server to support it otherwise it might respond with an
+        /// error.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.send_compressed(encoding);
+            self
+        }
+        /// Enable decompressing responses.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.accept_compressed(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_encoding_message_size(limit);
+            self
+        }
+        pub async fn get_server_status(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetServerStatusRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetServerStatusResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nanoprobe.v1alpha1.MissionService/GetServerStatus",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "nanoprobe.v1alpha1.MissionService",
+                        "GetServerStatus",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Weather and time written into the shell at the next load.
+        pub async fn set_next_mission(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SetNextMissionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SetNextMissionResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nanoprobe.v1alpha1.MissionService/SetNextMission",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "nanoprobe.v1alpha1.MissionService",
+                        "SetNextMission",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Write the shell and load it. The campaign is restored after the load.
+        pub async fn reload(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ReloadRequest>,
+        ) -> std::result::Result<tonic::Response<super::ReloadResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nanoprobe.v1alpha1.MissionService/Reload",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("nanoprobe.v1alpha1.MissionService", "Reload"));
+            self.inner.unary(req, path, codec).await
+        }
+    }
+}
+/// Generated server implementations.
+pub mod mission_service_server {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    /// Generated trait containing gRPC methods that should be implemented for use with MissionServiceServer.
+    #[async_trait]
+    pub trait MissionService: std::marker::Send + std::marker::Sync + 'static {
+        async fn get_server_status(
+            &self,
+            request: tonic::Request<super::GetServerStatusRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetServerStatusResponse>,
+            tonic::Status,
+        >;
+        /// Weather and time written into the shell at the next load.
+        async fn set_next_mission(
+            &self,
+            request: tonic::Request<super::SetNextMissionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SetNextMissionResponse>,
+            tonic::Status,
+        >;
+        /// Write the shell and load it. The campaign is restored after the load.
+        async fn reload(
+            &self,
+            request: tonic::Request<super::ReloadRequest>,
+        ) -> std::result::Result<tonic::Response<super::ReloadResponse>, tonic::Status>;
+    }
+    #[derive(Debug)]
+    pub struct MissionServiceServer<T> {
+        inner: Arc<T>,
+        accept_compression_encodings: EnabledCompressionEncodings,
+        send_compression_encodings: EnabledCompressionEncodings,
+        max_decoding_message_size: Option<usize>,
+        max_encoding_message_size: Option<usize>,
+    }
+    impl<T> MissionServiceServer<T> {
+        pub fn new(inner: T) -> Self {
+            Self::from_arc(Arc::new(inner))
+        }
+        pub fn from_arc(inner: Arc<T>) -> Self {
+            Self {
+                inner,
+                accept_compression_encodings: Default::default(),
+                send_compression_encodings: Default::default(),
+                max_decoding_message_size: None,
+                max_encoding_message_size: None,
+            }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> InterceptedService<Self, F>
+        where
+            F: tonic::service::Interceptor,
+        {
+            InterceptedService::new(Self::new(inner), interceptor)
+        }
+        /// Enable decompressing requests with the given encoding.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.accept_compression_encodings.enable(encoding);
+            self
+        }
+        /// Compress responses with the given encoding, if the client supports it.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.send_compression_encodings.enable(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.max_decoding_message_size = Some(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.max_encoding_message_size = Some(limit);
+            self
+        }
+    }
+    impl<T, B> tonic::codegen::Service<http::Request<B>> for MissionServiceServer<T>
+    where
+        T: MissionService,
+        B: Body + std::marker::Send + 'static,
+        B::Error: Into<StdError> + std::marker::Send + 'static,
+    {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: http::Request<B>) -> Self::Future {
+            match req.uri().path() {
+                "/nanoprobe.v1alpha1.MissionService/GetServerStatus" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetServerStatusSvc<T: MissionService>(pub Arc<T>);
+                    impl<
+                        T: MissionService,
+                    > tonic::server::UnaryService<super::GetServerStatusRequest>
+                    for GetServerStatusSvc<T> {
+                        type Response = super::GetServerStatusResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetServerStatusRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as MissionService>::get_server_status(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetServerStatusSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/nanoprobe.v1alpha1.MissionService/SetNextMission" => {
+                    #[allow(non_camel_case_types)]
+                    struct SetNextMissionSvc<T: MissionService>(pub Arc<T>);
+                    impl<
+                        T: MissionService,
+                    > tonic::server::UnaryService<super::SetNextMissionRequest>
+                    for SetNextMissionSvc<T> {
+                        type Response = super::SetNextMissionResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SetNextMissionRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as MissionService>::set_next_mission(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SetNextMissionSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/nanoprobe.v1alpha1.MissionService/Reload" => {
+                    #[allow(non_camel_case_types)]
+                    struct ReloadSvc<T: MissionService>(pub Arc<T>);
+                    impl<
+                        T: MissionService,
+                    > tonic::server::UnaryService<super::ReloadRequest>
+                    for ReloadSvc<T> {
+                        type Response = super::ReloadResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ReloadRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as MissionService>::reload(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ReloadSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                _ => {
+                    Box::pin(async move {
+                        let mut response = http::Response::new(
+                            tonic::body::Body::default(),
+                        );
+                        let headers = response.headers_mut();
+                        headers
+                            .insert(
+                                tonic::Status::GRPC_STATUS,
+                                (tonic::Code::Unimplemented as i32).into(),
+                            );
+                        headers
+                            .insert(
+                                http::header::CONTENT_TYPE,
+                                tonic::metadata::GRPC_CONTENT_TYPE,
+                            );
+                        Ok(response)
+                    })
+                }
+            }
+        }
+    }
+    impl<T> Clone for MissionServiceServer<T> {
+        fn clone(&self) -> Self {
+            let inner = self.inner.clone();
+            Self {
+                inner,
+                accept_compression_encodings: self.accept_compression_encodings,
+                send_compression_encodings: self.send_compression_encodings,
+                max_decoding_message_size: self.max_decoding_message_size,
+                max_encoding_message_size: self.max_encoding_message_size,
+            }
+        }
+    }
+    /// Generated gRPC service name
+    pub const SERVICE_NAME: &str = "nanoprobe.v1alpha1.MissionService";
+    impl<T> tonic::server::NamedService for MissionServiceServer<T> {
+        const NAME: &'static str = SERVICE_NAME;
+    }
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Campaign {
     #[prost(uint64, tag = "1")]
@@ -1131,6 +2448,39 @@ pub struct Campaign {
     /// Written by the controller when the campaign finished.
     #[prost(message, optional, tag = "10")]
     pub outcome: ::core::option::Option<::prost_types::Struct>,
+    /// The last checkpoint written to the store, absent before the first.
+    #[prost(message, optional, tag = "11")]
+    pub last_checkpoint: ::core::option::Option<CheckpointInfo>,
+}
+/// A checkpoint of the observed state (spec/persistence.md, "Writes").
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct CheckpointInfo {
+    /// When it was written.
+    #[prost(message, optional, tag = "1")]
+    pub taken: ::core::option::Option<::prost_types::Timestamp>,
+    /// The simulation's model time and mission generation it holds.
+    #[prost(message, optional, tag = "2")]
+    pub sim: ::core::option::Option<Stamp>,
+    /// The period each sampling tier achieved when it was taken: a value in it
+    /// may be this old.
+    #[prost(message, optional, tag = "3")]
+    pub achieved: ::core::option::Option<SampleRates>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Backup {
+    /// Counts up from 1 in the campaign's folder, never reused.
+    #[prost(uint32, tag = "1")]
+    pub id: u32,
+    #[prost(message, optional, tag = "2")]
+    pub created: ::core::option::Option<::prost_types::Timestamp>,
+    /// The store copy's size in bytes.
+    #[prost(uint64, tag = "3")]
+    pub size: u64,
+    /// The store's schema version when it was taken.
+    #[prost(uint32, tag = "4")]
+    pub schema: u32,
+    #[prost(enumeration = "BackupReason", tag = "5")]
+    pub reason: i32,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateCampaignRequest {
@@ -1243,6 +2593,30 @@ pub struct DeleteCampaignRequest {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeleteCampaignResponse {}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BackupCampaignRequest {
+    #[prost(message, optional, tag = "1")]
+    pub lease: ::core::option::Option<Lease>,
+    #[prost(uint64, tag = "2")]
+    pub campaign_id: u64,
+    #[prost(message, optional, tag = "3")]
+    pub idempotency: ::core::option::Option<Idempotency>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BackupCampaignResponse {
+    #[prost(message, optional, tag = "1")]
+    pub backup: ::core::option::Option<Backup>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListCampaignBackupsRequest {
+    #[prost(uint64, tag = "1")]
+    pub campaign_id: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListCampaignBackupsResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub backups: ::prost::alloc::vec::Vec<Backup>,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum CampaignState {
@@ -1271,6 +2645,41 @@ impl CampaignState {
             "CAMPAIGN_STATE_ACTIVE" => Some(Self::Active),
             "CAMPAIGN_STATE_SUSPENDED" => Some(Self::Suspended),
             "CAMPAIGN_STATE_FINISHED" => Some(Self::Finished),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum BackupReason {
+    Unspecified = 0,
+    /// Every backup_interval_h while the campaign is active.
+    Scheduled = 1,
+    /// BackupCampaign.
+    Manual = 2,
+    /// Before a schema migration.
+    PreMigration = 3,
+}
+impl BackupReason {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "BACKUP_REASON_UNSPECIFIED",
+            Self::Scheduled => "BACKUP_REASON_SCHEDULED",
+            Self::Manual => "BACKUP_REASON_MANUAL",
+            Self::PreMigration => "BACKUP_REASON_PRE_MIGRATION",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "BACKUP_REASON_UNSPECIFIED" => Some(Self::Unspecified),
+            "BACKUP_REASON_SCHEDULED" => Some(Self::Scheduled),
+            "BACKUP_REASON_MANUAL" => Some(Self::Manual),
+            "BACKUP_REASON_PRE_MIGRATION" => Some(Self::PreMigration),
             _ => None,
         }
     }
@@ -1603,6 +3012,71 @@ pub mod campaign_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Take a backup of the campaign's store now (spec/persistence.md,
+        /// "Backups"). There is no restore call. To restore backup <n>: suspend the
+        /// campaign; stop the server; delete store.sqlite-wal and store.sqlite-shm
+        /// in the campaign's folder if they are there; copy backups/<n>/store.sqlite
+        /// over the folder's store.sqlite; start the server; activate the campaign.
+        /// history.log is not rolled back and keeps the events after the backup.
+        pub async fn backup_campaign(
+            &mut self,
+            request: impl tonic::IntoRequest<super::BackupCampaignRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::BackupCampaignResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nanoprobe.v1alpha1.CampaignService/BackupCampaign",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "nanoprobe.v1alpha1.CampaignService",
+                        "BackupCampaign",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// The backups kept, oldest first. Needs no lease.
+        pub async fn list_campaign_backups(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListCampaignBackupsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListCampaignBackupsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nanoprobe.v1alpha1.CampaignService/ListCampaignBackups",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "nanoprobe.v1alpha1.CampaignService",
+                        "ListCampaignBackups",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -1683,6 +3157,27 @@ pub mod campaign_service_server {
             request: tonic::Request<super::DeleteCampaignRequest>,
         ) -> std::result::Result<
             tonic::Response<super::DeleteCampaignResponse>,
+            tonic::Status,
+        >;
+        /// Take a backup of the campaign's store now (spec/persistence.md,
+        /// "Backups"). There is no restore call. To restore backup <n>: suspend the
+        /// campaign; stop the server; delete store.sqlite-wal and store.sqlite-shm
+        /// in the campaign's folder if they are there; copy backups/<n>/store.sqlite
+        /// over the folder's store.sqlite; start the server; activate the campaign.
+        /// history.log is not rolled back and keeps the events after the backup.
+        async fn backup_campaign(
+            &self,
+            request: tonic::Request<super::BackupCampaignRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::BackupCampaignResponse>,
+            tonic::Status,
+        >;
+        /// The backups kept, oldest first. Needs no lease.
+        async fn list_campaign_backups(
+            &self,
+            request: tonic::Request<super::ListCampaignBackupsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListCampaignBackupsResponse>,
             tonic::Status,
         >;
     }
@@ -2133,6 +3628,101 @@ pub mod campaign_service_server {
                     };
                     Box::pin(fut)
                 }
+                "/nanoprobe.v1alpha1.CampaignService/BackupCampaign" => {
+                    #[allow(non_camel_case_types)]
+                    struct BackupCampaignSvc<T: CampaignService>(pub Arc<T>);
+                    impl<
+                        T: CampaignService,
+                    > tonic::server::UnaryService<super::BackupCampaignRequest>
+                    for BackupCampaignSvc<T> {
+                        type Response = super::BackupCampaignResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::BackupCampaignRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as CampaignService>::backup_campaign(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = BackupCampaignSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/nanoprobe.v1alpha1.CampaignService/ListCampaignBackups" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListCampaignBackupsSvc<T: CampaignService>(pub Arc<T>);
+                    impl<
+                        T: CampaignService,
+                    > tonic::server::UnaryService<super::ListCampaignBackupsRequest>
+                    for ListCampaignBackupsSvc<T> {
+                        type Response = super::ListCampaignBackupsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListCampaignBackupsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as CampaignService>::list_campaign_backups(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListCampaignBackupsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
                 _ => {
                     Box::pin(async move {
                         let mut response = http::Response::new(
@@ -2213,6 +3803,13 @@ pub struct Unit {
     pub sampled: ::core::option::Option<Stamp>,
     #[prost(double, optional, tag = "14")]
     pub life_max: ::core::option::Option<f64>,
+    /// How the unit left DCS without a death fact, if it did. While the mark
+    /// stands, no spawn includes the unit. A death fact or the unit being found
+    /// again releases it. A mark the agent reported outlives a mission load
+    /// until the controller removes the group; a mark inferred at an
+    /// enumeration's end clears at the load (spec/world.md, "Respawn gate").
+    #[prost(enumeration = "UnitLeft", tag = "15")]
+    pub left: i32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Group {
@@ -2590,6 +4187,38 @@ impl RateClass {
             "RATE_CLASS_NORMAL" => Some(Self::Normal),
             "RATE_CLASS_FAST" => Some(Self::Fast),
             "RATE_CLASS_SLOW" => Some(Self::Slow),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum UnitLeft {
+    /// It has not left, or it is dead.
+    Unspecified = 0,
+    /// DCS no longer has it and the cause is unknown: it may be dead.
+    Missing = 1,
+    /// DCS no longer has it and the read showed a removal, not a kill.
+    Removed = 2,
+}
+impl UnitLeft {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "UNIT_LEFT_UNSPECIFIED",
+            Self::Missing => "UNIT_LEFT_MISSING",
+            Self::Removed => "UNIT_LEFT_REMOVED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "UNIT_LEFT_UNSPECIFIED" => Some(Self::Unspecified),
+            "UNIT_LEFT_MISSING" => Some(Self::Missing),
+            "UNIT_LEFT_REMOVED" => Some(Self::Removed),
             _ => None,
         }
     }
@@ -5098,727 +6727,6 @@ pub mod commands_service_server {
         const NAME: &'static str = SERVICE_NAME;
     }
 }
-/// Every field but sequence and stamp is optional: DCS does not always send
-/// the same fields for one event type.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct Event {
-    /// Grows by one per event within a campaign, or within the server log.
-    #[prost(uint64, tag = "1")]
-    pub sequence: u64,
-    #[prost(message, optional, tag = "2")]
-    pub stamp: ::core::option::Option<Stamp>,
-    /// The campaign the sequence number belongs to, 0 for the server log.
-    #[prost(uint64, tag = "9")]
-    pub campaign_id: u64,
-    #[prost(oneof = "event::Body", tags = "3, 4, 5, 6, 7, 8, 10")]
-    pub body: ::core::option::Option<event::Body>,
-}
-/// Nested message and enum types in `Event`.
-pub mod event {
-    #[derive(Clone, PartialEq, ::prost::Oneof)]
-    pub enum Body {
-        #[prost(message, tag = "3")]
-        World(super::WorldEvent),
-        #[prost(message, tag = "4")]
-        Player(super::PlayerEvent),
-        #[prost(message, tag = "5")]
-        Author(super::AuthorEvent),
-        #[prost(message, tag = "6")]
-        Menu(super::MenuEvent),
-        #[prost(message, tag = "7")]
-        Gap(super::Gap),
-        #[prost(message, tag = "8")]
-        Lifecycle(super::LifecycleEvent),
-        #[prost(message, tag = "10")]
-        Route(super::RouteEvent),
-    }
-}
-/// A DCS world event.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct WorldEvent {
-    /// The DCS event ID.
-    #[prost(uint32, tag = "1")]
-    pub dcs_id: u32,
-    /// The event's name where the platform knows it, such as "kill".
-    #[prost(string, tag = "2")]
-    pub name: ::prost::alloc::string::String,
-    #[prost(uint64, optional, tag = "3")]
-    pub initiator_id: ::core::option::Option<u64>,
-    #[prost(uint64, optional, tag = "4")]
-    pub target_id: ::core::option::Option<u64>,
-    /// Player keys in the initiator and in the target when it happened.
-    #[prost(string, repeated, tag = "5")]
-    pub initiator_players: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    #[prost(string, repeated, tag = "6")]
-    pub target_players: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    #[prost(string, optional, tag = "7")]
-    pub weapon: ::core::option::Option<::prost::alloc::string::String>,
-    /// The airbase the event names.
-    #[prost(string, optional, tag = "8")]
-    pub place: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(message, optional, tag = "9")]
-    pub position: ::core::option::Option<Position>,
-    #[prost(string, optional, tag = "10")]
-    pub text: ::core::option::Option<::prost::alloc::string::String>,
-    /// Rounds expended, for a shooting-end event: from the event where DCS
-    /// sends a count, otherwise from the ammunition difference.
-    #[prost(uint32, optional, tag = "11")]
-    pub rounds: ::core::option::Option<u32>,
-    /// Fields the platform read and has no typed field for.
-    #[prost(message, optional, tag = "12")]
-    pub extra: ::core::option::Option<::prost_types::Struct>,
-}
-/// Progress of a group along its route order (spec/world.md, "Route
-/// progress"). The sidecar writes it from position samples, so it is as
-/// current as they are.
-#[derive(Clone, Copy, PartialEq, ::prost::Message)]
-pub struct RouteEvent {
-    #[prost(enumeration = "RouteEventKind", tag = "1")]
-    pub kind: i32,
-    /// The group.
-    #[prost(uint64, tag = "2")]
-    pub group_id: u64,
-    /// The order revision the route was given at.
-    #[prost(uint64, tag = "3")]
-    pub order_revision: u64,
-    /// The waypoint's index in the order's own numbering, from 0. Not set for
-    /// ROUTE_COMPLETE.
-    #[prost(uint32, optional, tag = "4")]
-    pub waypoint_index: ::core::option::Option<u32>,
-    /// Model time of the position sample that showed it, in seconds.
-    #[prost(double, tag = "5")]
-    pub model_time: f64,
-    /// True when the position was observed in DCS, false when the controller
-    /// wrote it.
-    #[prost(bool, tag = "6")]
-    pub observed: bool,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct PlayerEvent {
-    #[prost(enumeration = "PlayerEventKind", tag = "1")]
-    pub kind: i32,
-    #[prost(string, tag = "2")]
-    pub player_key: ::prost::alloc::string::String,
-    #[prost(string, tag = "3")]
-    pub name: ::prost::alloc::string::String,
-    #[prost(uint64, optional, tag = "4")]
-    pub unit_id: ::core::option::Option<u64>,
-    #[prost(uint32, optional, tag = "5")]
-    pub seat: ::core::option::Option<u32>,
-    #[prost(string, optional, tag = "6")]
-    pub text: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(enumeration = "Coalition", tag = "7")]
-    pub coalition: i32,
-}
-/// An event from emit, an extension or PublishEvent.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct AuthorEvent {
-    #[prost(string, tag = "1")]
-    pub name: ::prost::alloc::string::String,
-    /// Any value: emit accepts nil, a boolean, a number, a string or a table.
-    #[prost(message, optional, tag = "2")]
-    pub payload: ::core::option::Option<::prost_types::Value>,
-    #[prost(string, repeated, tag = "3")]
-    pub player_keys: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    /// The units the event is about.
-    #[prost(uint64, repeated, tag = "4")]
-    pub entity_ids: ::prost::alloc::vec::Vec<u64>,
-}
-/// A player selected a menu item.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct MenuEvent {
-    #[prost(uint64, tag = "1")]
-    pub item_id: u64,
-    /// The player where DCS identifies one; otherwise the players the item was
-    /// shown to.
-    #[prost(string, repeated, tag = "2")]
-    pub player_keys: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-}
-/// Events in this span were lost. A consumer marks what overlaps it as
-/// incomplete.
-/// The agent reports a gap in DCS real time; the server converts the ends to
-/// wall-clock time with the offset it tracks, so the wall times are estimates.
-/// The stamps carry no frame.
-#[derive(Clone, Copy, PartialEq, ::prost::Message)]
-pub struct Gap {
-    #[prost(message, optional, tag = "1")]
-    pub from: ::core::option::Option<Stamp>,
-    #[prost(message, optional, tag = "2")]
-    pub to: ::core::option::Option<Stamp>,
-    #[prost(uint32, tag = "3")]
-    pub lost: u32,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct LifecycleEvent {
-    #[prost(enumeration = "SimState", tag = "1")]
-    pub state: i32,
-    #[prost(string, tag = "2")]
-    pub theater: ::prost::alloc::string::String,
-}
-/// Gap and lifecycle events pass every filter.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct EventFilter {
-    /// The campaign to read, 0 for the active one.
-    #[prost(uint64, tag = "1")]
-    pub campaign_id: u64,
-    /// Only these DCS event IDs; empty for all.
-    #[prost(uint32, repeated, tag = "2")]
-    pub dcs_ids: ::prost::alloc::vec::Vec<u32>,
-    /// Only events that name this player.
-    #[prost(string, tag = "3")]
-    pub player_key: ::prost::alloc::string::String,
-    /// Read the server log: events recorded while no campaign was active.
-    /// campaign_id must be 0.
-    #[prost(bool, tag = "4")]
-    pub server_log: bool,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SubscribeEventsRequest {
-    #[prost(message, optional, tag = "1")]
-    pub filter: ::core::option::Option<EventFilter>,
-    /// Send events after this sequence number. 0 starts at the oldest retained.
-    #[prost(uint64, tag = "2")]
-    pub after_sequence: u64,
-    /// Start at the newest event instead.
-    #[prost(bool, tag = "3")]
-    pub live_only: bool,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct SubscribeEventsResponse {
-    #[prost(message, optional, tag = "1")]
-    pub event: ::core::option::Option<Event>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ReadEventsRequest {
-    #[prost(message, optional, tag = "1")]
-    pub filter: ::core::option::Option<EventFilter>,
-    #[prost(uint64, tag = "2")]
-    pub after_sequence: u64,
-    #[prost(uint32, tag = "3")]
-    pub limit: u32,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ReadEventsResponse {
-    #[prost(message, repeated, tag = "1")]
-    pub events: ::prost::alloc::vec::Vec<Event>,
-    /// True when more history follows the last event.
-    #[prost(bool, tag = "2")]
-    pub more: bool,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
-pub enum RouteEventKind {
-    Unspecified = 0,
-    /// A waypoint of the group's route was reached.
-    WaypointReached = 1,
-    /// The last waypoint was reached; one per route, after its last
-    /// WAYPOINT_REACHED.
-    RouteComplete = 2,
-}
-impl RouteEventKind {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    ///
-    /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::Unspecified => "ROUTE_EVENT_KIND_UNSPECIFIED",
-            Self::WaypointReached => "ROUTE_EVENT_KIND_WAYPOINT_REACHED",
-            Self::RouteComplete => "ROUTE_EVENT_KIND_ROUTE_COMPLETE",
-        }
-    }
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "ROUTE_EVENT_KIND_UNSPECIFIED" => Some(Self::Unspecified),
-            "ROUTE_EVENT_KIND_WAYPOINT_REACHED" => Some(Self::WaypointReached),
-            "ROUTE_EVENT_KIND_ROUTE_COMPLETE" => Some(Self::RouteComplete),
-            _ => None,
-        }
-    }
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
-pub enum PlayerEventKind {
-    Unspecified = 0,
-    Connect = 1,
-    Disconnect = 2,
-    EnterUnit = 3,
-    LeaveUnit = 4,
-    Chat = 5,
-    Rename = 6,
-}
-impl PlayerEventKind {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    ///
-    /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::Unspecified => "PLAYER_EVENT_KIND_UNSPECIFIED",
-            Self::Connect => "PLAYER_EVENT_KIND_CONNECT",
-            Self::Disconnect => "PLAYER_EVENT_KIND_DISCONNECT",
-            Self::EnterUnit => "PLAYER_EVENT_KIND_ENTER_UNIT",
-            Self::LeaveUnit => "PLAYER_EVENT_KIND_LEAVE_UNIT",
-            Self::Chat => "PLAYER_EVENT_KIND_CHAT",
-            Self::Rename => "PLAYER_EVENT_KIND_RENAME",
-        }
-    }
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "PLAYER_EVENT_KIND_UNSPECIFIED" => Some(Self::Unspecified),
-            "PLAYER_EVENT_KIND_CONNECT" => Some(Self::Connect),
-            "PLAYER_EVENT_KIND_DISCONNECT" => Some(Self::Disconnect),
-            "PLAYER_EVENT_KIND_ENTER_UNIT" => Some(Self::EnterUnit),
-            "PLAYER_EVENT_KIND_LEAVE_UNIT" => Some(Self::LeaveUnit),
-            "PLAYER_EVENT_KIND_CHAT" => Some(Self::Chat),
-            "PLAYER_EVENT_KIND_RENAME" => Some(Self::Rename),
-            _ => None,
-        }
-    }
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
-pub enum SimState {
-    Unspecified = 0,
-    Starting = 1,
-    Loading = 2,
-    Running = 3,
-    Paused = 4,
-    Stopping = 5,
-    Disabled = 6,
-    /// The health verdict is gone: no DCS process holds a running agent. A DCS
-    /// the server is not attached to still reports its own state.
-    Gone = 7,
-}
-impl SimState {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    ///
-    /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::Unspecified => "SIM_STATE_UNSPECIFIED",
-            Self::Starting => "SIM_STATE_STARTING",
-            Self::Loading => "SIM_STATE_LOADING",
-            Self::Running => "SIM_STATE_RUNNING",
-            Self::Paused => "SIM_STATE_PAUSED",
-            Self::Stopping => "SIM_STATE_STOPPING",
-            Self::Disabled => "SIM_STATE_DISABLED",
-            Self::Gone => "SIM_STATE_GONE",
-        }
-    }
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "SIM_STATE_UNSPECIFIED" => Some(Self::Unspecified),
-            "SIM_STATE_STARTING" => Some(Self::Starting),
-            "SIM_STATE_LOADING" => Some(Self::Loading),
-            "SIM_STATE_RUNNING" => Some(Self::Running),
-            "SIM_STATE_PAUSED" => Some(Self::Paused),
-            "SIM_STATE_STOPPING" => Some(Self::Stopping),
-            "SIM_STATE_DISABLED" => Some(Self::Disabled),
-            "SIM_STATE_GONE" => Some(Self::Gone),
-            _ => None,
-        }
-    }
-}
-/// Generated client implementations.
-pub mod events_service_client {
-    #![allow(
-        unused_variables,
-        dead_code,
-        missing_docs,
-        clippy::wildcard_imports,
-        clippy::let_unit_value,
-    )]
-    use tonic::codegen::*;
-    use tonic::codegen::http::Uri;
-    #[derive(Debug, Clone)]
-    pub struct EventsServiceClient<T> {
-        inner: tonic::client::Grpc<T>,
-    }
-    impl EventsServiceClient<tonic::transport::Channel> {
-        /// Attempt to create a new client by connecting to a given endpoint.
-        pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
-        where
-            D: TryInto<tonic::transport::Endpoint>,
-            D::Error: Into<StdError>,
-        {
-            let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
-            Ok(Self::new(conn))
-        }
-    }
-    impl<T> EventsServiceClient<T>
-    where
-        T: tonic::client::GrpcService<tonic::body::Body>,
-        T::Error: Into<StdError>,
-        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
-        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
-    {
-        pub fn new(inner: T) -> Self {
-            let inner = tonic::client::Grpc::new(inner);
-            Self { inner }
-        }
-        pub fn with_origin(inner: T, origin: Uri) -> Self {
-            let inner = tonic::client::Grpc::with_origin(inner, origin);
-            Self { inner }
-        }
-        pub fn with_interceptor<F>(
-            inner: T,
-            interceptor: F,
-        ) -> EventsServiceClient<InterceptedService<T, F>>
-        where
-            F: tonic::service::Interceptor,
-            T::ResponseBody: Default,
-            T: tonic::codegen::Service<
-                http::Request<tonic::body::Body>,
-                Response = http::Response<
-                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
-                >,
-            >,
-            <T as tonic::codegen::Service<
-                http::Request<tonic::body::Body>,
-            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
-        {
-            EventsServiceClient::new(InterceptedService::new(inner, interceptor))
-        }
-        /// Compress requests with the given encoding.
-        ///
-        /// This requires the server to support it otherwise it might respond with an
-        /// error.
-        #[must_use]
-        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.inner = self.inner.send_compressed(encoding);
-            self
-        }
-        /// Enable decompressing responses.
-        #[must_use]
-        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.inner = self.inner.accept_compressed(encoding);
-            self
-        }
-        /// Limits the maximum size of a decoded message.
-        ///
-        /// Default: `4MB`
-        #[must_use]
-        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
-            self.inner = self.inner.max_decoding_message_size(limit);
-            self
-        }
-        /// Limits the maximum size of an encoded message.
-        ///
-        /// Default: `usize::MAX`
-        #[must_use]
-        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
-            self.inner = self.inner.max_encoding_message_size(limit);
-            self
-        }
-        /// Events from a sequence number onward, then live.
-        pub async fn subscribe_events(
-            &mut self,
-            request: impl tonic::IntoRequest<super::SubscribeEventsRequest>,
-        ) -> std::result::Result<
-            tonic::Response<tonic::codec::Streaming<super::SubscribeEventsResponse>>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/nanoprobe.v1alpha1.EventsService/SubscribeEvents",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new(
-                        "nanoprobe.v1alpha1.EventsService",
-                        "SubscribeEvents",
-                    ),
-                );
-            self.inner.server_streaming(req, path, codec).await
-        }
-        /// A page of history.
-        pub async fn read_events(
-            &mut self,
-            request: impl tonic::IntoRequest<super::ReadEventsRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ReadEventsResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/nanoprobe.v1alpha1.EventsService/ReadEvents",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("nanoprobe.v1alpha1.EventsService", "ReadEvents"),
-                );
-            self.inner.unary(req, path, codec).await
-        }
-    }
-}
-/// Generated server implementations.
-pub mod events_service_server {
-    #![allow(
-        unused_variables,
-        dead_code,
-        missing_docs,
-        clippy::wildcard_imports,
-        clippy::let_unit_value,
-    )]
-    use tonic::codegen::*;
-    /// Generated trait containing gRPC methods that should be implemented for use with EventsServiceServer.
-    #[async_trait]
-    pub trait EventsService: std::marker::Send + std::marker::Sync + 'static {
-        /// Server streaming response type for the SubscribeEvents method.
-        type SubscribeEventsStream: tonic::codegen::tokio_stream::Stream<
-                Item = std::result::Result<super::SubscribeEventsResponse, tonic::Status>,
-            >
-            + std::marker::Send
-            + 'static;
-        /// Events from a sequence number onward, then live.
-        async fn subscribe_events(
-            &self,
-            request: tonic::Request<super::SubscribeEventsRequest>,
-        ) -> std::result::Result<
-            tonic::Response<Self::SubscribeEventsStream>,
-            tonic::Status,
-        >;
-        /// A page of history.
-        async fn read_events(
-            &self,
-            request: tonic::Request<super::ReadEventsRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ReadEventsResponse>,
-            tonic::Status,
-        >;
-    }
-    #[derive(Debug)]
-    pub struct EventsServiceServer<T> {
-        inner: Arc<T>,
-        accept_compression_encodings: EnabledCompressionEncodings,
-        send_compression_encodings: EnabledCompressionEncodings,
-        max_decoding_message_size: Option<usize>,
-        max_encoding_message_size: Option<usize>,
-    }
-    impl<T> EventsServiceServer<T> {
-        pub fn new(inner: T) -> Self {
-            Self::from_arc(Arc::new(inner))
-        }
-        pub fn from_arc(inner: Arc<T>) -> Self {
-            Self {
-                inner,
-                accept_compression_encodings: Default::default(),
-                send_compression_encodings: Default::default(),
-                max_decoding_message_size: None,
-                max_encoding_message_size: None,
-            }
-        }
-        pub fn with_interceptor<F>(
-            inner: T,
-            interceptor: F,
-        ) -> InterceptedService<Self, F>
-        where
-            F: tonic::service::Interceptor,
-        {
-            InterceptedService::new(Self::new(inner), interceptor)
-        }
-        /// Enable decompressing requests with the given encoding.
-        #[must_use]
-        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.accept_compression_encodings.enable(encoding);
-            self
-        }
-        /// Compress responses with the given encoding, if the client supports it.
-        #[must_use]
-        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.send_compression_encodings.enable(encoding);
-            self
-        }
-        /// Limits the maximum size of a decoded message.
-        ///
-        /// Default: `4MB`
-        #[must_use]
-        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
-            self.max_decoding_message_size = Some(limit);
-            self
-        }
-        /// Limits the maximum size of an encoded message.
-        ///
-        /// Default: `usize::MAX`
-        #[must_use]
-        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
-            self.max_encoding_message_size = Some(limit);
-            self
-        }
-    }
-    impl<T, B> tonic::codegen::Service<http::Request<B>> for EventsServiceServer<T>
-    where
-        T: EventsService,
-        B: Body + std::marker::Send + 'static,
-        B::Error: Into<StdError> + std::marker::Send + 'static,
-    {
-        type Response = http::Response<tonic::body::Body>;
-        type Error = std::convert::Infallible;
-        type Future = BoxFuture<Self::Response, Self::Error>;
-        fn poll_ready(
-            &mut self,
-            _cx: &mut Context<'_>,
-        ) -> Poll<std::result::Result<(), Self::Error>> {
-            Poll::Ready(Ok(()))
-        }
-        fn call(&mut self, req: http::Request<B>) -> Self::Future {
-            match req.uri().path() {
-                "/nanoprobe.v1alpha1.EventsService/SubscribeEvents" => {
-                    #[allow(non_camel_case_types)]
-                    struct SubscribeEventsSvc<T: EventsService>(pub Arc<T>);
-                    impl<
-                        T: EventsService,
-                    > tonic::server::ServerStreamingService<
-                        super::SubscribeEventsRequest,
-                    > for SubscribeEventsSvc<T> {
-                        type Response = super::SubscribeEventsResponse;
-                        type ResponseStream = T::SubscribeEventsStream;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::ResponseStream>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::SubscribeEventsRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as EventsService>::subscribe_events(&inner, request)
-                                    .await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = SubscribeEventsSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.server_streaming(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/nanoprobe.v1alpha1.EventsService/ReadEvents" => {
-                    #[allow(non_camel_case_types)]
-                    struct ReadEventsSvc<T: EventsService>(pub Arc<T>);
-                    impl<
-                        T: EventsService,
-                    > tonic::server::UnaryService<super::ReadEventsRequest>
-                    for ReadEventsSvc<T> {
-                        type Response = super::ReadEventsResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::ReadEventsRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as EventsService>::read_events(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = ReadEventsSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                _ => {
-                    Box::pin(async move {
-                        let mut response = http::Response::new(
-                            tonic::body::Body::default(),
-                        );
-                        let headers = response.headers_mut();
-                        headers
-                            .insert(
-                                tonic::Status::GRPC_STATUS,
-                                (tonic::Code::Unimplemented as i32).into(),
-                            );
-                        headers
-                            .insert(
-                                http::header::CONTENT_TYPE,
-                                tonic::metadata::GRPC_CONTENT_TYPE,
-                            );
-                        Ok(response)
-                    })
-                }
-            }
-        }
-    }
-    impl<T> Clone for EventsServiceServer<T> {
-        fn clone(&self) -> Self {
-            let inner = self.inner.clone();
-            Self {
-                inner,
-                accept_compression_encodings: self.accept_compression_encodings,
-                send_compression_encodings: self.send_compression_encodings,
-                max_decoding_message_size: self.max_decoding_message_size,
-                max_encoding_message_size: self.max_encoding_message_size,
-            }
-        }
-    }
-    /// Generated gRPC service name
-    pub const SERVICE_NAME: &str = "nanoprobe.v1alpha1.EventsService";
-    impl<T> tonic::server::NamedService for EventsServiceServer<T> {
-        const NAME: &'static str = SERVICE_NAME;
-    }
-}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RegisterSchemaRequest {
     #[prost(message, optional, tag = "1")]
@@ -6963,602 +7871,6 @@ pub mod extension_service_server {
     /// Generated gRPC service name
     pub const SERVICE_NAME: &str = "nanoprobe.v1alpha1.ExtensionService";
     impl<T> tonic::server::NamedService for ExtensionServiceServer<T> {
-        const NAME: &'static str = SERVICE_NAME;
-    }
-}
-/// Achieved period of each sampling tier, so a controller sees how stale its
-/// view is.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SampleRates {
-    #[prost(message, optional, tag = "1")]
-    pub position: ::core::option::Option<::prost_types::Duration>,
-    #[prost(message, optional, tag = "2")]
-    pub vitals: ::core::option::Option<::prost_types::Duration>,
-    #[prost(message, optional, tag = "3")]
-    pub ammo: ::core::option::Option<::prost_types::Duration>,
-    #[prost(message, optional, tag = "4")]
-    pub warehouse: ::core::option::Option<::prost_types::Duration>,
-    #[prost(message, optional, tag = "5")]
-    pub enumeration: ::core::option::Option<::prost_types::Duration>,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ServerStatus {
-    #[prost(enumeration = "Health", tag = "1")]
-    pub health: i32,
-    /// Time since the agent's last heartbeat.
-    #[prost(message, optional, tag = "2")]
-    pub heartbeat_age: ::core::option::Option<::prost_types::Duration>,
-    #[prost(enumeration = "SimState", tag = "3")]
-    pub sim_state: i32,
-    #[prost(string, tag = "4")]
-    pub theater: ::prost::alloc::string::String,
-    #[prost(message, optional, tag = "5")]
-    pub now: ::core::option::Option<Stamp>,
-    /// The active campaign, 0 for none.
-    #[prost(uint64, tag = "6")]
-    pub campaign_id: u64,
-    #[prost(message, optional, tag = "7")]
-    pub achieved: ::core::option::Option<SampleRates>,
-    /// Agent overhead as a share of real time over the last minute.
-    #[prost(double, tag = "8")]
-    pub overhead_share: f64,
-    /// Commands waiting to be applied.
-    #[prost(uint32, tag = "9")]
-    pub commands_queued: u32,
-    /// Commands over the commanded-work budget since DCS started.
-    #[prost(uint64, tag = "10")]
-    pub commands_over_budget: u64,
-    #[prost(uint64, tag = "11")]
-    pub samples_dropped: u64,
-    #[prost(uint64, tag = "12")]
-    pub event_gaps: u64,
-    #[prost(string, tag = "13")]
-    pub agent_build: ::prost::alloc::string::String,
-    #[prost(string, tag = "14")]
-    pub dcs_version: ::prost::alloc::string::String,
-    /// Whether the sidecar is attached to the agent. Not part of health: a DCS
-    /// whose heartbeat advances is healthy even when the sidecar cannot attach.
-    #[prost(bool, tag = "15")]
-    pub attached: bool,
-    /// The reason of the last refused handshake, empty for none.
-    #[prost(string, tag = "16")]
-    pub attach_error: ::prost::alloc::string::String,
-    /// The agent DLL's interface version from its last HELLO, 0 before one: the
-    /// ABI between the DLL and its Lua hook and shim. Reported, not checked.
-    #[prost(uint32, tag = "17")]
-    pub agent_interface: u32,
-}
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GetServerStatusRequest {}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct GetServerStatusResponse {
-    #[prost(message, optional, tag = "1")]
-    pub status: ::core::option::Option<ServerStatus>,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct NextMission {
-    /// The theater to load. Empty keeps the loaded one.
-    #[prost(string, tag = "1")]
-    pub theater: ::prost::alloc::string::String,
-    /// The mission's date and start time. Absent carries the campaign clock.
-    #[prost(message, optional, tag = "2")]
-    pub start: ::core::option::Option<::prost_types::Timestamp>,
-    /// The DCS weather table. Absent keeps the template's.
-    #[prost(message, optional, tag = "3")]
-    pub weather: ::core::option::Option<::prost_types::Struct>,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct SetNextMissionRequest {
-    #[prost(message, optional, tag = "1")]
-    pub write: ::core::option::Option<Write>,
-    #[prost(message, optional, tag = "2")]
-    pub next: ::core::option::Option<NextMission>,
-}
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SetNextMissionResponse {}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ReloadRequest {
-    #[prost(message, optional, tag = "1")]
-    pub write: ::core::option::Option<Write>,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ReloadResponse {
-    #[prost(message, optional, tag = "1")]
-    pub result: ::core::option::Option<CommandResult>,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
-pub enum Health {
-    Unspecified = 0,
-    Healthy = 1,
-    Hung = 2,
-    Gone = 3,
-    Disabled = 4,
-}
-impl Health {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    ///
-    /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::Unspecified => "HEALTH_UNSPECIFIED",
-            Self::Healthy => "HEALTH_HEALTHY",
-            Self::Hung => "HEALTH_HUNG",
-            Self::Gone => "HEALTH_GONE",
-            Self::Disabled => "HEALTH_DISABLED",
-        }
-    }
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "HEALTH_UNSPECIFIED" => Some(Self::Unspecified),
-            "HEALTH_HEALTHY" => Some(Self::Healthy),
-            "HEALTH_HUNG" => Some(Self::Hung),
-            "HEALTH_GONE" => Some(Self::Gone),
-            "HEALTH_DISABLED" => Some(Self::Disabled),
-            _ => None,
-        }
-    }
-}
-/// Generated client implementations.
-pub mod mission_service_client {
-    #![allow(
-        unused_variables,
-        dead_code,
-        missing_docs,
-        clippy::wildcard_imports,
-        clippy::let_unit_value,
-    )]
-    use tonic::codegen::*;
-    use tonic::codegen::http::Uri;
-    #[derive(Debug, Clone)]
-    pub struct MissionServiceClient<T> {
-        inner: tonic::client::Grpc<T>,
-    }
-    impl MissionServiceClient<tonic::transport::Channel> {
-        /// Attempt to create a new client by connecting to a given endpoint.
-        pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
-        where
-            D: TryInto<tonic::transport::Endpoint>,
-            D::Error: Into<StdError>,
-        {
-            let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
-            Ok(Self::new(conn))
-        }
-    }
-    impl<T> MissionServiceClient<T>
-    where
-        T: tonic::client::GrpcService<tonic::body::Body>,
-        T::Error: Into<StdError>,
-        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
-        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
-    {
-        pub fn new(inner: T) -> Self {
-            let inner = tonic::client::Grpc::new(inner);
-            Self { inner }
-        }
-        pub fn with_origin(inner: T, origin: Uri) -> Self {
-            let inner = tonic::client::Grpc::with_origin(inner, origin);
-            Self { inner }
-        }
-        pub fn with_interceptor<F>(
-            inner: T,
-            interceptor: F,
-        ) -> MissionServiceClient<InterceptedService<T, F>>
-        where
-            F: tonic::service::Interceptor,
-            T::ResponseBody: Default,
-            T: tonic::codegen::Service<
-                http::Request<tonic::body::Body>,
-                Response = http::Response<
-                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
-                >,
-            >,
-            <T as tonic::codegen::Service<
-                http::Request<tonic::body::Body>,
-            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
-        {
-            MissionServiceClient::new(InterceptedService::new(inner, interceptor))
-        }
-        /// Compress requests with the given encoding.
-        ///
-        /// This requires the server to support it otherwise it might respond with an
-        /// error.
-        #[must_use]
-        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.inner = self.inner.send_compressed(encoding);
-            self
-        }
-        /// Enable decompressing responses.
-        #[must_use]
-        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.inner = self.inner.accept_compressed(encoding);
-            self
-        }
-        /// Limits the maximum size of a decoded message.
-        ///
-        /// Default: `4MB`
-        #[must_use]
-        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
-            self.inner = self.inner.max_decoding_message_size(limit);
-            self
-        }
-        /// Limits the maximum size of an encoded message.
-        ///
-        /// Default: `usize::MAX`
-        #[must_use]
-        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
-            self.inner = self.inner.max_encoding_message_size(limit);
-            self
-        }
-        pub async fn get_server_status(
-            &mut self,
-            request: impl tonic::IntoRequest<super::GetServerStatusRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::GetServerStatusResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/nanoprobe.v1alpha1.MissionService/GetServerStatus",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new(
-                        "nanoprobe.v1alpha1.MissionService",
-                        "GetServerStatus",
-                    ),
-                );
-            self.inner.unary(req, path, codec).await
-        }
-        /// Weather and time written into the shell at the next load.
-        pub async fn set_next_mission(
-            &mut self,
-            request: impl tonic::IntoRequest<super::SetNextMissionRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::SetNextMissionResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/nanoprobe.v1alpha1.MissionService/SetNextMission",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new(
-                        "nanoprobe.v1alpha1.MissionService",
-                        "SetNextMission",
-                    ),
-                );
-            self.inner.unary(req, path, codec).await
-        }
-        /// Write the shell and load it. The campaign is restored after the load.
-        pub async fn reload(
-            &mut self,
-            request: impl tonic::IntoRequest<super::ReloadRequest>,
-        ) -> std::result::Result<tonic::Response<super::ReloadResponse>, tonic::Status> {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/nanoprobe.v1alpha1.MissionService/Reload",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("nanoprobe.v1alpha1.MissionService", "Reload"));
-            self.inner.unary(req, path, codec).await
-        }
-    }
-}
-/// Generated server implementations.
-pub mod mission_service_server {
-    #![allow(
-        unused_variables,
-        dead_code,
-        missing_docs,
-        clippy::wildcard_imports,
-        clippy::let_unit_value,
-    )]
-    use tonic::codegen::*;
-    /// Generated trait containing gRPC methods that should be implemented for use with MissionServiceServer.
-    #[async_trait]
-    pub trait MissionService: std::marker::Send + std::marker::Sync + 'static {
-        async fn get_server_status(
-            &self,
-            request: tonic::Request<super::GetServerStatusRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::GetServerStatusResponse>,
-            tonic::Status,
-        >;
-        /// Weather and time written into the shell at the next load.
-        async fn set_next_mission(
-            &self,
-            request: tonic::Request<super::SetNextMissionRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::SetNextMissionResponse>,
-            tonic::Status,
-        >;
-        /// Write the shell and load it. The campaign is restored after the load.
-        async fn reload(
-            &self,
-            request: tonic::Request<super::ReloadRequest>,
-        ) -> std::result::Result<tonic::Response<super::ReloadResponse>, tonic::Status>;
-    }
-    #[derive(Debug)]
-    pub struct MissionServiceServer<T> {
-        inner: Arc<T>,
-        accept_compression_encodings: EnabledCompressionEncodings,
-        send_compression_encodings: EnabledCompressionEncodings,
-        max_decoding_message_size: Option<usize>,
-        max_encoding_message_size: Option<usize>,
-    }
-    impl<T> MissionServiceServer<T> {
-        pub fn new(inner: T) -> Self {
-            Self::from_arc(Arc::new(inner))
-        }
-        pub fn from_arc(inner: Arc<T>) -> Self {
-            Self {
-                inner,
-                accept_compression_encodings: Default::default(),
-                send_compression_encodings: Default::default(),
-                max_decoding_message_size: None,
-                max_encoding_message_size: None,
-            }
-        }
-        pub fn with_interceptor<F>(
-            inner: T,
-            interceptor: F,
-        ) -> InterceptedService<Self, F>
-        where
-            F: tonic::service::Interceptor,
-        {
-            InterceptedService::new(Self::new(inner), interceptor)
-        }
-        /// Enable decompressing requests with the given encoding.
-        #[must_use]
-        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.accept_compression_encodings.enable(encoding);
-            self
-        }
-        /// Compress responses with the given encoding, if the client supports it.
-        #[must_use]
-        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.send_compression_encodings.enable(encoding);
-            self
-        }
-        /// Limits the maximum size of a decoded message.
-        ///
-        /// Default: `4MB`
-        #[must_use]
-        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
-            self.max_decoding_message_size = Some(limit);
-            self
-        }
-        /// Limits the maximum size of an encoded message.
-        ///
-        /// Default: `usize::MAX`
-        #[must_use]
-        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
-            self.max_encoding_message_size = Some(limit);
-            self
-        }
-    }
-    impl<T, B> tonic::codegen::Service<http::Request<B>> for MissionServiceServer<T>
-    where
-        T: MissionService,
-        B: Body + std::marker::Send + 'static,
-        B::Error: Into<StdError> + std::marker::Send + 'static,
-    {
-        type Response = http::Response<tonic::body::Body>;
-        type Error = std::convert::Infallible;
-        type Future = BoxFuture<Self::Response, Self::Error>;
-        fn poll_ready(
-            &mut self,
-            _cx: &mut Context<'_>,
-        ) -> Poll<std::result::Result<(), Self::Error>> {
-            Poll::Ready(Ok(()))
-        }
-        fn call(&mut self, req: http::Request<B>) -> Self::Future {
-            match req.uri().path() {
-                "/nanoprobe.v1alpha1.MissionService/GetServerStatus" => {
-                    #[allow(non_camel_case_types)]
-                    struct GetServerStatusSvc<T: MissionService>(pub Arc<T>);
-                    impl<
-                        T: MissionService,
-                    > tonic::server::UnaryService<super::GetServerStatusRequest>
-                    for GetServerStatusSvc<T> {
-                        type Response = super::GetServerStatusResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::GetServerStatusRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as MissionService>::get_server_status(&inner, request)
-                                    .await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = GetServerStatusSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/nanoprobe.v1alpha1.MissionService/SetNextMission" => {
-                    #[allow(non_camel_case_types)]
-                    struct SetNextMissionSvc<T: MissionService>(pub Arc<T>);
-                    impl<
-                        T: MissionService,
-                    > tonic::server::UnaryService<super::SetNextMissionRequest>
-                    for SetNextMissionSvc<T> {
-                        type Response = super::SetNextMissionResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::SetNextMissionRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as MissionService>::set_next_mission(&inner, request)
-                                    .await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = SetNextMissionSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/nanoprobe.v1alpha1.MissionService/Reload" => {
-                    #[allow(non_camel_case_types)]
-                    struct ReloadSvc<T: MissionService>(pub Arc<T>);
-                    impl<
-                        T: MissionService,
-                    > tonic::server::UnaryService<super::ReloadRequest>
-                    for ReloadSvc<T> {
-                        type Response = super::ReloadResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::ReloadRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as MissionService>::reload(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = ReloadSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                _ => {
-                    Box::pin(async move {
-                        let mut response = http::Response::new(
-                            tonic::body::Body::default(),
-                        );
-                        let headers = response.headers_mut();
-                        headers
-                            .insert(
-                                tonic::Status::GRPC_STATUS,
-                                (tonic::Code::Unimplemented as i32).into(),
-                            );
-                        headers
-                            .insert(
-                                http::header::CONTENT_TYPE,
-                                tonic::metadata::GRPC_CONTENT_TYPE,
-                            );
-                        Ok(response)
-                    })
-                }
-            }
-        }
-    }
-    impl<T> Clone for MissionServiceServer<T> {
-        fn clone(&self) -> Self {
-            let inner = self.inner.clone();
-            Self {
-                inner,
-                accept_compression_encodings: self.accept_compression_encodings,
-                send_compression_encodings: self.send_compression_encodings,
-                max_decoding_message_size: self.max_decoding_message_size,
-                max_encoding_message_size: self.max_encoding_message_size,
-            }
-        }
-    }
-    /// Generated gRPC service name
-    pub const SERVICE_NAME: &str = "nanoprobe.v1alpha1.MissionService";
-    impl<T> tonic::server::NamedService for MissionServiceServer<T> {
         const NAME: &'static str = SERVICE_NAME;
     }
 }
