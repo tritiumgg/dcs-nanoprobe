@@ -198,7 +198,8 @@ budget and the `no result` answer, and are excused from the sampling slice as a
 commands-only pump is. The hook's dispatch is one function that any hook callback can
 call. A `hook` opcode bound to a generation waits while the lifecycle state is
 `LOADING`, and is answered `NOT_READY` when no mission is loaded otherwise. `CHAT` and
-`MISSION_LOAD` have no hook handler yet: they are answered `UNKNOWN_OPCODE`.
+`MISSION_LOAD` take any campaign and any generation, so they run with no mission
+loaded.
 
 A pump begins with the generation check, then the commands, then sampling. A pump that
 `frame` asked for only for commands samples nothing, and its time, the cross-state call
@@ -257,7 +258,24 @@ form) and `static_name`, because its entity is a group or a static.
 | `PICTURE_STOP` | none |
 | `CAPTURE` | `name`, `static_name` |
 | `EXTENSION_SET` | `name`, `source` |
+| `EXTENSION_REMOVE` | `name` |
 | `EXTENSION_INVOKE` | `name`, `args` |
+| `MARK_SET` | `entity`, `scope`, `target`, `name`, `read_only`, `x`, `y`, `z`, `text` |
+| `DRAWING_SET` | `entity`, `scope`, `target`, `shape`, `args` |
+| `MENU_SET` | `entity`, `parent`, `scope`, `target`, `name`, `submenu`, `text` |
+| `MARK_REMOVE`, `DRAWING_REMOVE`, `MENU_REMOVE` | `entity` |
+| `MESSAGE` | `scope`, `target`, `name`, `clear`, `seconds`, `text` |
+| `CHAT` | `player`, `text` |
+| `MISSION_LOAD` | `path` |
+| `EVAL` | `source` |
+
+For the mark, drawing and menu opcodes, `entity` and `parent` are the header's entity
+and the layout's parent as decimal text, so no `EntityId` loses digits in a Lua number;
+`parent` is `'0'` for the root. `read_only`, `submenu` and `clear` are booleans. `name`
+is the group's platform name for the scope `GROUP` (and the unit's for `MESSAGE`'s
+`UNIT`), built from the header's `campaign` and the `target`; it is empty otherwise.
+`target` is passed as a number for the scopes `COALITION` and `COUNTRY` and is absent
+otherwise. A scope the opcode does not take is `BAD_PAYLOAD`, from the agent.
 
 For `SOUND` and `PICTURE`, `name` is present for the scope `GROUP` or `UNIT` only: the
 platform name built from the header's `campaign` and the `target` (`np!` or `np.`),
@@ -338,8 +356,11 @@ other, is answered `UNKNOWN_OPCODE`, and sets `last_applied_seq`.
 | 59 | WAREHOUSE_ADJUST | effect |  |  | active | bound | server | layout | Add to or take from a warehouse's stock |
 | 60 | PICTURE | effect |  |  | any |  | hook | layout | Show a picture from the mission |
 | 61 | PICTURE_STOP | effect |  |  | any |  | hook | none | Take every picture off screen |
+| 62 | MODERATE | effect |  |  | any |  | hook | layout | Kick, ban, unban, or move a player |
 | 64 | CAPTURE | query | group or static |  | active | bound | server | none | Read an entity's full state and return it |
 | 65 | COUNTRIES | query |  |  | any | bound | server | none | Read each country's coalition in the loaded mission |
+| 66 | PLAYERS | query |  |  | any |  | hook | none | Read the connected players and their slots |
+| 67 | BANS | query |  |  | any |  | hook | none | Read DCS's ban list |
 
 The State column names the Lua state the handler runs in: `server`, the mission
 scripting state, through the shim; `hook`, the hook's own state. A control command has
@@ -634,8 +655,45 @@ stops the handler there: the items before it stay changed and the answer is
 
 Selecting a command item writes a `MENU` record (spec/records.md).
 
-The agent holds every mark, drawing and menu item it set. They are gone after a
-mission load; the sidecar sets them again, as it spawns groups again.
+### Marks, drawings and menu items in DCS
+
+The shim holds every mark, drawing and menu item it set, by `EntityId`. They are gone
+after a mission load: the shim forgets them on a new generation, and the sidecar sets
+them again, as it spawns groups again. A `GROUP` scope names the group by its platform
+name; the handler reads the group's mission ID with `getID()`, and a group DCS does not
+have is `NOT_BOUND`. DCS returns nothing from these calls, so `APPLIED` says only that
+the call did not raise.
+
+**Marks and drawings** share DCS's mark ID space (ED-CODE, `trigger.action.removeMark`
+removes both). The shim gives each a DCS ID from its own counter, which starts at
+2^30 so it stays clear of the IDs DCS gives the marks players make (UNVERIFIED: that
+those start low). A replacement removes the held DCS mark first and adds the new one
+under a new ID.
+
+- `MARK_SET` calls `trigger.action.markToAll(id, text, point, read_only)`,
+  `markToCoalition(id, text, point, coalition, read_only)` or
+  `markToGroup(id, text, point, group, read_only)`.
+- `DRAWING_SET` calls `trigger.action.markupToAll(shape, coalition, id, ...)` with the
+  coalition number, -1 for `ALL`, and the array `args` unpacked after the ID. Points in
+  `args` are tables with `x`, `y` and `z`, as DCS takes them.
+- `MARK_REMOVE` and `DRAWING_REMOVE` call `trigger.action.removeMark` on the held ID.
+  An entity the shim does not hold is `APPLIED`: it is gone already.
+
+**Menu items** use `missionCommands.addSubMenu` or `addCommand`, or their
+`ForCoalition` or `ForGroup` form by scope. A submenu's path is what DCS returned for
+it. An item with a parent is added under the parent's path; a parent the shim does not
+hold, or one that is not a submenu or has another scope or target, is `NOT_BOUND`. A
+command's callback is a function of the shim that calls the agent's `menu` with the
+item's `EntityId` under `pcall`: it never raises into DCS.
+
+- A replacement removes the old item first. DCS removes a submenu's items with it, so
+  the shim adds the items it holds under that submenu again under the new path, in the
+  order they were first set, at every depth.
+- `MENU_REMOVE` removes the item; for a submenu the shim also forgets every item it
+  holds under it. The sidecar removes items before their submenu, so this happens only
+  when the store and DCS disagree.
+- A `GROUP`-scoped item stays on the group's DCS ID. When the sidecar spawns that group
+  again, it sets the group's marks and menu items again.
 
 ### Codes: scope
 
@@ -645,7 +703,7 @@ mission load; the sidecar sets them again, as it spawns groups again.
 | 2 | COALITION | DCS coalition number |
 | 3 | GROUP | group `EntityId` |
 | 4 | UNIT | unit `EntityId` |
-| 5 | COUNTRY | DCS country number; `SOUND` and `PICTURE` only |
+| 5 | COUNTRY | DCS country number; `SOUND`, `PICTURE` and `MESSAGE` only |
 
 ### Layout: EXTENSION_SET
 
@@ -685,6 +743,12 @@ Positions are DCS `x`, `y`, `z` in meters.
 | 0x0008 | u64 | target | By scope |
 | 0x0010 | f64 | seconds | How long the text stays |
 | + | str | text | The text |
+
+The handler calls `trigger.action.outText(text, seconds, clear)`, or the
+`outTextForCoalition`, `outTextForCountry`, `outTextForGroup` or `outTextForUnit` form
+the scope names, with the coalition, country or mission ID first. A `GROUP` or `UNIT`
+target DCS does not have is `NOT_BOUND`. The agent checks that `seconds` is finite and
+from 0 to 86,400, else `BAD_PAYLOAD`.
 
 ### Layout: SOUND
 
@@ -796,6 +860,11 @@ docs/results/2026-11-11-first-dll-and-spikes.md, E18).
 | 0x0004 | pad[4] | reserved | |
 | + | str | text | The message |
 
+The handler calls `net.send_chat(text, true)` for player 0 and
+`net.send_chat_to(text, player)` otherwise. DCS returns nothing useful, so `APPLIED`
+says only that the call did not raise; a player who is not connected gets nothing.
+The agent refuses an empty `text` or one over 1,024 bytes with `BAD_PAYLOAD`.
+
 ### Layout: MISSION_LOAD
 
 | Offset | Type | Field | Meaning |
@@ -805,6 +874,15 @@ docs/results/2026-11-11-first-dll-and-spikes.md, E18).
 The agent queues the result, publishes the frame's records, and only then calls the
 load. It handles no further command in that frame. The lifecycle then goes to
 `LOADING`.
+
+The hook's handler checks that `path` is a string of 1 to 1,024 bytes, else
+`DCS_REFUSED` (the hook's checks repeat the agent's, as for `PICTURE`), and answers
+`APPLIED`; it hands the path back to the dispatch, which takes no further command, and
+the hook calls `net.load_mission(path)` after `finish`. `net.load_mission` returns at
+once and DCS loads on a later frame (LIVE, docs/results/2026-11-11-server-gate.md). A
+load DCS cannot do is not in the result: it shows as no `LOADING`, and as the hook's
+log line with what `net.load_mission` returned. The command is an effect and is never
+sent again.
 
 ### Layout: EXTENSION_INVOKE
 
@@ -823,6 +901,14 @@ value it returns. An extension with no `invoke` answers `LUA_ERROR`.
 | + | lv | source | Lua source, a string |
 
 Needs raw Lua. The result's `value` is the first value the chunk returns.
+
+The shim compiles the source with `loadstring` and runs it under `pcall` in a new
+environment whose reads fall through to the `server` state's globals, so an assignment
+to a global stays in that environment and cannot replace one of the shim's. State
+carries from one chunk to the next only through explicit writes to `_G`. `emit` is in
+it. A chunk that does not compile, or raises, is `LUA_ERROR` with the error text. Its
+time is charged to the commanded-work budget like any handler; a chunk that loops is
+not interrupted.
 
 ## Queries
 
@@ -879,6 +965,13 @@ calls hooks only while the frame's budget has time left: first queued events, th
 before the others. An `on_frame` call that does not fit is skipped and not made up. A
 hook must return: the agent cannot interrupt one that loops.
 
+Hooks run only in a pump. While any extension has queued events, waiting callbacks or
+an `on_frame` hook, the shim tells the agent so through `extension_budget`, and the
+agent asks for a pump on every frame of a `RUNNING` or `PAUSED` mission, never on the
+frame that makes its system calls. Such a pump samples only on a sampling frame; its
+cross-state call is charged to the commanded-work budget. With no extension holding
+work, the pump runs as before.
+
 **Errors.** A hook that raises is logged and counted. After 10 errors in a row from one
 extension the agent stops calling its hooks and writes a log record and an `EXTENSION`
 record that say so. Only `EXTENSION_SET` with a newer revision, or the next mission
@@ -891,11 +984,15 @@ the budget, or after the extension is gone:
 | Global | In an extension |
 |---|---|
 | `world.addEventHandler`, `world.removeEventHandler` | Raise, with a message that points to `on_event`. DCS's dispatcher has no `pcall`: a handler that raises stops every handler after it, the agent's included (PRIOR). |
-| `timer.scheduleFunction`, `timer.removeFunction` | Go through the agent, which runs the callback from the pump as a hook and cancels it when the extension stops |
-| `missionCommands` functions that take a callback | Go through the agent, which runs the callback as a hook and removes the item when the extension stops |
+| `timer.scheduleFunction`, `timer.removeFunction`, `timer.setFunctionTime` | Go through the agent, which runs the callback from the pump as a hook and cancels it when the extension stops |
+| `missionCommands.addCommand`, `addCommandForCoalition`, `addCommandForGroup` | Go through the agent, which runs the callback as a hook and removes the item when the extension stops |
+| `missionCommands.addSubMenu`, `addSubMenuForCoalition`, `addSubMenuForGroup` | Go through the agent, which tracks the submenu and removes it when the extension stops |
+| `missionCommands.removeItem`, `removeItemForCoalition`, `removeItemForGroup` | Go through the agent, which forgets the item and its children |
+| `emit` | Bound to the extension: its time is charged to the extension's hook |
 
-The full list of replaced globals is fixed in step S16. An extension that reaches the
-real functions another way, such as through `_G`, is outside these guarantees.
+Every other global reads through to the state's own. These are all the replaced
+globals. An extension that reaches the real functions another way, such as through
+`_G`, is outside these guarantees.
 
 ### State
 
@@ -927,3 +1024,68 @@ the agent's queue when the ring is full, and a loss is a `GAP`, never silent.
 `too_deep` (a table in itself counts), `objects` (not an array of at most 16, or an
 entry that is not in the agent's table) or `disabled`. Its time is charged to the hook
 that called it, or to the agent's overhead when no hook is running.
+
+`emit` is a Lua function of the shim that calls the agent's `emit` entry under `pcall`
+and turns a raise into `false` and the error text. The entry reads `payload` with raw
+table access only, inside the worker that runs under `lua_pcall`, so no metamethod runs
+and no Lua error crosses a Rust frame that owns a value.
+
+## Moderation
+
+`MODERATE` runs in the hook's state, where `net` is (LIVE: `net.kick`,
+`net.banlist_add`, `net.banlist_add_by_ucid`, `net.banlist_remove`,
+`net.force_player_slot`, `net.get_player_info` are functions there; their argument
+orders are fixed by E34). The sidecar names a player to the agent by connection ID and
+ucid; the API names a player by player key (spec/world.md, "Players").
+
+### Layout: MODERATE
+
+| Offset | Type | Field | Meaning |
+|---|---|---|---|
+| 0x0000 | u32 | action | A `moderation` code |
+| 0x0004 | u32 | player | The DCS connection ID, 0 for none |
+| 0x0008 | u32 | side | The coalition to move to, for `SLOT`; 0 for spectators |
+| 0x000C | pad[4] | reserved | |
+| 0x0010 | f64 | seconds | How long a `BAN` lasts, 0 for DCS's default |
+| + | str | ucid | The client's ucid |
+| + | str | slot | The slot ID to move to, for `SLOT`; empty for spectators |
+| + | str | reason | Shown to the player, for `KICK` and `BAN` |
+
+The handler gets `action`, `player`, `side`, `seconds`, `ucid`, `slot` and `reason`.
+The agent refuses with `BAD_PAYLOAD` an action it does not know, an empty `ucid`, a
+`seconds` that is not finite or is below 0, and player 1, which is the server itself.
+
+For every action that names a player (`KICK`, `SLOT`, and `BAN` with a player) the
+handler first reads `net.get_player_info(player, 'ucid')`. A player who is not
+connected, or whose ucid differs from `ucid`, is `NOT_BOUND`: the connection ID now
+belongs to someone else, or to no one.
+
+### Codes: moderation
+
+| Code | Name | Call |
+|---|---|---|
+| 1 | KICK | `net.kick(player, reason)` |
+| 2 | BAN | `net.banlist_add(player, seconds, reason)`; with player 0, `net.banlist_add_by_ucid(ucid, seconds, reason)` |
+| 3 | UNBAN | `net.banlist_remove(ucid)` |
+| 4 | SLOT | `net.force_player_slot(player, side, slot)` |
+
+A call that raises is `DCS_REFUSED`; one that returns `false` is `DCS_REFUSED` with the
+message `DCS returned false`. Otherwise `APPLIED`. `MODERATE` is an effect: a result
+that is lost is unknown, and the command is never sent again. Each `APPLIED` one is an
+event in the API's stream with the token that asked for it.
+
+### Player and ban queries
+
+`PLAYERS` has no payload after the header. Its value is an array with one table for each
+connected player but the server, from `net.get_player_list()` and
+`net.get_player_info(id)`: `id`, `ucid`, `name`, `side` and `slot`. The sidecar sends it
+after every `HELLO` and every new mission generation, so a controller that attaches
+reads the slot changes it missed.
+
+`BANS` has no payload after the header. Its value is what `net.banlist_get()` returns,
+each entry with its `ucid`, `name`, `banned_until` and `reason` fields only; any other
+field DCS returns, such as an address, is left out.
+
+A ucid travels from the agent to the sidecar and no further: the API, the event stream,
+logs, metrics and bundles carry the player key instead (spec/world.md, "Players"). No
+handler writes a ucid into a `RESULT` message or a log record.

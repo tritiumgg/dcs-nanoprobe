@@ -235,6 +235,9 @@ codes event_field
   16 ROUNDS value=number
   17 INITIATOR_CATEGORY value=number
   18 TARGET_CATEGORY value=number
+  19 INITIATOR_TYPE value=string
+  20 TARGET_TYPE value=string
+  21 INITIATOR_MISSION_ID value=string
 layout AUTHOR_EVENT fixed=8
   0x0000 u32 n
   0x0004 pad[4] reserved
@@ -354,8 +357,11 @@ codes opcode
   59 WAREHOUSE_ADJUST class=effect campaign=active gen=bound state=server payload=layout
   60 PICTURE class=effect campaign=any state=hook payload=layout
   61 PICTURE_STOP class=effect campaign=any state=hook payload=none
+  62 MODERATE class=effect campaign=any state=hook payload=layout
   64 CAPTURE class=query entity=group_or_static campaign=active gen=bound state=server payload=none
   65 COUNTRIES class=query campaign=any gen=bound state=server payload=none
+  66 PLAYERS class=query campaign=any state=hook payload=none
+  67 BANS class=query campaign=any state=hook payload=none
 codes result
   0 APPLIED class=success
   2 AT_REVISION class=success
@@ -507,4 +513,18 @@ layout EXTENSION_INVOKE fixed=0
   + lv args
 layout EVAL fixed=0
   + lv source
-hash a263521028bfa6cb
+layout MODERATE fixed=24
+  0x0000 u32 action
+  0x0004 u32 player
+  0x0008 u32 side
+  0x000c pad[4] reserved
+  0x0010 f64 seconds
+  + str ucid
+  + str slot
+  + str reason
+codes moderation
+  1 KICK call=net.kick(player,_reason)
+  2 BAN call=net.banlist_add(player,_seconds,_reason);_with_player_0,_net.banlist_add_by_ucid(ucid,_seconds,_reason)
+  3 UNBAN call=net.banlist_remove(ucid)
+  4 SLOT call=net.force_player_slot(player,_side,_slot)
+hash c88c091331698af5

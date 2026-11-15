@@ -554,6 +554,17 @@ event, so a cut `EVENT` always fits (see "Oversized records").
 | 16 | ROUNDS | number | The rounds expended, on a shooting-end event |
 | 17 | INITIATOR_CATEGORY | number | `event.initiator_data.object_category` |
 | 18 | TARGET_CATEGORY | number | `event.target_data.object_category` |
+| 19 | INITIATOR_TYPE | string | `event.initiator_data.unit_type` |
+| 20 | TARGET_TYPE | string | `event.target_data.unit_type` |
+| 21 | INITIATOR_MISSION_ID | string | `event.initiator_data.mission_id`, on `S_EVENT_BIRTH` only |
+
+`INITIATOR_TYPE` and `TARGET_TYPE` are the DCS type names, present on every `DEAD`,
+`HIT` and `KILL` in the catalogue, scenery included (LIVE). The API reports them as
+`initiator_type` and `target_type`, from the mission's mirror when the event has none.
+`INITIATOR_MISSION_ID` joins a player's slot to the unit born in it (spec/world.md,
+"Players"); that it equals the slot ID DCS gives the player is UNVERIFIED (step S16).
+The agent reads `INITIATOR_TYPE` on every event type whose row below lists
+`INITIATOR_CATEGORY`, and `TARGET_TYPE` on every one that lists `TARGET_CATEGORY`.
 
 `INITIATOR_CATEGORY` and `TARGET_CATEGORY` are DCS's `Object.Category` numbers. In the
 event catalogue (LIVE, `docs/results/2026-11-13-event-catalogue.md`) a spawned unit's
@@ -672,9 +683,21 @@ before it adds its own.
 
 Player records come from the hook's callbacks, in the hook's own state. On a dedicated
 server that state is not the `gui` state (LIVE,
-docs/results/2026-11-11-server-gate.md). Which callbacks and
-fields DCS provides for a human player is UNVERIFIED (E31, steps S9 and S16), and so is
-how a slot ID names a unit and a seat. Step S16 fixes both and may add fields.
+docs/results/2026-11-11-server-gate.md). The hook calls the agent's `player` entry:
+
+| Event | Callback | Fields read |
+|---|---|---|
+| `CONNECT` | `onPlayerConnect(id)` | `net.get_player_info(id)`: `ucid`, `name`, `side`, `slot` |
+| `DISCONNECT` | `onPlayerDisconnect(id, err_code)` | what the hook last held for `id`; `text` is the error code as decimal text |
+| `SLOT` | `onPlayerChangeSlot(id)` | `net.get_player_info(id)` |
+| `CHAT` | `onPlayerTrySendChat(id, message, all)` | `net.get_player_info(id)`; `text` is the message |
+
+The server's own connection, ID 1, writes no record. `client` is the ucid; it never
+leaves the sidecar. `seat` is N - 1 for a slot ID that ends in `_N`, else 0 (PRIOR: a
+multi-crew seat's slot ID is the pilot slot's ID with `_N` appended). `RENAME` is not
+written: DCS has no rename callback for a connected player, and the sidecar derives
+renames from names. That `onPlayerDisconnect` still answers `net.get_player_info` is not
+relied on.
 
 The hook registers an `onPlayerTry*` callback only where it needs one, and such a
 callback never returns a value: a returned value would decide the matter for every
@@ -685,8 +708,8 @@ The sidecar builds the API's player events from these records:
 | API event | From |
 |---|---|
 | connect, disconnect, chat | `CONNECT`, `DISCONNECT`, `CHAT` |
-| enter unit, leave unit | `SLOT`: leaving the earlier slot, entering the new one; and `DISCONNECT` |
-| rename | `RENAME`, or a `CONNECT` or `SLOT` whose name differs from the last one seen for the client |
+| enter unit, leave unit | `SLOT` joined to a `S_EVENT_BIRTH`, and the end of that occupancy (spec/world.md, "Players") |
+| rename | a `CONNECT` or `SLOT` whose name differs from the last one seen for the client |
 
 ### Codes: player_event
 
@@ -707,9 +730,17 @@ The sidecar builds the API's player events from these records:
 | 0x0010 | u32 | scope | The item's `scope` code (spec/commands.md) |
 | 0x0014 | u32 | player | The ID DCS gives the connection of the player who selected it, 0 when DCS does not say |
 
-Whether DCS tells a menu callback which player selected the item is UNVERIFIED (step
-S16). When it does not, the sidecar attributes the selection to the players the item
-was shown to: for a group-scoped item, the occupants of that group.
+The shim's callback writes the record through the agent's `menu` entry, with `player`
+0: a `missionCommands` callback gets only the argument the script gave it. A client's
+radio panel sends DCS the item's index and nothing else
+(ED-CODE, `Scripts/UI/RadioCommandDialogPanel/RadioCommandDialogsPanel.lua`, which calls
+`missionCommands.doAction(actionIndex)`). The sidecar then reports the selection with the attribution
+`AUDIENCE`: its player keys are the candidates by occupancy at the record's time, and
+the sidecar never picks one of them. A group-scoped item's candidates are that group's
+occupants; a coalition item's, the coalition's connected players; an `ALL` item's,
+every connected player. A record with a nonzero `player` is reported with the
+attribution `SELECTOR` and that player's key. A controller that needs to know exactly
+who chose an item gives it to a group with one player seat.
 
 ### Layout: LOG
 
