@@ -17,12 +17,28 @@ use crate::intents::{self, Intent};
 use crate::lifecycle::{self, State, Trigger};
 use crate::stock::{Item, Stock};
 
+#[cfg(feature = "disk")]
 mod disk;
 
+#[cfg(feature = "disk")]
 pub use disk::{
     CampaignRecord, CampaignState, Checkpoint, DiskError, MIGRATIONS, Migration, REVISION_RESERVE,
     SCHEMA, TierPeriod, backup_file, ident_of, record_of, schema_of, state_of,
 };
+
+/// Without the `disk` feature a store lives in memory only: its slot is
+/// always empty, and nothing commits.
+#[cfg(not(feature = "disk"))]
+mod disk {
+    /// The store's link to a file it never has.
+    #[derive(Clone, Debug, Default)]
+    pub struct Slot(pub(super) Option<std::convert::Infallible>);
+
+    impl super::Store {
+        /// Never called: the slot is always empty.
+        pub(super) fn commit_or_stop(&mut self) {}
+    }
+}
 
 mod markers;
 pub use markers::{Marker, MarkerError, MarkerKind, MarkerSpec, Markers, scope};

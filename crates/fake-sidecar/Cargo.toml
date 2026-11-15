@@ -22,7 +22,7 @@ path = "src/main.rs"
 [dependencies]
 nanoprobe-api = { path = "../api" }
 nanoprobe-proto = { path = "../proto" }
-nanoprobe-sidecar = { path = "../sidecar" }
+nanoprobe-sidecar = { path = "../sidecar", features = ["disk"] }
 nanoprobe-sim-fake = { path = "../sim-fake" }
 hyper-util = { version = "0.1.21", features = ["tokio"] }
 tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }

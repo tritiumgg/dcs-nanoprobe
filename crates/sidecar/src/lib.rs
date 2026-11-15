@@ -1,5 +1,6 @@
 //! The sidecar: world store, reconciler, persistence and API server.
 
+#[cfg(feature = "disk")]
 pub mod campaigns;
 pub mod conformance;
 pub mod grid;

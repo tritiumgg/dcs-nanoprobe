@@ -387,6 +387,7 @@ impl Store {
     }
 
     /// The revision floors of every extension name removed.
+    #[cfg(feature = "disk")]
     pub(super) fn extension_floors(&self) -> &BTreeMap<String, u64> {
         &self.markers.ext_floor
     }
@@ -394,6 +395,7 @@ impl Store {
     /// Set the revision floors read back from a store file. Each is a tombstone,
     /// so the agent may still hold the extension: the removal is pending until
     /// the agent confirms it.
+    #[cfg(feature = "disk")]
     pub(super) fn set_extension_floors(&mut self, floors: BTreeMap<String, u64>) {
         self.markers.ext_removed = floors.keys().cloned().collect();
         self.markers.ext_floor = floors;
