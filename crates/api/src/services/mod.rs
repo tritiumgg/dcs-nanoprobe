@@ -3,9 +3,11 @@
 pub mod campaign;
 pub mod commands;
 pub mod events;
+pub mod extension;
 pub mod mission;
+pub mod moderation;
+pub mod players;
 pub mod session;
-pub mod unbuilt;
 pub mod world;
 
 use std::pin::Pin;

@@ -31,20 +31,29 @@
 
 pub mod harness;
 
+/// `player_event` codes (spec/records.md).
+mod pe {
+    pub const CONNECT: u32 = 1;
+    pub const DISCONNECT: u32 = 2;
+    pub const SLOT: u32 = 3;
+    pub const CHAT: u32 = 4;
+}
+
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use nanoprobe_sidecar::ids;
 use nanoprobe_sidecar::intents::{Waypoint, route_points};
 use nanoprobe_sidecar::sim::wire::{
     Body, Command, Enumeration, Input, Object, ObjectGone, Position, Seen, gone_reason, lv,
-    object_kind, opcode,
+    moderation, object_kind, opcode,
 };
 use nanoprobe_sidecar::sim::{Detached, RawRecord, SimAdapter};
 use nanoprobe_sidecar::stock::{Item, Stock};
 use nanoprobe_transport::codec::Lv;
 use nanoprobe_transport::layout::{Class, gap_class, lifecycle as lc, record_class, result as rc};
 use nanoprobe_transport::records::{
-    Airbase, CommandResult, Frame, Gap, Hello, Lifecycle, Rates, Warehouse,
+    Airbase, AuthorEvent, CommandResult, Frame, Gap, Hello, Lifecycle, Menu, Player, Rates,
+    Warehouse,
 };
 
 /// Scenery objects that die with each unit or static the fake kills.
@@ -77,6 +86,8 @@ fn name_entity(name: &str, campaign: u64) -> u64 {
         _ => 0,
     }
 }
+
+pub use nanoprobe_transport::records::ExtensionStats;
 
 /// The fake's settings.
 #[derive(Clone, Debug)]
@@ -111,6 +122,9 @@ pub struct Config {
     /// slice, as when the agent's checks of the misses span frames
     /// (spec/records.md, "Layout: ENUM_END"). 0 checks them in that slice.
     pub enum_end_hold: u64,
+    /// Whether `agent.toml` allows raw Lua: `EXTENSION_SET` and `EVAL` are
+    /// answered `RAW_LUA_OFF` when it does not.
+    pub raw_lua: bool,
 }
 
 impl Default for Config {
@@ -129,6 +143,7 @@ impl Default for Config {
             death_seed: 0,
             warehouse_every: 5,
             enum_end_hold: 0,
+            raw_lua: true,
         }
     }
 }
@@ -136,6 +151,61 @@ impl Default for Config {
 /// The coalition of each country the fake knows, answered to `COUNTRIES`:
 /// country 0 is red, country 2 is blue (DCS numbering).
 pub const COUNTRY_COALITIONS: [(u32, u32); 2] = [(0, 1), (2, 2)];
+
+/// A map mark the agent holds.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FakeMark {
+    /// A `scope` code.
+    pub scope: u32,
+    /// By scope: a coalition number or a group `EntityId`.
+    pub target: u64,
+    /// Whether players cannot change it.
+    pub read_only: bool,
+    /// DCS `x`, `y`, `z`.
+    pub at: (f64, f64, f64),
+    /// The text.
+    pub text: String,
+    /// The spec revision applied.
+    pub rev: u64,
+    /// The DCS group a `GROUP` scope named, 0 otherwise.
+    pub dcs_group: u64,
+}
+
+/// A map drawing the agent holds.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FakeDrawing {
+    /// A `scope` code.
+    pub scope: u32,
+    /// The coalition number, by scope.
+    pub target: u64,
+    /// The DCS shape ID.
+    pub shape: u32,
+    /// The shape's arguments.
+    pub args: Lv,
+    /// The spec revision applied.
+    pub rev: u64,
+}
+
+/// An F10 menu item the agent holds.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FakeMenu {
+    /// The parent's `EntityId`, 0 for the root.
+    pub parent: u64,
+    /// A `scope` code.
+    pub scope: u32,
+    /// By scope: a coalition number or a group `EntityId`.
+    pub target: u64,
+    /// Whether it is a submenu.
+    pub submenu: bool,
+    /// The text.
+    pub text: String,
+    /// The spec revision applied.
+    pub rev: u64,
+    /// The DCS group a `GROUP` scope named, 0 otherwise.
+    pub dcs_group: u64,
+    /// Where the item was first set: the order the shim adds items again.
+    pub order: u64,
+}
 
 /// One airbase of the mission: its DCS object ID, owner and warehouse.
 #[derive(Clone, Debug, PartialEq)]
@@ -212,6 +282,25 @@ pub struct Ledger {
     pub pictures: Vec<Body>,
     /// `PICTURE_STOP`s the agent applied.
     pub picture_stops: u32,
+    /// `MESSAGE`s the agent applied: scope, target, clear, seconds, text.
+    pub messages: Vec<(u32, u64, bool, f64, String)>,
+    /// `CHAT`s the agent applied: player, text.
+    pub chats: Vec<(u32, String)>,
+    /// `EVAL` sources the agent ran.
+    pub evals: Vec<String>,
+    /// `MISSION_LOAD` paths the agent took.
+    pub mission_loads: Vec<String>,
+    /// Extensions the agent removed, by name.
+    pub extension_removals: Vec<String>,
+    /// `MARK_SET`, `DRAWING_SET` and `MENU_SET` commands the agent applied
+    /// (not `AT_REVISION`), by entity.
+    pub pin_sets: BTreeMap<u64, u32>,
+    /// `MODERATE` commands the agent applied, as sent.
+    pub moderations: Vec<Body>,
+    /// `PLAYERS` queries the agent answered.
+    pub players_asked: u32,
+    /// `BANS` queries the agent answered.
+    pub bans_asked: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -307,6 +396,13 @@ pub struct FakeSim {
     applied_spec: HashMap<u64, u64>,
     applied_order: HashMap<u64, u64>,
     applied_extension: HashMap<String, u64>,
+    // What the agent holds in DCS for the players.
+    marks: BTreeMap<u64, FakeMark>,
+    drawings: BTreeMap<u64, FakeDrawing>,
+    menus: BTreeMap<u64, FakeMenu>,
+    menu_order: u64,
+    /// Records the agent writes in its next frame.
+    queued_out: Vec<Input>,
     // The link.
     attached: bool,
     sidecar_boot: u64,
@@ -360,12 +456,48 @@ pub struct FakeSim {
     /// The sample rates last received.
     rates: Rates,
     rates_received: u32,
+    binds_received: u32,
     /// The DCS object an `AttackUnit` task names, by DCS group.
     attack_unit: BTreeMap<u64, u64>,
     /// Objects whose destroy is pending until the resume, by object ID.
     pending: BTreeMap<u64, FObject>,
     /// The restore burst (spec/commands.md, `BURST`).
     burst: bool,
+    /// The clients connected to the server, by DCS connection ID.
+    clients: BTreeMap<u32, FakeClient>,
+    /// The server's ban list. It outlives the DCS process, as DCS's does.
+    bans: Vec<FakeBan>,
+    /// The objects the `SUBSCRIBE` last received named.
+    subscribed: BTreeSet<u64>,
+}
+
+/// The wall-clock second the fake's ban times count from.
+pub const FAKE_WALL_NOW: f64 = 1_800_000_000.0;
+
+/// A client connected to the server.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FakeClient {
+    /// The ucid DCS gives the client.
+    pub ucid: String,
+    /// The name.
+    pub name: String,
+    /// The coalition number, 0 for none.
+    pub side: u32,
+    /// The slot ID, empty for spectators.
+    pub slot: String,
+}
+
+/// A ban list entry.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FakeBan {
+    /// The banned ucid.
+    pub ucid: String,
+    /// The name the player had, empty for a ucid never seen.
+    pub name: String,
+    /// When the ban ends, seconds since the Unix epoch; 0 for none given.
+    pub banned_until: f64,
+    /// The reason.
+    pub reason: String,
 }
 
 impl FakeSim {
@@ -391,6 +523,11 @@ impl FakeSim {
             last_applied_seq: 0,
             applied_spec: HashMap::new(),
             applied_extension: HashMap::new(),
+            marks: BTreeMap::new(),
+            drawings: BTreeMap::new(),
+            menus: BTreeMap::new(),
+            menu_order: 0,
+            queued_out: Vec::new(),
             applied_order: HashMap::new(),
             attached: false,
             sidecar_boot: 0,
@@ -424,9 +561,13 @@ impl FakeSim {
             life: BTreeMap::new(),
             rates: Rates::default(),
             rates_received: 0,
+            binds_received: 0,
             attack_unit: BTreeMap::new(),
             pending: BTreeMap::new(),
             burst: false,
+            clients: BTreeMap::new(),
+            bans: Vec::new(),
+            subscribed: BTreeSet::new(),
         };
         f.load_mission();
         f
@@ -492,6 +633,372 @@ impl FakeSim {
     /// commands it took.
     pub fn rates(&self) -> (Rates, u32) {
         (self.rates, self.rates_received)
+    }
+
+    /// `BIND` commands the agent took.
+    pub fn binds(&self) -> u32 {
+        self.binds_received
+    }
+
+    /// The mark the agent holds for an entity.
+    pub fn mark(&self, entity: u64) -> Option<&FakeMark> {
+        self.marks.get(&entity)
+    }
+
+    /// Every mark the agent holds, by entity.
+    pub fn marks(&self) -> &BTreeMap<u64, FakeMark> {
+        &self.marks
+    }
+
+    /// The drawing the agent holds for an entity.
+    pub fn drawing(&self, entity: u64) -> Option<&FakeDrawing> {
+        self.drawings.get(&entity)
+    }
+
+    /// Every drawing the agent holds, by entity.
+    pub fn drawings(&self) -> &BTreeMap<u64, FakeDrawing> {
+        &self.drawings
+    }
+
+    /// The menu item the agent holds for an entity.
+    pub fn menu_item(&self, entity: u64) -> Option<&FakeMenu> {
+        self.menus.get(&entity)
+    }
+
+    /// Every menu item the agent holds, in the order they were first set.
+    pub fn menu_items(&self) -> Vec<(u64, &FakeMenu)> {
+        let mut v: Vec<_> = self.menus.iter().map(|(e, m)| (*e, m)).collect();
+        v.sort_by_key(|(_, m)| m.order);
+        v
+    }
+
+    /// The revision of an extension the agent holds, 0 for none.
+    pub fn extension_rev(&self, name: &str) -> u64 {
+        self.applied_extension.get(name).copied().unwrap_or(0)
+    }
+
+    /// A player selects a command menu item. The agent writes a `MENU`
+    /// record in its next frame. False for an item that is not a command
+    /// the agent holds.
+    pub fn select_menu(&mut self, entity: u64, player: u32) -> bool {
+        let Some(m) = self.menus.get(&entity).filter(|m| !m.submenu) else {
+            return false;
+        };
+        let (target, scope) = (m.target, m.scope);
+        self.queued_out.push(Input::Menu(Menu {
+            entity,
+            target,
+            scope,
+            player,
+        }));
+        true
+    }
+
+    /// An extension calls `emit`: the agent writes an `AUTHOR_EVENT` in its
+    /// next frame, with DCS object IDs.
+    pub fn emit_author_event(&mut self, objects: &[u64], name: &str, payload: Lv) {
+        self.queued_out.push(Input::AuthorEvent(AuthorEvent {
+            objects: objects.to_vec(),
+            name: name.to_owned(),
+            payload,
+        }));
+    }
+
+    /// The agent writes a `PLAYER` record in its next frame: a chat line.
+    pub fn emit_player_record(&mut self) {
+        self.queued_out.push(Input::Player(Player {
+            event: 4,
+            player: 2,
+            side: 2,
+            seat: 0,
+            client: "client".into(),
+            name: "pilot".into(),
+            slot: "slot".into(),
+            text: "hello".into(),
+        }));
+    }
+
+    /// The agent writes an `EXTENSION` record in its next frame.
+    pub fn emit_extension_stats(&mut self, stats: ExtensionStats) {
+        self.queued_out.push(Input::Extension(stats));
+    }
+
+    /// A client connects: the hook's `onPlayerConnect` writes a `PLAYER`
+    /// record in the next frame. False for a banned ucid, which DCS
+    /// refuses.
+    pub fn connect_client(&mut self, id: u32, ucid: &str, name: &str, side: u32) -> bool {
+        if self.bans.iter().any(|b| b.ucid == ucid) {
+            return false;
+        }
+        self.clients.insert(
+            id,
+            FakeClient {
+                ucid: ucid.to_owned(),
+                name: name.to_owned(),
+                side,
+                slot: String::new(),
+            },
+        );
+        self.player_record(pe::CONNECT, id, "");
+        true
+    }
+
+    /// A client takes a slot (`onPlayerChangeSlot`); an empty `slot` is
+    /// spectators.
+    pub fn client_slot(&mut self, id: u32, side: u32, slot: &str) {
+        let Some(c) = self.clients.get_mut(&id) else {
+            return;
+        };
+        c.side = side;
+        c.slot = slot.to_owned();
+        self.player_record(pe::SLOT, id, "");
+    }
+
+    /// A client changes its name. DCS has no callback for it: the sidecar
+    /// sees the new name in the client's next `CONNECT` or `SLOT` record.
+    pub fn rename_client(&mut self, id: u32, name: &str) {
+        if let Some(c) = self.clients.get_mut(&id) {
+            c.name = name.to_owned();
+        }
+    }
+
+    /// A client sends a chat line (`onPlayerTrySendChat`).
+    pub fn client_chat(&mut self, id: u32, text: &str) {
+        if self.clients.contains_key(&id) {
+            self.player_record(pe::CHAT, id, text);
+        }
+    }
+
+    /// A client leaves (`onPlayerDisconnect`).
+    pub fn disconnect_client(&mut self, id: u32) {
+        if self.clients.contains_key(&id) {
+            self.player_record(pe::DISCONNECT, id, "");
+            self.clients.remove(&id);
+        }
+    }
+
+    /// The clients connected now.
+    pub fn clients(&self) -> &BTreeMap<u32, FakeClient> {
+        &self.clients
+    }
+
+    /// The ban list.
+    pub fn bans(&self) -> &[FakeBan] {
+        &self.bans
+    }
+
+    /// The objects the last `SUBSCRIBE` named that the agent holds.
+    pub fn subscribed(&self) -> &BTreeSet<u64> {
+        &self.subscribed
+    }
+
+    /// A client unit the mission file holds appears: a new object in no
+    /// campaign, its `OBJECT` record and an `S_EVENT_BIRTH` with the
+    /// mission ID (`INITIATOR_MISSION_ID`) in the next frame. Returns the
+    /// DCS object ID.
+    pub fn birth_client_unit(&mut self, mission_id: &str) -> u64 {
+        self.birth_client_unit_in(mission_id, 0, "F-16C_50")
+    }
+
+    /// As [`FakeSim::birth_client_unit`], in the DCS group `group` (0 for
+    /// none), of the type `type_name`.
+    pub fn birth_client_unit_in(&mut self, mission_id: &str, group: u64, type_name: &str) -> u64 {
+        let id = self.next_object;
+        self.next_object += 1;
+        self.objects.insert(
+            id,
+            FObject {
+                name: format!("client-{mission_id}"),
+                type_name: type_name.to_owned(),
+                group,
+                entity: 0,
+                group_entity: 0,
+                campaign: 0,
+                kind: object_kind::UNIT,
+                at: Position {
+                    object: id,
+                    ..Position::default()
+                },
+            },
+        );
+        self.table.insert(id, (0, 0));
+        let o = self.object_record(id, 0);
+        self.sent.insert(id);
+        self.queued_out.push(o);
+        self.birth_event(id, Some(mission_id));
+        id
+    }
+
+    /// An `S_EVENT_BIRTH` for an object the fake holds. With no mission ID
+    /// the event carries none, as DCS may send it.
+    pub fn birth_event(&mut self, object: u64, mission_id: Option<&str>) {
+        let mut fields = vec![
+            (1, Lv::Number(self.model_time)),
+            (2, Lv::Number(object as f64)),
+        ];
+        if let Some(m) = mission_id {
+            fields.push((21, lv::s(m)));
+        }
+        self.queued_out
+            .push(Input::Event(nanoprobe_transport::records::Event {
+                id: 15,
+                fields,
+            }));
+    }
+
+    /// A world event with the fields given, each an `event_field` code.
+    pub fn emit_event(&mut self, id: u32, fields: Vec<(u16, Lv)>) {
+        self.queued_out
+            .push(Input::Event(nanoprobe_transport::records::Event {
+                id,
+                fields,
+            }));
+    }
+
+    /// The DCS entity binding of an object: its unit and group `EntityId`s
+    /// the agent holds, 0 for none.
+    pub fn binding_of(&self, object: u64) -> Option<(u64, u64)> {
+        self.table.get(&object).copied()
+    }
+
+    /// `BIND`: an object or group whose row is in the table takes the
+    /// entity; any other pair is ignored. A bound row is written whole by
+    /// the next enumeration.
+    fn bind(&mut self, b: &nanoprobe_transport::records::Bind) {
+        for (entity, object) in b.entity.iter().zip(&b.object) {
+            if b.kind == object_kind::GROUP {
+                let rows: Vec<u64> = self
+                    .objects
+                    .iter()
+                    .filter(|(o, x)| x.group == *object && self.table.contains_key(*o))
+                    .map(|(o, _)| *o)
+                    .collect();
+                for o in rows {
+                    self.objects.get_mut(&o).expect("row").group_entity = *entity;
+                    if let Some(t) = self.table.get_mut(&o) {
+                        t.1 = *entity;
+                    }
+                    self.sent.remove(&o);
+                }
+            } else if self.table.contains_key(object)
+                && let Some(x) = self.objects.get_mut(object)
+            {
+                x.entity = *entity;
+                if let Some(t) = self.table.get_mut(object) {
+                    t.0 = *entity;
+                }
+                self.sent.remove(object);
+            }
+        }
+    }
+
+    /// A world event with an initiator and a target, by DCS object ID.
+    pub fn event_between(&mut self, id: u32, initiator: Option<u64>, target: Option<u64>) {
+        let mut fields = Vec::new();
+        if let Some(i) = initiator {
+            fields.push((2, Lv::Number(i as f64)));
+        }
+        if let Some(t) = target {
+            fields.push((3, Lv::Number(t as f64)));
+        }
+        self.queued_out
+            .push(Input::Event(nanoprobe_transport::records::Event {
+                id,
+                fields,
+            }));
+    }
+
+    /// A vitals row for an object, in the next frame.
+    pub fn emit_vitals(&mut self, object: u64, life: f32, fuel: f32) {
+        self.queued_out
+            .push(Input::Vitals(vec![nanoprobe_sidecar::sim::wire::Vitals {
+                object,
+                life,
+                fuel,
+            }]));
+    }
+
+    fn player_record(&mut self, event: u32, id: u32, text: &str) {
+        let Some(c) = self.clients.get(&id) else {
+            return;
+        };
+        let seat = nanoprobe_sidecar::players::seat_of(&c.slot);
+        self.queued_out.push(Input::Player(Player {
+            event,
+            player: id,
+            side: c.side,
+            seat,
+            client: c.ucid.clone(),
+            name: c.name.clone(),
+            slot: c.slot.clone(),
+            text: text.to_owned(),
+        }));
+    }
+
+    /// The agent's `MODERATE` handler (spec/commands.md, "Moderation").
+    fn moderate(&mut self, cmd: &Command) {
+        let Body::Moderate {
+            action,
+            player,
+            side,
+            seconds,
+            ucid,
+            slot,
+            reason,
+        } = &cmd.body
+        else {
+            return;
+        };
+        if !(moderation::KICK..=moderation::SLOT).contains(action)
+            || ucid.is_empty()
+            || !seconds.is_finite()
+            || *seconds < 0.0
+            || *player == 1
+        {
+            return self.result(cmd, rc::BAD_PAYLOAD, 0, "", Lv::Nil);
+        }
+        let names_player = *player != 0 && *action != moderation::UNBAN;
+        if names_player && self.clients.get(player).is_none_or(|c| c.ucid != *ucid) {
+            return self.result(cmd, rc::NOT_BOUND, 0, "no such player", Lv::Nil);
+        }
+        match *action {
+            moderation::KICK => self.disconnect_client(*player),
+            moderation::BAN => {
+                let name = self
+                    .clients
+                    .get(player)
+                    .map(|c| c.name.clone())
+                    .unwrap_or_default();
+                self.bans.retain(|b| b.ucid != *ucid);
+                self.bans.push(FakeBan {
+                    ucid: ucid.clone(),
+                    name,
+                    banned_until: if *seconds > 0.0 {
+                        FAKE_WALL_NOW + *seconds
+                    } else {
+                        0.0
+                    },
+                    reason: reason.clone(),
+                });
+                self.disconnect_client(*player);
+            }
+            moderation::UNBAN => {
+                let before = self.bans.len();
+                self.bans.retain(|b| b.ucid != *ucid);
+                if self.bans.len() == before {
+                    return self.result(cmd, rc::DCS_REFUSED, 0, "DCS returned false", Lv::Nil);
+                }
+            }
+            _ => {
+                if let Some(c) = self.clients.get_mut(player) {
+                    c.side = *side;
+                    c.slot = slot.clone();
+                }
+                self.player_record(pe::SLOT, *player, "");
+            }
+        }
+        self.ledger.moderations.push(cmd.body.clone());
+        self.result(cmd, rc::APPLIED, 0, "", Lv::Nil);
     }
 
     /// The ground truth.
@@ -798,6 +1305,10 @@ impl FakeSim {
         self.graves.clear();
         self.applied_spec.clear();
         self.applied_order.clear();
+        // Marks, drawings and menu items are gone with the mission.
+        self.marks.clear();
+        self.drawings.clear();
+        self.menus.clear();
         // The mission file's airbases, owners and stock; no option or life
         // survives its group.
         self.airbases = self.airbase_seed.clone();
@@ -824,11 +1335,13 @@ impl FakeSim {
         let boot = self.agent_boot + 1;
         let cfg = self.cfg.clone();
         let ledger = std::mem::take(&mut self.ledger);
+        let bans = std::mem::take(&mut self.bans);
         *self = FakeSim::new(Config {
             first_boot: boot,
             ..cfg
         });
         self.ledger = ledger;
+        self.bans = bans;
     }
 
     /// DCS dies and stays down: nothing runs, nothing is read, and records
@@ -893,6 +1406,9 @@ impl FakeSim {
         self.applied_spec.clear();
         self.applied_order.clear();
         self.applied_extension.clear();
+        self.marks.clear();
+        self.drawings.clear();
+        self.menus.clear();
         // The binding the kept rows were made under is gone: a death event
         // after the switch names no entity of either campaign.
         self.late.clear();
@@ -913,6 +1429,11 @@ impl FakeSim {
                 ),
                 None => (0, 0),
             };
+        }
+        // A row bound by `BIND`, which no platform name binds, loses it too.
+        for o in self.objects.values_mut().filter(|o| o.campaign == 0) {
+            o.entity = 0;
+            o.group_entity = 0;
         }
     }
 
@@ -1543,6 +2064,9 @@ impl FakeSim {
             self.move_groups();
         }
         if self.attached {
+            for r in std::mem::take(&mut self.queued_out) {
+                self.emit(r);
+            }
             if self.run.is_none() && self.frame >= self.next_enum {
                 self.start_enumeration();
             }
@@ -1687,6 +2211,19 @@ impl FakeSim {
                     self.ledger.bursts.push((on, paused));
                     self.burst = on && paused;
                 }
+                Body::Bind(b) => {
+                    self.binds_received += 1;
+                    self.bind(&b);
+                }
+                Body::Subscribe(sub) => {
+                    // An entity the binding does not hold is ignored.
+                    self.subscribed = self
+                        .table
+                        .iter()
+                        .filter(|(_, (unit, _))| *unit != 0 && sub.entity.contains(unit))
+                        .map(|(o, _)| *o)
+                        .collect();
+                }
                 _ => {}
             }
             return;
@@ -1706,11 +2243,21 @@ impl FakeSim {
         if h.campaign != self.campaign {
             return self.result(&cmd, rc::WRONG_CAMPAIGN, 0, "", Lv::Nil);
         }
-        // The extension opcodes need a campaign (the real admission table's
-        // NO_CAMPAIGN row, before the revision check) but not a generation.
+        // The opcodes whose Campaign column says `active` need a campaign
+        // (the real admission table's NO_CAMPAIGN row, before the revision
+        // check). The extension opcodes and `EVAL` need no generation.
         if matches!(
             cmd.body,
-            Body::ExtensionSet { .. } | Body::ExtensionInvoke { .. }
+            Body::ExtensionSet { .. }
+                | Body::ExtensionRemove { .. }
+                | Body::ExtensionInvoke { .. }
+                | Body::Eval { .. }
+                | Body::MarkSet { .. }
+                | Body::MarkRemove
+                | Body::DrawingSet { .. }
+                | Body::DrawingRemove
+                | Body::MenuSet { .. }
+                | Body::MenuRemove
         ) && self.campaign == 0
         {
             return self.result(&cmd, rc::NO_CAMPAIGN, 0, "", Lv::Nil);
@@ -1723,10 +2270,118 @@ impl FakeSim {
             if h.rev <= self.applied_extension.get(&name).copied().unwrap_or(0) {
                 return self.result(&cmd, rc::AT_REVISION, 0, "", Lv::Nil);
             }
+            if !self.cfg.raw_lua {
+                return self.result(&cmd, rc::RAW_LUA_OFF, 0, "", Lv::Nil);
+            }
             self.applied_extension.insert(name.clone(), h.rev);
             let key = (self.agent_boot, self.campaign, name, h.rev);
             *self.ledger.extension_runs.entry(key).or_default() += 1;
             return self.result(&cmd, rc::APPLIED, 0, "", Lv::Nil);
+        }
+        match &cmd.body {
+            Body::ExtensionRemove { name } => {
+                self.applied_extension.remove(name);
+                self.ledger.extension_removals.push(name.clone());
+                return self.result(&cmd, rc::APPLIED, 0, "", Lv::Nil);
+            }
+            Body::Eval { source } => {
+                if !self.cfg.raw_lua {
+                    return self.result(&cmd, rc::RAW_LUA_OFF, 0, "", Lv::Nil);
+                }
+                let Lv::String(b) = source else {
+                    return self.result(&cmd, rc::BAD_PAYLOAD, 0, "", Lv::Nil);
+                };
+                let src = String::from_utf8_lossy(b).into_owned();
+                self.ledger.evals.push(src.clone());
+                // The fake runs no Lua: `return <number>` and `return "text"`
+                // answer that value, `error(` raises, anything else returns
+                // nothing.
+                let t = src.trim();
+                if t.contains("error(") {
+                    return self.result(&cmd, rc::LUA_ERROR, 0, "raised", Lv::Nil);
+                }
+                let v = match t.strip_prefix("return ").map(str::trim) {
+                    Some(x) => match x.parse::<f64>() {
+                        Ok(n) => Lv::Number(n),
+                        Err(_) => Lv::String(x.trim_matches(['"', '\'']).as_bytes().to_vec()),
+                    },
+                    None => Lv::Nil,
+                };
+                return self.result(&cmd, rc::APPLIED, 0, "", v);
+            }
+            Body::Message {
+                scope,
+                clear,
+                target,
+                seconds,
+                text,
+            } => {
+                if !(1..=5).contains(scope)
+                    || !(seconds.is_finite() && (0.0..=86_400.0).contains(seconds))
+                {
+                    return self.result(&cmd, rc::BAD_PAYLOAD, 0, "", Lv::Nil);
+                }
+                if !self.scope_held(h.campaign, *scope, *target) {
+                    return self.result(&cmd, rc::NOT_BOUND, 0, "", Lv::Nil);
+                }
+                self.ledger
+                    .messages
+                    .push((*scope, *target, *clear, *seconds, text.clone()));
+                return self.result(&cmd, rc::APPLIED, 0, "", Lv::Nil);
+            }
+            Body::Chat { player, text } => {
+                if text.is_empty() || text.len() > 1024 {
+                    return self.result(&cmd, rc::BAD_PAYLOAD, 0, "", Lv::Nil);
+                }
+                self.ledger.chats.push((*player, text.clone()));
+                return self.result(&cmd, rc::APPLIED, 0, "", Lv::Nil);
+            }
+            Body::Moderate { .. } => return self.moderate(&cmd),
+            Body::Players => {
+                self.ledger.players_asked += 1;
+                let rows: Vec<Lv> = self
+                    .clients
+                    .iter()
+                    .map(|(id, c)| {
+                        lv::obj(vec![
+                            ("id", lv::n(f64::from(*id))),
+                            ("ucid", lv::s(&c.ucid)),
+                            ("name", lv::s(&c.name)),
+                            ("side", lv::n(f64::from(c.side))),
+                            ("slot", lv::s(&c.slot)),
+                        ])
+                    })
+                    .collect();
+                return self.result(&cmd, rc::APPLIED, 0, "", lv::list(rows));
+            }
+            Body::Bans => {
+                self.ledger.bans_asked += 1;
+                let rows: Vec<Lv> = self
+                    .bans
+                    .iter()
+                    .map(|b| {
+                        lv::obj(vec![
+                            ("ucid", lv::s(&b.ucid)),
+                            ("name", lv::s(&b.name)),
+                            ("banned_until", lv::n(b.banned_until)),
+                            ("reason", lv::s(&b.reason)),
+                        ])
+                    })
+                    .collect();
+                return self.result(&cmd, rc::APPLIED, 0, "", lv::list(rows));
+            }
+            Body::MissionLoad { path } => {
+                if path.is_empty() || path.len() > 1024 {
+                    return self.result(&cmd, rc::BAD_PAYLOAD, 0, "", Lv::Nil);
+                }
+                self.ledger.mission_loads.push(path.clone());
+                self.result(&cmd, rc::APPLIED, 0, "", Lv::Nil);
+                // The result is queued, then DCS loads: the fake loads its
+                // one mission.
+                self.load_mission();
+                return;
+            }
+            _ => {}
         }
         if let Body::ExtensionInvoke { name, args } = &cmd.body {
             if !self.applied_extension.contains_key(name) {
@@ -1752,7 +2407,11 @@ impl FakeSim {
             return self.result(&cmd, rc::WRONG_GENERATION, 0, "", Lv::Nil);
         }
         let rev_map = match op {
-            opcode::GROUP_SPAWN | opcode::STATIC_SPAWN => Some(&self.applied_spec),
+            opcode::GROUP_SPAWN
+            | opcode::STATIC_SPAWN
+            | opcode::MARK_SET
+            | opcode::DRAWING_SET
+            | opcode::MENU_SET => Some(&self.applied_spec),
             opcode::GROUP_ORDER => Some(&self.applied_order),
             _ => None,
         };
@@ -1936,6 +2595,114 @@ impl FakeSim {
                 self.ledger.picture_stops += 1;
                 self.result(&cmd, rc::APPLIED, 0, "", Lv::Nil);
             }
+            Body::MarkSet {
+                scope,
+                read_only,
+                target,
+                x,
+                y,
+                z,
+                text,
+            } => {
+                let Some(dcs_group) = self.pin_group(h.campaign, *scope, *target, true) else {
+                    return self.pin_refused(&cmd, *scope, true);
+                };
+                self.marks.insert(
+                    h.entity,
+                    FakeMark {
+                        scope: *scope,
+                        target: *target,
+                        read_only: *read_only,
+                        at: (*x, *y, *z),
+                        text: text.clone(),
+                        rev: h.rev,
+                        dcs_group,
+                    },
+                );
+                self.pin_applied(&cmd);
+            }
+            Body::DrawingSet {
+                scope,
+                shape,
+                target,
+                args,
+            } => {
+                if self.pin_group(h.campaign, *scope, *target, false).is_none() {
+                    return self.pin_refused(&cmd, *scope, false);
+                }
+                self.drawings.insert(
+                    h.entity,
+                    FakeDrawing {
+                        scope: *scope,
+                        target: *target,
+                        shape: *shape,
+                        args: args.clone(),
+                        rev: h.rev,
+                    },
+                );
+                self.pin_applied(&cmd);
+            }
+            Body::MenuSet {
+                parent,
+                target,
+                scope,
+                submenu,
+                text,
+            } => {
+                let Some(dcs_group) = self.pin_group(h.campaign, *scope, *target, true) else {
+                    return self.pin_refused(&cmd, *scope, true);
+                };
+                if *parent != 0
+                    && !self
+                        .menus
+                        .get(parent)
+                        .is_some_and(|p| p.submenu && p.scope == *scope && p.target == *target)
+                {
+                    return self.result(&cmd, rc::NOT_BOUND, 0, "no such submenu", Lv::Nil);
+                }
+                let order = match self.menus.get(&h.entity) {
+                    Some(old) => old.order,
+                    None => {
+                        self.menu_order += 1;
+                        self.menu_order
+                    }
+                };
+                self.menus.insert(
+                    h.entity,
+                    FakeMenu {
+                        parent: *parent,
+                        scope: *scope,
+                        target: *target,
+                        submenu: *submenu,
+                        text: text.clone(),
+                        rev: h.rev,
+                        dcs_group,
+                        order,
+                    },
+                );
+                self.pin_applied(&cmd);
+            }
+            Body::MarkRemove | Body::DrawingRemove => {
+                self.marks.remove(&h.entity);
+                self.drawings.remove(&h.entity);
+                self.applied_spec.remove(&h.entity);
+                self.result(&cmd, rc::APPLIED, 0, "", Lv::Nil);
+            }
+            Body::MenuRemove => {
+                // A submenu takes the items under it.
+                let mut gone = vec![h.entity];
+                while let Some(e) = gone.pop() {
+                    self.menus.remove(&e);
+                    self.applied_spec.remove(&e);
+                    gone.extend(
+                        self.menus
+                            .iter()
+                            .filter(|(_, m)| m.parent == e)
+                            .map(|(c, _)| *c),
+                    );
+                }
+                self.result(&cmd, rc::APPLIED, 0, "", Lv::Nil);
+            }
             Body::Countries => {
                 let v = Lv::Table(
                     COUNTRY_COALITIONS
@@ -1946,13 +2713,56 @@ impl FakeSim {
                 self.ledger.countries_asked += 1;
                 self.result(&cmd, rc::APPLIED, 0, "", v);
             }
-            Body::ExtensionSet { .. } | Body::ExtensionInvoke { .. } => {
+            Body::ExtensionSet { .. }
+            | Body::ExtensionRemove { .. }
+            | Body::ExtensionInvoke { .. }
+            | Body::Eval { .. }
+            | Body::Message { .. }
+            | Body::Chat { .. }
+            | Body::Moderate { .. }
+            | Body::Players
+            | Body::Bans
+            | Body::MissionLoad { .. } => {
                 unreachable!("answered above")
             }
-            Body::Campaign(_) | Body::Enumerate | Body::Burst(_) | Body::Rates(_) => {
+            Body::Campaign(_)
+            | Body::Enumerate
+            | Body::Burst(_)
+            | Body::Rates(_)
+            | Body::Subscribe(_)
+            | Body::Bind(_) => {
                 unreachable!("control")
             }
         }
+    }
+
+    /// The DCS group a marker's scope names: `Some(0)` for a scope with no
+    /// group, `None` for a scope the opcode does not take or a group DCS
+    /// does not have. `group_ok` says whether `GROUP` is a scope it takes.
+    fn pin_group(&self, campaign: u64, scope: u32, target: u64, group_ok: bool) -> Option<u64> {
+        match scope {
+            1 | 2 => Some(0),
+            3 if group_ok => self.group_in(campaign, target),
+            _ => None,
+        }
+    }
+
+    /// The answer for a marker whose scope DCS cannot use: a scope the
+    /// opcode does not take is `BAD_PAYLOAD`, a group DCS lacks `NOT_BOUND`.
+    fn pin_refused(&mut self, cmd: &Command, scope: u32, group_ok: bool) {
+        let code = if scope == 3 && group_ok {
+            rc::NOT_BOUND
+        } else {
+            rc::BAD_PAYLOAD
+        };
+        self.result(cmd, code, 0, "", Lv::Nil);
+    }
+
+    fn pin_applied(&mut self, cmd: &Command) {
+        let h = cmd.header;
+        self.applied_spec.insert(h.entity, h.rev);
+        *self.ledger.pin_sets.entry(h.entity).or_default() += 1;
+        self.result(cmd, rc::APPLIED, 0, "", Lv::Nil);
     }
 
     /// Whether DCS holds what a `SOUND` or `PICTURE` scope names: a group
@@ -2075,6 +2885,9 @@ impl FakeSim {
         let Some(g) = self.groups.remove(&gid) else {
             return;
         };
+        // The marks and menu items of the group's ID go with it.
+        self.marks.retain(|_, m| m.dcs_group != gid);
+        self.menus.retain(|_, m| m.dcs_group != gid);
         // A group DCS destroyed leaves nothing to revive.
         self.graves
             .retain(|id, (o, _)| o.group != gid && *id != gid);

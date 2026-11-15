@@ -514,6 +514,7 @@ impl Disk {
             sample_time,
             route_events,
             disk: _,
+            markers: _,
         } = store;
         let tx = self.conn.transaction()?;
         let mut changed_groups = Vec::new();
@@ -1628,6 +1629,7 @@ fn enc_entry(e: &Entry) -> Lv {
         Entry::ExtensionSpec { name, rev } => {
             k("extension_spec", vec![("name", s(name)), ("rev", u(*rev))])
         }
+        Entry::ExtensionRemoved { name } => k("extension_removed", vec![("name", s(name))]),
         Entry::Order { entity, rev } => k("order", vec![("entity", u(entity.0)), ("rev", u(*rev))]),
         Entry::Authority { entity, authority } => k(
             "authority",
@@ -1737,6 +1739,7 @@ fn dec_entry(v: &Lv) -> Result<Entry, DiskError> {
             name: r.s("name")?,
             rev: r.u("rev")?,
         },
+        "extension_removed" => Entry::ExtensionRemoved { name: r.s("name")? },
         "order" => Entry::Order {
             entity: entity()?,
             rev: r.u("rev")?,

@@ -5,6 +5,7 @@ package nanoprobe.v1alpha1;
 
 import "google/protobuf/struct.proto";
 import "nanoprobe/v1alpha1/common.proto";
+import "nanoprobe/v1alpha1/session.proto";
 
 service EventsService {
   // Events from a sequence number onward, then live.
@@ -27,6 +28,7 @@ message Event {
     Gap gap = 7;
     LifecycleEvent lifecycle = 8;
     RouteEvent route = 10;
+    ModerationEvent moderation = 11;
   }
   // The campaign the sequence number belongs to, 0 for the server log.
   uint64 campaign_id = 9;
@@ -53,6 +55,30 @@ message WorldEvent {
   optional uint32 rounds = 11;
   // Fields the platform read and has no typed field for.
   google.protobuf.Struct extra = 12;
+  // The DCS type names of the initiator and the target: the event's own
+  // when it carries them, else the type the mission's table held for the
+  // object.
+  optional string initiator_type = 13;
+  optional string target_type = 14;
+  // Model time of the kill, for a KILL or DEAD: the victim's BDA time when
+  // one came, else the time the victim's row left the table. DCS's own time
+  // of the event stays in extra.time. A weapon kill's KILL and DEAD come up
+  // to 83 s after the object stopped existing; this is the time to count.
+  optional double dated_time = 15;
+  // The players who launched the weapon of a HIT or KILL. initiator_players
+  // is never rewritten; this is a separate attribution.
+  repeated string launch_players = 16;
+  LaunchRule launch_rule = 17;
+}
+
+// How launch_players was found (spec/world.md, "Launch attribution").
+enum LaunchRule {
+  LAUNCH_RULE_UNSPECIFIED = 0;
+  // The event names a weapon whose shooter the sidecar saw at SHOT.
+  LAUNCH_RULE_WEAPON = 1;
+  // The weapon is unknown, as for a gun: the initiator's occupants before it
+  // left.
+  LAUNCH_RULE_INITIATOR = 2;
 }
 
 enum RouteEventKind {
@@ -113,12 +139,42 @@ message AuthorEvent {
   repeated uint64 entity_ids = 4;
 }
 
+enum MenuAttribution {
+  MENU_ATTRIBUTION_UNSPECIFIED = 0;
+  // DCS named the player who selected the item: player_keys holds that one.
+  MENU_ATTRIBUTION_SELECTOR = 1;
+  // DCS did not say. player_keys holds the players who could have selected
+  // it by occupancy and connection when the record arrived; the platform
+  // never picks one. To know exactly who chose an item, give it to a group
+  // with one player seat.
+  MENU_ATTRIBUTION_AUDIENCE = 2;
+}
+
 // A player selected a menu item.
 message MenuEvent {
   uint64 item_id = 1;
-  // The player where DCS identifies one; otherwise the players the item was
-  // shown to.
+  // With SELECTOR the player; with AUDIENCE the candidates.
   repeated string player_keys = 2;
+  MenuAttribution attribution = 3;
+}
+
+enum ModerationAction {
+  MODERATION_ACTION_UNSPECIFIED = 0;
+  MODERATION_ACTION_KICK = 1;
+  MODERATION_ACTION_BAN = 2;
+  MODERATION_ACTION_UNBAN = 3;
+  MODERATION_ACTION_MOVE = 4;
+}
+
+// A moderation call DCS applied.
+message ModerationEvent {
+  ModerationAction action = 1;
+  // The player acted on. Never a ucid.
+  string player_key = 2;
+  string reason = 3;
+  // The role of the token that made the call.
+  Role role = 4;
+  CommandResult result = 5;
 }
 
 // Events in this span were lost. A consumer marks what overlaps it as

@@ -11,8 +11,10 @@ use std::collections::VecDeque;
 use std::time::{Duration, SystemTime};
 
 use nanoprobe_proto::v1alpha1::{
-    self as pb, Event, Gap as PbGap, LifecycleEvent, SimState, WorldEvent, event,
+    self as pb, AuthorEvent, Event, Gap as PbGap, LifecycleEvent, MenuAttribution, MenuEvent,
+    PlayerEvent, PlayerEventKind, SimState, WorldEvent, event,
 };
+use nanoprobe_sidecar::players::{LaunchRule, Note, Roster};
 use nanoprobe_sidecar::sim::RawRecord;
 use nanoprobe_sidecar::sim::wire::Input;
 use nanoprobe_transport::layout::{gap_class, lifecycle as lc};
@@ -115,6 +117,115 @@ pub struct Link {
     pub offset: Option<f64>,
     /// When the last record was read.
     pub last_record: Option<SystemTime>,
+    /// The latest `EXTENSION` record of each extension, by name, from the
+    /// agent boot now running.
+    pub extensions: std::collections::BTreeMap<String, records::ExtensionStats>,
+}
+
+/// What the server knows of the objects and players a record names.
+pub struct Lookup<'a> {
+    /// The unit `EntityId` a DCS object ID is bound to.
+    pub unit: &'a dyn Fn(u64) -> Option<u64>,
+    /// Who is in which object, and who is connected.
+    pub roster: Option<&'a Roster>,
+}
+
+/// The API's player event for what the roster saw.
+pub fn player_body(n: Note) -> event::Body {
+    let (kind, key, name, side, unit, seat, text, from) = match n {
+        Note::Connect { key, name, side } => (
+            PlayerEventKind::Connect,
+            key,
+            name,
+            side,
+            None,
+            None,
+            None,
+            None,
+        ),
+        Note::Disconnect { key, name, side } => (
+            PlayerEventKind::Disconnect,
+            key,
+            name,
+            side,
+            None,
+            None,
+            None,
+            None,
+        ),
+        Note::Enter {
+            key,
+            name,
+            side,
+            unit,
+            seat,
+        } => (
+            PlayerEventKind::EnterUnit,
+            key,
+            name,
+            side,
+            Some(unit).filter(|u| *u != 0),
+            Some(seat),
+            None,
+            None,
+        ),
+        Note::Leave {
+            key,
+            name,
+            side,
+            unit,
+            seat,
+        } => (
+            PlayerEventKind::LeaveUnit,
+            key,
+            name,
+            side,
+            Some(unit).filter(|u| *u != 0),
+            Some(seat),
+            None,
+            None,
+        ),
+        Note::Chat {
+            key,
+            name,
+            side,
+            text,
+        } => (
+            PlayerEventKind::Chat,
+            key,
+            name,
+            side,
+            None,
+            None,
+            Some(text),
+            None,
+        ),
+        Note::Rename {
+            key,
+            name,
+            side,
+            from,
+        } => (
+            PlayerEventKind::Rename,
+            key,
+            name,
+            side,
+            None,
+            None,
+            None,
+            Some(from),
+        ),
+    };
+    // A rename carries the name before it in `text`.
+    event::Body::Player(PlayerEvent {
+        kind: kind as i32,
+        player_key: key,
+        name,
+        unit_id: unit,
+        seat,
+        text: text.or(from),
+        coalition: crate::convert::coalition_of_dcs(side) as i32,
+    })
 }
 
 /// An event read from the agent, before it is put in a log.
@@ -175,8 +286,40 @@ impl Link {
         }
     }
 
-    /// Fold one record in. Returns the event it carries, if any.
+    /// Fold one record in. Returns the event it carries, if any. An
+    /// `AUTHOR_EVENT` names no entity.
     pub fn read(&mut self, r: &RawRecord) -> Option<Read> {
+        self.read_with(
+            r,
+            &Lookup {
+                unit: &|_| None,
+                roster: None,
+            },
+        )
+    }
+
+    /// Fold one record in, with `entity` giving the unit a DCS object ID is
+    /// bound to. An `AUTHOR_EVENT` names the units whose objects it has.
+    pub fn read_bound(
+        &mut self,
+        r: &RawRecord,
+        entity: &dyn Fn(u64) -> Option<u64>,
+    ) -> Option<Read> {
+        self.read_with(
+            r,
+            &Lookup {
+                unit: entity,
+                roster: None,
+            },
+        )
+    }
+
+    /// Fold one record in, with what the server knows of the objects and
+    /// the players in them. An `EVENT` names the players in its initiator
+    /// and target, an `AUTHOR_EVENT` the players in its objects, a `MENU`
+    /// the players who could have chosen the item.
+    pub fn read_with(&mut self, r: &RawRecord, look: &Lookup<'_>) -> Option<Read> {
+        let entity = look.unit;
         self.last_record = Some(SystemTime::now());
         let input = Input::decode(r.kind, &r.payload).ok()?;
         match input {
@@ -195,6 +338,9 @@ impl Link {
                 if h.agent_boot != self.agent_boot {
                     // A new DCS process: its first lifecycle is news.
                     self.emitted = None;
+                }
+                if h.agent_boot != self.agent_boot {
+                    self.extensions.clear();
                 }
                 self.attached = true;
                 self.agent_boot = h.agent_boot;
@@ -244,8 +390,58 @@ impl Link {
             Input::Event(e) => Some(Read {
                 campaign: self.frame_campaign,
                 stamp: self.stamp(),
-                body: event::Body::World(self.world_event(&e)),
+                body: event::Body::World(self.world_event(&e, look)),
             }),
+            Input::AuthorEvent(a) => {
+                let mut player_keys: Vec<String> = Vec::new();
+                if let Some(roster) = look.roster {
+                    for o in &a.objects {
+                        for k in roster.players_of(*o) {
+                            if !player_keys.contains(&k) {
+                                player_keys.push(k);
+                            }
+                        }
+                    }
+                }
+                Some(Read {
+                    campaign: self.frame_campaign,
+                    stamp: self.stamp(),
+                    body: event::Body::Author(AuthorEvent {
+                        name: a.name,
+                        payload: Some(from_lua(&a.payload)),
+                        player_keys,
+                        entity_ids: a.objects.iter().filter_map(|o| entity(*o)).collect(),
+                    }),
+                })
+            }
+            Input::Menu(m) => {
+                let (attribution, player_keys) = match look.roster {
+                    Some(roster) if m.player != 0 => match roster.selector(&m) {
+                        Some(k) => (MenuAttribution::Selector, vec![k]),
+                        // DCS named a connection the server has no player on:
+                        // no one is named.
+                        None => (MenuAttribution::Selector, Vec::new()),
+                    },
+                    Some(roster) => (MenuAttribution::Audience, roster.candidates(&m)),
+                    None if m.player != 0 => (MenuAttribution::Selector, Vec::new()),
+                    None => (MenuAttribution::Audience, Vec::new()),
+                };
+                Some(Read {
+                    campaign: self.frame_campaign,
+                    stamp: self.stamp(),
+                    body: event::Body::Menu(MenuEvent {
+                        item_id: m.entity,
+                        player_keys,
+                        attribution: attribution as i32,
+                    }),
+                })
+            }
+            Input::Extension(e) => {
+                self.extensions.insert(e.name.clone(), e);
+                None
+            }
+            // A player record becomes player events through the roster
+            // (`player_body`).
             _ => None,
         }
     }
@@ -254,6 +450,8 @@ impl Link {
 /// `event_field` codes (spec/records.md, "Codes: event_field").
 mod field {
     pub const TIME: u64 = 1;
+    pub const INITIATOR: u64 = 2;
+    pub const TARGET: u64 = 3;
     pub const WEAPON_NAME: u64 = 5;
     pub const SUBPLACE: u64 = 7;
     pub const TEXT: u64 = 8;
@@ -265,10 +463,13 @@ mod field {
     pub const ROUNDS: u64 = 16;
     pub const INITIATOR_CATEGORY: u64 = 17;
     pub const TARGET_CATEGORY: u64 = 18;
+    pub const INITIATOR_TYPE: u64 = 19;
+    pub const TARGET_TYPE: u64 = 20;
 }
 
 /// Fields shown in `WorldEvent.extra`, by name. The others hold DCS object
-/// IDs, which the API never shows; resolving them to entities is step S16's.
+/// IDs, which the API never shows: the initiator and target become entities
+/// and player keys.
 const EXTRA: [(u64, &str); 6] = [
     (field::TIME, "time"),
     (field::SUBPLACE, "subplace"),
@@ -281,7 +482,10 @@ const EXTRA: [(u64, &str); 6] = [
 impl Link {
     /// The API's world event for an `EVENT` record. Every field is optional:
     /// a value of the wrong type is left out.
-    fn world_event(&self, e: &records::Event) -> WorldEvent {
+    fn world_event(&self, e: &records::Event, look: &Lookup<'_>) -> WorldEvent {
+        let object = |code: u64| e.number(code).filter(|n| *n >= 0.0).map(|n| n as u64);
+        let (initiator, target) = (object(field::INITIATOR), object(field::TARGET));
+        let attr = look.roster.map(|r| r.attribute(e)).unwrap_or_default();
         let position = match (
             e.number(field::POS_X),
             e.number(field::POS_Y),
@@ -303,6 +507,21 @@ impl Link {
             .collect();
         WorldEvent {
             dcs_id: e.id,
+            initiator_id: initiator
+                .and_then(|o| (look.unit)(o))
+                .or(attr.initiator_entity),
+            target_id: target.and_then(|o| (look.unit)(o)).or(attr.target_entity),
+            initiator_players: attr.initiator_players,
+            target_players: attr.target_players,
+            initiator_type: e.text(field::INITIATOR_TYPE).or(attr.initiator_type),
+            target_type: e.text(field::TARGET_TYPE).or(attr.target_type),
+            dated_time: attr.dated_time,
+            launch_players: attr.launch_players,
+            launch_rule: match attr.launch_rule {
+                Some(LaunchRule::Weapon) => pb::LaunchRule::Weapon as i32,
+                Some(LaunchRule::Initiator) => pb::LaunchRule::Initiator as i32,
+                None => pb::LaunchRule::Unspecified as i32,
+            },
             weapon: e.text(field::WEAPON_NAME),
             position,
             text: e.text(field::TEXT),
@@ -355,6 +574,9 @@ pub fn passes(e: &Event, dcs_ids: &[u32], player_key: &str) -> bool {
                 && (player_key.is_empty() || a.player_keys.iter().any(|k| k == player_key))
         }
         Some(event::Body::Route(_)) => dcs_ids.is_empty() && player_key.is_empty(),
+        Some(event::Body::Moderation(m)) => {
+            dcs_ids.is_empty() && (player_key.is_empty() || m.player_key == player_key)
+        }
         Some(event::Body::Menu(m)) => {
             dcs_ids.is_empty()
                 && (player_key.is_empty() || m.player_keys.iter().any(|k| k == player_key))

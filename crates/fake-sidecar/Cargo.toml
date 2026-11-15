@@ -33,6 +33,7 @@ tower = "0.5.3"
 [dev-dependencies]
 nanoprobe-cli = { path = "../cli" }
 nanoprobe-hello = { path = "../../examples/hello-rust" }
+nanoprobe-transport = { path = "../transport" }
 prost = "0.14.6"
 prost-types = "0.14.6"
 tonic-reflection = "0.14.9"

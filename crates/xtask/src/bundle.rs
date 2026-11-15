@@ -77,8 +77,9 @@ fn ipv6(text: &str, mut replace: impl FnMut(&str) -> String) -> String {
     out
 }
 
-/// A DCS player UCID: 32 lower-case hex digits.
-static UCID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b[0-9a-f]{32}\b").unwrap());
+/// A DCS player UCID, or a player key (spec/world.md, "Players"): 32 hex
+/// digits, in either case.
+static UCID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b[0-9a-fA-F]{32}\b").unwrap());
 
 /// Replaces sensitive values with keyed hashes.
 pub struct Redactor {
@@ -424,6 +425,62 @@ mod tests {
                 .contains("redacted  5 player names, 1 UCIDs, 2 IP addresses"),
             "{}",
             files[0].1
+        );
+    }
+
+    #[test]
+    fn any_32_hex_digit_token_is_redacted_and_the_keyring_file_is_never_collected() {
+        let dir = std::env::temp_dir().join(format!("nanoprobe-keyring-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ucid = "fedcba9876543210FEDCBA9876543210";
+        let lower = "00112233445566778899aabbccddeeff";
+        let write = |path: &str, text: &str| {
+            let path = dir.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write(
+            "nanoprobe/logs/sidecar.log",
+            &format!("pairs {{\"{lower}\":\"{ucid}\"}} but not {lower}0 or 0{lower}\n"),
+        );
+        // The keyring file sits in the store directory, which no collected
+        // path names; wherever it is placed in the profile it stays out.
+        let secret = "KEYRING-SECRET-PLANTED";
+        for place in [
+            "players.json",
+            "nanoprobe/players.json",
+            "campaigns/players.json",
+        ] {
+            write(
+                place,
+                &format!("{{\"secret\":\"{secret}\",\"players\":{{\"{lower}\":\"{ucid}\"}}}}"),
+            );
+        }
+        write(
+            "Logs/dcs.log",
+            "2026 INFO NANOPROBE (Main): session 1 build x\n",
+        );
+        let bytes = build(
+            &Local::new(&dir).unwrap(),
+            &Facts::default(),
+            KEY,
+            Vec::new(),
+        )
+        .unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let files = unzip(&bytes);
+        let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["BUNDLE.txt", "logs/sidecar.log", "dcs.log"]);
+        for (name, text) in &files {
+            assert!(!text.contains(secret), "{name}");
+            assert!(!text.contains(ucid), "{name}: {text}");
+        }
+        let log = &files[1].1;
+        assert_eq!(log.matches("ucid-").count(), 2, "{log}");
+        // A longer or shorter run of hex digits is no ucid.
+        assert!(
+            log.contains(&format!("{lower}0")) && log.contains(&format!("0{lower}")),
+            "{log}"
         );
     }
 
