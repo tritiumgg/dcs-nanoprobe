@@ -300,6 +300,7 @@ with `SEQUENCE_EXPIRED` (spec/errors.md).
 | `player` | `key TEXT PRIMARY KEY`, `ucid TEXT`, `body BLOB` | One per player key the server has given |
 | `idempotency` | `key TEXT PRIMARY KEY`, `at_ms INTEGER`, `campaign INTEGER`, `request_hash BLOB`, `response BLOB` | One per changing call answered: for a call on no campaign, the whole answer; for a call on a campaign, the index (`campaign` set, `request_hash` and `response` null) |
 | `extension` | `name TEXT PRIMARY KEY`, `body BLOB` | Server-scoped extension data, by name |
+| `deleted_campaign` | `id INTEGER PRIMARY KEY`, `at_ms INTEGER` | One per campaign deleted through the API, so its tag is never given again (spec/world.md, "Names") |
 
 The command epoch is written before any command of the new epoch reaches DCS. It
 grows across a campaign switch and a sidecar restart.

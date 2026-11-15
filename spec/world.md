@@ -97,8 +97,11 @@ Known limits:
 
 - A tag can equal the tag of a campaign the stores have never held, for example one from
   another server or from lost stores, with probability 1 in 238,328 per pair.
-- The check at creation covers only the campaigns the stores hold. A deleted campaign's
-  tag can be given to a new campaign.
+- The check at creation covers the campaigns the stores know: every campaign folder,
+  readable or not, and the campaign IDs the server store keeps (deleted campaigns and
+  its idempotency index; spec/persistence.md, "The server store"). A campaign folder
+  removed by hand, or lost with the server store, leaves no trace, and its tag can be
+  given to a new campaign.
 
 In both cases the other campaign's objects, in a mission DCS still runs or one saved
 with them, read as the active campaign's.

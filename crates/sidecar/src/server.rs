@@ -31,6 +31,7 @@ CREATE TABLE player_secret (id INTEGER PRIMARY KEY, secret BLOB NOT NULL);
 CREATE TABLE player (key TEXT PRIMARY KEY, ucid TEXT NOT NULL, body BLOB NOT NULL);
 CREATE TABLE idempotency (key TEXT PRIMARY KEY, at_ms INTEGER NOT NULL, campaign INTEGER, request_hash BLOB, response BLOB);
 CREATE TABLE extension (name TEXT PRIMARY KEY, body BLOB NOT NULL);
+CREATE TABLE deleted_campaign (id INTEGER PRIMARY KEY, at_ms INTEGER NOT NULL);
 ";
 
 /// One migration step of the server store, as a campaign store's.
@@ -414,6 +415,33 @@ impl ServerStore {
         )?)
     }
 
+    /// Keep a deleted campaign's ID, so its tag is never given to a new
+    /// campaign (spec/world.md, "Names").
+    pub fn campaign_deleted(&self, id: u64, at_ms: u64) -> Result<(), DiskError> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO deleted_campaign (id, at_ms) VALUES (?1, ?2)",
+            params![id as i64, at_ms as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Every campaign ID the server store knows besides the folders: the
+    /// deleted ones and those its idempotency index names.
+    pub fn known_campaigns(&self) -> Result<Vec<u64>, DiskError> {
+        let mut st = self.conn.prepare(
+            "SELECT id FROM deleted_campaign \
+             UNION SELECT campaign FROM idempotency WHERE campaign IS NOT NULL",
+        )?;
+        let rows = st.query_map([], |r| r.get::<_, i64>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            if let Ok(id) = u64::try_from(r?) {
+                out.push(id);
+            }
+        }
+        Ok(out)
+    }
+
     /// Server-scoped extension data by name.
     pub fn extension(&self, name: &str) -> Result<Option<Vec<u8>>, DiskError> {
         Ok(self
@@ -497,6 +525,10 @@ mod tests {
             s.idempotency("b").expect("b").and_then(|i| i.campaign),
             Some(42)
         );
+        s.campaign_deleted(99, 1).expect("tombstone");
+        let mut known = s.known_campaigns().expect("known");
+        known.sort_unstable();
+        assert_eq!(known, vec![42, 99]);
         assert_eq!(s.prune_idempotency(6).expect("prune"), 2);
         assert_eq!(s.idempotency("a").expect("a"), None);
     }

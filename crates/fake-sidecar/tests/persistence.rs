@@ -495,7 +495,7 @@ async fn compaction_at_open_keeps_the_newest_event_and_ids_skip_unreadable_folde
     server.stop().await.expect("stop");
 
     // A folder that cannot be read, numbered past any time this test sees.
-    let far = CampaignId(u64::MAX / 4);
+    let far = CampaignId(nanoprobe_sidecar::ids::MAX_ID - 1_000);
     std::fs::create_dir_all(d.path().join(far.0.to_string())).expect("dir");
     std::fs::write(store_path(d.path(), far.0), b"not a database").expect("garbage");
 

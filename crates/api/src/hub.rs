@@ -1089,18 +1089,29 @@ impl Inner {
         }
     }
 
-    /// A new campaign's ID (spec/world.md, "Identities"): the wall clock in
-    /// milliseconds, or one more than the newest campaign, counting folders
-    /// that could not be read.
+    /// A new campaign's ID (spec/world.md, "Identities" and "Names"): the
+    /// wall clock in milliseconds, or one more than the newest campaign,
+    /// moved forward until its tag is free. Every campaign the stores know
+    /// counts: those listed, finished ones included, folders that could not
+    /// be read, and the deleted ones and the index entries of the server
+    /// store.
     pub fn new_campaign_id(&self) -> u64 {
-        let newest = self
+        let mut existing: Vec<CampaignId> = self
             .campaigns
             .keys()
             .copied()
             .chain(self.unreadable.iter().map(|(id, _)| *id))
-            .max()
-            .unwrap_or(0);
-        wall_ms().max(newest + 1)
+            // A folder named past the largest ID is no campaign.
+            .filter(|id| *id <= nanoprobe_sidecar::ids::MAX_ID)
+            .map(CampaignId)
+            .collect();
+        if let Some(server) = self.server.as_ref() {
+            match server.known_campaigns() {
+                Ok(ids) => existing.extend(ids.into_iter().map(CampaignId)),
+                Err(e) => panic!("the server store could not be read, stopping: {e}"),
+            }
+        }
+        nanoprobe_sidecar::ids::new_campaign(wall_ms(), &existing).0
     }
 
     /// Add a campaign, suspended, to be loaded on `theater`. With the
