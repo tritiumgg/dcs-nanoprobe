@@ -3,6 +3,7 @@
 #[cfg(feature = "disk")]
 pub mod campaigns;
 pub mod conformance;
+#[cfg(feature = "disk")]
 pub mod eventfile;
 pub mod grid;
 pub mod ids;
@@ -13,6 +14,7 @@ pub mod mirror;
 pub mod players;
 pub mod reconciler;
 pub mod replay;
+#[cfg(feature = "disk")]
 pub mod server;
 pub mod sim;
 pub mod stock;

@@ -21,7 +21,7 @@ use nanoprobe_transport::records::Rates;
 use super::{
     Authority, CapturedMore, DesiredOwner, DesiredStock, Entry, Extension, Group, IdemRow,
     Journalled, Kind, LeftAs, Loaded, LostPolicy, Outcome, Point, RouteEvent, Store, Unit,
-    UnitState,
+    UnitState, check_lv,
 };
 use crate::ids::{CampaignId, EntityId};
 use crate::intents::{Intent, Waypoint};
@@ -1244,37 +1244,6 @@ fn get_meta(conn: &Connection, key: &str) -> Result<Lv, DiskError> {
 }
 
 // ---- lv helpers ----
-
-/// Whether `v` encodes whole: no table nested deeper than the codec's
-/// [`MAX_DEPTH`](nanoprobe_transport::codec::MAX_DEPTH) and none with more
-/// pairs than [`MAX_PAIRS`](nanoprobe_transport::codec::MAX_PAIRS). The
-/// transport writer writes nil past either; the store refuses instead
-/// (spec/persistence.md, "Encodings").
-pub fn check_lv(v: &Lv) -> Result<(), String> {
-    fn at(v: &Lv, depth: usize) -> Result<(), String> {
-        let Lv::Table(pairs) = v else {
-            return Ok(());
-        };
-        if depth >= nanoprobe_transport::codec::MAX_DEPTH {
-            return Err(format!(
-                "a table nested deeper than {} levels",
-                nanoprobe_transport::codec::MAX_DEPTH
-            ));
-        }
-        if pairs.len() > nanoprobe_transport::codec::MAX_PAIRS as usize {
-            return Err(format!(
-                "a table of more than {} pairs",
-                nanoprobe_transport::codec::MAX_PAIRS
-            ));
-        }
-        for (k, v) in pairs {
-            at(k, depth + 1)?;
-            at(v, depth + 1)?;
-        }
-        Ok(())
-    }
-    at(v, 0)
-}
 
 thread_local! {
     /// Why a value encoded since the last [`take_overflow`] did not encode

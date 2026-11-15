@@ -23,7 +23,7 @@ mod disk;
 #[cfg(feature = "disk")]
 pub use disk::{
     CampaignRecord, CampaignState, Checkpoint, DiskError, MIGRATIONS, Migration, REVISION_RESERVE,
-    SCHEMA, TierPeriod, backup_file, check_lv, checkpoint_of, idempotency_of, ident_of, journal_of,
+    SCHEMA, TierPeriod, backup_file, checkpoint_of, idempotency_of, ident_of, journal_of,
     record_of, revision_of, schema_of, state_of,
 };
 
@@ -38,7 +38,43 @@ mod disk {
     impl super::Store {
         /// Never called: the slot is always empty.
         pub(super) fn commit_or_stop(&mut self) {}
+
+        /// Nothing to write: the store is in memory.
+        pub fn commit(&mut self) -> Result<(), std::convert::Infallible> {
+            Ok(())
+        }
     }
+}
+
+/// Whether `v` encodes whole: no table nested deeper than the codec's
+/// [`MAX_DEPTH`](nanoprobe_transport::codec::MAX_DEPTH) and none with more
+/// pairs than [`MAX_PAIRS`](nanoprobe_transport::codec::MAX_PAIRS). The
+/// transport writer writes nil past either; the store refuses instead
+/// (spec/persistence.md, "Encodings").
+pub fn check_lv(v: &Lv) -> Result<(), String> {
+    fn at(v: &Lv, depth: usize) -> Result<(), String> {
+        let Lv::Table(pairs) = v else {
+            return Ok(());
+        };
+        if depth >= nanoprobe_transport::codec::MAX_DEPTH {
+            return Err(format!(
+                "a table nested deeper than {} levels",
+                nanoprobe_transport::codec::MAX_DEPTH
+            ));
+        }
+        if pairs.len() > nanoprobe_transport::codec::MAX_PAIRS as usize {
+            return Err(format!(
+                "a table of more than {} pairs",
+                nanoprobe_transport::codec::MAX_PAIRS
+            ));
+        }
+        for (k, v) in pairs {
+            at(k, depth + 1)?;
+            at(v, depth + 1)?;
+        }
+        Ok(())
+    }
+    at(v, 0)
 }
 
 mod markers;
