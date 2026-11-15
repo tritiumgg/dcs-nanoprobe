@@ -468,11 +468,15 @@ function M.pump()
     M.forced = M.forced + 1
   end
   if gen ~= nil and sample then
-    -- A sampling pump with nothing to read, as the shim's own: the gate closes
-    -- and later frames are forced for the waiting command.
-    agent.checks({})
-    while agent.plan({}, {}) do
-    end
+    -- A sampling pump that plans nothing and spends past the slice: its time
+    -- is the row tiers' debt, so the gate closes and later frames are forced
+    -- for the waiting command. A pump that plans the enumeration and reads
+    -- none of it never ends it, and the births' and the enumeration's
+    -- balance pays such a pump whole (spec/sampling.md, "Tiers"): with no row
+    -- owed, the gate then stays open and no frame is forced.
+    local start = os.clock()
+    repeat
+    until os.clock() - start >= 0.002
   end
   agent.pump_end()
 end
