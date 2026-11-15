@@ -411,7 +411,7 @@ impl Inner {
                     push_once(
                         &mut slot.events,
                         id,
-                        stamp.clone(),
+                        stamp,
                         route_body(&e),
                         Some(source),
                     );
