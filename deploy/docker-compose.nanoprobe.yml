@@ -1,0 +1,60 @@
+# An example compose overlay that adds the sidecar beside a DCS server that runs
+# under Wine in a container. Apply it over your own compose file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.nanoprobe.yml up -d
+#
+# Replace every placeholder in angle brackets before you use it. Rename the
+# service `dcs-server` to the name of the DCS service in your compose file.
+#
+# The sidecar shares the DCS container's network namespace, so the agent's
+# loopback handshake reaches it, and one small memory-backed volume, which holds
+# the mapped file both open (spec/transport.md).
+# Set the agent's `map_path` in `<profile>/nanoprobe/agent.toml` to
+# `Z:\nanoprobe-shm\nanoprobe.map` and restart DCS once.
+
+services:
+  dcs-server:
+    volumes:
+      - nanoprobe-shm:/nanoprobe-shm
+    # The sidecar's API, for a controller outside the DCS container, with a
+    # listener off loopback and a tokens file in sidecar.toml:
+    # ports:
+    #   - "<host address>:47311:47311"
+
+  nanoprobe-sidecar:
+    image: nanoprobe-sidecar:<version>
+    # The user and group that run DCS in its container, so the sidecar can
+    # open the mapped file the agent makes.
+    user: "<dcs uid>:<dcs gid>"
+    network_mode: "service:dcs-server"
+    depends_on:
+      - dcs-server
+    # When the DCS container restarts, the sidecar exits once the new agent
+    # does not answer (`handshake_timeout_s`), and the restart policy starts it
+    # in the restarted container's namespace. When the DCS container is created
+    # again, run `docker compose up -d` so the sidecar is created again with it.
+    # Both UNVERIFIED.
+    restart: unless-stopped
+    volumes:
+      - nanoprobe-shm:/nanoprobe-shm
+      - ./nanoprobe/sidecar.toml:/etc/nanoprobe/sidecar.toml:ro
+      # The agent's token, from the DCS profile's nanoprobe folder on the host.
+      - "<host path of the DCS profile>/nanoprobe/token:/etc/nanoprobe/agent-token:ro"
+      # The mission folder, `<theater>.miz` for each theater.
+      - "<host path of the DCS profile>/nanoprobe/missions:/missions:ro"
+      # The campaign stores: a folder on the host owned by the DCS user.
+      - ./nanoprobe/data:/var/lib/nanoprobe
+      # For a listener off loopback: the tokens file sidecar.toml names.
+      # - ./nanoprobe/tokens.toml:/etc/nanoprobe/tokens.toml:ro
+    # With a tokens file, the health check needs a token of the observer role
+    # or higher:
+    # environment:
+    #   NANOPROBE_TOKEN: "<observer token>"
+
+volumes:
+  # Memory-backed, owned by the DCS user. 16 MiB holds the default rings.
+  nanoprobe-shm:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=16m,mode=0700,uid=<dcs uid>,gid=<dcs gid>"

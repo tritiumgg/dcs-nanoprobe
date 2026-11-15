@@ -106,6 +106,10 @@ pub struct Config {
     pub event_queue: usize,
     /// Frames a mission load takes.
     pub load_frames: u32,
+    /// Frames between a `MISSION_LOAD`'s `APPLIED` and the start of its
+    /// load, in which the mission before runs on: `net.load_mission` loads
+    /// at a later frame, not inside the call.
+    pub load_delay_frames: u32,
     /// Meters a unit on a route moves per frame.
     pub step_m: f64,
     /// The first agent boot; each restart adds one.
@@ -137,6 +141,7 @@ impl Default for Config {
             positions_every: 5,
             event_queue: 64,
             load_frames: 3,
+            load_delay_frames: 0,
             step_m: 100.0,
             first_boot: 0x1000,
             death_delay_max: 0.0,
@@ -377,6 +382,8 @@ struct Run {
 /// One DCS process with the agent in it.
 #[derive(Debug)]
 pub struct FakeSim {
+    /// Frames until a `MISSION_LOAD` already answered starts its load.
+    load_after: Option<u32>,
     cfg: Config,
     ledger: Ledger,
     // The process.
@@ -513,6 +520,7 @@ impl FakeSim {
         let boot = cfg.first_boot;
         let cfg_seed = cfg.death_seed;
         let mut f = FakeSim {
+            load_after: None,
             cfg,
             ledger: Ledger::default(),
             alive: true,
@@ -2045,6 +2053,14 @@ impl FakeSim {
         if !self.alive {
             return;
         }
+        if let Some(n) = self.load_after {
+            if n == 0 {
+                self.load_after = None;
+                self.load_mission();
+            } else {
+                self.load_after = Some(n - 1);
+            }
+        }
         if self.lifecycle == lc::LOADING as u32 {
             self.loading -= 1;
             if self.loading > 0 {
@@ -2412,8 +2428,12 @@ impl FakeSim {
                 self.ledger.mission_loads.push(path.clone());
                 self.result(&cmd, rc::APPLIED, 0, "", Lv::Nil);
                 // The result is queued, then DCS loads: the fake loads its
-                // one mission.
-                self.load_mission();
+                // one mission, now or after `load_delay_frames`.
+                if self.cfg.load_delay_frames == 0 {
+                    self.load_mission();
+                } else {
+                    self.load_after = Some(self.cfg.load_delay_frames);
+                }
                 return;
             }
             _ => {}

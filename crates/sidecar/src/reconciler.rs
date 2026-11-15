@@ -312,6 +312,10 @@ pub struct Reconciler {
     countries_held: bool,
     /// Results of effects and queries, by (epoch, seq), for the API.
     effects: BTreeMap<(u64, u64), EffectResult>,
+    /// Spawn nothing: an activation's mission load is owed or the mission it
+    /// loads has not been recorded yet (spec/persistence.md, "Campaign
+    /// operations").
+    hold: bool,
     /// The restore burst is on (spec/persistence.md, "Restore burst").
     burst: bool,
     /// `CAMPAIGN` was written since the last `HELLO`.
@@ -398,6 +402,7 @@ impl Reconciler {
             adopted: adopt::Adopted::default(),
             countries_held: false,
             effects: BTreeMap::new(),
+            hold: false,
             campaign_sent: false,
             burst: false,
             enumerated: false,
@@ -1715,10 +1720,13 @@ impl Reconciler {
                 *e = row.dcs_group;
             }
         }
-        if !self.restore_burst(store, sim, &loaded) {
+        // A hold stops spawning only: the rest of the plan goes on.
+        if !self.hold && !self.restore_burst(store, sim, &loaded) {
             return;
         }
-        let mut spawns = if self.burst {
+        let mut spawns = if self.hold {
+            0
+        } else if self.burst {
             usize::MAX
         } else {
             self.cfg.materialize_per_frame
@@ -2262,6 +2270,13 @@ impl Reconciler {
     /// the campaign announced. No mission needs to run.
     pub(crate) fn server_ready(&self) -> bool {
         self.attached && self.epoch != 0 && self.campaign_sent
+    }
+
+    /// Hold materializing, or let it go on: while an activation's mission
+    /// load is owed, and until its generation runs, no group of the campaign
+    /// materializes.
+    pub fn hold_world(&mut self, on: bool) {
+        self.hold = on;
     }
 
     /// Add to or take from a warehouse's stock: a `WAREHOUSE_ADJUST`, an

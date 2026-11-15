@@ -74,6 +74,7 @@ Every failed call returns a gRPC status whose details hold one `ErrorDetail`: a
 | `FAILED_PRECONDITION` | `LEASE_HELD` | Another controller holds the lease |
 | `FAILED_PRECONDITION` | `RAW_LUA_OFF` | The call needs raw Lua, which the agent has off |
 | `FAILED_PRECONDITION` | `THEATER_NOT_LOADED` | The entity's theater is not the loaded one |
+| `FAILED_PRECONDITION` | none (`UNSPECIFIED`), `field` `theater` | An activation, or a `CreateCampaign` that activates, whose theater has no mission file (spec/config.md, `[missions]`). Nothing is created, suspended, opened or sent |
 | `FAILED_PRECONDITION` | `UNMANAGED_ENTITY` | The call changes a spec or order of an unmanaged entity |
 | `FAILED_PRECONDITION` | `CONFIRMATION_REQUIRED` | A delete without its confirmation field |
 | `ABORTED` | `LEASE_LOST` | The caller's lease epoch is not the current one |

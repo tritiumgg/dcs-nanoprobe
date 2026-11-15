@@ -14,7 +14,7 @@ async fn main() -> ExitCode {
         .or_else(|| std::env::var("NANOPROBE_ADDR").ok())
         .unwrap_or_else(|| "http://127.0.0.1:47311".to_owned());
     let token = std::env::var("NANOPROBE_TOKEN").ok();
-    match nanoprobe_hello::run(&endpoint, token.as_deref(), Duration::from_secs(120)).await {
+    match nanoprobe_hello::run(&endpoint, token.as_deref(), Duration::from_secs(300)).await {
         Ok(s) => {
             println!(
                 "hello campaign done: campaign {} group {} revision {} events {}",

@@ -88,7 +88,7 @@ registration of the name after a reopen gets a revision above it.
 | `schema` | The schema version, a number. 1 is this document. |
 | `campaign_id` | The campaign ID. It must equal the folder's name. |
 | `campaign` | The campaign record: ID, name, state (`active`, `suspended`, `finished`), theaters, the theater to load, clock, created time, the author's component schema versions, and the outcome of a finished campaign. Its `state` key keeps its layout in every schema version, so the state is read before a migration. The platform schema version is `schema`. |
-| `world` | The next `EntityId`, the store revision, whether the store is open, the loaded mission (agent boot, mission generation, theater), the last agent record folded in (agent boot and record number) with the stamp it was read under (agent boot, mission generation, campaign), which records delivered again before their next `FRAME` keep, the desired airbase owners and warehouse stocks with their revisions, the sample rates the controller set, the agent's country-to-coalition map, the model time of the last samples, and the route events not yet published. |
+| `world` | The next `EntityId`, the store revision, whether the store is open, the loaded mission (agent boot, mission generation, theater), the last agent record folded in (agent boot and record number) with the stamp it was read under (agent boot, mission generation, campaign), which records delivered again before their next `FRAME` keep, the desired airbase owners and warehouse stocks with their revisions, the sample rates the controller set, the mission load an activation owes (the file as DCS opens it, and the command's epoch and sequence number once sent; absent when none is owed), the agent's country-to-coalition map, the model time of the last samples, and the route events not yet published. |
 
 An entity body carries every field of its row in spec/world.md: for a group or static
 its spec, order and revisions, lifecycle state, authority, lost policy, error, and the
@@ -153,6 +153,7 @@ What each failure loses:
 | Positions, fuel, life, ammunition, warehouse stock | every `checkpoint_s` | up to `checkpoint_s` | up to `checkpoint_s`; read again from the agent |
 | Events | at the end of the step that makes them, before they are published | nothing published | nothing published |
 | Effects | journalled as sent | may or may not have applied; never sent again | never sent again |
+| Owed mission load | in the activation's commit; cleared in the commit that journals its outcome | nothing | sent again at start if it never reached DCS |
 
 ### A crash between the two commits
 
@@ -353,9 +354,9 @@ What each operation of the Campaign service does to the files:
 
 | Operation | Files |
 |---|---|
-| Create | A new folder with its store (the campaign record, state `suspended`, or `active` when the call activates it, and an empty world) and its events file. |
-| Activate | A finished campaign is refused (`FAILED_PRECONDITION`) before anything is opened or migrated. The active campaign, if any, is suspended first. Then the target's store is opened (and migrated), its state set to `active`, and its mission loaded. If the open fails, no campaign is active. Exactly one campaign is active per DCS instance. |
-| Suspend | The driver captures every group and static DCS holds (`CAPTURE`) and waits up to `result_wait_s` for the results, which the store takes as they arrive. Then it tells the agent there is no active campaign (`CAMPAIGN` 0), takes a final checkpoint, sets the state to `suspended`, and closes the store cleanly. DCS keeps running whatever it has, unmanaged. A repeat of the call under its answered key captures nothing. |
+| Create | A new folder with its store (the campaign record, state `suspended`, or `active` when the call activates it, and an empty world) and its events file. A call that activates a campaign whose theater has no mission file is refused before the folder is made. |
+| Activate | A finished campaign is refused (`FAILED_PRECONDITION`) before anything is opened or migrated. So is a theater with no mission file (spec/config.md, `[missions]`), before anything is suspended, opened or sent: the active campaign stays active. The active campaign, if any, is suspended first. Then the target's store is opened (and migrated), its state set to `active`, and its mission loaded: the load is owed in `meta.world` from the activation's commit, before the call answers, and the `MISSION_LOAD` is sent once the agent is attached and knows the campaign. The commit that folds in its result clears it: `APPLIED` clears it; `NOT_SENT` keeps it owed and it is sent again; any other outcome is logged and clears it. If the open fails, no campaign is active. Exactly one campaign is active per DCS instance. |
+| Suspend | The driver captures every group and static DCS holds (`CAPTURE`) and waits up to `result_wait_s` for the results, which the store takes as they arrive. Then it tells the agent there is no active campaign (`CAMPAIGN` 0), takes a final checkpoint, sets the state to `suspended`, clears an owed mission load, and closes the store cleanly. DCS keeps running whatever it has, unmanaged. A repeat of the call under its answered key captures nothing. |
 | Finish | As suspend, with state `finished` and the outcome record. A finished store is read-only: it is never activated or migrated again, only read. |
 | Backup | A backup with reason `manual` (`BackupCampaign`). `ListCampaignBackups` reads the folder without opening the store. |
 | Delete | The folder is removed. Never automatic. |
@@ -370,7 +371,14 @@ reads each campaign's record and checkpoint without opening its store, and opens
 events file, applying the retention. A folder whose store or events file cannot be read
 is skipped; its ID is never given to a new campaign. A campaign whose record is
 `active` was active when the sidecar stopped: its store is opened and it is the active
-campaign again, without a mission load. More than one such campaign stops the start.
+campaign again. If its `meta.world` owes a mission load that was never sent (no command
+named), it is sent once the agent is ready. If the owed load names its command and that
+command is in `inflight`, the sidecar waits for its result and never sends it twice. If
+the command is not in `inflight`, the load is logged and cleared. A clean stop keeps an
+owed load. With no owed load there is no mission load. While a load
+is owed, and after its `APPLIED` until the store records a mission other than the one
+the load was sent in, no group of the campaign is spawned (the rest of the reconciler's work goes on), so a campaign never spawns into the mission before
+its own. More than one such campaign stops the start.
 
 A store is opened when a call first names its campaign, to read or to change it, and
 when it is activated. It stays open until the campaign is suspended or finished. Every

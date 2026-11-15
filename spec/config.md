@@ -103,6 +103,10 @@ destroy_retries = 3         # refused or unknown destroys of one entity before t
 [log]
 dir = "logs"
 level = "info"
+
+[missions]
+dir = ""                    # the mission folder as the sidecar opens it
+dcs_dir = ""                # the same folder as DCS opens it
 ```
 
 | Key | Rule |
@@ -115,6 +119,7 @@ level = "info"
 | `[health]` | Limits, not expectations (spec/errors.md, "Health"). A mission load has no fixed duration; `loading_limit_s` is only when to call a silent DCS hung. |
 | `on_lost` | An author may override it per group through the API. |
 | `destroy_retries` | At least 1. A dematerializing entity whose destroy is refused or unknown this many times goes `lost` with the error (spec/world.md). A destroy of an entity DCS should not hold is tried again after the next full enumeration. |
+| `[missions] dir`, `dcs_dir` | One folder, named once per side, as `map_path` is: inside the Saved Games profile, such as `<profile>/nanoprobe/missions`. A theater's mission is `<theater>.miz`, the theater's name exactly as `LIFECYCLE` carries it. A name of more than 64 bytes, or with a byte other than `A`-`Z`, `a`-`z`, `0`-`9`, `_` and `-`, has no mission file. The file name must match in case, also on a file system that ignores case. Activating a campaign loads its theater's file with a `MISSION_LOAD` of `dcs_dir` joined to the file name. A key left empty, or a missing file, refuses the activation (spec/persistence.md, "Campaign operations"). The sidecar refuses to start when `dcs_dir` joined to a 64-byte theater name and `.miz` is over 1,024 bytes, the agent's path limit. |
 
 Relative paths are relative to the folder that holds `sidecar.toml`.
 
@@ -139,7 +144,11 @@ entries with one hash are errors: the sidecar refuses to start.
 ### Health command
 
 `nanoprobe-sidecar health --config <path>` asks the running sidecar for its verdict
-(spec/errors.md), prints it with the seconds since the last heartbeat, and exits with:
+(spec/errors.md), prints it with the seconds since the last heartbeat, and exits with
+the code below. It calls `GetServerStatus` on `[api] listen`, or on loopback at that
+port when the listener's address is unspecified. When the listener needs a token, the
+command reads one with the `observer` role or higher from the `NANOPROBE_TOKEN`
+environment variable.
 
 | Exit code | Verdict |
 |---|---|
