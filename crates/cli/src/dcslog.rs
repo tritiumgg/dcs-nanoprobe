@@ -29,6 +29,32 @@ pub fn newest(log: &[u8]) -> Vec<Line> {
     lines[start..].iter().filter_map(|l| parse(l)).collect()
 }
 
+/// When the newest start began: the UTC time on the last
+/// `=== Log opened UTC <YYYY-MM-DD HH:MM:SS>` line (LOG).
+pub fn newest_opened(log: &[u8]) -> Option<std::time::SystemTime> {
+    let text = String::from_utf8_lossy(log);
+    let line = text.lines().rev().find(|l| l.contains(OPENED))?;
+    let rest = line.split_once("UTC ")?.1.trim();
+    let (date, time) = rest.split_once(' ')?;
+    let mut d = date.split('-').map(|p| p.parse::<i64>().ok());
+    let (y, m, day) = (d.next()??, d.next()??, d.next()??);
+    let mut t = time.split(':').map(|p| p.parse::<i64>().ok());
+    let (h, min, sec) = (t.next()??, t.next()??, t.next()??);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&day) || h > 23 || min > 59 || sec > 60 {
+        return None;
+    }
+    // Days from the civil date (Howard Hinnant's algorithm).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let secs = u64::try_from(days * 86_400 + h * 3_600 + min * 60 + sec).ok()?;
+    Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+}
+
 /// A line written under the `NANOPROBE` subsystem.
 pub fn parse(line: &str) -> Option<Line> {
     let line = line.trim_end_matches('\r');
@@ -102,6 +128,16 @@ mod tests {
             None
         );
         assert_eq!(parse("NANOPROBE"), None);
+    }
+
+    #[test]
+    fn reads_when_the_newest_start_began() {
+        let log =
+            "=== Log opened UTC 2026-11-10 10:00:00\nx\n=== Log opened UTC 2026-11-15 12:30:05\n";
+        let at = newest_opened(log.as_bytes()).unwrap();
+        let secs = at.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        assert_eq!(secs, 1_794_745_805);
+        assert_eq!(newest_opened(b"no start\n"), None);
     }
 
     #[test]

@@ -132,36 +132,34 @@ pub fn check(found: &Found) -> Report {
     let active = files(&profile, &mut report);
     settings(&profile, &mut report);
     owner(&found.path, &mut report);
-    let session = dcs_log(&profile, &found.path, active.as_deref(), &mut report);
-    platform_logs(&profile, session.as_deref(), &mut report);
+    let start = dcs_log(&profile, &found.path, active.as_deref(), &mut report);
+    platform_logs(&profile, &start, &mut report);
     gates(&profile, &mut report);
     report
 }
 
-/// A read that turns an error into a failed line.
-fn read(profile: &dyn Profile, path: &str, report: &mut Report) -> Option<Vec<u8>> {
-    match profile.read(path) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            report.fail(format!("cannot read {path}: {e}"));
-            None
-        }
-    }
+/// A read that turns an error into a failed line: Err when the file is
+/// there and does not read, which the caller then says nothing more about.
+fn read(profile: &dyn Profile, path: &str, report: &mut Report) -> Result<Option<Vec<u8>>, ()> {
+    profile.read(path).map_err(|e| {
+        report.fail(format!("cannot read {path}: {e}"));
+    })
 }
 
 /// The loader, the kill switch, the manifest and the active version's
 /// files. Returns the active build.
 fn files(profile: &dyn Profile, report: &mut Report) -> Option<String> {
     match read(profile, LOADER, report) {
-        None => report.fail(format!(
+        Err(()) => {}
+        Ok(None) => report.fail(format!(
             "no {LOADER}: DCS loads nothing; run `nanoprobe install`"
         )),
-        Some(bytes) if bytes == RELEASE_LOADER => report.ok(format!("{LOADER} is in place")),
-        Some(_) => report.note(format!(
+        Ok(Some(bytes)) if bytes == RELEASE_LOADER => report.ok(format!("{LOADER} is in place")),
+        Ok(Some(_)) => report.note(format!(
             "{LOADER} differs from this release's loader; `nanoprobe install` replaces it"
         )),
     }
-    if read(profile, DISABLE, report).is_some() {
+    if let Ok(Some(_)) = read(profile, DISABLE, report) {
         report.fail(format!(
             "the kill switch {DISABLE} is there: nothing runs; remove it and restart DCS"
         ));
@@ -192,7 +190,10 @@ fn files(profile: &dyn Profile, report: &mut Report) -> Option<String> {
 /// The active version folder against its `SHA256SUMS`, and its build hash.
 fn version(profile: &dyn Profile, build: &str, report: &mut Report) {
     let dir = format!("{VERSIONS}/{build}");
-    let Some(sums) = read(profile, &format!("{dir}/SHA256SUMS"), report) else {
+    let Ok(sums) = read(profile, &format!("{dir}/SHA256SUMS"), report) else {
+        return;
+    };
+    let Some(sums) = sums else {
         report.fail(format!(
             "active version {build}: no {dir}/SHA256SUMS; run `nanoprobe install`"
         ));
@@ -262,24 +263,26 @@ pub fn build_of(sums: &str, dll: &str) -> String {
 /// The token, `agent.toml`, and the build DCS runs.
 fn settings(profile: &dyn Profile, report: &mut Report) {
     match read(profile, TOKEN, report) {
-        Some(token) if !token.is_empty() => report.ok(format!("{TOKEN} is there")),
-        Some(_) => report.fail(format!(
+        Err(()) => {}
+        Ok(Some(token)) if !token.is_empty() => report.ok(format!("{TOKEN} is there")),
+        Ok(Some(_)) => report.fail(format!(
             "{TOKEN} is empty: the agent will not listen; delete it and run `nanoprobe install`"
         )),
-        None => report.fail(format!(
+        Ok(None) => report.fail(format!(
             "no {TOKEN}: the agent will not listen; run `nanoprobe install`"
         )),
     }
     match read(profile, AGENT_TOML, report) {
-        None => report.ok(format!("no {AGENT_TOML}: every setting is its default")),
-        Some(bytes) => match AgentToml::parse(&String::from_utf8_lossy(&bytes)) {
+        Err(()) => {}
+        Ok(None) => report.ok(format!("no {AGENT_TOML}: every setting is its default")),
+        Ok(Some(bytes)) => match AgentToml::parse(&String::from_utf8_lossy(&bytes)) {
             Ok(_) => report.ok(format!("{AGENT_TOML} reads")),
             Err(e) => report.fail(format!(
                 "{AGENT_TOML}: {e}; the agent starts without its link"
             )),
         },
     }
-    if let Some(running) = read(profile, RUNNING, report) {
+    if let Ok(Some(running)) = read(profile, RUNNING, report) {
         let running = String::from_utf8_lossy(&running);
         if let Some(build) = running.lines().find_map(|l| l.strip_prefix("build=")) {
             report.note(format!("the last DCS start loaded build {build}"));
@@ -287,21 +290,29 @@ fn settings(profile: &dyn Profile, report: &mut Report) {
     }
 }
 
-/// The platform's lines in the newest start of `dcs.log`. Returns the
-/// session ID the hook gave that start.
-fn dcs_log(
-    profile: &dyn Profile,
-    root: &Path,
-    active: Option<&str>,
-    report: &mut Report,
-) -> Option<String> {
-    let Some(bytes) = read(profile, DCS_LOG, report) else {
-        report.note(format!("no {DCS_LOG}: DCS has not run with this profile"));
-        return None;
+/// What `dcs.log` says of the newest DCS start.
+enum Start {
+    /// No `dcs.log`: DCS has not run with this profile.
+    NoLog,
+    /// The newest start ran no hook, or `dcs.log` does not read.
+    NoHook,
+    /// The hook's session ID in the newest start.
+    Session(String),
+}
+
+/// The platform's lines in the newest start of `dcs.log`.
+fn dcs_log(profile: &dyn Profile, root: &Path, active: Option<&str>, report: &mut Report) -> Start {
+    let bytes = match read(profile, DCS_LOG, report) {
+        Err(()) => return Start::NoHook,
+        Ok(None) => {
+            report.note(format!("no {DCS_LOG}: DCS has not run with this profile"));
+            return Start::NoLog;
+        }
+        Ok(Some(bytes)) => bytes,
     };
     let lines = dcslog::newest(&bytes);
     if lines.is_empty() {
-        if older_than_install(root) {
+        if before_install(root, &bytes) {
             report.note(format!(
                 "{DCS_LOG} is from before the install: restart DCS to load nanoprobe"
             ));
@@ -310,12 +321,12 @@ fn dcs_log(
                 "{DCS_LOG}: no nanoprobe line in the newest start: DCS did not run the loader; check {LOADER}"
             ));
         }
-        return None;
+        return Start::NoHook;
     }
-    let mut session = None;
+    let mut session = Start::NoHook;
     for Line { level, message } in lines {
         if let Some((id, build)) = dcslog::session(&message) {
-            session = Some(id.to_owned());
+            session = Start::Session(id.to_owned());
             match active {
                 Some(active) if active != build => report.note(format!(
                     "{DCS_LOG}: the hook started build {build}; restart DCS to load {active}"
@@ -331,10 +342,20 @@ fn dcs_log(
     session
 }
 
-/// Whether `dcs.log` was last written before the loader was installed.
-fn older_than_install(root: &Path) -> bool {
-    let modified = |rel: &str| std::fs::metadata(root.join(rel)).and_then(|m| m.modified());
-    matches!((modified(DCS_LOG), modified(LOADER)), (Ok(log), Ok(loader)) if log < loader)
+/// Whether the newest start in `dcs.log` began before the loader was
+/// written: by the time on its `=== Log opened` line, or, without one, by the
+/// file's modification time. A running DCS keeps writing the file, so its
+/// time alone does not say when the start began.
+fn before_install(root: &Path, log: &[u8]) -> bool {
+    let Ok(loader) = std::fs::metadata(root.join(LOADER)).and_then(|m| m.modified()) else {
+        return false;
+    };
+    let began = dcslog::newest_opened(log).or_else(|| {
+        std::fs::metadata(root.join(DCS_LOG))
+            .and_then(|m| m.modified())
+            .ok()
+    });
+    began.is_some_and(|began| began <= loader)
 }
 
 /// One record of the platform's JSON-lines logs.
@@ -348,8 +369,8 @@ struct Record {
 /// A log and the file it rotated to, oldest record first.
 fn records(profile: &dyn Profile, name: &str, report: &mut Report) -> Option<Vec<Record>> {
     let path = format!("{LOGS}/{name}");
-    let older = read(profile, &format!("{path}.1"), report);
-    let newer = read(profile, &path, report);
+    let older = read(profile, &format!("{path}.1"), report).ok().flatten();
+    let newer = read(profile, &path, report).ok().flatten();
     if older.is_none() && newer.is_none() {
         return None;
     }
@@ -381,9 +402,19 @@ fn records(profile: &dyn Profile, name: &str, report: &mut Report) -> Option<Vec
 
 /// The hook's and the shim's records from the newest DCS start: the hook's
 /// from its `hook loaded` record with that start's session (the last one
-/// when `dcs.log` names none), the shim's from that record's time on. Each
+/// when there is no `dcs.log`), the shim's from that record's time on. Each
 /// error fails; each state's `capabilities` record names what DCS lacks.
-fn platform_logs(profile: &dyn Profile, session: Option<&str>, report: &mut Report) {
+fn platform_logs(profile: &dyn Profile, start: &Start, report: &mut Report) {
+    let session = match start {
+        Start::NoHook => {
+            report.note(
+                "the newest start ran no hook, so hook.log and shim.log are from an earlier one and are not checked",
+            );
+            return;
+        }
+        Start::NoLog => None,
+        Start::Session(id) => Some(id.as_str()),
+    };
     let Some(hook) = records(profile, "hook.log", report) else {
         report.note("no nanoprobe/logs/hook.log: the hook has not run yet");
         return;
@@ -397,6 +428,11 @@ fn platform_logs(profile: &dyn Profile, session: Option<&str>, report: &mut Repo
     };
     let Some(start) = start else {
         match session {
+            Some(id) if matches!(profile.read(&format!("{LOGS}/hook.log.1")), Ok(Some(_))) => {
+                report.note(format!(
+                    "nanoprobe/logs/hook.log no longer holds the start of session {id}: it rotated out"
+                ));
+            }
             Some(id) => report.fail(format!(
                 "nanoprobe/logs/hook.log has no record of session {id}, the newest start: the hook could not write its log"
             )),

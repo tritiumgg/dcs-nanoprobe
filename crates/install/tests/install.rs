@@ -319,7 +319,7 @@ fn reads_a_list_over_several_lines_and_other_forms() {
     install(&local, &payload()).unwrap();
     let mut text = local.read(AUTOEXEC).unwrap().unwrap();
     text.extend_from_slice(
-        b"net.allow_dostring_in = {\n  'server',\n  'gui',\n}\nnet['allow_unsafe_api'] = {}\n",
+        b"net.allow_dostring_in = { -- mine\n  'server', -- this one\n  'gui',\n}\nnet['allow_unsafe_api'] = {}\n",
     );
     local.write(AUTOEXEC, &text).unwrap();
     let gates = autoexec::gates(&local).unwrap();
@@ -377,4 +377,17 @@ print('ok')
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "ok");
+}
+
+#[test]
+fn a_file_ending_in_a_lone_cr_keeps_it() {
+    let scratch = Scratch::new("lonecr");
+    let root = scratch.0.join("DCS");
+    profile(&root, Autoexec::NoFile, false);
+    write(&root.join(AUTOEXEC), "x = 1\r");
+    let local = Local::new(&root).unwrap();
+    install(&local, &payload()).unwrap();
+    assert!(autoexec::gates(&local).unwrap().block);
+    undeploy(&local).unwrap();
+    assert_eq!(local.read(AUTOEXEC).unwrap().unwrap(), b"x = 1\r");
 }

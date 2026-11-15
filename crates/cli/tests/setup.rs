@@ -89,6 +89,8 @@ fn installs_checks_and_uninstalls_through_the_command_line() {
         b"options.example = 1\n",
     );
     write(&profile.join("Logs/dcs.log"), b"made-up line\n");
+    // The log must be older than the loader install writes.
+    std::thread::sleep(std::time::Duration::from_millis(50));
     let dir = scratch.0.join("payload");
     payload(&dir);
     let prefix_arg = prefix.to_str().unwrap();

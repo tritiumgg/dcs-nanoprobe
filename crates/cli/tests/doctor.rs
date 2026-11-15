@@ -441,23 +441,15 @@ fn only_the_newest_start_counts_in_the_platform_logs() {
 fn a_log_from_before_the_install_is_a_note() {
     let scratch = Scratch::new("before");
     let root = scratch.0.join("DCS");
-    write(
-        &root.join("Logs/dcs.log"),
-        "=== Log opened UTC 2026-11-14 10:00:00\n2026-11-14 10:00:01.000 INFO    EDCORE (Main): x\n",
-    );
-    std::thread::sleep(std::time::Duration::from_millis(50));
     good(&root);
-    write(
-        &root.join("Logs/dcs.log"),
-        "=== Log opened UTC 2026-11-14 10:00:00\n2026-11-14 10:00:01.000 INFO    EDCORE (Main): x\n",
-    );
-    // The log is now newer than the loader: DCS ran and did not load it.
-    assert!(check(&root).has(Mark::Fail, "did not run the loader"));
-    // Make the log older than the loader again.
-    let loader = root.join("Scripts/Hooks/nanoprobe-hook.lua");
-    let bytes = std::fs::read(&loader).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    std::fs::write(&loader, bytes).unwrap();
+    let log = |year: u32| {
+        format!(
+            "=== Log opened UTC {year}-01-01 10:00:00\n{year}-01-01 10:00:01.000 INFO    EDCORE (Main): x\n"
+        )
+    };
+    // A start that began before the install, in a log a running DCS still
+    // writes to: a note.
+    write(&root.join("Logs/dcs.log"), &log(2000));
     let report = check(&root);
     assert!(
         report.has(Mark::Note, "from before the install"),
@@ -467,4 +459,35 @@ fn a_log_from_before_the_install_is_a_note() {
         !report.has(Mark::Fail, "did not run the loader"),
         "{report}"
     );
+    // A start that began after it and ran no loader: a failure.
+    write(&root.join("Logs/dcs.log"), &log(2099));
+    assert!(check(&root).has(Mark::Fail, "did not run the loader"));
+}
+
+#[test]
+fn a_newest_start_without_the_hook_leaves_the_old_logs_alone() {
+    let scratch = Scratch::new("nohook");
+    let root = scratch.0.join("DCS");
+    good(&root);
+    // An earlier start's error in hook.log.
+    let mut hook = std::fs::read_to_string(root.join("nanoprobe/logs/hook.log")).unwrap();
+    hook.push_str(&record(
+        "2026-11-15T10:00:05Z",
+        "error",
+        "hook",
+        "agent not loaded",
+        "",
+    ));
+    write(&root.join("nanoprobe/logs/hook.log"), &hook);
+    // The newest start: the kill switch, so no session line.
+    write(&root.join("nanoprobe/disable"), "");
+    write(
+        &root.join("Logs/dcs.log"),
+        "=== Log opened UTC 2099-01-01 10:00:00\n\
+         2099-01-01 10:00:01.000 INFO    NANOPROBE (Main): disabled by x/disable; nothing loaded\n",
+    );
+    let report = check(&root);
+    assert!(!report.has(Mark::Fail, "agent not loaded"), "{report}");
+    assert!(!report.has(Mark::Ok, "DCS names"), "{report}");
+    assert!(report.has(Mark::Note, "ran no hook"), "{report}");
 }

@@ -120,6 +120,9 @@ pub fn run_uninstall(
         })
         .and_then(|(profile, path)| {
             let removed = undeploy(&profile).map_err(|e| {
+                if e.starts_with(nanoprobe_install::autoexec::AUTOEXEC) {
+                    return e;
+                }
                 // Windows does not delete a DLL a running process has loaded.
                 format!("{e}; if DCS is running, quit it and run `nanoprobe uninstall` again")
             })?;

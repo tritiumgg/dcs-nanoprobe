@@ -175,6 +175,11 @@ pub fn merge(profile: &dyn Profile) -> Result<Merged, String> {
     let text = old.as_deref().unwrap_or_default();
     let added_break = !text.is_empty() && !text.ends_with(b"\n");
     let mut new = text.to_vec();
+    // After a lone CR, add a whole CRLF, so that uninstall, which takes a CRLF
+    // before the block as the added break, leaves that CR.
+    if added_break && text.ends_with(b"\r") {
+        new.push(b'\r');
+    }
     new.extend_from_slice(block(old.is_none(), added_break).as_bytes());
     profile.write(AUTOEXEC, &new)?;
     Ok(Merged::Added)
@@ -288,10 +293,11 @@ pub fn gates(profile: &dyn Profile) -> Result<Gates, String> {
         i += 1;
         if let Some((key, _)) = assignment(line) {
             // A list that goes on over later lines: join them up to its `}`.
-            let mut joined = line.clone();
+            // Each line's comment goes first; a name in these lists holds no `--`.
+            let mut joined = uncomment(line).to_owned();
             while joined.contains('{') && !joined.contains('}') && i < lines.len() {
                 joined.push(' ');
-                joined.push_str(&lines[i].1);
+                joined.push_str(uncomment(&lines[i].1));
                 i += 1;
             }
             let names = assignment(&joined).and_then(|(_, names)| names);
@@ -301,6 +307,10 @@ pub fn gates(profile: &dyn Profile) -> Result<Gates, String> {
         }
     }
     Ok(gates)
+}
+
+fn uncomment(line: &str) -> &str {
+    line.split("--").next().unwrap_or("")
 }
 
 /// A line that may replace either key in a form [`assignment`] does not
@@ -338,6 +348,15 @@ fn assignment(line: &str) -> Option<(String, Option<Vec<String>>)> {
 }
 
 fn names(value: &str) -> Option<Vec<String>> {
+    // A value that is no table at all holds no name.
+    let literal = matches!(value, "nil" | "true" | "false")
+        || value.parse::<f64>().is_ok()
+        || (value.len() >= 2
+            && (value.starts_with('\'') && value.ends_with('\'')
+                || value.starts_with('"') && value.ends_with('"')));
+    if literal {
+        return Some(Vec::new());
+    }
     let inner = value.strip_prefix('{')?.strip_suffix('}')?;
     let mut out = Vec::new();
     for item in inner.split([',', ';']) {
@@ -404,6 +423,14 @@ mod tests {
             Some(("net.allow_unsafe_api".into(), None))
         );
         assert_eq!(assignment("net.allow_unsafe_api == x"), None);
+        assert_eq!(
+            assignment("net.allow_dostring_in = nil"),
+            Some(("net.allow_dostring_in".into(), Some(vec![])))
+        );
+        assert_eq!(
+            assignment("net.allow_dostring_in = 'server'"),
+            Some(("net.allow_dostring_in".into(), Some(vec![])))
+        );
         assert_eq!(other_form("net = {}"), Some("net".into()));
         assert_eq!(
             other_form("net['allow_dostring_in'] = {}"),

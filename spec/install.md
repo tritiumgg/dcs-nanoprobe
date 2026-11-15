@@ -92,7 +92,7 @@ created it and nothing else is left. Every other byte of the file stays as it wa
 edited block, or a begin line without an end line, is refused by both and left for the
 user. The tools handle the file's bytes only to find and cut the block. `doctor` reports
 the block, and each later assignment to either key that drops the name the platform
-needs, and nothing else from the file.
+needs or that it cannot read, by line number and key, and nothing else from the file.
 
 ## Release
 
@@ -124,7 +124,8 @@ folder's access list decides.
 
 `nanoprobe doctor` checks an install from outside DCS and writes nothing. It prints one
 line per check, marked `ok`, `fail` or `note`, and exits 0 when nothing failed, 1 when a
-check failed, and 2 when it found no profile holding the loader. Without `--profile`
+check failed, and 2 when it has no profile to check: none found, or, without
+`--profile`, none that holds the loader. Without `--profile`
 it checks every profile found, as install finds them, that holds the loader.
 
 | Check | Fails when | A note when |
@@ -133,14 +134,16 @@ it checks every profile found, as install finds them, that holds the loader.
 | Kill switch | `nanoprobe/disable` exists | |
 | Manifest and active version | no `active`; `SHA256SUMS` missing; a file missing, changed or unlisted; the folder's build does not match its `SHA256SUMS` | `previous` is not installed |
 | Token and `agent.toml` | the token is missing or empty, or (Linux, macOS) owned by another user than the profile; `agent.toml` does not parse | |
-| `Logs/dcs.log`, newest start | the newest start has no platform line and the log is newer than the loader; a platform `ERROR` line | no log; a log from before the install; the hook runs another build than `active` |
-| `logs/hook.log` and `logs/shim.log`, newest start | an `error` record; a `capabilities` record with a name absent; no `hook loaded` record of the newest session | no shim record yet in that start |
+| `Logs/dcs.log`, newest start | the newest start has no platform line and began after the loader was written; a platform `ERROR` line | no log; a newest start from before the install; the hook runs another build than `active` |
+| `logs/hook.log` and `logs/shim.log`, newest start | an `error` record; a `capabilities` record with a name absent; no `hook loaded` record of the newest session and no `hook.log.1` | no shim record yet in that start; the start record rotated out; the newest start ran no hook, and the logs are not checked |
 | `autoexec.cfg` | the block is edited or cut short; an assignment after the block, or anywhere without one, sets a list that lacks the needed name | no block; a value doctor cannot read |
 
-The newest start is the part of `dcs.log` after its last `=== Log opened` line. Its
-`session <id> build <build>` line names the hook's `hook loaded` record of that session
-in `hook.log`; doctor reads the hook's records from there and the shim's from that
-record's `wall` on, across each log and its `.1`.
+The newest start is the part of `dcs.log` after its last `=== Log opened UTC <time>`
+line, which also says when it began (the log's modification time when there is no such
+line). Its `session <id> build <build>` line names the hook's `hook loaded` record of that
+session in `hook.log`; doctor reads the hook's records from there and the shim's from that
+record's `wall` on, across each log and its `.1`. Without a `dcs.log` it reads them from
+the last `hook loaded` record.
 
 ## Agent
 
