@@ -45,14 +45,14 @@ clock (`QueryPerformanceCounter` on Windows).
 | `A` | The frame's allowance: `overhead_share` × `I` |
 | `C` | System-call cost per second: the agent time of the system-call frames in each second of real time, as a running average over seconds, each new second weighing 0.2 |
 | `c` | The per-frame charge for the system-call frames: `C` × `I` / 10⁶ |
-| `D` | Debt: agent time spent past the allowances, at most one second's budget (`overhead_share` × 10⁶). Below 0 it is credit: allowance earned on frames that spent less, at most 150 µs |
+| `D` | Debt: agent time spent past the allowances, at most one second's budget (`overhead_share` × 10⁶). Below 0 it is credit: allowance earned on frames that spent less, at most 150 µs. The time that births' and the enumeration's balance pays is not in it ("Tiers") |
 | `r` | The repayment planned this frame: the smaller of `D` and `A` / 2, when `D` is above 0 |
 | `S` | The frame's slice, `slice_us`: the smaller of `A` − `c` − `r` + credit and the cap. The cap is 250 less what the frame's finish takes: the frame's fixed part already spent, and an estimate of closing the last batch and writing its record (`close_us` + the batch tail + 2 × the closing's mean deviation, at least 6 µs). No frame passes 250 µs. The cap binds only below about 12 frames a second. After a frame interval over 2 × `I`, such as a stall, the frame takes no credit |
 | `F` | Fixed work: agent time from the start of `frame` to the point of the decision, plus the agent time of the events handled since the last frame, less commanded work done so far (spec/commands.md, "Handlers"). For the pump it includes the frame's sweep |
 | `m` | The share of the allowance for births and the enumeration: 0.5, and 0.75 while an enumeration has run longer than `enumeration_s` |
 | `R` | The sweep's savings that the pump leaves alone ("The sweep"), `k` times what the sweep has saved. 0 when the pump reads the positions |
 | `x` | The running estimate of the cross-state call: the time from `frame`'s decision to the start of the shim's pump, each new call weighing 0.1, one call counting at most 62.5 µs. It decays by 1 % on each pump, and on a frame where 3 × `x` is above the gate's cap and the pump has work worth the call ("The pump's worth"), at most once a frame, so an estimate that is too high cannot keep the pump shut |
-| `f` | The running estimate of a pump batch's fixed part ("Tiers"), from the row tiers' batches only. It decays by 1 % on each pump |
+| `f` | The running estimate of a pump batch's fixed part ("Tiers"), from the row tiers' batches only. It decays by 1 % on each pump, except a pump whose batches were all births or the enumeration |
 | `G` | The gate: 3 × (`x` + `f`), but at most the cap `reach` = 0.8 × (`A` − `c` + 150 − `F` − `R`) and never under 3 × `x` |
 | `B` | The pump's sampling budget: (`S` − `F` − `R`) × `k`. Nothing is sampled when it is 0 or less. `k` is 1, except in a build with fault injection, where the `sampling` fault sets it (spec/faults.md) |
 
@@ -69,12 +69,16 @@ At the end of a frame that is not a system-call frame, the agent takes the frame
 agent time `T` (from the start of `frame` to its end, or to the end of `finish`, plus
 the events since the last frame, less commanded work: the span of each command handler
 from take to done, and the whole of a pump asked for only for commands, spec/commands.md
-"Handlers") and sets `D` to `D` + `T` + `W` − (`A` − `c`), held
+"Handlers") and sets `D` to `D` + `T` + `W` − `P` − (`A` − `c` − `E`), held
 between −150 µs and its cap. `W` is what the scale `k` withheld from the frame: of the
 pump's budget, (`S` − `F` − `R`) × (1 − `k`), and of the sweep's, the cost of the rows
-`k` kept it from reading. It counts as spent, so it never returns as credit. A frame
-that spends less than its allowance repays debt or earns credit; one that spends more
-adds to the debt.
+`k` kept it from reading. It counts as spent, so it never returns as credit. `P` is the
+time the births' and the enumeration's balance paid on the frame: their batches and, at
+`k` = 1, the call and the closes of a pump that read only births or the enumeration and
+made no existence checks, less commanded work in that call. `E` is what the balance earned
+on the frame ("Tiers"): they keep an account of their own, so their
+steps leave no debt for the row tiers to repay. A frame that spends less than its
+allowance repays debt or earns credit; one that spends more adds to the debt.
 
 A system-call frame samples nothing, earns no credit and leaves `D` alone. Its time goes
 into `C`, so the frames after it repay it a little each, about 1.5 µs of a 27 µs slice
@@ -82,10 +86,15 @@ at the server's 110 frames a second with the measured 165 µs a second (LIVE,
 docs/results/2026-11-13-e25-cpu-idle.md). No frame is skipped to repay it. The cap on
 `D` covers a handshake, which brings up to ten system-call frames in a second.
 
-The mean of the agent's time over real time therefore stays at `overhead_share`, less
-whatever debt the cap forgave. No frame's slice is more than 250 µs, and with credit at
-most 150 µs a frame at the server's frame rate stays under 250 µs with its sweep, its
-pump, the closing and `finish`.
+The total agent time therefore differs from `overhead_share` × real time by at most the
+debt the cap forgave, the time the births' and the enumeration's balance forgave
+(`maintenance_forgiven_us`), and that balance, which lies between 250 µs and
+−`L` and repays itself when below 0 ("Tiers"). The mean that
+`overhead_share` bounds is measured from real agent time, the `share` the `sampling` LOG
+reports, never from the balance or `D`: forgiving time changes only when births, the
+enumeration and the row tiers get their turn. No frame's slice is more than 250 µs, and
+with credit at most 150 µs a frame at the server's frame rate stays under 250 µs with its
+sweep, its pump, the closing and `finish`.
 
 ## Tiers
 
@@ -105,8 +114,8 @@ what is left goes on:
 
 | Order | Tier | Rows | Target period | Calls |
 |---|---|---|---|---|
-| 1 | Enumeration, while one runs | every group and static in DCS | `enumeration_s` | `coalition.getGroups`, `Group.getUnits`, `coalition.getStaticObjects`; the calls of a birth for an object the table lacks; `getPoint` for a static that cannot move |
-| 2 | Births | births waiting to be resolved | each pump | `isExist`, `getName`, `getTypeName`, `getGroup`, `getID`, `getCoalition`, `getCountry`, `getDesc().category`, `getLife0`, `Object.getCategory` for a static, and `getPoint` for one that cannot move |
+| 1 | Births | births waiting to be resolved | each pump | `isExist`, `getName`, `getTypeName`, `getGroup`, `getID`, `getCoalition`, `getCountry`, `getDesc().category`, `getLife0`, `Object.getCategory` for a static, and `getPoint` for one that cannot move |
+| 2 | Enumeration, while one runs | every group and static in DCS | `enumeration_s` | `coalition.getGroups`, `Group.getUnits`, `coalition.getStaticObjects`; the calls of a birth for an object the table lacks; `getPoint` for a static that cannot move |
 | 3 | Subscribed positions | the rows `SUBSCRIBE` names | its `period_s` | as for positions, and `getPosition` when it asks for attitude |
 | 4 | Positions | every unit, and every static that can move | `position_s`; five times it for a row that has not moved | `DCS.getUnitPositionByObjectId` |
 | 5 | Attitude when stopped | units that stopped since their last attitude | each pump | `getPosition` |
@@ -179,25 +188,43 @@ what is left of the budget exceeds a batch's fixed part by 62.5 µs; warehouse r
 still read within about 2 × their period or the pump's 1 s wait.
 
 Births and the enumeration take at most the share `m` of the sampling time while any row
-tier owes rows. A balance in µs gains `m` × (`A` − `c` − the frame's fixed work before the
-sweep) × `k` on every frame that is not a system-call frame, up to 250 µs. It loses the
-time of their batches. While a row tier owes rows they take a batch only when the balance covers one
-batch: the smaller of 3 × the measured call and the cost of the rows still owed plus
-`batch_us`, at most the most a frame can reach. When no row is owed they take a batch
-whatever the balance. The balance gains its share × `k`, and a batch of births or the
-enumeration costs it the larger of the batch's time and its batch cost × (1 − `k`), so
-at a scale below 1 maintenance yields to the tiers: it falls about as `k`^1.7, to about 2 %
-of its rate at `k` = 1 when `k` = 0.1 with rows owed. At `k` = 1 nothing changes. The balance stops at −1,000 µs, so one dear step, such as a `coalition.getGroups`
-of 687 µs (PRIOR, S10), keeps them out for a bounded number of pumps. A burst of such
-steps does not keep them out for good. While a tier above the positions waits for a
-pump, the sweep saves only 1 − `m` of each frame's allowance, so the two shares add up
-to the allowance and the pump takes no second share. The row tiers therefore always
-keep the rest of the sampling time, so subscribed positions keep a rate even at a tenth
-of the slice, where that takes precedence over the enumeration's period. A running
-enumeration goes before births and reads their objects itself; the birth of an object
-it already added costs one `wants` check and is dropped. While enumerations run back to
-back, as at a tenth of the slice, new objects therefore enter through the enumeration,
-within one enumeration period plus that enumeration's duration.
+tier owes rows, from an account of their own. A balance in µs gains `m` × (`A` − `c` − the
+frame's fixed work before the sweep) × `k` on every frame that is not a system-call frame:
+up to 250 µs while births or an enumeration wait, and only up to 0 while none does, so
+that it repays its own deficit. What it gains on a frame leaves that frame's allowance for
+the row tiers (`E` in "Slice"). It loses the time of their batches, and that time is not
+the row tiers' debt (`P` in "Slice"); at `k` = 1 a pump whose batches were all births or
+the enumeration, and that made no existence checks, also pays its call and its closes from
+the balance. Their own time is never the row tiers' debt. Below a scale of 1 a batch also
+costs the balance the share of a whole batch the scale withholds (below), and that charge
+stops at −1,000 µs. Their own time may take the balance below −1,000 µs, down to −`L`,
+the larger of the debt's cap, `overhead_share` × 10⁶ µs, and 1,000 µs (−3,000 µs at
+0.3 %); past it the time is
+forgiven and counted (`maintenance_forgiven_us`), as for a stall inside a step. With
+steps of 687 and 1,140 µs the balance forgives nothing; a nonzero value in a live run
+marks a DCS stall inside a step, and the live measure reports it with its window. One dear
+step, such as a `coalition.getGroups` of 687 or 1,140 µs (PRIOR, S10 and S11), therefore
+keeps births and the enumeration out until the balance has earned its time back, at most
+the bound over their share of a frame (about 2.5 s at 110 frames a second), and leaves the
+positions sweep's slice alone. A burst of such steps, which happens only when no row is
+owed, keeps them out no longer.
+While a row tier owes rows they take a batch only when the balance covers one batch: the
+smaller of 3 × the measured call and the cost of the rows still owed plus `batch_us`, at
+most the most a frame can reach. When no row is owed they take a batch whatever the
+balance. A batch of births or the enumeration costs the balance the larger of the
+batch's time and its batch cost × (1 − `k`), so at a scale below 1 maintenance yields to
+the tiers: it falls about as `k`^1.7, to about 2 % of its rate at `k` = 1 when `k` = 0.1
+with rows owed. At `k` = 1 nothing changes. While a tier above the positions waits for a
+pump, the sweep takes at most 1 − `m` of a frame, so the pump has room in each frame
+("The sweep"). The row tiers therefore always keep the rest of the sampling time, so
+subscribed positions keep a rate even at a tenth of the slice, where that takes
+precedence over the enumeration's period.
+
+Births go before a running enumeration. The enumeration finds the objects that births
+added already in the table; the birth of an object the enumeration already added costs
+one `wants` check and is dropped. Every birth resolves within one enumeration period
+plus that enumeration's duration. While births wait, as in a fill of 2,000 objects at
+37 µs a birth (LIVE, S11), the enumeration waits behind them.
 
 ### The sweep
 
@@ -206,12 +233,16 @@ within one enumeration period plus that enumeration's duration.
 Nothing else runs between choosing a row and reading it. It writes them in one
 `POSITIONS` record, after any `OBJECT` record of the frame.
 
-- **Savings.** On every sampling frame the sweep's savings `R` grow by `A` − `c`, or by
-  (1 − `m`) × (`A` − `c`) while births, an enumeration or subscribed rows with attitude
-  wait for a pump. They stop at a full sweep's cost over `k`. A full sweep's cost is the
-  sweep's fixed part plus the rows owed, at most 256, at the cost of a row; it is at
-  most what one frame can ever spend on it: the smaller of `A` − `c` + 150 and 250, less
-  `F`, times the same share. The pump leaves `k` × `R` of the frame alone, with one
+- **Savings.** On every sampling frame the sweep's savings `R` grow by the row tiers'
+  allowance, `A` − `c` − `E`: the frame's allowance less what births' and the
+  enumeration's balance earned on it ("Tiers"). Below a scale of 1 they grow by `A` − `c`,
+  or by (1 − `m`) × (`A` − `c`) while births, an enumeration or subscribed rows with
+  attitude wait for a pump. They stop at a full sweep's cost over `k`. A full sweep's
+  cost is the sweep's fixed part plus the rows owed, at most 256, at the cost of a row; it
+  is at most what one frame can ever spend on it: the smaller of `A` − `c` + 150 and 250,
+  less `F`, times 1 − `m` while births, an enumeration or subscribed rows with attitude
+  wait for a pump, and times 1 otherwise. The sweep never waits on births or the
+  enumeration: their steps leave it no debt to repay. The pump leaves `k` × `R` of the frame alone, with one
   exception: on a frame where the pump is wanted for subscribed rows read with their
   attitude ("The pump's worth"), it may spend the savings on the subscribed tier only.
   Other tiers keep the reserve. On such a frame the sweep reads no row of the positions
@@ -444,6 +475,9 @@ message `sampling` and these `data` keys:
 | `sweep_cut` | Sweeps in the window that their deadline stopped |
 | `sweep_overruns`, `sweep_overrun_us` | Sweeps in the window that ran past their budget by more than the rows between two clock reads cost, and the most a sweep ran past it |
 | `sweep_forced` | Sweeps in the window that read one row because their fixed part alone passed their budget ("The sweep"). They are in neither of the two counts above |
+| `sweep_wait_subscribed`, `sweep_wait_batch`, `sweep_wait_debt`, `sweep_wait_fund`, `sweep_wait_slice` | Sampling frames, not system-call frames, in the window on which the sweep in `frame` owed rows and read none, by why: the pump for the subscribed rows read with their attitude goes first; the budget paid for fewer rows than the sweep's minimum; the savings paid for a row but the slice, cut by the repayment of debt `r`, did not, and without `r` it would have; the savings did not yet pay for a row; the savings paid for a row but `S` − `F` did not, with no repayment to blame ("The sweep") |
+| `maintenance_us` | The births' and the enumeration's balance at the window's end, µs, from −`L` to 250: `L` is the larger of `overhead_share` × 10⁶ and 1,000 ("Tiers") |
+| `maintenance_forgiven_us` | The births' and the enumeration's time in the window that passed their balance's bound, µs: forgiven, and not the row tiers' debt ("Tiers") |
 | `gone_dead`, `gone_removed`, `gone_missing` | Rows that left the table after an existence check, since the agent started, by the reason the reads gave (spec/records.md, "The object table") |
 | `classifier_anomalies`, `classifier_faults` | Since the agent started: `classifier_anomalies` counts existence checks whose reads gave no decision, including a death-event mark over a `MISSING` or anomalous result. `classifier_faults` counts rows that left as `REMOVED` and that a death event named, whether by a mark at the check or by a later event (spec/records.md, "Death events") |
 | `enum_end_abandoned` | Since the agent started: enumerations whose hold on pending misses lasted one enumeration period and ended with no `ENUM_END` (spec/records.md, "Layout: ENUM_END") |
