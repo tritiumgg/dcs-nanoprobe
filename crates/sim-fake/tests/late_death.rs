@@ -851,3 +851,67 @@ fn a_miss_found_alive_before_the_end_keeps_the_group_live_and_bound() {
     assert_eq!(entries(&w, |e| matches!(e, Entry::Left { .. })), 0);
     w.settle().unwrap();
 }
+
+/// An enumeration misses every unit of a group and holds its `ENUM_END`
+/// while the misses are checked over frames. One missed unit dies, with its
+/// death event, during the hold: it leaves as `DEAD`, its miss is dropped,
+/// and the end that follows removes nothing else. The group stays `live` and
+/// bound, the others alive (spec/records.md, "Layout: ENUM_END").
+#[test]
+fn a_death_while_enum_end_is_held_is_dead_and_the_rest_stay_live() {
+    let mut w = World::with_config(
+        1,
+        0,
+        LostPolicy::Respawn,
+        Config {
+            event_queue: 10_000,
+            enum_end_hold: 20,
+            ..Config::default()
+        },
+    );
+    w.settle().unwrap();
+    let id = first_group(&w);
+    let units = units_of(&w, id);
+    assert!(units.len() >= 2, "{units:?}");
+    for (o, _) in &units {
+        w.sim.hide_from_enumeration(*o);
+    }
+    let mut frames = 0;
+    while !w.sim.enum_end_held() {
+        w.tick().unwrap();
+        frames += 1;
+        assert!(frames < 400, "no enumeration held its end");
+    }
+    let before = w.rec.counters();
+    w.sim.kill(units[0].0);
+    // The first held slice took one of the hold's 20 frames. The other 19
+    // follow, and the end is written in the frame after them.
+    let mut frames = 0;
+    while w.sim.enum_end_held() {
+        w.tick().unwrap();
+        frames += 1;
+        assert!(frames <= 21, "the end stayed held");
+    }
+    assert_eq!(frames, 20, "the end was held {frames} frames");
+    ticks(&mut w, 5);
+    // The sidecar used the held enumeration; it did not discard it.
+    let after = w.rec.counters();
+    assert!(after.enumerations > before.enumerations);
+    assert_eq!(after.enumerations_discarded, before.enumerations_discarded);
+    let dead = w.store.unit(EntityId(units[0].1)).unwrap();
+    assert!(dead.dead, "the unit that died during the hold");
+    assert!(!dead.missing);
+    for (o, e) in &units[1..] {
+        let u = w.store.unit(EntityId(*e)).unwrap();
+        assert!(!u.dead && !u.missing, "object {o}");
+        assert_eq!(u.object, *o);
+    }
+    assert_eq!(state(&w, id), State::Live);
+    assert!(!w.store.gate_shut(id));
+    assert_eq!(spawns(&w, id), 1);
+    assert_eq!(entries(&w, |e| matches!(e, Entry::Left { .. })), 0);
+    for (o, _) in &units {
+        w.sim.show_in_enumeration(*o);
+    }
+    w.settle().unwrap();
+}
