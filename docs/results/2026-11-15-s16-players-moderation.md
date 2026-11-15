@@ -64,8 +64,9 @@ keyboard.
 
 Moderation run 1 passed connect, `PLAYERS`, slot, birth, the move to spectators, E35 and
 the kick, then failed in the harness's rejoin wait: after a kick the client still lists the
-last session's slots, so the join check returned before the client had joined. The check now
-counts a join only with `DCS.isMultiplayer()` and a player ID. Moderation run 2 passed end
+last session's slots, so the join check returned before the client had joined. The join
+check counts a join only with `DCS.isMultiplayer()` and a player ID; run 2 used it.
+Moderation run 2 passed end
 to end, 17 of 17 steps.
 
 ## Experiments
