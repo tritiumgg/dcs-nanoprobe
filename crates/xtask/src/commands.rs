@@ -14,7 +14,8 @@
 //! target. Everything goes under `bundles/commands-<name>-<time>/`, with
 //! `commands.json`, the run's verdict.
 //!
-//! `--part world` runs the S15 exit test instead (`commands/world.rs`).
+//! `--part world` runs the S15 exit test instead, and `--part names` the
+//! naming check (`commands/world.rs`).
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -69,8 +70,14 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
             }
             return world::run(repository, name, groups, units);
         }
+        "names" => {
+            if units == 0 || units > 50 {
+                return Err("--units is between 1 and 50".into());
+            }
+            return world::run_names(repository, name, units);
+        }
         "commands" => {}
-        other => return Err(format!("--part is commands or world, not {other}")),
+        other => return Err(format!("--part is commands, world or names, not {other}")),
     }
     // The exit test needs forced sidecar restarts.
     if restart_every == 0 || restart_every >= commands {
@@ -80,7 +87,8 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
 }
 
 const USAGE: &str = "usage: cargo xtask commands <name> [--seed N] [--commands 1000] \
-    [--restart-every 100] | cargo xtask commands <name> --part world [--groups 100] [--units 4]";
+    [--restart-every 100] | cargo xtask commands <name> --part world [--groups 100] [--units 4] \
+    | cargo xtask commands <name> --part names [--units 4]";
 
 /// `old` with `[lua] raw = true`, every other key kept.
 fn raw_on(old: &str) -> Result<String, String> {

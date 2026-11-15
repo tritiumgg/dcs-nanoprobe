@@ -20,8 +20,8 @@ local root = S.root()
 local mock = dofile(root .. 'lua/mock/dcs.lua')
 
 local MODULE, _, PROBE, _, _, SCENARIO = ...
-assert(MODULE and PROBE and (SCENARIO == 'groups' or SCENARIO == 'paused'),
-  'usage: lua lua/tests/world_exit.lua <module> <version> <link-probe> <inspect> <xtask> groups|paused')
+assert(MODULE and PROBE and (SCENARIO == 'groups' or SCENARIO == 'paused' or SCENARIO == 'names'),
+  'usage: lua lua/tests/world_exit.lua <module> <version> <link-probe> <inspect> <xtask> groups|paused|names')
 local COMMAND_PROBE = PROBE:gsub('link%-probe$', 'command-probe')
 
 local now = os.clock
@@ -151,7 +151,26 @@ local function paused()
     .. '(%d while paused)', v.enumerated_under_group, v.old_gone_destroyed_once, v.old_gone_while_paused))
 end
 
-local ok, err = pcall(SCENARIO == 'groups' and groups or paused)
+-- The naming check: names in the mock read the base-62 forms of campaign
+-- 1,763,000,000,000 (tag `jqW`), and a restarted sidecar rebinds them.
+local function names()
+  local spawned
+  local v = run('names', 1763000000000, '--units 2', function(host, e)
+    if e.name == 'spawned' then
+      spawned = e
+      assert(e.group:find('^np!jqW[0-9A-Za-z]+$'), 'group name ' .. e.group)
+      assert(e.static:find('^np#jqW[0-9A-Za-z]+$'), 'static name ' .. e.static)
+      assert(host.sim.groups[e.group], 'the mock has no group ' .. e.group)
+      S.write(control .. 'checked', '')
+    end
+  end)
+  assert(spawned and v.tag == 'jqW' and v.removed == 3, 'tag and removal')
+  S.ok(string.format('names: %s and %s in the mock, bound, rebound after a sidecar restart with %d spawns',
+    spawned.group, spawned.static, v.spawns_after_restart))
+end
+
+local scenarios = { groups = groups, paused = paused, names = names }
+local ok, err = pcall(scenarios[SCENARIO])
 local pid = (S.read(pidfile) or ''):match('%d+')
 if pid then
   os.execute('kill ' .. pid .. ' 2>/dev/null')
