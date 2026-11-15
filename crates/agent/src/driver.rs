@@ -2585,7 +2585,7 @@ mod tests {
             ],
         );
         let got = args(op::MARK_SET, &h, &mark(3, 37)).expect("group mark");
-        assert!(got.contains(&("name".into(), s("np.g.1z.11"))));
+        assert!(got.contains(&("name".into(), s("np!enPb"))));
         assert!(got.contains(&("target".into(), n(37.0))));
         // A target the binding holds is named by the DCS group ID or the
         // unit's row, with an empty platform name.
@@ -2669,7 +2669,7 @@ mod tests {
                 ("parent", s("18446744073709551615")),
                 ("scope", n(3.0)),
                 ("target", n(37.0)),
-                ("name", s("np.g.1z.11")),
+                ("name", s("np!enPb")),
                 ("submenu", Lv::Bool(true)),
                 ("text", s("Menu")),
             ],
@@ -2702,7 +2702,7 @@ mod tests {
             &message(4, 36, 10.0),
             vec![
                 ("scope", n(4.0)),
-                ("name", s("np.u.1z.10")),
+                ("name", s("np.enPa")),
                 ("clear", Lv::Bool(true)),
                 ("seconds", n(10.0)),
                 ("text", s("hello")),

@@ -1544,7 +1544,7 @@ end
 scenario('marks', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   local sim, run, expect = effect_world(ctx)
   local NOT_BOUND = 18
-  local group_id = sim.groups['np.g.7.1'].id
+  local group_id = sim.groups['np!hGx1'].id
   local r
 
   -- A mark to everyone, then the same entity again: the old DCS mark goes
@@ -1656,7 +1656,7 @@ end, '\n[lua]\nraw = true\n')
 scenario('menus', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   local sim, run, expect = effect_world(ctx)
   local NOT_BOUND = 18
-  local group_id = sim.groups['np.g.7.1'].id
+  local group_id = sim.groups['np!hGx1'].id
   local shim = ctx.host.states.server.__nanoprobe_shim
   local r
   local function list(key)
@@ -1766,7 +1766,7 @@ scenario('menus', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
       shim.pump()
       return done[1]
     end
-    local by_name = { name = 'np.g.7.1' }
+    local by_name = { name = 'np!hGx1' }
     local by_id = { name = '', group_id = group_id }
     local function set(entity, parent, extra, text, submenu)
       local c = { entity = entity, parent = parent, submenu = submenu, text = text }
@@ -1849,8 +1849,8 @@ end, '\n[lua]\nraw = true\n')
 scenario('message', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   local sim, run, expect = effect_world(ctx)
   local NOT_BOUND = 18
-  local group_id = sim.groups['np.g.7.1'].id
-  local unit_id = sim.by_name['np.u.7.2'].mission_id
+  local group_id = sim.groups['np!hGx1'].id
+  local unit_id = sim.by_name['np.hGx2'].mission_id
   local r
 
   r = run({ message(3, 1, 5, 'g'), message(4, 2, 5, 'u'), message(1, 0, 5, 'all') }, 'message, no campaign', false)
@@ -2349,7 +2349,7 @@ scenario('emit-objects', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   ctx.script(json({ campaign = 7, commands = {
     { op = 'ENUMERATE' },
     { op = 'EVAL', wait_ms = 1500, payload_hex = hexof(PACK.lv(
-      "local u = Unit.getByName('np.u.7.2') local ok, why = emit('with unit', { n = 1 }, { u }) "
+      "local u = Unit.getByName('np.hGx2') local ok, why = emit('with unit', { n = 1 }, { u }) "
       .. "local ok2, why2 = emit('with id', 2, { u.id_ }) "
       .. "local ok3, why3 = emit('missing', 2, { u, 99 }) "
       .. "return { ok, tostring(why), ok2, tostring(why2), ok3, tostring(why3), u.id_ }")) },
@@ -2696,7 +2696,7 @@ end, '\n[lua]\nraw = true\n')
 scenario('menu-record', SHIM, function(ctx)
   local sim = running_world(ctx)
   local host = ctx.host
-  local group_id = sim.groups['np.g.7.1'].id
+  local group_id = sim.groups['np!hGx1'].id
   local selected = false
   play(ctx, {
     menu(30, 1, 0, 1, 0, false, 'All'),

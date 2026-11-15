@@ -2065,18 +2065,9 @@ unsafe fn work_player(state: *mut State) -> c_int {
     0
 }
 
-/// The entity a platform name (spec/world.md, "Names") ends in, from its last
-/// base 36 part.
+/// The entity a platform name (spec/world.md, "Names") ends in.
 fn entity_of_name(name: &str) -> Option<u64> {
-    let mut parts = name.split('.');
-    (parts.next()? == "np").then_some(())?;
-    parts.next()?;
-    parts.next()?;
-    let entity = parts.next()?;
-    if parts.next().is_some() {
-        return None;
-    }
-    u64::from_str_radix(entity, 36).ok()
+    nanoprobe_transport::names::parse(name).map(|p| p.entity)
 }
 
 /// `menu(entity, target, scope)`: queue a `MENU` record for a selected item,
@@ -2423,12 +2414,13 @@ mod tests {
 
     #[test]
     fn a_platform_name_ends_in_its_entity() {
-        assert_eq!(entity_of_name("np.g.1z.11"), Some(37));
-        assert_eq!(entity_of_name("np.u.0.zz"), Some(35 * 36 + 35));
-        assert_eq!(entity_of_name("np.g.1z"), None);
-        assert_eq!(entity_of_name("np.g.1z.11.1"), None);
-        assert_eq!(entity_of_name("xx.g.1.1"), None);
-        assert_eq!(entity_of_name("np.g.1.-"), None);
+        assert_eq!(entity_of_name("np!enPb"), Some(37));
+        assert_eq!(entity_of_name("np.enPz"), Some(61));
+        assert_eq!(entity_of_name("np.enP10"), Some(62));
+        assert_eq!(entity_of_name("np!enP"), None);
+        assert_eq!(entity_of_name("xx!enPb"), None);
+        assert_eq!(entity_of_name("np!enP0"), None);
+        assert_eq!(entity_of_name("np!enP-"), None);
         assert_eq!(entity_of_name(""), None);
     }
 }
