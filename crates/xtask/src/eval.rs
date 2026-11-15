@@ -120,13 +120,31 @@ mod tests {
     use super::*;
     use crate::install::Local;
 
-    fn scratch(name: &str) -> (std::path::PathBuf, Local) {
+    /// A scratch folder's path, removed when the test ends, whether it passes
+    /// or fails.
+    struct Scratch(std::path::PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    impl std::ops::Deref for Scratch {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    fn scratch(name: &str) -> (Scratch, Local) {
         let dir =
             std::env::temp_dir().join(format!("nanoprobe-eval-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        let guard = Scratch(dir.clone());
         std::fs::create_dir_all(&dir).unwrap();
         let local = Local::new(&dir).unwrap();
-        (dir, local)
+        (guard, local)
     }
 
     #[test]
@@ -145,20 +163,19 @@ mod tests {
 
     #[test]
     fn refuses_a_bad_state_and_a_missing_hook() {
-        let (dir, local) = scratch("refuse");
+        let (_dir, local) = scratch("refuse");
         let timeout = Duration::from_millis(50);
         assert!(run(&local, "GUI", "x", b"", timeout).is_err());
         assert!(run(&local, "", "x", b"", timeout).is_err());
         let error = run(&local, "gui", "x", b"", timeout).unwrap_err();
         assert!(error.contains("deploy <name> --dev"), "{error}");
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn returns_the_result_a_hook_writes() {
         let (dir, local) = scratch("hook");
         local.write(EVAL_HOOK, b"-- hook\n").unwrap();
-        let player_dir = dir.clone();
+        let player_dir = dir.to_path_buf();
         let player = std::thread::spawn(move || {
             let local = Local::new(&player_dir).unwrap();
             let start = Instant::now();
@@ -199,12 +216,11 @@ mod tests {
         assert!(local.list(&format!("{EVAL}/out")).unwrap().is_empty());
         assert!(local.list(&format!("{EVAL}/taken")).unwrap().is_empty());
         assert!(local.list(&format!("{EVAL}/in")).unwrap().is_empty());
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn a_request_nobody_takes_is_removed() {
-        let (dir, local) = scratch("untaken");
+        let (_dir, local) = scratch("untaken");
         local.write(EVAL_HOOK, b"-- hook\n").unwrap();
         let error = run_polling(
             &local,
@@ -217,14 +233,13 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("did not take"), "{error}");
         assert!(local.list(&format!("{EVAL}/in")).unwrap().is_empty());
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn a_taken_request_with_no_result_stays() {
         let (dir, local) = scratch("taken");
         local.write(EVAL_HOOK, b"-- hook\n").unwrap();
-        let player_dir = dir.clone();
+        let player_dir = dir.to_path_buf();
         let player = std::thread::spawn(move || {
             let local = Local::new(&player_dir).unwrap();
             let start = Instant::now();
@@ -255,6 +270,5 @@ mod tests {
         player.join().unwrap();
         assert!(error.contains("took the request"), "{error}");
         assert_eq!(local.list(&format!("{EVAL}/taken")).unwrap().len(), 1);
-        let _ = std::fs::remove_dir_all(dir);
     }
 }

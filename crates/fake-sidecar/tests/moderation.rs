@@ -839,7 +839,16 @@ async fn the_hub_asks_for_the_players_it_missed_and_asks_again_when_the_answer_i
 async fn only_an_admin_moderates() {
     const CONTROLLER: &str = "controller-0123456789abcdef01234567";
     const ADMIN: &str = "admin-0123456789abcdef0123456789abcd";
-    let dir = std::env::temp_dir().join(format!("nanoprobe-mod-tokens-{}", std::process::id()));
+    /// Removes the folder when the test ends, whether it passes or fails.
+    struct Scratch(std::path::PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let scratch =
+        Scratch(std::env::temp_dir().join(format!("nanoprobe-mod-tokens-{}", std::process::id())));
+    let dir = scratch.0.clone();
     std::fs::create_dir_all(&dir).expect("dir");
     let path = dir.join("tokens.toml");
     std::fs::write(
@@ -916,5 +925,4 @@ async fn only_an_admin_moderates() {
     let hub: Arc<Hub> = Arc::clone(&server.hub);
     drop(hub);
     server.stop().await.expect("stop");
-    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -510,16 +510,25 @@ mod tests {
         )
     }
 
+    /// Removes the folder when the test ends, whether it passes or fails.
+    struct Scratch(std::path::PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     fn run(lines: &[String]) -> Report {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("nanoprobe-verify-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("dir");
+        let scratch = Scratch(
+            std::env::temp_dir().join(format!("nanoprobe-verify-{}-{n}", std::process::id())),
+        );
+        let dir = &scratch.0;
+        let _ = std::fs::remove_dir_all(dir);
+        std::fs::create_dir_all(dir).expect("dir");
         std::fs::write(dir.join("journal-000001.txt"), lines.join("\n") + "\n").expect("write");
-        let r = verify(&dir).expect("verify");
-        let _ = std::fs::remove_dir_all(&dir);
-        r
+        verify(dir).expect("verify")
     }
 
     #[test]
@@ -714,10 +723,12 @@ mod tests {
     fn run_files(files: &[&[String]]) -> Report {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir =
-            std::env::temp_dir().join(format!("nanoprobe-verify-files-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("dir");
+        let scratch = Scratch(
+            std::env::temp_dir().join(format!("nanoprobe-verify-files-{}-{n}", std::process::id())),
+        );
+        let dir = &scratch.0;
+        let _ = std::fs::remove_dir_all(dir);
+        std::fs::create_dir_all(dir).expect("dir");
         for (i, lines) in files.iter().enumerate() {
             std::fs::write(
                 dir.join(format!("journal-{:06}.txt", i + 1)),
@@ -725,9 +736,7 @@ mod tests {
             )
             .expect("write");
         }
-        let r = verify(&dir).expect("verify");
-        let _ = std::fs::remove_dir_all(&dir);
-        r
+        verify(dir).expect("verify")
     }
 
     fn result_for(epoch: u64, seq: u64, number: u64, digest: f64) -> String {
