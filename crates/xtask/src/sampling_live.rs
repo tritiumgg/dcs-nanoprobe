@@ -19,15 +19,20 @@
 //! `lua/sampling/fps.lua` (30 s to settle, 60 s measured, the simulation
 //! running), which also gives the enumeration time to find statics
 //! that send no birth. It checks the conditions
-//!   of the S10 ruling: the rates fall in order, subscribed positions keep a
-//!   rate, the enumeration period holds, the share stays under
+//!   of the S10 ruling, as the ruling on live row costs (2026-11-15) left
+//!   them: at k = 0.1 the subscribed positions read rows and keep at least
+//!   the positions' ratio, while the order below the positions, the
+//!   subscribed rows' 90 % keep, the fill time and an enumeration's completion are reported. At
+//!   both scales, since they bound the agent's time and the frame cap and
+//!   not a tier's rate, these stay judged: the share stays under
 //!   `overhead_share`, no debt is forgiven, debt stays under a second's
 //!   budget, sampling runs past `k·B` by more than one clock interval in at
 //!   most 1 % of the frames that only swept rows, and the frames over 250 µs
 //!   are at most 1 % of the frames (the agent's exact count, `tail`; the
 //!   histogram's 256 µs bucket edge is reported, not judged). At k = 1 it
-//!   reports, without judging, the vitals period as a rate against its
-//!   4.5-6.5 s band and the pumps a second against 5.
+//!   judges the vitals period as a rate against its 4.5-6.5 s band and the
+//!   pump bound, pumps a second at most 5 + `pump_work_us` a second ÷ (3 ×
+//!   `xcall_seen_us`) in every report, here and in the mirror part.
 //!
 //! Everything goes under `bundles/sampling-<name>-<time>/`: every mirror and
 //! oracle dump, the verdicts, the probe's output and the recording, and
@@ -1024,12 +1029,16 @@ fn mean_of(reports: &[Value], key: &str) -> f64 {
 /// rate.
 const VITALS_TARGET_S: f64 = 5.0;
 
-/// Two reported checks over steady reports at k = 1, judged by nothing
-/// (quorum 2 on maintenance with no row owed, 2026-11-15): the vitals band,
-/// 4.5 to 6.5 s, as a rate (the default target × the rows due at it over the
-/// rows the vitals cursor read, `due_vitals` and `swept_vitals`), beside the mean, median and
-/// maximum of the reported `vitals_s`, which shows an enumeration's wait; and
-/// the pumps a second against 5. `what` names the span.
+/// Two judged checks over steady reports at k = 1 (ruling on sampler rules
+/// at live row costs, 2026-11-15): the vitals band, 4.5 to 6.5 s, as a rate
+/// (the default target × the rows due at it over the rows the vitals cursor
+/// read, `due_vitals` and `swept_vitals`), beside the mean, median and
+/// maximum of the reported `vitals_s`, which shows an enumeration's wait;
+/// and the pump bound in every report: pumps a second at most 5 +
+/// `pump_work_us` a second ÷ (3 × `xcall_seen_us`). The pumps a second and
+/// the call share (`pumps` × `xcall_seen_us` over `us_xcall` + `us_pump`) are
+/// reported with it. A span whose reports lack the keys fails, not measured.
+/// `what` names the span.
 fn k1_rates(reports: &[Value], what: &str) -> Vec<Value> {
     let sum = |k: &str| reports.iter().filter_map(|r| r[k].as_f64()).sum::<f64>();
     let (due, read, window) = (sum("due_vitals"), sum("swept_vitals"), sum("window_s"));
@@ -1050,37 +1059,98 @@ fn k1_rates(reports: &[Value], what: &str) -> Vec<Value> {
         readings.last().copied().unwrap_or(0.0),
     );
     let has = |k: &str| reports.iter().any(|r| r[k].as_f64().is_some());
-    let vitals = if !(has("due_vitals") && has("swept_vitals")) || due <= 0.0 {
-        format!(
-            "not measured: {read:.0} rows swept, {due:.0} due (`swept_vitals`, `due_vitals`); {shown}"
+    let (vitals_ok, vitals) = if !(has("due_vitals") && has("swept_vitals")) || due <= 0.0 {
+        (
+            false,
+            format!(
+                "not measured: {read:.0} rows swept, {due:.0} due (`swept_vitals`, `due_vitals`); {shown}"
+            ),
         )
     } else if read <= 0.0 {
-        format!("outside the band: 0 rows swept of {due:.0} due in {window:.0} s; {shown}")
+        (
+            false,
+            format!("outside the band: 0 rows swept of {due:.0} due in {window:.0} s; {shown}"),
+        )
     } else {
         let rate = VITALS_TARGET_S * due / read;
-        let band = if (4.5..=6.5).contains(&rate) {
-            "inside"
-        } else {
-            "outside"
-        };
-        format!(
-            "{rate:.2} s as a rate against the default 5 s target, {band} the band: \
-             {read:.0} rows swept of {due:.0} due in {window:.0} s; {shown}"
+        let inside = (4.5..=6.5).contains(&rate);
+        let band = if inside { "inside" } else { "outside" };
+        (
+            inside,
+            format!(
+                "{rate:.2} s as a rate against the default 5 s target, {band} the band: \
+                 {read:.0} rows swept of {due:.0} due in {window:.0} s; {shown}"
+            ),
         )
     };
-    let pumps = if window > 0.0 {
-        let rate = sum("pumps") / window;
-        let under = if rate < 5.0 { "under" } else { "not under" };
-        format!("{rate:.2} pumps a second, {under} 5, in {window:.0} s")
-    } else {
-        "no reports".to_string()
-    };
+    let (pumps_ok, pumps) = pump_bound(reports);
     vec![
-        json!({"check": format!("vitals band 4.5-6.5 s as a rate at k = 1{what}, reported"),
-               "ok": true, "detail": vitals}),
-        json!({"check": format!("pumps a second under 5 at k = 1{what}, reported"),
-               "ok": true, "detail": pumps}),
+        json!({"check": format!("vitals band 4.5-6.5 s as a rate at k = 1{what}"),
+               "ok": vitals_ok, "detail": vitals}),
+        json!({"check": format!("pumps a second within the pump bound at k = 1{what}"),
+               "ok": pumps_ok, "detail": pumps}),
     ]
+}
+
+/// The pump bound over `reports`, each a 10 s window: pumps a second at
+/// most 5 + `pump_work_us` ÷ `window_s` ÷ (3 × `xcall_seen_us`). Returns the
+/// verdict and the detail: the span's pumps a second, call share and pump
+/// work, and every window past its bound.
+fn pump_bound(reports: &[Value]) -> (bool, String) {
+    let sum = |k: &str| reports.iter().filter_map(|r| r[k].as_f64()).sum::<f64>();
+    let window = sum("window_s");
+    if window <= 0.0 {
+        return (false, "no reports".to_string());
+    }
+    let measured = reports
+        .iter()
+        .all(|r| r["pump_work_us"].as_f64().is_some() && r["xcall_seen_us"].as_f64().is_some());
+    let pumps = sum("pumps");
+    let rate = pumps / window;
+    let spent = sum("us_xcall") + sum("us_pump");
+    let calls: f64 = reports
+        .iter()
+        .filter_map(|r| Some(r["pumps"].as_f64()? * r["xcall_seen_us"].as_f64()?))
+        .sum();
+    let share = if spent > 0.0 { calls / spent } else { 0.0 };
+    let work = sum("pump_work_us");
+    let empty = sum("empty_pumps");
+    let mut over = Vec::new();
+    for r in reports {
+        let (Some(w), Some(p), Some(u), Some(x)) = (
+            r["window_s"].as_f64(),
+            r["pumps"].as_f64(),
+            r["pump_work_us"].as_f64(),
+            r["xcall_seen_us"].as_f64(),
+        ) else {
+            continue;
+        };
+        if w <= 0.0 {
+            continue;
+        }
+        let bound = 5.0 + u / w / (3.0 * x.max(1.0));
+        if p / w > bound {
+            over.push(format!("{:.2} against {bound:.2}", p / w));
+        }
+    }
+    let head = format!(
+        "{rate:.2} pumps a second in {window:.0} s, call share {share:.2}, \
+         pump work {:.0} µs a second, {empty:.0} of {pumps:.0} pumps planned no row",
+        work / window
+    );
+    if !measured {
+        (
+            false,
+            format!("not measured (`pump_work_us`, `xcall_seen_us`): {head}"),
+        )
+    } else if over.is_empty() {
+        (true, format!("{head}; every window within its bound"))
+    } else {
+        (
+            false,
+            format!("{head}; past the bound: {}", over.join(", ")),
+        )
+    }
 }
 
 /// The order of the tiers at k = 0.1, judged over the span of the reports
@@ -1110,9 +1180,13 @@ fn tenth_order(
         _ => true,
     };
     let show = |v: Option<f64>| v.map_or("not judged".to_string(), |v| format!("{v:.2}"));
-    let stretch_ok = le(vit, pos) && le(ammo, vit) && le(wh, vit) && le(pos, sub);
-    // Subscribed positions fall last: they keep their rate at a tenth.
-    let subscribed_ok = sub.is_none_or(|s| s >= 0.9);
+    // At live row costs (ruling of 2026-11-15) k = 0.1 is judged on two
+    // things only: the subscribed rows read rows, and they keep at least the
+    // positions' ratio (the rank). The lone-row rule bounds their absolute
+    // keep, and the order below the positions is reported. A k = 1 base
+    // with no subscribed rows measures nothing, and fails.
+    let rank_ok = sub.is_some_and(|s| s > 0.0) && le(pos, sub);
+    let order_ok = le(vit, pos) && le(ammo, vit) && le(wh, vit);
     // The periods are reported beside the rates and judged by nothing: a
     // reported period holds any stall in progress when the report is made.
     let periods = format!(
@@ -1125,23 +1199,29 @@ fn tenth_order(
     );
     vec![
         (
-            "the lower tiers stretch first".to_string(),
-            stretch_ok,
-            format!(
-                "kept: subscribed {}, positions {}, vitals {}, ammunition {}, warehouses {}; \
-                 {} reports at k = 1, {} at k = 0.1; {periods}",
-                show(sub),
-                show(pos),
-                show(vit),
-                show(ammo),
-                show(wh),
-                k1.len(),
-                k01.len()
-            ),
+            "subscribed positions read rows and keep at least the positions' ratio".to_string(),
+            rank_ok,
+            format!("kept: subscribed {}, positions {}", show(sub), show(pos)),
         ),
         (
-            "subscribed positions keep 90 % of their rows a second".to_string(),
-            subscribed_ok,
+            "the lower tiers stretch first, reported".to_string(),
+            true,
+            format!("{}; ", if order_ok { "in order" } else { "out of order" })
+                + &format!(
+                    "kept: subscribed {}, positions {}, vitals {}, ammunition {}, warehouses {}; \
+                 {} reports at k = 1, {} at k = 0.1; {periods}",
+                    show(sub),
+                    show(pos),
+                    show(vit),
+                    show(ammo),
+                    show(wh),
+                    k1.len(),
+                    k01.len()
+                ),
+        ),
+        (
+            "subscribed positions keep 90 % of their rows a second, reported".to_string(),
+            true,
             format!("kept {}", show(sub)),
         ),
     ]
@@ -1253,10 +1333,12 @@ fn part_tenth(run: &Run, name: &str, shell: &[u8], probe: &Path) -> Result<Value
         " at k = 1, settled",
     )?;
     // The stall-free window ceiling is judged in the mirror part, the judged
-    // scenario. Here the budget runs at its cap at k = 1, and the host's
-    // positions sweep waits while an enumeration is due or running
-    // (`higher_waits`), so a window holding an enumeration reads several
-    // seconds with no stall. The ceiling is reported; the per-object median
+    // scenario. Here the budget runs near its cap at k = 1: while an
+    // enumeration is due or running the sweep takes at most 1 − m of a frame
+    // (`higher_waits`), and once it ends the sweep waits for the subscribed
+    // pump to repay the rows that fell behind (an open item of the ruling on
+    // live row costs), so a window holding an enumeration can read a long
+    // period with no stall. The ceiling is reported; the per-object median
     // is judged (coordinator ruling, 2026-11-14, on the tenth part's k = 1).
     for c in position_checks {
         let name = c["check"].as_str().unwrap_or_default();
@@ -1272,7 +1354,7 @@ fn part_tenth(run: &Run, name: &str, shell: &[u8], probe: &Path) -> Result<Value
     ) {
         check(
             c["check"].as_str().unwrap_or_default(),
-            true,
+            c["ok"] == json!(true),
             c["detail"].as_str().unwrap_or_default().to_string(),
         );
     }
@@ -1290,15 +1372,27 @@ fn part_tenth(run: &Run, name: &str, shell: &[u8], probe: &Path) -> Result<Value
     // keeps its period (S10 ruling 3b): it must still complete.
     let used = |m: &Value| m["counters"]["enumerations_used"].as_u64().unwrap_or(0);
     check(
-        "the mirror fills at k = 0.1 within twice the expected time",
-        filled_k01,
-        format!("{fill_k01_s:.0} s for 50 births"),
+        "the mirror fills at k = 0.1 within twice the expected time, reported",
+        true,
+        format!(
+            "{}: {fill_k01_s:.0} s for 50 births",
+            if filled_k01 {
+                "within it"
+            } else {
+                "not within it"
+            }
+        ),
     );
     check(
-        "an enumeration completes at k = 0.1",
-        used(&m2) > used(&m1),
+        "an enumeration completes at k = 0.1, reported",
+        true,
         format!(
-            "{} ended between the two compares; period {en:.1} s against 60 s",
+            "{}; {} ended between the two compares; period {en:.1} s against 60 s",
+            if used(&m2) > used(&m1) {
+                "completed"
+            } else {
+                "none completed"
+            },
             used(&m2).saturating_sub(used(&m1))
         ),
     );
@@ -1407,6 +1501,10 @@ fn part_tenth(run: &Run, name: &str, shell: &[u8], probe: &Path) -> Result<Value
                 .count()
         ),
     );
+    // The debt, overrun and sweep-budget checks below stay judged at k = 0.1
+    // too: they bound the agent's time and the frame cap, the owner's
+    // targets, not a tier's rate, which the ruling on live row costs (item
+    // 3) makes reported there.
     check(
         "debt bounded",
         max("debt_us") <= SHARE * 1e6,
@@ -1733,10 +1831,12 @@ mod tests {
     }
 
     #[test]
-    fn the_k1_rates_report_the_vitals_band_as_a_rate_and_never_fail() {
+    fn the_k1_rates_judge_the_vitals_band_as_a_rate_and_the_pump_bound() {
         let r = |due: f64, read: f64, vit: f64| {
             json!({"window_s": 10.0, "pumps": 30.0, "due_vitals": due,
-                   "swept_vitals": read, "rows_vitals": read + 50.0, "vitals_s": vit})
+                   "swept_vitals": read, "rows_vitals": read + 50.0, "vitals_s": vit,
+                   "pump_work_us": 1000.0, "xcall_seen_us": 35.0,
+                   "us_xcall": 1050.0, "us_pump": 2000.0})
         };
         let reports = [
             r(370.0, 380.0, 5.1),
@@ -1744,7 +1844,7 @@ mod tests {
             r(370.0, 370.0, 5.0),
         ];
         let c = k1_rates(&reports, "");
-        assert!(c.iter().all(|c| c["ok"] == json!(true)));
+        assert!(c.iter().all(|c| c["ok"] == json!(true)), "{c:?}");
         let vitals = c[0]["detail"].as_str().unwrap();
         assert!(
             vitals.starts_with("5.00 s as a rate against the default 5 s target, inside"),
@@ -1755,8 +1855,13 @@ mod tests {
             "{vitals}"
         );
         let pumps = c[1]["detail"].as_str().unwrap();
-        assert!(pumps.starts_with("3.00 pumps a second, under 5"), "{pumps}");
+        assert!(
+            pumps.starts_with("3.00 pumps a second in 30 s, call share 0.34"),
+            "{pumps}"
+        );
+        assert!(pumps.ends_with("every window within its bound"), "{pumps}");
         let slow = k1_rates(&[r(370.0, 200.0, 9.0)], "");
+        assert_eq!(slow[0]["ok"], json!(false));
         assert!(
             slow[0]["detail"]
                 .as_str()
@@ -1764,6 +1869,7 @@ mod tests {
                 .contains("outside the band")
         );
         let starved = k1_rates(&[r(370.0, 0.0, 30.0)], "");
+        assert_eq!(starved[0]["ok"], json!(false));
         assert!(
             starved[0]["detail"]
                 .as_str()
@@ -1773,14 +1879,36 @@ mod tests {
             starved[0]["detail"]
         );
         let old = k1_rates(
-            &[json!({"window_s": 10.0, "rows_vitals": 300.0, "due_vitals": 370.0})],
+            &[json!({"window_s": 10.0, "pumps": 30.0, "rows_vitals": 300.0, "due_vitals": 370.0})],
             "",
         );
+        assert!(old.iter().all(|c| c["ok"] == json!(false)));
         assert!(
             old[0]["detail"]
                 .as_str()
                 .unwrap()
                 .starts_with("not measured")
+        );
+        assert!(
+            old[1]["detail"]
+                .as_str()
+                .unwrap()
+                .starts_with("not measured")
+        );
+        // 10 pumps a second with 300 µs a second of work: the bound is
+        // 5 + 300 / 105, about 7.86.
+        let mut busy = r(370.0, 370.0, 5.0);
+        busy["pumps"] = json!(100.0);
+        busy["pump_work_us"] = json!(3000.0);
+        let c = k1_rates(&[busy], "");
+        assert_eq!(c[1]["ok"], json!(false));
+        assert!(
+            c[1]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("past the bound: 10.00 against 7.86"),
+            "{}",
+            c[1]["detail"]
         );
     }
 
@@ -1804,20 +1932,24 @@ mod tests {
             [800.0, 200.0, 74.0, 30.0, 15.0],
             [3.0, 10.5, 12.0, 14.0],
         )];
-        assert_eq!(verdicts(&k1(), &k01, 1.0), [true, true]);
+        assert_eq!(verdicts(&k1(), &k01, 1.0), [true, true, true]);
+        assert!(tenth_order(&k1(), &k01, 1.0)[1].2.starts_with("in order"));
     }
 
+    /// The order below the positions is reported, not judged, at live row
+    /// costs.
     #[test]
-    fn the_tenth_order_fails_when_vitals_keep_more_than_positions() {
+    fn the_tenth_order_reports_vitals_that_keep_more_than_positions() {
         let k01 = vec![report(
             10.0,
             [400.0, 200.0, 190.0, 30.0, 15.0],
             [3.0, 10.5, 12.0, 14.0],
         )];
         let checks = tenth_order(&k1(), &k01, 1.0);
-        assert_eq!(checks[0].0, "the lower tiers stretch first");
-        assert!(!checks[0].1);
-        assert!(checks[0].2.contains("vitals 0.95"), "{}", checks[0].2);
+        assert_eq!(checks[1].0, "the lower tiers stretch first, reported");
+        assert!(checks[1].1);
+        assert!(checks[1].2.starts_with("out of order"), "{}", checks[1].2);
+        assert!(checks[1].2.contains("vitals 0.95"), "{}", checks[1].2);
     }
 
     #[test]
@@ -1827,7 +1959,7 @@ mod tests {
             [800.0, 200.0, 0.0, 0.0, 0.0],
             [3.0, 40.0, 50.0, 60.0],
         )];
-        assert_eq!(verdicts(&k1(), &k01, 1.0), [true, true]);
+        assert_eq!(verdicts(&k1(), &k01, 1.0), [true, true, true]);
     }
 
     #[test]
@@ -1835,31 +1967,39 @@ mod tests {
         let mut base = k1();
         base[0]["rows_vitals"] = json!(0.0);
         base[0]["rows_ammo"] = json!(0.0);
-        // Vitals would fail against positions if it were judged.
         let k01 = vec![report(
             10.0,
             [400.0, 200.0, 190.0, 30.0, 15.0],
             [3.0, 0.0, 0.0, 14.0],
         )];
-        assert_eq!(verdicts(&base, &k01, 1.0), [true, true]);
+        assert_eq!(verdicts(&base, &k01, 1.0), [true, true, true]);
     }
 
-    /// The subscribed tier keeps at least 90 % of its rows a second, and the
-    /// periods are reported, never judged: vitals may read under positions.
+    /// The subscribed rows must read rows and keep at least the positions'
+    /// ratio (the rank); their 90 % keep is reported.
     #[test]
-    fn the_tenth_order_holds_the_subscribed_tier_to_its_rate() {
-        let short = vec![report(
-            10.0,
-            [700.0, 150.0, 74.0, 30.0, 15.0],
-            [3.0, 2.0, 12.0, 14.0],
-        )];
-        assert_eq!(verdicts(&k1(), &short, 1.0), [true, false]);
-        let kept = vec![report(
-            10.0,
-            [800.0, 200.0, 74.0, 30.0, 15.0],
-            [3.0, 2.0, 12.0, 14.0],
-        )];
-        assert_eq!(verdicts(&k1(), &kept, 1.0), [true, true]);
-        assert_eq!(verdicts(&k1(), &kept[..0], 1.0).len(), 2);
+    fn the_tenth_order_holds_the_subscribed_tier_to_the_rank() {
+        let kept = |sub: f64| {
+            vec![report(
+                10.0,
+                [800.0, sub, 74.0, 30.0, 15.0],
+                [3.0, 2.0, 12.0, 14.0],
+            )]
+        };
+        // Half their rows against the positions' 0.8: the rank fails.
+        assert_eq!(verdicts(&k1(), &kept(100.0), 1.0), [false, true, true]);
+        assert_eq!(verdicts(&k1(), &kept(0.0), 1.0), [false, true, true]);
+        // 0.8, the positions' ratio, passes; under 90 % is reported.
+        let checks = tenth_order(&k1(), &kept(160.0), 1.0);
+        assert_eq!(
+            checks.iter().map(|c| c.1).collect::<Vec<_>>(),
+            [true, true, true]
+        );
+        assert_eq!(checks[2].2, "kept 0.80");
+        assert_eq!(verdicts(&k1(), &kept(160.0)[..0], 1.0).len(), 3);
+        // A k = 1 base with no subscribed rows measures nothing: it fails.
+        let mut base = k1();
+        base[0]["rows_subscribed"] = json!(0.0);
+        assert_eq!(verdicts(&base, &kept(160.0), 1.0), [false, true, true]);
     }
 }

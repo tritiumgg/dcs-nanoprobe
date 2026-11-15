@@ -178,7 +178,8 @@ than a quarter of a position period's rows and 64.
 **Starvation guard.** At a scale of 1, with the sweep not behind, a tier below the
 positions that the pumps could not afford is late and goes right after the subscribed
 rows, with one row, ahead of owed vitals. A tier is late only when the budget is at a
-scale of 1, the pumps could not afford it and the sweep is not behind. The wait is timed
+scale of 1, the pumps could not afford it (it carries the mark of "The pump's worth") and
+the sweep is not behind. The wait is timed
 from the tier's last planned batch, or from its first owed row when none was planned.
 Ammunition and warehouses are late when two rows are owed and the wait passed the pump's 1
 s wait. Vitals is late when the wait passed 1 vitals period, and takes its rows by the
@@ -222,9 +223,16 @@ time and its batch cost × (1 − `k`), so at a scale below 1 maintenance yields
 tiers: it falls about as `k`^1.7, to about 2 % of its rate at `k` = 1 when `k` = 0.1 with
 rows owed. At `k` = 1 nothing changes. While a tier above the positions waits for a pump,
 the sweep takes at most 1 − `m` of a frame, so the pump has room in each frame ("The
-sweep"). The row tiers therefore always keep the rest of the sampling time, so subscribed
-positions keep a rate even at a tenth of the slice, where that takes precedence over the
-enumeration's period.
+sweep"). While births or an enumeration wait, the sweep may read unsubscribed positions
+while subscribed rows with attitude are owed. The row tiers therefore always keep the
+rest of the sampling time, so subscribed positions keep a rate even at a tenth of the
+slice, where that takes precedence over the enumeration's period. At live row costs a
+subscribed row with attitude costs about as much as the call (28-35 µs against 34-42 µs,
+LIVE, docs/results/2026-11-15-sampler-live-costs.md): a tenth of the budget is under two
+such rows, each pump reads one by the lone-row rule ("Batches in the pump"), and that
+bounds their keep, 0.52 of their rate at `k` = 1 in the host model of those costs
+(`at_a_tenth_with_live_attitude_costs_subscribed_rows_keep_the_rank`). They still keep
+at least the positions' ratio.
 
 Births go before a running enumeration. The enumeration finds the objects that births
 added already in the table; the birth of an object the enumeration already added costs
@@ -248,11 +256,13 @@ Nothing else runs between choosing a row and reading it. It writes them in one
   is at most what one frame can ever spend on it: the smaller of `A` − `c` + 150 and 250,
   less `F`, times 1 − `m` while births, an enumeration or subscribed rows with attitude
   wait for a pump, and times 1 otherwise. The sweep never waits on births or the
-  enumeration: their steps leave it no debt to repay. The pump leaves `k` × `R` of the frame alone, with one
+  enumeration, directly or through the subscribed rows that wait behind them: their steps
+  leave it no debt to repay. The pump leaves `k` × `R` of the frame alone, with one
   exception: on a frame where the pump is wanted for subscribed rows read with their
   attitude ("The pump's worth"), it may spend the savings on the subscribed tier only.
-  Other tiers keep the reserve. On such a frame the sweep reads no row of the positions
-  tier, which no subscription names, until that pump has run.
+  Other tiers keep the reserve. On such a frame, unless births or an enumeration that is
+  due or running wait for a pump, the sweep reads no row of the positions tier, which no
+  subscription names, until that pump has run.
 - **When.** A sweep's budget is the smaller of `k` × `R` and `S` − `F`. It reads the rows
   that pays for after its fixed part. It waits until that is 64 rows, or as many as a
   frame can ever pay for when that is fewer; or every row owed, once the last sweep is
@@ -294,16 +304,31 @@ With the sweep in `frame` the pump is called only when it has work worth its cal
   unless the sweep is behind;
 - or the sweep is not behind (above), and the tiers below the positions owe rows that
   cost at least three calls, or as much as a frame could spend on them. A tier (vitals,
-  ammunition or warehouses) whose owed rows the last pump planned none of for lack of
-  budget leaves that sum until the last pump is 1 s old; a planned row of the tier clears
-  the mark, and rows skipped because the sweep is behind or the rank is strict do not
-  set it;
+  ammunition or warehouses) whose owed rows a pump planned none of for lack of budget is
+  marked, and leaves that sum for 1 s from when it was first marked. A later pump does
+  not renew or restart the mark, so pumps that come more than once a second for other
+  tiers cannot keep the tier out. A planned row of the tier clears the mark, and rows
+  skipped because the sweep is behind or the rank is strict do not set it;
 - or they owe anything and the last pump is 1 s old.
+
+A pump not wanted for the subscribed rows read with their attitude reads none of them:
+they wait until they owe a batch's worth or their oldest is past its period, and then
+for their own pump.
 
 The agent counts births itself from the birth events, so an event that is no birth
 calls no pump. The call's cost here is the running average of the calls measured, with
 no decay between pumps, and 20 µs before the first. A pump that plans no row is counted
 (`empty_pumps`).
+
+The pumps a second are bounded by the work they carry. Over each 10 s window, the pumps a
+second are at most 5 + `W` ÷ (3 × the call's cost), `W` the time a second the pumps spent
+on batches of rows, births and the enumeration (`pump_work_us` over `window_s`, the call
+`xcall_seen_us`): every pump past 5 a second carries at least three calls' worth of work,
+the batch threshold above. At host costs `W` is small and the bound is about 5. In the
+host model of live costs, with subscribed rows with attitude at 32 µs, the pump comes 7.8
+to 8.0 times a second within it
+(`with_live_attitude_costs_every_tier_holds_and_the_pump_bound_holds`); the live figure
+is in docs/results/2026-11-15-sampler-live-costs.md.
 
 Each pump makes as many existence checks as its budget pays for at the cost of a vitals
 row, at least one and at most 20. The rest carry over, and the checks an event
@@ -469,6 +494,8 @@ message `sampling` and these `data` keys:
 | `birth_step_p50_us`, `birth_step_p99_us`, `enum_step_p50_us`, `enum_step_p99_us` | The upper edge of the histogram bucket (spec/transport.md, "Metrics") holding the p50 and p99 of one birth step (one object's reads) and one enumeration step (one DCS call, or one object), since the agent started |
 | `birth_step_max_us`, `enum_step_max_us` | The longest such step in the window |
 | `batch_us` | The running estimate of a batch's fixed part: planning it, the shim's dispatch and its return, apart from its rows |
+| `xcall_seen_us` | The running average of the calls measured, µs: the first call measured sets it, each later call weighs 0.1, each counts at most 62.5 µs, with no decay between pumps. It reads 0 before the first pump, when the pump's worth uses 20 µs. The call the pump bound uses ("The pump's worth") |
+| `pump_work_us` | The pumps' batches in the window, from plan to close, µs: rows of every tier the pump reads, births and the enumeration. `W` of the pump bound ("The pump's worth"); the call share is `pumps` × `xcall_seen_us` over `us_xcall` + `us_pump` |
 | `xcall_us`, `close_us` | The running estimates of the cross-state call and of closing a batch. Each takes at most a quarter of 250 µs from one measurement and decays by 1 % on each pump, so one slow call cannot stop sampling. `xcall_us` also decays on a frame where the gate's cap is below 3 × `x` ("Slice") |
 | `starved` | Frames in the window whose fixed work reached the allowance `A`; when above 0 the agent also logs a warning (spec/config.md) |
 | `us_fixed`, `us_xcall`, `us_pump`, `us_syscall` | Where the window's agent time went, µs: from the start of `frame` to the slice on frames that are not system-call frames; the cross-state calls; the pumps; the system-call frames. With the tiers' times they do not add up to the window's agent time: the rest is the end of each frame |
