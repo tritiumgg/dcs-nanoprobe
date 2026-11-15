@@ -184,10 +184,21 @@ under the same budget. It handles control commands and admission answers in Rust
 returns the opcode and the decoded arguments of the next admitted command with a
 `server` handler. It returns nothing when the ring is empty, the budget is spent, or
 the head has a `hook` handler. The shim runs the handler under `pcall` and passes its
-result to the agent's `command_done`; a raise is `LUA_ERROR` with the error text, and an
-opcode the shim has no handler for is `UNKNOWN_OPCODE`. A `hook` handler runs the same
-way from the hook, in `frame`'s place, with no cross-state call. No command is held
-from one frame to the next.
+result to the agent's `command_done(code, message, value, destroyed)`; a raise is
+`LUA_ERROR` with the error text, and an opcode the shim has no handler for is
+`UNKNOWN_OPCODE`. No command is held from one frame to the next.
+
+A `hook` handler runs the same way from the hook, with no cross-state call. Each state's
+`command` hands out only a command at the ring's head whose handler runs in that state,
+so ring order holds, and one command is outstanding at a time. When the head waits for
+a `hook` handler, `frame` says so, never on the frame that makes the agent's system
+calls, and leaves ending the frame to the hook: the hook runs the pump if `frame` asked
+for one, then its own commands, then `finish`. Hook commands share the commanded-work
+budget and the `no result` answer, and are excused from the sampling slice as a
+commands-only pump is. The hook's dispatch is one function that any hook callback can
+call. A `hook` opcode bound to a generation waits while the lifecycle state is
+`LOADING`, and is answered `NOT_READY` when no mission is loaded otherwise. `CHAT` and
+`MISSION_LOAD` have no hook handler yet: they are answered `UNKNOWN_OPCODE`.
 
 A pump begins with the generation check, then the commands, then sampling. A pump that
 `frame` asked for only for commands samples nothing, and its time, the cross-state call
@@ -218,6 +229,64 @@ limit; any other code stays, with a nil `value`. The agent cuts every
 `RESULT` message to 1,024 bytes at a UTF-8 boundary. A `command_done` with a code that
 `result` does not define is answered `LUA_ERROR` with a message naming the code, and the
 message is read only when it is a string.
+
+### Handler arguments
+
+The agent decodes the payload into one table and passes it to the handler. A payload
+that does not decode is answered `BAD_PAYLOAD` in Rust, and no handler runs. An opcode
+whose Entity column names a kind also gets `name`, the entity's platform name
+(spec/world.md, "Names") built from the header's `campaign` and `entity`: `np.g.` for a
+group, `np.s.` for a static, `np.u.` for a unit. `CAPTURE` gets both `name` (the group
+form) and `static_name`, because its entity is a group or a static.
+
+| Opcode | Fields |
+|---|---|
+| `GROUP_SPAWN` | `country`, `category`, `name`, `group` |
+| `GROUP_ORDER` | `name`, `task` |
+| `GROUP_DESTROY`, `GROUP_CAPTURE_DESTROY` | `name` |
+| `GROUP_OPTION` | `name`, `option`, `value` |
+| `STATIC_SPAWN` | `country`, `name`, `static` |
+| `STATIC_DESTROY` | `name` |
+| `AIRBASE_OWNER` | `coalition`, `airbase` |
+| `WAREHOUSE_SET` | `airbase`, `stock` |
+| `WAREHOUSE_ADJUST` | `airbase`, `delta` |
+| `DAMAGE` | `name`, `life_percent` |
+| `SOUND` | `scope`, `target`, `name`, `file` |
+| `PICTURE` | `scope`, `target`, `name`, `file`, `seconds`, `clear_view`, `size`, `horizontal`, `vertical`, `size_units` |
+| `PICTURE_STOP` | none |
+| `CAPTURE` | `name`, `static_name` |
+| `EXTENSION_SET` | `name`, `source` |
+| `EXTENSION_INVOKE` | `name`, `args` |
+
+For `SOUND` and `PICTURE`, `name` is present for the scope `GROUP` or `UNIT` only: the
+platform name built from the header's `campaign` and the `target` (`np.g.` or `np.u.`),
+empty with campaign 0. `PICTURE`'s hook handler builds Lua source, so the agent formats
+its numbers as text, as for `DAMAGE`, and a `file` that is empty, longer than 255 bytes or
+holds a character outside letters, digits, space and `_.-/()+,#` is `BAD_PAYLOAD`. So are
+`seconds` outside 0 to 86,400 (a day), and `size` below 0.0001 or above 10,000, so the
+size never reads 0 in the four decimals the agent writes. The
+Mission Editor offers sizes 1 to 100 (ED-CODE); the wider bound leaves room for a
+pixel unit whose range is UNVERIFIED, and keeps a number DCS might misread out.
+`SOUND`'s `file` is passed to DCS as a value and is any string.
+
+A spawn handler returns the new group's or static's DCS ID as its value. The agent
+writes that ID in the `RESULT`'s `object` and sends a nil `value`.
+
+`command_done`'s fourth argument, `destroyed`, is an array of the DCS object IDs a
+command removed. The handler reads them before the DCS call: the group's unit IDs for
+`GROUP_DESTROY` and `GROUP_CAPTURE_DESTROY`, the static's ID for `STATIC_DESTROY`, for
+a `GROUP_SPAWN` under the name of an existing group that group's unit IDs, and for a
+`STATIC_SPAWN` under the name of an existing static that static's ID. It passes them
+only with `APPLIED`, after the call returned without raising and, for a spawn, returned
+an object. The agent also acts on them when it turns that `APPLIED` into `TOO_LARGE`,
+since the destroy has happened. It reads `destroyed` only for those five opcodes, under
+the same `lua_pcall` that reads the value. It reads at most 4,096 IDs from one `destroyed`; the
+rest are counted in `pending_overflow` and leave through the existence checks.
+`command_done` returns how many IDs it took from `destroyed`, 0 when the read failed;
+the shim forgets its handles for those IDs only. For each ID it holds a row for, it writes
+`OBJECT_GONE` with `DESTROYED` before the `RESULT` and drops the row; every named ID,
+held or not, enters the pending-destroy set (below). Every `APPLIED` `GROUP_SPAWN` sets
+the entity's `applied_order_rev` to 0.
 
 ### Unknown opcodes
 
@@ -260,12 +329,16 @@ other, is answered `UNKNOWN_OPCODE`, and sets `last_applied_seq`.
 | 51 | SMOKE | effect |  |  | active | bound | server | layout | A smoke marker at a point |
 | 52 | FLARE | effect |  |  | active | bound | server | layout | A signal flare at a point |
 | 53 | ILLUMINATION | effect |  |  | active | bound | server | layout | An illumination bomb at a point |
-| 54 | DAMAGE | effect | unit |  | active | bound | server | layout | Set a unit's life |
+| 54 | DAMAGE | effect | unit |  | active | bound | hook | layout | Set a unit's life |
 | 55 | CHAT | effect |  |  | any |  | hook | layout | A chat message from the server |
 | 56 | MISSION_LOAD | effect |  |  | any |  | hook | layout | Load a mission file |
 | 57 | EXTENSION_INVOKE | effect |  |  | active |  | server | layout | Run a registered extension |
 | 58 | EVAL | effect |  |  | active |  | server | layout | Run Lua source in the `server` state |
+| 59 | WAREHOUSE_ADJUST | effect |  |  | active | bound | server | layout | Add to or take from a warehouse's stock |
+| 60 | PICTURE | effect |  |  | any |  | hook | layout | Show a picture from the mission |
+| 61 | PICTURE_STOP | effect |  |  | any |  | hook | none | Take every picture off screen |
 | 64 | CAPTURE | query | group or static |  | active | bound | server | none | Read an entity's full state and return it |
+| 65 | COUNTRIES | query |  |  | any | bound | server | none | Read each country's coalition in the loaded mission |
 
 The State column names the Lua state the handler runs in: `server`, the mission
 scripting state, through the shim; `hook`, the hook's own state. A control command has
@@ -393,8 +466,11 @@ old object IDs in the pending-destroy set (below). It sets the entity's
 `applied_order_rev` to 0, because the new group has no task, and the sidecar sends the
 order and the options again.
 
-That `coalition.addGroup` under an existing name replaces the group is PRIOR; step S15
-checks it, running and paused.
+While the simulation is paused, `coalition.addGroup` under an existing name leaves
+exactly the new group after a resume, with its new units: the old units are gone and
+were written `DESTROYED` once (LIVE, step S15 exit test, agent build
+`9590d6f6771c67a1`, DCS 2.9.31.29434 dedicated server under Wine 10.0, 2026-11-15).
+The same replace while the simulation runs is PRIOR; step S18's restore checks it.
 
 The result's `object` is the group's DCS ID, and an `OBJECT` record follows for each
 unit.
@@ -420,15 +496,34 @@ second, with no event (LIVE, docs/results/2026-11-11-server-gate.md, E17). So af
 its destroy call the agent:
 
 - writes `OBJECT_GONE` with `DESTROYED` for each row and removes the rows, at once;
-- keeps the object IDs in a pending-destroy set until `isExist()` is false for each;
-- ignores a pending-destroy object in events and in a full enumeration.
+- keeps the object IDs in a pending-destroy set until `isExist()` is false for each, or
+  raises, read through the existing per-pump existence checks;
+- ignores a pending-destroy object in births and in a full enumeration. A `DEAD` event
+  that names one is still written as an `EVENT`, removes nothing, and is counted in `pending_deaths`.
 
-Whether a spawn under the name of a group whose destroy is pending leaves exactly the
-new group after a resume is UNVERIFIED; step S15 checks it.
+The set is cleared on a mission generation change and survives a resync `HELLO`. It
+holds at most 65,536 IDs; an ID over that is not kept, and is counted in
+`pending_overflow`.
+An ID still existing after 60 s of unpaused model time is dropped and counted in `pending_expired`, so a
+later enumeration can add the object back. A unit killed and then destroyed before an
+existence check read its death is reported `DESTROYED`, not `DEAD`.
 
-`GROUP_CAPTURE_DESTROY` returns the captured state as the result's `value`: for each
-living unit its position, attitude, life, initial life, fuel and ammunition. For a
-group that does not exist the value is nil. The sidecar never sends this command again
+`GROUP_CAPTURE_DESTROY` returns the captured state as the result's `value`: a list
+with one table for each living unit, or for the static, with these keys. A read that
+raises leaves its key out.
+
+| Key | Value |
+|---|---|
+| `name` | The unit's or static's DCS name |
+| `id` | Its DCS object ID |
+| `type` | Its type name |
+| `x`, `y`, `z` | Position, meters |
+| `heading`, `pitch`, `roll` | Attitude, radians, from `getPosition()` |
+| `life`, `life0` | `getLife()` and `getLife0()` |
+| `fuel` | `getFuel()`; a static has none |
+| `ammo` | A list with one `{type, count}` per `getAmmo()` row, `type` from the row's `desc.typeName`; a row whose read raises is left out. Nil for a unit with none and for a static. Flares and chaff are not among the rows (LIVE, E8). |
+
+For a group that does not exist the value is nil. The sidecar never sends this command again
 after a `refused`, `unknown` or `TOO_LARGE` outcome: it takes the group's last
 checkpointed state and sends `GROUP_DESTROY`.
 
@@ -443,6 +538,10 @@ the last checkpointed state.
 | 0x0000 | u32 | option | The DCS option ID |
 | 0x0004 | pad[4] | reserved | |
 | + | lv | value | The option's value |
+
+The handler calls `setOption(option, value)` on the group's controller. A group that
+does not exist is `NOT_BOUND`. The sidecar keeps each group's options with the group, not in its spec
+(spec/world.md), and sends every option again after a spawn, as it does the order.
 
 ### Layout: STATIC_SPAWN
 
@@ -463,12 +562,43 @@ The exists-guard applies as for a group.
 | 0x0004 | pad[4] | reserved | |
 | + | str | airbase | The airbase's DCS name |
 
+The handler calls `autoCapture(false)` and then `setCoalition(coalition)` on the
+airbase (PRIOR; step S18's restore checks it): with automatic capture on, DCS
+can hand the airbase back to the units around it. An airbase the platform set keeps
+its owner until the next `AIRBASE_OWNER`. An airbase that does not exist is
+`NOT_BOUND`.
+
 ### Layout: WAREHOUSE_SET
 
 | Offset | Type | Field | Meaning |
 |---|---|---|---|
 | + | str | airbase | The airbase's DCS name |
 | + | lv | stock | Names and counts to set. An item not named keeps its count. |
+
+`stock` has the shape of a `WAREHOUSE` record's (spec/records.md): `weapon` and
+`aircraft` map item names to counts, set with `setItem`; `liquids` maps the liquid
+number (0 jet fuel, 1 gasoline, 2 MW-50, 3 diesel) to an amount, set with
+`setLiquidAmount`. An airbase with no warehouse, or a name DCS does not have, is
+`NOT_BOUND`. A call that raises is `DCS_REFUSED`.
+
+On a limited warehouse each set reads back as set, for items and liquids (LIVE, E6,
+step S15). An unlimited warehouse ignores a set without an error and keeps reading its
+full count (LIVE, E6), so `APPLIED` says only that DCS took the call. The reconciler
+then sees a sample that differs from the desired count; it sends the set once per
+revision and mission generation, and never again for that difference.
+
+### Layout: WAREHOUSE_ADJUST
+
+| Offset | Type | Field | Meaning |
+|---|---|---|---|
+| + | str | airbase | The airbase's DCS name |
+| + | lv | delta | Names and amounts to add, in the shape of `WAREHOUSE_SET`'s `stock`. A negative amount takes away. |
+
+An effect: applied at most once, never sent again. A positive amount uses `addItem` or
+`addLiquid`, a negative one `removeItem` or `removeLiquid`. Taking more than a limited
+warehouse holds leaves 0, with no error (LIVE, E6, step S15). A call that raises
+stops the handler there: the items before it stay changed and the answer is
+`DCS_REFUSED`; the sidecar takes those changes from the next sample, as facts.
 
 ### Layout: MARK_SET
 
@@ -514,6 +644,7 @@ mission load; the sidecar sets them again, as it spawns groups again.
 | 2 | COALITION | DCS coalition number |
 | 3 | GROUP | group `EntityId` |
 | 4 | UNIT | unit `EntityId` |
+| 5 | COUNTRY | DCS country number; `SOUND` and `PICTURE` only |
 
 ### Layout: EXTENSION_SET
 
@@ -563,6 +694,44 @@ Positions are DCS `x`, `y`, `z` in meters.
 | 0x0008 | u64 | target | By scope |
 | + | str | file | The sound file's name in the mission |
 
+The handler calls `trigger.action.outSound`, or the `outSoundForCoalition`,
+`outSoundForCountry`, `outSoundForGroup` or `outSoundForUnit` form the scope names,
+with `file` as given. A `GROUP` or `UNIT` target is resolved by its platform name in
+the command's campaign; with campaign 0, or when DCS does not have it, the answer is
+`NOT_BOUND`. DCS accepts any file name without an error, a missing one included (LIVE,
+step S15), so `APPLIED` says only that DCS took the call. Which form of the name plays
+on a client, and whether a file outside the mission plays, is UNVERIFIED.
+
+### Layout: PICTURE
+
+| Offset | Type | Field | Meaning |
+|---|---|---|---|
+| 0x0000 | u32 | scope | A `scope` code |
+| 0x0004 | u32 | clear_view | 1 to clear the view, the Mission Editor's "clear view" |
+| 0x0008 | u64 | target | By scope |
+| 0x0010 | f64 | seconds | How long the picture stays; 0 until `PICTURE_STOP` |
+| 0x0018 | f64 | size | The picture's size, in `size_units` |
+| 0x0020 | u32 | horizontal | The Mission Editor's horizontal alignment value |
+| 0x0024 | u32 | vertical | The Mission Editor's vertical alignment value |
+| 0x0028 | u32 | size_units | The Mission Editor's size-units value |
+| 0x002C | pad[4] | reserved | |
+| + | str | file | The picture's resource key in the mission, or its file name |
+
+`PICTURE` and `PICTURE_STOP` run in the hook's state, because `a_out_picture` and its
+scoped forms exist only in the `mission` state (LIVE, step S15), and are native, with no
+Lua definition in ED's files. The handler resolves a `GROUP` or `UNIT` target as
+`DAMAGE` does, with one `net.dostring_in('server', ...)` call (`NOT_BOUND` when DCS
+does not have it, or with campaign 0), then makes one `net.dostring_in('mission', ...)`
+call from a fixed template: `a_out_picture`, `a_out_picture_s`, `_c`, `_g` or `_u` by
+scope, the target first for a scoped form, then `getValueResourceByKey(file)`, seconds,
+clear view, a start delay of 0, horizontal, vertical, size and size units, the order of
+the Mission Editor's fields (ED-CODE, `me_trigrules.lua`). A key DCS does not know
+resolves to itself, and DCS raises nothing for a missing picture (LIVE), so `APPLIED`
+says only that DCS took the call. The alignment and unit values, the form of a
+coalition target, and what a client shows are UNVERIFIED.
+
+`PICTURE_STOP` has no payload after the header and calls `a_out_picture_stop()`.
+
 ### Layout: SMOKE
 
 | Offset | Type | Field | Meaning |
@@ -599,11 +768,24 @@ Positions are DCS `x`, `y`, `z` in meters.
 |---|---|---|---|
 | 0x0000 | f64 | life_percent | The life to set, as a percentage of the unit's initial life, 0 to 100 |
 
-Damage goes through `a_unit_set_life_percentage` in the `mission` state with one
-cross-state call. On a dedicated server a setting of 10 killed a ground unit and the
+`DAMAGE` runs in the hook's state, because `a_unit_set_life_percentage` exists only in
+the `mission` state and neither the `server` nor the `mission` state has `net` (LIVE).
+The agent checks that `life_percent` is finite and from 0 to 100, else `BAD_PAYLOAD`,
+and passes it to the handler as text it formats itself. The handler checks `name`
+against the platform unit form, then makes one `net.dostring_in('server', ...)` call
+that returns the unit's `getID()`; a unit that does not exist is `NOT_BOUND`, with no
+`mission` call, because the setter revives a dead unit (LIVE, E38). It then makes one
+`net.dostring_in('mission', ...)` call from a fixed template, with the ID formatted as
+an integer and a `c_unit_dead` guard: a dead unit is `NOT_BOUND`. A call that fails is
+`DCS_REFUSED` with its text; otherwise `APPLIED`.
+
+What the setter does (LIVE, E16, step S15): at 50 % an aircraft, a helicopter and a
+ground unit read back half their initial life. At 0 they leave DCS; only an airborne
+aircraft logged an event (`UNIT_LOST`, `EJECTION`). The one ship type tried, a
+speedboat, left DCS at 50 %. The setter does nothing to a static, which is why
+`DAMAGE` takes only a unit. On a dedicated server a setting of 10 killed a ground unit and the
 death did not reach a connected client (LIVE,
-docs/results/2026-11-11-first-dll-and-spikes.md, E18). Step S15 (E16) decides what the
-platform offers.
+docs/results/2026-11-11-first-dll-and-spikes.md, E18).
 
 ### Layout: CHAT
 
@@ -644,7 +826,19 @@ Needs raw Lua. The result's `value` is the first value the chunk returns.
 ## Queries
 
 `CAPTURE` has no payload after the header. The result's `value` is the state
-`GROUP_CAPTURE_DESTROY` returns, and nothing is destroyed.
+`GROUP_CAPTURE_DESTROY` returns, and nothing is destroyed. A group or static that does
+not exist is `NOT_BOUND`.
+
+`COUNTRIES` has no payload after the header. The result's `value` maps each DCS
+country number to its coalition number in the loaded mission, from
+`coalition.getCountryCoalition` for each value of `country.id`, each read under `pcall`.
+A country whose read raises or returns no number is left out. The sidecar sends it
+whenever it holds no map for the current mission generation and a mission is loaded: a
+new generation, a sidecar restart, or a lost answer. A resync `HELLO` within one
+generation keeps the map. The API reports a materialized object's coalition from its
+`OBJECT` records and uses the map for groups and statics that are not materialized;
+before the answer their coalition is unspecified. A disagreement between the two is
+counted.
 
 ## Extensions
 

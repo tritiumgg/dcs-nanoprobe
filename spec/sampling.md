@@ -449,3 +449,7 @@ message `sampling` and these `data` keys:
 | `enum_end_abandoned` | Since the agent started: enumerations whose hold on pending misses lasted one enumeration period and ended with no `ENUM_END` (spec/records.md, "Layout: ENUM_END") |
 | `marks_cleared` | Since the agent started: death-event marks cleared because `isExist` returned true at its check |
 | `revivals` | Since the agent started: objects of the dead set that were found alive and added again (spec/records.md, "The object table") |
+| `pending_destroy` | IDs in the pending-destroy set now (spec/commands.md, "A destroy while paused is pending") |
+| `pending_deaths` | Since the agent started: `DEAD` events that named an ID in the pending-destroy set |
+| `pending_overflow` | Since the agent started: destroyed IDs not kept, over the set's 65,536 or past the 4,096 the agent reads from one `destroyed` array |
+| `pending_expired` | Since the agent started: IDs dropped from the set after 60 s of unpaused model time while DCS still had them |

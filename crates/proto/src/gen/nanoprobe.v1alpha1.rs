@@ -3155,8 +3155,8 @@ pub struct RouteOrder {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AttackOrder {
-    /// The group to attack. A unit or a static as the target is not supported
-    /// yet (step S15).
+    /// The group, unit or static to attack. A unit's group, or a static, that
+    /// gets new DCS object IDs gets the attack compiled again.
     #[prost(uint64, tag = "1")]
     pub target_id: u64,
 }
@@ -3344,9 +3344,25 @@ pub struct SetWarehouseStockRequest {
     pub theater: ::prost::alloc::string::String,
     #[prost(string, tag = "3")]
     pub airbase: ::prost::alloc::string::String,
-    /// Items to set, by name. An item not named keeps its count.
+    /// Deprecated: use `weapon`. An alias for it; a name in both takes the
+    /// count in `weapon`.
     #[prost(btree_map = "string, double", tag = "4")]
     pub stock: ::prost::alloc::collections::BTreeMap<
+        ::prost::alloc::string::String,
+        f64,
+    >,
+    /// Aircraft to set, by DCS type name.
+    #[prost(btree_map = "string, double", tag = "5")]
+    pub aircraft: ::prost::alloc::collections::BTreeMap<
+        ::prost::alloc::string::String,
+        f64,
+    >,
+    /// Liquids to set, by number: 0 jet fuel, 1 gasoline, 2 MW-50, 3 diesel.
+    #[prost(btree_map = "uint32, double", tag = "6")]
+    pub liquids: ::prost::alloc::collections::BTreeMap<u32, f64>,
+    /// Weapons to set, by DCS name. An item not named keeps its count.
+    #[prost(btree_map = "string, double", tag = "7")]
+    pub weapon: ::prost::alloc::collections::BTreeMap<
         ::prost::alloc::string::String,
         f64,
     >,
@@ -3355,6 +3371,34 @@ pub struct SetWarehouseStockRequest {
 pub struct SetWarehouseStockResponse {
     #[prost(uint64, tag = "1")]
     pub revision: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AdjustWarehouseStockRequest {
+    #[prost(message, optional, tag = "1")]
+    pub write: ::core::option::Option<Write>,
+    #[prost(string, tag = "2")]
+    pub theater: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub airbase: ::prost::alloc::string::String,
+    /// Amounts to add, by weapon name. A negative amount takes away.
+    #[prost(btree_map = "string, double", tag = "4")]
+    pub weapon: ::prost::alloc::collections::BTreeMap<
+        ::prost::alloc::string::String,
+        f64,
+    >,
+    #[prost(btree_map = "string, double", tag = "5")]
+    pub aircraft: ::prost::alloc::collections::BTreeMap<
+        ::prost::alloc::string::String,
+        f64,
+    >,
+    /// By liquid number, as in SetWarehouseStockRequest.
+    #[prost(btree_map = "uint32, double", tag = "6")]
+    pub liquids: ::prost::alloc::collections::BTreeMap<u32, f64>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AdjustWarehouseStockResponse {
+    #[prost(message, optional, tag = "1")]
+    pub result: ::core::option::Option<CommandResult>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CaptureRequest {
@@ -3411,9 +3455,52 @@ pub struct Damage {
     #[prost(double, tag = "2")]
     pub life_percent: f64,
 }
+/// Play a sound file that is in the mission. DCS takes any file name without
+/// an error, so an applied outcome says only that DCS took the call.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Sound {
+    #[prost(enumeration = "EffectScope", tag = "1")]
+    pub scope: i32,
+    #[prost(uint64, tag = "2")]
+    pub target: u64,
+    /// The sound file's name in the mission.
+    #[prost(string, tag = "3")]
+    pub file: ::prost::alloc::string::String,
+}
+/// Show a picture. Its numbers are the Mission Editor's values for the same
+/// fields. An applied outcome says only that DCS took the call.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Picture {
+    #[prost(enumeration = "EffectScope", tag = "1")]
+    pub scope: i32,
+    #[prost(uint64, tag = "2")]
+    pub target: u64,
+    /// The picture's resource key in the mission, or its file name. Letters,
+    /// digits, space and `_.-/()+,#`, at most 255 bytes.
+    #[prost(string, tag = "3")]
+    pub file: ::prost::alloc::string::String,
+    /// How long the picture stays, 0 to 86400; 0 until PictureStop.
+    #[prost(double, tag = "4")]
+    pub seconds: f64,
+    /// Clear the view first.
+    #[prost(bool, tag = "5")]
+    pub clear_view: bool,
+    /// The picture's size, in `size_units`, at least 0.0001, at most 10000.
+    #[prost(double, tag = "6")]
+    pub size: f64,
+    #[prost(uint32, tag = "7")]
+    pub horizontal: u32,
+    #[prost(uint32, tag = "8")]
+    pub vertical: u32,
+    #[prost(uint32, tag = "9")]
+    pub size_units: u32,
+}
+/// Take every picture off screen.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PictureStop {}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Effect {
-    #[prost(oneof = "effect::Effect", tags = "1, 2, 3, 4, 5")]
+    #[prost(oneof = "effect::Effect", tags = "1, 2, 3, 4, 5, 6, 7, 8")]
     pub effect: ::core::option::Option<effect::Effect>,
 }
 /// Nested message and enum types in `Effect`.
@@ -3430,6 +3517,12 @@ pub mod effect {
         Illumination(super::Illumination),
         #[prost(message, tag = "5")]
         Damage(super::Damage),
+        #[prost(message, tag = "6")]
+        Sound(super::Sound),
+        #[prost(message, tag = "7")]
+        Picture(super::Picture),
+        #[prost(message, tag = "8")]
+        PictureStop(super::PictureStop),
     }
 }
 /// At-most-once: an effect is never sent to DCS twice.
@@ -3513,6 +3606,50 @@ impl LostPolicy {
             "LOST_POLICY_REPORT" => Some(Self::Report),
             "LOST_POLICY_RESPAWN" => Some(Self::Respawn),
             "LOST_POLICY_DEAD" => Some(Self::Dead),
+            _ => None,
+        }
+    }
+}
+/// Whom a sound or a picture reaches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum EffectScope {
+    Unspecified = 0,
+    /// Everyone. `target` is ignored.
+    All = 1,
+    /// `target` is the DCS coalition number.
+    Coalition = 2,
+    /// `target` is the EntityId of a live group.
+    Group = 3,
+    /// `target` is the EntityId of a live unit.
+    Unit = 4,
+    /// `target` is the DCS country number.
+    Country = 5,
+}
+impl EffectScope {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "EFFECT_SCOPE_UNSPECIFIED",
+            Self::All => "EFFECT_SCOPE_ALL",
+            Self::Coalition => "EFFECT_SCOPE_COALITION",
+            Self::Group => "EFFECT_SCOPE_GROUP",
+            Self::Unit => "EFFECT_SCOPE_UNIT",
+            Self::Country => "EFFECT_SCOPE_COUNTRY",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "EFFECT_SCOPE_UNSPECIFIED" => Some(Self::Unspecified),
+            "EFFECT_SCOPE_ALL" => Some(Self::All),
+            "EFFECT_SCOPE_COALITION" => Some(Self::Coalition),
+            "EFFECT_SCOPE_GROUP" => Some(Self::Group),
+            "EFFECT_SCOPE_UNIT" => Some(Self::Unit),
+            "EFFECT_SCOPE_COUNTRY" => Some(Self::Country),
             _ => None,
         }
     }
@@ -3882,6 +4019,38 @@ pub mod commands_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Add to or take from a warehouse's stock now. An effect: applied at most
+        /// once, never sent again. Once applied, it adds its amounts to the count
+        /// the controller set for each item it names, at least 0.
+        pub async fn adjust_warehouse_stock(
+            &mut self,
+            request: impl tonic::IntoRequest<super::AdjustWarehouseStockRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AdjustWarehouseStockResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nanoprobe.v1alpha1.CommandsService/AdjustWarehouseStock",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "nanoprobe.v1alpha1.CommandsService",
+                        "AdjustWarehouseStock",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         /// Read an entity's full state from DCS. With persistence off this and
         /// PutGroup are the author's capture and restore: the captured units go back
         /// as a spec.
@@ -4081,6 +4250,16 @@ pub mod commands_service_server {
             request: tonic::Request<super::SetWarehouseStockRequest>,
         ) -> std::result::Result<
             tonic::Response<super::SetWarehouseStockResponse>,
+            tonic::Status,
+        >;
+        /// Add to or take from a warehouse's stock now. An effect: applied at most
+        /// once, never sent again. Once applied, it adds its amounts to the count
+        /// the controller set for each item it names, at least 0.
+        async fn adjust_warehouse_stock(
+            &self,
+            request: tonic::Request<super::AdjustWarehouseStockRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AdjustWarehouseStockResponse>,
             tonic::Status,
         >;
         /// Read an entity's full state from DCS. With persistence off this and
@@ -4649,6 +4828,55 @@ pub mod commands_service_server {
                     };
                     Box::pin(fut)
                 }
+                "/nanoprobe.v1alpha1.CommandsService/AdjustWarehouseStock" => {
+                    #[allow(non_camel_case_types)]
+                    struct AdjustWarehouseStockSvc<T: CommandsService>(pub Arc<T>);
+                    impl<
+                        T: CommandsService,
+                    > tonic::server::UnaryService<super::AdjustWarehouseStockRequest>
+                    for AdjustWarehouseStockSvc<T> {
+                        type Response = super::AdjustWarehouseStockResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::AdjustWarehouseStockRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as CommandsService>::adjust_warehouse_stock(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = AdjustWarehouseStockSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
                 "/nanoprobe.v1alpha1.CommandsService/Capture" => {
                     #[allow(non_camel_case_types)]
                     struct CaptureSvc<T: CommandsService>(pub Arc<T>);
@@ -4882,7 +5110,7 @@ pub struct Event {
     /// The campaign the sequence number belongs to, 0 for the server log.
     #[prost(uint64, tag = "9")]
     pub campaign_id: u64,
-    #[prost(oneof = "event::Body", tags = "3, 4, 5, 6, 7, 8")]
+    #[prost(oneof = "event::Body", tags = "3, 4, 5, 6, 7, 8, 10")]
     pub body: ::core::option::Option<event::Body>,
 }
 /// Nested message and enum types in `Event`.
@@ -4901,6 +5129,8 @@ pub mod event {
         Gap(super::Gap),
         #[prost(message, tag = "8")]
         Lifecycle(super::LifecycleEvent),
+        #[prost(message, tag = "10")]
+        Route(super::RouteEvent),
     }
 }
 /// A DCS world event.
@@ -4937,6 +5167,31 @@ pub struct WorldEvent {
     /// Fields the platform read and has no typed field for.
     #[prost(message, optional, tag = "12")]
     pub extra: ::core::option::Option<::prost_types::Struct>,
+}
+/// Progress of a group along its route order (spec/world.md, "Route
+/// progress"). The sidecar writes it from position samples, so it is as
+/// current as they are.
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct RouteEvent {
+    #[prost(enumeration = "RouteEventKind", tag = "1")]
+    pub kind: i32,
+    /// The group.
+    #[prost(uint64, tag = "2")]
+    pub group_id: u64,
+    /// The order revision the route was given at.
+    #[prost(uint64, tag = "3")]
+    pub order_revision: u64,
+    /// The waypoint's index in the order's own numbering, from 0. Not set for
+    /// ROUTE_COMPLETE.
+    #[prost(uint32, optional, tag = "4")]
+    pub waypoint_index: ::core::option::Option<u32>,
+    /// Model time of the position sample that showed it, in seconds.
+    #[prost(double, tag = "5")]
+    pub model_time: f64,
+    /// True when the position was observed in DCS, false when the controller
+    /// wrote it.
+    #[prost(bool, tag = "6")]
+    pub observed: bool,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct PlayerEvent {
@@ -5049,6 +5304,38 @@ pub struct ReadEventsResponse {
     /// True when more history follows the last event.
     #[prost(bool, tag = "2")]
     pub more: bool,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum RouteEventKind {
+    Unspecified = 0,
+    /// A waypoint of the group's route was reached.
+    WaypointReached = 1,
+    /// The last waypoint was reached; one per route, after its last
+    /// WAYPOINT_REACHED.
+    RouteComplete = 2,
+}
+impl RouteEventKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "ROUTE_EVENT_KIND_UNSPECIFIED",
+            Self::WaypointReached => "ROUTE_EVENT_KIND_WAYPOINT_REACHED",
+            Self::RouteComplete => "ROUTE_EVENT_KIND_ROUTE_COMPLETE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "ROUTE_EVENT_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "ROUTE_EVENT_KIND_WAYPOINT_REACHED" => Some(Self::WaypointReached),
+            "ROUTE_EVENT_KIND_ROUTE_COMPLETE" => Some(Self::RouteComplete),
+            _ => None,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]

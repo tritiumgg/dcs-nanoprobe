@@ -1425,6 +1425,39 @@ pub(crate) fn open(repository: &Path, name: &str, kind: &str) -> Result<Opened, 
     Ok(Opened { run, shell, probe })
 }
 
+/// [`open`] for a run that needs the eval channel only: no link probe and no
+/// `agent.toml`, so the connection fields the probe uses are empty. Returns
+/// the run and the shell mission.
+pub(crate) fn open_eval(
+    repository: &Path,
+    name: &str,
+    kind: &str,
+) -> Result<(Run, Vec<u8>), String> {
+    let target = crate::target(name)?;
+    if !matches!(target, Target::DockerWine { .. }) {
+        return Err(format!("{kind} runs on a docker-wine target"));
+    }
+    let template = std::fs::read(repository.join("templates/caucasus.miz"))
+        .map_err(|e| format!("templates/caucasus.miz: {e}"))?;
+    let shell = miz::generate(&template, &miz::Changes::default())?;
+    let (remote, _, _) = crate::remote(name)?;
+    let players = remote.players()?;
+    if players > 0 {
+        return Err(format!("{players} player(s) connected; not running."));
+    }
+    let folder = bundle::folder().join(format!("{kind}-{name}-{}", bundle::stamp()));
+    std::fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
+    let run = Run {
+        map: String::new(),
+        port: String::new(),
+        token: String::new(),
+        remote,
+        folder,
+        repository: repository.to_path_buf(),
+    };
+    Ok((run, shell))
+}
+
 /// The part to run on a target: a windows-ssh target runs the windows part,
 /// which is also its default, and the others run on docker-wine only.
 pub(crate) fn resolve_part(part: Part, windows: bool) -> Result<Part, String> {

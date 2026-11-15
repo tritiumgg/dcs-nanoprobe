@@ -22,6 +22,7 @@ mod probes;
 mod profile;
 mod proto;
 mod remote;
+mod routes;
 mod sampling;
 mod soak;
 mod spec;
@@ -121,6 +122,18 @@ commands:
                             agent.toml back as found; the caller restores the rest.
                             Writes bundles/commands-<name>-<time>/commands.json.
                             Exit 0 PASS, 1 FAIL.
+  routes <name> [--units 400] [--sweeps 1] [--shapes a,b] [--settle 20] [--measure 45]
+         [--length M] [--step M] [--speed M/S] [--kind TYPE] [--lane M]
+         [--lanes-per-block N] [--formations column=Cone,line=Rank,...]
+                            Experiment E37 on a docker-wine target: deploy with --dev,
+                            restart DCS, load a fresh shell, and for each route shape
+                            of lua/scenarios/routes.lua (halted, offroad-few,
+                            offroad-dense, onroad, formation-*, size-1/4/10,
+                            held-order, held-zero) add --units ground units, settle,
+                            count frames for --measure seconds, and remove them.
+                            Writes bundles/routes-<name>-<time>/ with routes.json
+                            and routes.txt: mean and p5 fps, model/real, DCS CPU and
+                            the moving share per shape. Refuses a server with players.
   soak <name> [--minutes 30] [--units 1200] [--collect-every MIN] [--no-sidecar]
                             The S11 churn soak on a docker-wine target: deploy with
                             --dev, restart DCS, load a fresh shell, attach link-probe
@@ -175,7 +188,7 @@ commands:
                             when it is out of date
   api-dump <name>           Write lua/mock/api/<state>.txt from each state's globals
   snapshot <name>           List the profile's tree, outside Logs/
-  miz <template> <out> [--start-time S]
+  miz <template> <out> [--start-time S] [--limited-airport ID] [--sound-picture]
                             Write a shell mission from an empty Mission Editor
                             template, optionally starting S seconds after midnight
 
@@ -221,6 +234,7 @@ fn main() -> ExitCode {
         ["sampling", rest @ ..] => sampling::command(&repository(), rest),
         ["commands", rest @ ..] => commands::command(&repository(), rest),
         ["soak", name, rest @ ..] => soak::command(&repository(), name, rest),
+        ["routes", name, rest @ ..] => routes::command(&repository(), name, rest),
         ["client", rest @ ..] => client::command(rest),
         ["hello"] => hello::command(None),
         ["hello", name] => hello::command(Some(name)),
@@ -870,17 +884,33 @@ fn gates(name: &str, on: bool) -> Result<ExitCode, String> {
 }
 
 fn miz(template: &str, out: &str, rest: &[&str]) -> Result<ExitCode, String> {
-    let changes = match rest {
-        [] => miz::Changes::default(),
-        ["--start-time", seconds] => miz::Changes {
-            start_time: Some(
-                seconds
-                    .parse()
-                    .map_err(|_| format!("--start-time {seconds:?} is not a number of seconds"))?,
-            ),
-        },
-        _ => return Err(format!("unknown options: {}", rest.join(" "))),
-    };
+    let mut changes = miz::Changes::default();
+    let mut options = rest.iter();
+    while let Some(option) = options.next() {
+        if *option == "--sound-picture" {
+            changes.resources = miz::test_resources();
+            continue;
+        }
+        let value = options
+            .next()
+            .ok_or_else(|| format!("{option} needs a value"))?;
+        match *option {
+            "--start-time" => {
+                changes.start_time =
+                    Some(value.parse().map_err(|_| {
+                        format!("--start-time {value:?} is not a number of seconds")
+                    })?)
+            }
+            "--limited-airport" => {
+                changes.limited_airport = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("--limited-airport {value:?} is not an airbase ID"))?,
+                )
+            }
+            _ => return Err(format!("unknown options: {}", rest.join(" "))),
+        }
+    }
     let bytes = std::fs::read(template).map_err(|e| format!("could not read {template}: {e}"))?;
     let shell = miz::generate(&bytes, &changes)?;
     std::fs::write(out, &shell).map_err(|e| format!("could not write {out}: {e}"))?;

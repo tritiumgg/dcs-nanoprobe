@@ -8,8 +8,8 @@
 use nanoprobe_transport::codec::{DecodeError, Lv, Reader, Writer};
 use nanoprobe_transport::layout::{command, kind};
 use nanoprobe_transport::records::{
-    CommandHeader, CommandResult, EnumBegin, EnumEnd, Event, Frame, Gap, Hello, Lifecycle,
-    Positions, Vitals as TransportVitals,
+    Airbase, CommandHeader, CommandResult, EnumBegin, EnumEnd, Event, Frame, Gap, Hello, Lifecycle,
+    Positions, Rates, Vitals as TransportVitals, Warehouse,
 };
 
 /// Opcodes (spec/commands.md, "Codes: opcode") the reconciler writes.
@@ -18,6 +18,8 @@ pub mod opcode {
     pub const CAMPAIGN: u16 = 1;
     /// `ENUMERATE`
     pub const ENUMERATE: u16 = 2;
+    /// `RATES`
+    pub const RATES: u16 = 3;
     /// `BURST`
     pub const BURST: u16 = 6;
     /// `GROUP_SPAWN`
@@ -28,30 +30,58 @@ pub mod opcode {
     pub const GROUP_DESTROY: u16 = 18;
     /// `GROUP_CAPTURE_DESTROY`
     pub const GROUP_CAPTURE_DESTROY: u16 = 19;
+    /// `GROUP_OPTION`
+    pub const GROUP_OPTION: u16 = 20;
     /// `STATIC_SPAWN`
     pub const STATIC_SPAWN: u16 = 21;
     /// `STATIC_DESTROY`
     pub const STATIC_DESTROY: u16 = 22;
+    /// `AIRBASE_OWNER`
+    pub const AIRBASE_OWNER: u16 = 23;
+    /// `WAREHOUSE_SET`
+    pub const WAREHOUSE_SET: u16 = 24;
     /// `EXTENSION_SET`
     pub const EXTENSION_SET: u16 = 31;
+    /// `SOUND`
+    pub const SOUND: u16 = 50;
+    /// `DAMAGE`
+    pub const DAMAGE: u16 = 54;
     /// `EXTENSION_INVOKE`
     pub const EXTENSION_INVOKE: u16 = 57;
+    /// `WAREHOUSE_ADJUST`
+    pub const WAREHOUSE_ADJUST: u16 = 59;
     /// `CAPTURE`
     pub const CAPTURE: u16 = 64;
+    /// `PICTURE`
+    pub const PICTURE: u16 = 60;
+    /// `PICTURE_STOP`
+    pub const PICTURE_STOP: u16 = 61;
+    /// `COUNTRIES`
+    pub const COUNTRIES: u16 = 65;
     /// Every opcode here, by name, for the golden check.
     pub const ALL: &[(&str, u16)] = &[
         ("CAMPAIGN", CAMPAIGN),
         ("ENUMERATE", ENUMERATE),
+        ("RATES", RATES),
         ("BURST", BURST),
         ("GROUP_SPAWN", GROUP_SPAWN),
         ("GROUP_ORDER", GROUP_ORDER),
         ("GROUP_DESTROY", GROUP_DESTROY),
         ("GROUP_CAPTURE_DESTROY", GROUP_CAPTURE_DESTROY),
+        ("GROUP_OPTION", GROUP_OPTION),
         ("STATIC_SPAWN", STATIC_SPAWN),
         ("STATIC_DESTROY", STATIC_DESTROY),
+        ("AIRBASE_OWNER", AIRBASE_OWNER),
+        ("WAREHOUSE_SET", WAREHOUSE_SET),
         ("EXTENSION_SET", EXTENSION_SET),
+        ("SOUND", SOUND),
+        ("DAMAGE", DAMAGE),
         ("EXTENSION_INVOKE", EXTENSION_INVOKE),
+        ("WAREHOUSE_ADJUST", WAREHOUSE_ADJUST),
+        ("PICTURE", PICTURE),
+        ("PICTURE_STOP", PICTURE_STOP),
         ("CAPTURE", CAPTURE),
+        ("COUNTRIES", COUNTRIES),
     ];
 }
 
@@ -225,6 +255,10 @@ pub enum Input {
     Positions(Vec<Position>),
     /// `VITALS`
     Vitals(Vec<Vitals>),
+    /// `AIRBASE`
+    Airbase(Airbase),
+    /// `WAREHOUSE`
+    Warehouse(Warehouse),
     /// `EVENT`: a hint to a level-triggered reconciler, never a fact.
     Event(Event),
     /// Any other kind.
@@ -248,6 +282,8 @@ impl Input {
             kind::POSITIONS => Input::Positions(decode_positions(payload)?),
             kind::VITALS => Input::Vitals(decode_vitals(payload)?),
             kind::EVENT => Input::Event(Event::decode(payload)?),
+            kind::AIRBASE => Input::Airbase(Airbase::decode(payload)?),
+            kind::WAREHOUSE => Input::Warehouse(Warehouse::decode(payload)?),
             _ => Input::Other(record_kind),
         })
     }
@@ -268,6 +304,8 @@ impl Input {
             Input::Positions(p) => (kind::POSITIONS, encode_positions(p)),
             Input::Vitals(v) => (kind::VITALS, encode_vitals(v)),
             Input::Event(e) => (kind::EVENT, e.encode()),
+            Input::Airbase(a) => (kind::AIRBASE, a.encode()),
+            Input::Warehouse(w) => (kind::WAREHOUSE, w.encode()),
             Input::Other(k) => (u64::from(*k), Vec::new()),
         };
         (k as u16, p)
@@ -283,6 +321,8 @@ pub enum Body {
     Enumerate,
     /// `BURST`
     Burst(bool),
+    /// `RATES`
+    Rates(Rates),
     /// `GROUP_SPAWN`
     GroupSpawn {
         /// DCS country.
@@ -300,6 +340,13 @@ pub enum Body {
     GroupDestroy,
     /// `GROUP_CAPTURE_DESTROY`
     GroupCaptureDestroy,
+    /// `GROUP_OPTION`
+    GroupOption {
+        /// The DCS option ID.
+        option: u32,
+        /// The option's value.
+        value: Lv,
+    },
     /// `STATIC_SPAWN`
     StaticSpawn {
         /// DCS country.
@@ -311,6 +358,64 @@ pub enum Body {
     },
     /// `STATIC_DESTROY`
     StaticDestroy,
+    /// `AIRBASE_OWNER`
+    AirbaseOwner {
+        /// DCS coalition number.
+        coalition: u32,
+        /// The airbase's DCS name.
+        airbase: String,
+    },
+    /// `WAREHOUSE_SET`
+    WarehouseSet {
+        /// The airbase's DCS name.
+        airbase: String,
+        /// Names and counts to set, in the shape of a `WAREHOUSE` record's.
+        stock: Lv,
+    },
+    /// `WAREHOUSE_ADJUST`
+    WarehouseAdjust {
+        /// The airbase's DCS name.
+        airbase: String,
+        /// Names and amounts to add; a negative amount takes away.
+        delta: Lv,
+    },
+    /// `DAMAGE`
+    Damage {
+        /// The life to set, as a percentage of the unit's initial life.
+        life_percent: f64,
+    },
+    /// `SOUND`
+    Sound {
+        /// A `scope` code.
+        scope: u32,
+        /// By scope: a coalition or country number, or an `EntityId`.
+        target: u64,
+        /// The sound file's name in the mission.
+        file: String,
+    },
+    /// `PICTURE`
+    Picture {
+        /// A `scope` code.
+        scope: u32,
+        /// By scope, as for `Sound`.
+        target: u64,
+        /// 1 to clear the view.
+        clear_view: u32,
+        /// How long the picture stays; 0 until `PICTURE_STOP`.
+        seconds: f64,
+        /// The picture's size, in `size_units`.
+        size: f64,
+        /// The Mission Editor's horizontal alignment value.
+        horizontal: u32,
+        /// The Mission Editor's vertical alignment value.
+        vertical: u32,
+        /// The Mission Editor's size-units value.
+        size_units: u32,
+        /// The picture's resource key or file name.
+        file: String,
+    },
+    /// `PICTURE_STOP`
+    PictureStop,
     /// `EXTENSION_SET`
     ExtensionSet {
         /// The extension's name.
@@ -327,6 +432,8 @@ pub enum Body {
     },
     /// `CAPTURE`
     Capture,
+    /// `COUNTRIES`
+    Countries,
 }
 
 impl Body {
@@ -336,6 +443,15 @@ impl Body {
             Body::Campaign(_) => opcode::CAMPAIGN,
             Body::Enumerate => opcode::ENUMERATE,
             Body::Burst(_) => opcode::BURST,
+            Body::Rates(_) => opcode::RATES,
+            Body::GroupOption { .. } => opcode::GROUP_OPTION,
+            Body::AirbaseOwner { .. } => opcode::AIRBASE_OWNER,
+            Body::WarehouseSet { .. } => opcode::WAREHOUSE_SET,
+            Body::WarehouseAdjust { .. } => opcode::WAREHOUSE_ADJUST,
+            Body::Damage { .. } => opcode::DAMAGE,
+            Body::Sound { .. } => opcode::SOUND,
+            Body::Picture { .. } => opcode::PICTURE,
+            Body::PictureStop => opcode::PICTURE_STOP,
             Body::GroupSpawn { .. } => opcode::GROUP_SPAWN,
             Body::GroupOrder(_) => opcode::GROUP_ORDER,
             Body::GroupDestroy => opcode::GROUP_DESTROY,
@@ -345,12 +461,16 @@ impl Body {
             Body::ExtensionSet { .. } => opcode::EXTENSION_SET,
             Body::ExtensionInvoke { .. } => opcode::EXTENSION_INVOKE,
             Body::Capture => opcode::CAPTURE,
+            Body::Countries => opcode::COUNTRIES,
         }
     }
 
     /// Whether the opcode is a control command: no sequence number, no epoch.
     pub fn is_control(&self) -> bool {
-        matches!(self, Body::Campaign(_) | Body::Enumerate | Body::Burst(_))
+        matches!(
+            self,
+            Body::Campaign(_) | Body::Enumerate | Body::Burst(_) | Body::Rates(_)
+        )
     }
 }
 
@@ -374,6 +494,55 @@ impl Command {
             }
             Body::Burst(on) => {
                 w.u32(u32::from(*on)).pad(4);
+            }
+            Body::Rates(r) => {
+                w.f64(r.position_s)
+                    .f64(r.vitals_s)
+                    .f64(r.ammo_s)
+                    .f64(r.warehouse_s)
+                    .f64(r.enumeration_s);
+            }
+            Body::GroupOption { option, value } => {
+                w.u32(*option).pad(4).lv(value);
+            }
+            Body::AirbaseOwner { coalition, airbase } => {
+                w.u32(*coalition).pad(4).str(airbase);
+            }
+            Body::WarehouseSet { airbase, stock: v }
+            | Body::WarehouseAdjust { airbase, delta: v } => {
+                w.str(airbase).lv(v);
+            }
+            Body::Damage { life_percent } => {
+                w.f64(*life_percent);
+            }
+            Body::Sound {
+                scope,
+                target,
+                file,
+            } => {
+                w.u32(*scope).pad(4).u64(*target).str(file);
+            }
+            Body::Picture {
+                scope,
+                target,
+                clear_view,
+                seconds,
+                size,
+                horizontal,
+                vertical,
+                size_units,
+                file,
+            } => {
+                w.u32(*scope)
+                    .u32(*clear_view)
+                    .u64(*target)
+                    .f64(*seconds)
+                    .f64(*size)
+                    .u32(*horizontal)
+                    .u32(*vertical)
+                    .u32(*size_units)
+                    .pad(4)
+                    .str(file);
             }
             Body::GroupSpawn {
                 country,
@@ -400,6 +569,8 @@ impl Command {
             | Body::GroupDestroy
             | Body::GroupCaptureDestroy
             | Body::StaticDestroy
+            | Body::PictureStop
+            | Body::Countries
             | Body::Capture => {}
         }
         (self.body.opcode(), w.finish())
@@ -423,6 +594,72 @@ impl Command {
                 r.skip(4)?;
                 Body::Burst(on)
             }
+            opcode::RATES => Body::Rates(Rates {
+                position_s: r.f64()?,
+                vitals_s: r.f64()?,
+                ammo_s: r.f64()?,
+                warehouse_s: r.f64()?,
+                enumeration_s: r.f64()?,
+            }),
+            opcode::GROUP_OPTION => {
+                let option = r.u32()?;
+                r.skip(4)?;
+                Body::GroupOption {
+                    option,
+                    value: r.lv()?,
+                }
+            }
+            opcode::AIRBASE_OWNER => {
+                let coalition = r.u32()?;
+                r.skip(4)?;
+                Body::AirbaseOwner {
+                    coalition,
+                    airbase: r.str()?.to_owned(),
+                }
+            }
+            opcode::WAREHOUSE_SET => Body::WarehouseSet {
+                airbase: r.str()?.to_owned(),
+                stock: r.lv()?,
+            },
+            opcode::WAREHOUSE_ADJUST => Body::WarehouseAdjust {
+                airbase: r.str()?.to_owned(),
+                delta: r.lv()?,
+            },
+            opcode::DAMAGE => Body::Damage {
+                life_percent: r.f64()?,
+            },
+            opcode::SOUND => {
+                let scope = r.u32()?;
+                r.skip(4)?;
+                Body::Sound {
+                    scope,
+                    target: r.u64()?,
+                    file: r.str()?.to_owned(),
+                }
+            }
+            opcode::PICTURE => {
+                let scope = r.u32()?;
+                let clear_view = r.u32()?;
+                let target = r.u64()?;
+                let seconds = r.f64()?;
+                let size = r.f64()?;
+                let horizontal = r.u32()?;
+                let vertical = r.u32()?;
+                let size_units = r.u32()?;
+                r.skip(4)?;
+                Body::Picture {
+                    scope,
+                    target,
+                    clear_view,
+                    seconds,
+                    size,
+                    horizontal,
+                    vertical,
+                    size_units,
+                    file: r.str()?.to_owned(),
+                }
+            }
+            opcode::PICTURE_STOP => Body::PictureStop,
             opcode::GROUP_SPAWN => Body::GroupSpawn {
                 country: r.u32()?,
                 category: r.u32()?,
@@ -451,6 +688,7 @@ impl Command {
                 args: r.lv()?,
             },
             opcode::CAPTURE => Body::Capture,
+            opcode::COUNTRIES => Body::Countries,
             _ => return Ok(None),
         };
         Ok(Some(Command { header, body }))
@@ -648,6 +886,78 @@ mod tests {
         assert!(decode_vitals(&[0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0]).is_err());
     }
 
+    /// The byte layouts of spec/commands.md, pad fields included, and the
+    /// fixed sizes of the golden file.
+    #[test]
+    fn new_commands_have_the_spec_s_layouts() {
+        let head = command::HEADER;
+        let body = |b: Body| {
+            let c = Command {
+                header: CommandHeader::default(),
+                body: b,
+            };
+            let (_, p) = c.encode();
+            p[head..].to_vec()
+        };
+        let o = body(Body::GroupOption {
+            option: 7,
+            value: Lv::Nil,
+        });
+        assert_eq!(&o[..4], &7u32.to_le_bytes());
+        assert_eq!(&o[4..8], &[0; 4]);
+        assert_eq!(o.len(), golden::layout("GROUP_OPTION").unwrap().fixed + 1);
+        let a = body(Body::AirbaseOwner {
+            coalition: 2,
+            airbase: "X".into(),
+        });
+        assert_eq!(&a[..4], &2u32.to_le_bytes());
+        assert_eq!(&a[4..8], &[0; 4]);
+        assert_eq!(golden::layout("AIRBASE_OWNER").unwrap().fixed, 8);
+        let d = body(Body::Damage { life_percent: 10.0 });
+        assert_eq!(d, 10.0f64.to_le_bytes());
+        assert_eq!(d.len(), golden::layout("DAMAGE").unwrap().fixed);
+        let sound = body(Body::Sound {
+            scope: 2,
+            target: 1,
+            file: "x".into(),
+        });
+        assert_eq!(&sound[..4], &2u32.to_le_bytes());
+        assert_eq!(&sound[4..8], &[0; 4]);
+        assert_eq!(&sound[8..16], &1u64.to_le_bytes());
+        assert_eq!(sound.len(), golden::layout("SOUND").unwrap().fixed + 3);
+        let pic = body(Body::Picture {
+            scope: 1,
+            target: 0,
+            clear_view: 1,
+            seconds: 5.0,
+            size: 50.0,
+            horizontal: 1,
+            vertical: 2,
+            size_units: 3,
+            file: "p".into(),
+        });
+        assert_eq!(&pic[4..8], &1u32.to_le_bytes());
+        assert_eq!(&pic[16..24], &5.0f64.to_le_bytes());
+        assert_eq!(&pic[24..32], &50.0f64.to_le_bytes());
+        assert_eq!(&pic[40..44], &3u32.to_le_bytes());
+        assert_eq!(&pic[44..48], &[0; 4]);
+        assert_eq!(pic.len(), golden::layout("PICTURE").unwrap().fixed + 3);
+        assert!(body(Body::PictureStop).is_empty());
+        let r = body(Body::Rates(Rates::default()));
+        assert_eq!(r.len(), golden::layout("RATES").unwrap().fixed);
+        for n in ["WAREHOUSE_SET", "WAREHOUSE_ADJUST"] {
+            assert_eq!(golden::layout(n).unwrap().fixed, 0);
+        }
+        assert!(
+            Command {
+                header: CommandHeader::default(),
+                body: Body::Rates(Rates::default())
+            }
+            .body
+            .is_control()
+        );
+    }
+
     #[test]
     fn commands_round_trip() {
         let h = CommandHeader {
@@ -686,6 +996,48 @@ mod tests {
                 args: lv::obj(vec![("1", lv::s("a"))]),
             },
             Body::Capture,
+            Body::Countries,
+            Body::Rates(Rates {
+                position_s: 1.0,
+                vitals_s: 2.0,
+                ammo_s: 3.0,
+                warehouse_s: 4.0,
+                enumeration_s: 5.0,
+            }),
+            Body::GroupOption {
+                option: 3,
+                value: lv::n(2.0),
+            },
+            Body::AirbaseOwner {
+                coalition: 2,
+                airbase: "Batumi".into(),
+            },
+            Body::WarehouseSet {
+                airbase: "Batumi".into(),
+                stock: lv::obj(vec![("weapon", lv::obj(vec![("AIM-9X", lv::n(4.0))]))]),
+            },
+            Body::WarehouseAdjust {
+                airbase: "Batumi".into(),
+                delta: lv::obj(vec![("liquids", lv::list(vec![lv::n(-5.0)]))]),
+            },
+            Body::Damage { life_percent: 12.5 },
+            Body::Sound {
+                scope: 5,
+                target: 80,
+                file: "gong.ogg".into(),
+            },
+            Body::Picture {
+                scope: 3,
+                target: 1 << 40,
+                clear_view: 1,
+                seconds: 12.5,
+                size: 60.0,
+                horizontal: 1,
+                vertical: 2,
+                size_units: 0,
+                file: "map.png".into(),
+            },
+            Body::PictureStop,
         ] {
             let c = Command { header: h, body };
             let (op, p) = c.encode();

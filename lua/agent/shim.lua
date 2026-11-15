@@ -16,7 +16,7 @@
 local agent, root, dir, previous = ...
 
 -- The agent's interface version this shim was written for.
-local ABI = '8'
+local ABI = '9'
 if type(agent) ~= 'table' or agent.abi ~= ABI then
   error('the shim needs agent ABI ' .. ABI .. '; the DLL has '
     .. tostring(type(agent) == 'table' and agent.abi or agent), 0)
@@ -480,6 +480,11 @@ local function read(o, enumerated, isunit)
     type(desc) == 'table' and desc.category or 0, o:getCoalition(), o:getCountry(), life0,
     o:getName(), o:getTypeName(), gname, enumerated, movable)
   if slot and slot > 0 then
+    -- A reused slot no longer belongs to the ID it held.
+    local old = T.ids[slot]
+    if old and T.slot_of[old] == slot then
+      T.slot_of[old] = nil
+    end
     T.ids[slot], T.objs[slot], T.unit[slot] = id, o, isunit
     T.slot_of[id] = slot
     if not isunit then
@@ -638,9 +643,31 @@ end
 local bare = { id_ = 0 }
 local function check(id)
   local slot = T.slot_of[id]
-  local o = slot and T.objs[slot]
+  local o = slot and T.ids[slot] == id and T.objs[slot]
   if not o then
-    agent.alive(id, false)
+    -- No object here: a row the agent holds that this shim does not (its
+    -- command destroyed it and the agent kept the row), or an object a
+    -- command destroyed that DCS may still hold (pending). `isExist` true
+    -- keeps a pending object. False takes the reads of the object-held path
+    -- and gives them to `gone`, which ends a pending check and removes a row
+    -- the agent still holds; a raise says nothing, so `alive` lets a pending
+    -- object go and keeps a row. The class is unknown here, so a failed
+    -- `Unit.getLife` falls back to the static's read.
+    bare.id_ = id
+    local ran, there = pcall(Object.isExist, bare)
+    if ran and there == false then
+      local dead_ok, dead = pcall(Unit.isDead, bare)
+      local life_ok, life = pcall(Unit.getLife, bare)
+      if not life_ok then
+        life_ok, life = pcall(StaticObject.getLife, bare)
+      end
+      local freed = agent.gone(id, dead_ok, dead, life_ok, life)
+      if freed then
+        forget(freed)
+      end
+      return
+    end
+    agent.alive(id, ran and there == true)
     return
   end
   local ok, exists = pcall(o.isExist, o)
@@ -844,7 +871,7 @@ local function functions()
 end
 
 -- Result codes (spec/commands.md, "Codes: result").
-local APPLIED, UNKNOWN_OPCODE, LUA_ERROR = 0, 20, 23
+local APPLIED, NOT_BOUND, UNKNOWN_OPCODE, DCS_REFUSED, LUA_ERROR = 0, 18, 20, 22, 23
 
 -- Extensions by name: the source, the environment's hooks, and the chunk's
 -- revision is the agent's (spec/commands.md, "Extensions"). The registry
@@ -886,9 +913,363 @@ local function stop_extension(e)
   end
 end
 
--- Command handlers by opcode. Each returns a result code, then a value or a
--- message. The agent has admitted the command and checked raw Lua.
+-- World commands (spec/commands.md, "Handler arguments"). A handler returns
+-- the result code, the value, a message, and for a command that removes
+-- objects the array of their object IDs (`destroyed`), read before the DCS
+-- call and passed only with APPLIED. An object that is missing is NOT_BOUND,
+-- except that a destroy of nothing is APPLIED; a DCS call that raises or
+-- returns nothing is DCS_REFUSED with the error text.
+
+-- The object IDs of a group's living units, as the agent's table names them.
+local function unit_ids(group)
+  local ids = {}
+  local ok, units = pcall(group.getUnits, group)
+  for i = 1, ok and type(units) == 'table' and #units or 0 do
+    local id = rawget(units[i], 'id_')
+    if type(id) == 'number' then
+      ids[#ids + 1] = id
+    end
+  end
+  return ids
+end
+
+-- Heading, pitch and roll from the forward and up vectors of a position
+-- (the same as the agent's euler).
+local function euler(x, y)
+  local heading = math.atan2(x.z, x.x)
+  if heading < 0 then
+    heading = heading + 2 * math.pi
+  end
+  local pitch = math.asin(math.max(-1, math.min(1, x.y)))
+  local rx, rz = -x.z, x.x
+  local norm = math.sqrt(rx * rx + rz * rz)
+  local roll = 0
+  if norm > 1e-9 then
+    roll = math.atan2(-(y.x * rx + y.z * rz) / norm, y.y)
+  end
+  return heading, pitch, roll
+end
+
+-- The captured state of a unit or a static (GROUP_CAPTURE_DESTROY, CAPTURE).
+-- Each read is its own pcall: one that raises leaves its key out.
+local function capture_one(o, is_unit)
+  local t = { id = rawget(o, 'id_') }
+  local function read(key, method)
+    -- The method is looked up inside the pcall: a static has no getLife0.
+    local ok, v = pcall(function()
+      return o[method](o)
+    end)
+    if ok and v ~= nil then
+      t[key] = v
+    end
+    return ok and v or nil
+  end
+  read('name', 'getName')
+  read('type', 'getTypeName')
+  local ok, pos = pcall(o.getPosition, o)
+  if ok and type(pos) == 'table' and type(pos.p) == 'table' then
+    t.x, t.y, t.z = pos.p.x, pos.p.y, pos.p.z
+    if type(pos.x) == 'table' and type(pos.y) == 'table' then
+      t.heading, t.pitch, t.roll = euler(pos.x, pos.y)
+    end
+  end
+  read('life', 'getLife')
+  if is_unit then
+    read('life0', 'getLife0')
+    read('fuel', 'getFuel')
+    -- Each row is reduced to its type and count: the full desc of every row
+    -- would pass the read limit for a large armored group.
+    local ok_a, ammo = pcall(o.getAmmo, o)
+    if ok_a and type(ammo) == 'table' then
+      local rows = {}
+      for i = 1, #ammo do
+        local ok_r, row = pcall(function()
+          local r = ammo[i]
+          return { type = r.desc.typeName, count = r.count }
+        end)
+        if ok_r then
+          rows[#rows + 1] = row
+        end
+      end
+      t.ammo = rows
+    end
+  end
+  return t
+end
+
+local function capture_group(group)
+  local out = {}
+  local ok, units = pcall(group.getUnits, group)
+  for i = 1, ok and type(units) == 'table' and #units or 0 do
+    out[#out + 1] = capture_one(units[i], true)
+  end
+  return out
+end
+
+-- A warehouse of the airbase `name`, or nil and a code and message.
+local function warehouse_of(name)
+  local ab = Airbase.getByName(name)
+  if not ab then
+    return nil, NOT_BOUND, 'no airbase ' .. tostring(name)
+  end
+  local ok, w = pcall(ab.getWarehouse, ab)
+  if not ok or not w then
+    return nil, NOT_BOUND, 'airbase ' .. tostring(name) .. ' has no warehouse'
+  end
+  return w
+end
+
+-- Apply `delta` or `stock` (WAREHOUSE_ADJUST, WAREHOUSE_SET) to a warehouse.
+-- `set` true: setItem and setLiquidAmount; false: add or remove by sign.
+local function stock_to(w, stock, set)
+  if type(stock) ~= 'table' then
+    return
+  end
+  for _, group in ipairs({ 'weapon', 'aircraft' }) do
+    for item, n in pairs(stock[group] or {}) do
+      if set then
+        w:setItem(item, n)
+      elseif n > 0 then
+        w:addItem(item, n)
+      elseif n < 0 then
+        w:removeItem(item, -n)
+      end
+    end
+  end
+  for kind, n in pairs(stock.liquids or {}) do
+    if set then
+      w:setLiquidAmount(kind, n)
+    elseif n > 0 then
+      w:addLiquid(kind, n)
+    elseif n < 0 then
+      w:removeLiquid(kind, -n)
+    end
+  end
+end
+
+local function stock_command(a, set)
+  local w, code, message = warehouse_of(a.airbase)
+  if not w then
+    return code, nil, message
+  end
+  local ok, err = pcall(stock_to, w, set and a.stock or a.delta, set)
+  if not ok then
+    return DCS_REFUSED, nil, tostring(err)
+  end
+  return APPLIED
+end
+
+-- A group's controller call. `which` is setTask or setOption.
+local function controller_call(name, which, ...)
+  local g = Group.getByName(name)
+  if not g then
+    return NOT_BOUND, nil, 'no group ' .. tostring(name)
+  end
+  local ok, c = pcall(g.getController, g)
+  if not ok or not c then
+    return DCS_REFUSED, nil, ok and 'the group has no controller' or tostring(c)
+  end
+  local ran, err = pcall(c[which], c, ...)
+  if not ran then
+    return DCS_REFUSED, nil, tostring(err)
+  end
+  return APPLIED
+end
+
+-- Destroy a group. Returns the code, the unit IDs read before, a message.
+local function destroy_group(g)
+  local ids = unit_ids(g)
+  local ok, err = pcall(g.destroy, g)
+  if not ok then
+    return DCS_REFUSED, nil, tostring(err)
+  end
+  return APPLIED, ids
+end
+
+-- The mission ID of a group or a unit by platform name, as a number: nil and
+-- a code and message when there is none to name.
+local function mission_id(class, name)
+  if type(name) ~= 'string' or name == '' then
+    return nil, NOT_BOUND, 'no campaign to name the object'
+  end
+  local o = class.getByName(name)
+  if not o then
+    return nil, NOT_BOUND, 'no object ' .. name
+  end
+  local ok, id = pcall(o.getID, o)
+  id = ok and tonumber(id)
+  if not id then
+    return nil, DCS_REFUSED, 'the object has no mission ID'
+  end
+  return id
+end
+
+-- Command handlers by opcode. Each returns a result code, then a value, a
+-- message, and `destroyed`. The agent has admitted the command and checked
+-- raw Lua.
 local HANDLERS = {
+  -- GROUP_SPAWN: the new group's ID. A group under the name is replaced;
+  -- its unit IDs are `destroyed` (spec/commands.md).
+  [16] = function(a)
+    local old = Group.getByName(a.name)
+    local ids = old and unit_ids(old) or {}
+    local ok, g = pcall(coalition.addGroup, a.country, a.category, a.group)
+    if not ok then
+      return DCS_REFUSED, nil, tostring(g)
+    elseif not g then
+      return DCS_REFUSED, nil, 'addGroup returned no group'
+    end
+    local got, id = pcall(g.getID, g)
+    if not got or type(id) ~= 'number' then
+      return DCS_REFUSED, nil, 'the new group has no ID'
+    end
+    return APPLIED, id, nil, ids
+  end,
+  -- GROUP_ORDER
+  [17] = function(a)
+    return controller_call(a.name, 'setTask', a.task)
+  end,
+  -- GROUP_DESTROY: a group that is not there is destroyed already.
+  [18] = function(a)
+    local g = Group.getByName(a.name)
+    if not g then
+      return APPLIED
+    end
+    local code, ids, message = destroy_group(g)
+    return code, nil, message, ids
+  end,
+  -- GROUP_CAPTURE_DESTROY: the captured state, then the destroy.
+  [19] = function(a)
+    local g = Group.getByName(a.name)
+    if not g then
+      return APPLIED
+    end
+    local value = capture_group(g)
+    local code, ids, message = destroy_group(g)
+    if code ~= APPLIED then
+      return code, nil, message
+    end
+    return code, value, nil, ids
+  end,
+  -- GROUP_OPTION
+  [20] = function(a)
+    return controller_call(a.name, 'setOption', a.option, a.value)
+  end,
+  -- STATIC_SPAWN: the new static's ID. A static under the name is replaced;
+  -- its ID is `destroyed`.
+  [21] = function(a)
+    local had, old = pcall(StaticObject.getByName, a.name)
+    local old_id = had and old and rawget(old, 'id_') or nil
+    local ok, s = pcall(coalition.addStaticObject, a.country, a.static)
+    if not ok then
+      return DCS_REFUSED, nil, tostring(s)
+    elseif not s then
+      return DCS_REFUSED, nil, 'addStaticObject returned no static'
+    end
+    local id = rawget(s, 'id_')
+    if type(id) ~= 'number' then
+      return DCS_REFUSED, nil, 'the new static has no ID'
+    end
+    local ids = {}
+    if type(old_id) == 'number' and old_id ~= id then
+      ids[1] = old_id
+    end
+    return APPLIED, id, nil, ids
+  end,
+  -- STATIC_DESTROY
+  [22] = function(a)
+    local s = StaticObject.getByName(a.name)
+    if not s then
+      return APPLIED
+    end
+    local id = rawget(s, 'id_')
+    local ok, err = pcall(s.destroy, s)
+    if not ok then
+      return DCS_REFUSED, nil, tostring(err)
+    end
+    return APPLIED, nil, nil, type(id) == 'number' and { id } or {}
+  end,
+  -- SOUND: outSound, or the form the scope names. DCS raises nothing for a
+  -- file it does not have, so APPLIED says only that DCS took the call.
+  [50] = function(a)
+    local file, scope = a.file, a.scope
+    if type(file) ~= 'string' then
+      return DCS_REFUSED, nil, 'the file is not a string'
+    end
+    local call, first
+    if scope == 1 then
+      call = trigger.action.outSound
+    elseif scope == 2 then
+      call, first = trigger.action.outSoundForCoalition, a.target
+    elseif scope == 5 then
+      call, first = trigger.action.outSoundForCountry, a.target
+    elseif scope == 3 or scope == 4 then
+      local id, code, message = mission_id(scope == 3 and Group or Unit, a.name)
+      if not id then
+        return code, nil, message
+      end
+      call = scope == 3 and trigger.action.outSoundForGroup or trigger.action.outSoundForUnit
+      first = id
+    else
+      return DCS_REFUSED, nil, 'the scope is not 1 to 5'
+    end
+    local ok, err
+    if first ~= nil then
+      ok, err = pcall(call, first, file)
+    else
+      ok, err = pcall(call, file)
+    end
+    if not ok then
+      return DCS_REFUSED, nil, tostring(err)
+    end
+    return APPLIED
+  end,
+  -- AIRBASE_OWNER: automatic capture off, then the owner.
+  [23] = function(a)
+    local ab = Airbase.getByName(a.airbase)
+    if not ab then
+      return NOT_BOUND, nil, 'no airbase ' .. tostring(a.airbase)
+    end
+    local ok, err = pcall(ab.autoCapture, ab, false)
+    if ok then
+      ok, err = pcall(ab.setCoalition, ab, a.coalition)
+    end
+    if not ok then
+      return DCS_REFUSED, nil, tostring(err)
+    end
+    return APPLIED
+  end,
+  -- WAREHOUSE_SET
+  [24] = function(a)
+    return stock_command(a, true)
+  end,
+  -- WAREHOUSE_ADJUST
+  [59] = function(a)
+    return stock_command(a, false)
+  end,
+  -- CAPTURE: a group's state, or a static's.
+  [64] = function(a)
+    local g = Group.getByName(a.name)
+    if g then
+      return APPLIED, capture_group(g)
+    end
+    local s = StaticObject.getByName(a.static_name)
+    if s then
+      return APPLIED, { capture_one(s, false) }
+    end
+    return NOT_BOUND, nil, 'no group or static of that name'
+  end,
+  -- COUNTRIES: each country's coalition in this mission.
+  [65] = function()
+    local out = {}
+    for _, n in pairs(country.id) do
+      local ok, side = pcall(coalition.getCountryCoalition, n)
+      if ok and type(side) == 'number' then
+        out[n] = side
+      end
+    end
+    return APPLIED, out
+  end,
   -- EXTENSION_SET: the old extension keeps running when the new one fails.
   [31] = function(a)
     local hooks, err = load_extension(a.name, a.source)
@@ -925,13 +1306,27 @@ local function commands()
     if not handler then
       agent.command_done(UNKNOWN_OPCODE, 'no handler in the shim')
     else
-      local ok, code, value, message = pcall(handler, args or {})
+      local ok, code, value, message, destroyed = pcall(handler, args or {})
       if not ok then
         agent.command_done(LUA_ERROR, tostring(code))
       elseif type(code) ~= 'number' then
         agent.command_done(LUA_ERROR, 'the handler returned no code')
       else
-        agent.command_done(code, message, value)
+        local gone = code == APPLIED and destroyed or nil
+        local taken = agent.command_done(code, message, value, gone)
+        -- The agent freed the rows of the IDs it took, in order (at most
+        -- READ_IDS, none when its read failed): the shim lets go of those
+        -- and keeps the rest, which it still checks by ID.
+        if type(gone) == 'table' and type(taken) == 'number' then
+          for i = 1, math.min(taken, #gone) do
+            local id = gone[i]
+            local slot = T.slot_of[id]
+            if slot and T.ids[slot] == id then
+              forget(slot)
+            end
+            T.slot_of[id] = nil
+          end
+        end
       end
     end
   end

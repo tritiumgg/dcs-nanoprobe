@@ -316,6 +316,26 @@ impl Link {
     }
 }
 
+/// The event body for a route event the store made.
+pub fn route_body(e: &nanoprobe_sidecar::store::RouteEvent) -> event::Body {
+    use nanoprobe_proto::v1alpha1::{RouteEvent, RouteEventKind};
+    let (kind, waypoint_index) = match e.index {
+        Some(i) => (
+            RouteEventKind::WaypointReached,
+            Some(u32::try_from(i).unwrap_or(u32::MAX)),
+        ),
+        None => (RouteEventKind::RouteComplete, None),
+    };
+    event::Body::Route(RouteEvent {
+        kind: kind as i32,
+        group_id: e.group.0,
+        order_revision: e.order_rev,
+        waypoint_index,
+        model_time: e.model_time,
+        observed: e.observed,
+    })
+}
+
 /// Whether an event passes a filter's DCS IDs and player key. Gap and
 /// lifecycle events pass every filter.
 pub fn passes(e: &Event, dcs_ids: &[u32], player_key: &str) -> bool {
@@ -334,6 +354,7 @@ pub fn passes(e: &Event, dcs_ids: &[u32], player_key: &str) -> bool {
             dcs_ids.is_empty()
                 && (player_key.is_empty() || a.player_keys.iter().any(|k| k == player_key))
         }
+        Some(event::Body::Route(_)) => dcs_ids.is_empty() && player_key.is_empty(),
         Some(event::Body::Menu(m)) => {
             dcs_ids.is_empty()
                 && (player_key.is_empty() || m.player_keys.iter().any(|k| k == player_key))

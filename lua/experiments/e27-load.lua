@@ -8,7 +8,7 @@ local agent = E.lib('agent').open()
 local status = agent.status()
 E.observe('loaded', type(agent) == 'table', { windows = true })
 -- The ABI of the agent this repository builds (crates/agent/src/lib.rs).
-E.observe('abi', agent.abi, { windows = '8' })
+E.observe('abi', agent.abi, { windows = '9' })
 -- The host-native build under the mock does not pin itself. It carries the
 -- name of the file it was opened from, as the DLL does.
 E.observe('pinned', status.pinned, { windows = true, mock = false })

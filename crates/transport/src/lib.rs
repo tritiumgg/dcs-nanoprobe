@@ -35,3 +35,35 @@ pub fn random_nonzero() -> u64 {
         }
     }
 }
+
+/// The longest `PICTURE` file name, in bytes.
+pub const PICTURE_FILE_MAX: usize = 255;
+
+/// Whether a `PICTURE` file name is one the hook may put in Lua source:
+/// 1 to [`PICTURE_FILE_MAX`] bytes of ASCII letters, digits, space and
+/// `_.-/()+,#`. No quote, backslash or control character, so the name cannot
+/// end the string it sits in (spec/commands.md, "Handler arguments").
+pub fn picture_file_ok(file: &str) -> bool {
+    !file.is_empty()
+        && file.len() <= PICTURE_FILE_MAX
+        && file
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b" _.-/()+,#".contains(&b))
+}
+
+#[cfg(test)]
+mod picture_file_tests {
+    use super::picture_file_ok;
+
+    #[test]
+    fn only_safe_names_pass() {
+        for ok in ["ResKey_1", "a b.png", "l10n/DEFAULT/x-1(2).ogg", "#k,+"] {
+            assert!(picture_file_ok(ok), "{ok}");
+        }
+        for bad in ["", "a\"b", "a'b", "a\\b", "a\nb", "a]]b", "é", "a;b", "a=b"] {
+            assert!(!picture_file_ok(bad), "{bad:?}");
+        }
+        assert!(picture_file_ok(&"a".repeat(255)));
+        assert!(!picture_file_ok(&"a".repeat(256)));
+    }
+}

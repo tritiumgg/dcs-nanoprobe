@@ -85,6 +85,8 @@ struct Driver {
     syscall: bool,
     /// A command with a `server` handler waits at the ring's head.
     waiting: bool,
+    /// A command with a `hook` handler waits at the ring's head.
+    hook_waiting: bool,
     /// This frame's pump is for commands only: it samples nothing.
     forced: bool,
     /// The pump called `command` at least once.
@@ -120,6 +122,9 @@ enum Step {
     Empty,
     /// A command with a `server` handler; it stays at the head.
     Lua,
+    /// A command with a `hook` handler and a mission to run in; it stays at
+    /// the head for the hook to take.
+    Hook,
     /// A command handled in Rust, and the time it counts.
     Done(Duration),
     /// A command taken and admitted for its Lua handler.
@@ -284,6 +289,7 @@ pub fn start(root: &Path, dcs_version: &str) -> Result<String, String> {
         shim: false,
         syscall: false,
         waiting: false,
+        hook_waiting: false,
         forced: false,
         pumped: false,
         handler_time: Duration::ZERO,
@@ -440,9 +446,11 @@ fn injected(d: &mut Driver) {
 }
 
 /// One frame's first part: DCS real time, model time, and whether DCS is
-/// paused. Returns what the hook does next, and whether this is a sampling
-/// frame: the hook then calls the shim's pump, and `finish` after it. A
-/// frame that does not sample ends here (spec/sampling.md, "The frame").
+/// paused. Returns what the hook does next, whether the hook calls the
+/// shim's pump (a sampling frame, or a `server` command waits), and whether
+/// a command with a `hook` handler waits: the hook then runs its commands
+/// after the pump, and calls `finish` after them. A frame that needs neither
+/// ends here (spec/sampling.md, "The frame").
 ///
 /// `read`, when the caller's state has a position getter by object ID, reads
 /// one unit's position: `Ok(None)` when the getter gave no position, `Err`
@@ -454,7 +462,7 @@ pub fn frame(
     paused: bool,
     shim: bool,
     mut read: Option<&mut ReadPosition<'_>>,
-) -> (Frame, bool) {
+) -> (Frame, bool, bool) {
     with(|d| {
         if d.open {
             // The hook did not call finish for the last frame.
@@ -467,6 +475,7 @@ pub fn frame(
             && [lifecycle::RUNNING as u32, lifecycle::PAUSED as u32]
                 .contains(&d.link.stamps().lifecycle);
         d.sampler.set_direct(read.is_some());
+        d.sampler.model_time(model, paused);
         // One clock read serves the slice and the sweep's start, and one
         // the sweep's end and the gate.
         let mut now = Instant::now();
@@ -482,20 +491,24 @@ pub fn frame(
         // pump of its own, never on the system-call frame (spec/commands.md,
         // "Handlers").
         let commands = d.open && d.waiting && d.shim && !d.syscall;
+        // A command with a `hook` handler at the head: the hook runs it, after
+        // the pump if there is one, and ends the frame (spec/commands.md,
+        // "Handlers"). Never on the system-call frame.
+        let hook = d.open && d.hook_waiting && !d.syscall;
         let pump = sample || commands;
-        d.forced = pump && !sample;
+        d.forced = (pump && !sample) || (hook && !pump);
         d.pumped = false;
         d.handler_time = Duration::ZERO;
-        if !pump && d.open {
+        if !pump && !hook && d.open {
             // Nothing comes between this and `finish` on a frame that does
             // not sample, so the frame ends here and the hook makes one
             // call, not two.
             end_frame(d);
         }
         d.pump_started = Instant::now();
-        (code, pump)
+        (code, pump, hook)
     })
-    .unwrap_or((Frame::NoLink, false))
+    .unwrap_or((Frame::NoLink, false, false))
 }
 
 /// The frame's last part: account its time, publish its batch and store the
@@ -532,6 +545,8 @@ fn report(d: &mut Driver, r: &Report) {
     let gone = d.sampler.gone_counts();
     let revivals = d.sampler.revivals();
     let marks_cleared = d.sampler.marks_cleared();
+    let pending = d.sampler.pending_len();
+    let pending_counts = d.sampler.pending_counts();
     let enum_end_abandoned = d.sampler.enum_end_abandoned();
     record(
         d,
@@ -634,6 +649,10 @@ fn report(d: &mut Driver, r: &Report) {
             ("classifier_faults", Value::Int(gone[4] as i64)),
             ("revivals", Value::Int(revivals as i64)),
             ("marks_cleared", Value::Int(marks_cleared as i64)),
+            ("pending_destroy", Value::Int(pending as i64)),
+            ("pending_deaths", Value::Int(pending_counts[0] as i64)),
+            ("pending_overflow", Value::Int(pending_counts[1] as i64)),
+            ("pending_expired", Value::Int(pending_counts[2] as i64)),
             ("enum_end_abandoned", Value::Int(enum_end_abandoned as i64)),
         ],
     );
@@ -733,13 +752,18 @@ fn frame_with(d: &mut Driver, real: f64, model: f64, paused: bool) -> Frame {
 /// whose handler runs in the `server` state: the pump takes it.
 fn commands(d: &mut Driver) {
     d.waiting = false;
+    d.hook_waiting = false;
     d.ran = false;
     d.spent = Duration::ZERO;
     while !d.ran || d.spent < d.commanded || d.link.unbudgeted() {
-        match step(d, false) {
+        match step(d, Who::Frame) {
             Step::Empty => break,
             Step::Lua => {
                 d.waiting = true;
+                break;
+            }
+            Step::Hook => {
+                d.hook_waiting = true;
                 break;
             }
             Step::Done(counted) => {
@@ -759,36 +783,80 @@ fn needs_raw_lua(opcode: u16) -> bool {
     )
 }
 
-/// The next command at the ring's head. Outside the pump, a sequenced
-/// command with a `server` handler stays there (`Lua`), or is answered
-/// `NOT_READY` when no shim is loaded and no mission is loading. In the
-/// pump it is taken and admitted; an admitted one is left outstanding for
-/// its handler (`Handler`), with its arguments in `d.payload`'s place in
-/// `staged`.
-fn step(d: &mut Driver, in_pump: bool) -> Step {
+/// Who asks for the next command.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Who {
+    /// `frame`, reading commands in Rust.
+    Frame,
+    /// The shim's pump, in the `server` state.
+    Server,
+    /// The hook's dispatch, in the hook's state.
+    Hook,
+    /// `settle` at the end of a frame whose Lua state never asked: a command
+    /// waiting for a handler is answered `NOT_READY`.
+    Refuse,
+}
+
+/// The state a sequenced command's Lua handler runs in, or None when Rust
+/// answers it. `CHAT` and `MISSION_LOAD` have no hook handler yet: they are
+/// answered `UNKNOWN_OPCODE` in Rust (spec/commands.md, "Handlers").
+fn handler_state(opcode: u16) -> Option<HandlerState> {
+    if has_server_handler(opcode) {
+        Some(HandlerState::Server)
+    } else if matches!(
+        u64::from(opcode),
+        op::DAMAGE | op::PICTURE | op::PICTURE_STOP
+    ) {
+        Some(HandlerState::Hook)
+    } else {
+        None
+    }
+}
+
+/// The next command at the ring's head, for the caller `who`. A command
+/// whose handler runs in another state stays at the head: `command` returns
+/// nothing for it, so ring order holds. For `frame`, a sequenced command
+/// with a `server` handler stays there (`Lua`), as does one with a `hook`
+/// handler when a mission runs (`Hook`); either waits while the lifecycle
+/// state is `LOADING`, and is otherwise answered `NOT_READY`, a `server`
+/// command when no shim is loaded. For the state that owns the handler it
+/// is taken and admitted; an admitted one is left outstanding for its
+/// handler (`Handler`), with its arguments in `staged`.
+fn step(d: &mut Driver, who: Who) -> Step {
     let mut payload = std::mem::take(&mut d.payload);
     let Some(opcode) = d.link.peek_command(&mut payload) else {
         d.payload = payload;
         return Step::Empty;
     };
     let header = CommandHeader::read(&mut Reader::new(&payload)).ok();
-    let lua = header.as_ref().is_some_and(|h| h.seq != 0) && has_server_handler(opcode);
-    if lua && !in_pump {
-        if d.shim {
-            d.payload = payload;
-            return Step::Lua;
+    let state = header
+        .as_ref()
+        .is_some_and(|h| h.seq != 0)
+        .then(|| handler_state(opcode))
+        .flatten();
+    let lifecycle_now = d.link.stamps().lifecycle;
+    let running = [lifecycle::RUNNING as u32, lifecycle::PAUSED as u32].contains(&lifecycle_now);
+    let wait = match (who, state) {
+        (Who::Server, Some(HandlerState::Hook)) | (Who::Hook, Some(HandlerState::Server)) => {
+            Some(Step::Empty)
         }
-        if d.link.stamps().lifecycle == lifecycle::LOADING as u32 {
-            d.payload = payload;
-            return Step::Empty;
+        (Who::Frame, Some(HandlerState::Server)) if d.shim => Some(Step::Lua),
+        (Who::Frame, Some(HandlerState::Hook)) if running => Some(Step::Hook),
+        (Who::Frame | Who::Refuse, Some(_)) if lifecycle_now == lifecycle::LOADING as u32 => {
+            Some(Step::Empty)
         }
+        _ => None,
+    };
+    if let Some(wait) = wait {
+        d.payload = payload;
+        return wait;
     }
     let Some(opcode) = d.link.take_command(&mut payload) else {
         d.payload = payload;
         return Step::Empty;
     };
-    let out = if lua {
-        lua_command(d, opcode, &payload, in_pump)
+    let out = if state.is_some() {
+        lua_command(d, opcode, &payload, matches!(who, Who::Server | Who::Hook))
     } else {
         Step::Done(run_command(d, opcode, &payload))
     };
@@ -801,13 +869,13 @@ fn has_server_handler(opcode: u16) -> bool {
     opcode_row(opcode.into()).and_then(|r| r.state) == Some(HandlerState::Server)
 }
 
-/// Whether a sequenced command with a `server` handler is at the ring's
-/// head, looked at without taking it.
+/// Whether a sequenced command with a Lua handler is at the ring's head,
+/// looked at without taking it.
 fn head_is_lua(d: &mut Driver) -> bool {
     let mut payload = std::mem::take(&mut d.payload);
     let lua = d.link.peek_command(&mut payload).is_some_and(|opcode| {
         CommandHeader::read(&mut Reader::new(&payload)).is_ok_and(|h| h.seq != 0)
-            && has_server_handler(opcode)
+            && handler_state(opcode).is_some()
     });
     d.payload = payload;
     lua
@@ -838,7 +906,7 @@ fn lua_command(d: &mut Driver, opcode: u16, payload: &[u8], in_pump: bool) -> St
             message = "no extension of that name";
             result::LUA_ERROR
         }
-        Admit::Run => match arguments(opcode, body) {
+        Admit::Run => match arguments(opcode, &h, body) {
             Some(args) => {
                 d.staged = args;
                 d.outstanding = Some(Outstanding {
@@ -852,39 +920,252 @@ fn lua_command(d: &mut Driver, opcode: u16, payload: &[u8], in_pump: bool) -> St
         },
     };
     d.link.ran(code);
-    Step::Done(answer(d, opcode, &h, code, started, message, Lv::Nil))
+    Step::Done(answer(d, opcode, &h, code, started, message, 0, Lv::Nil))
+}
+
+/// The platform name of an entity (spec/world.md, "Names"):
+/// `np.<kind>.<campaign base 36>.<entity base 36>`.
+fn platform_name(kind: char, campaign: u64, entity: u64) -> String {
+    fn base36(mut v: u64, out: &mut String) {
+        const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+        let mut buf = [0u8; 13];
+        let mut at = buf.len();
+        loop {
+            at -= 1;
+            buf[at] = DIGITS[(v % 36) as usize];
+            v /= 36;
+            if v == 0 {
+                break;
+            }
+        }
+        out.extend(buf[at..].iter().map(|&b| b as char));
+    }
+    let mut name = format!("np.{kind}.");
+    base36(campaign, &mut name);
+    name.push('.');
+    base36(entity, &mut name);
+    name
+}
+
+/// The fields of one handler's arguments table: encoded `lv` pairs, built by
+/// hand. A value that is itself an `lv` payload is copied in as bytes:
+/// `Writer::lv` counts depth from the wrapper and would cut an argument that
+/// is 16 deep from its own root, which the codec admits.
+#[derive(Default)]
+struct Fields {
+    n: u32,
+    pairs: Vec<u8>,
+}
+
+impl Fields {
+    fn key(&mut self, key: &str) -> Writer {
+        self.n += 1;
+        let mut w = Writer::new();
+        w.lv(&Lv::String(key.as_bytes().to_vec()));
+        w
+    }
+
+    fn push(&mut self, key: &str, value: &Lv) {
+        let mut w = self.key(key);
+        w.lv(value);
+        self.pairs.extend(w.finish());
+    }
+
+    fn num(&mut self, key: &str, v: f64) {
+        self.push(key, &Lv::Number(v));
+    }
+
+    fn text(&mut self, key: &str, v: &str) {
+        self.push(key, &Lv::String(v.as_bytes().to_vec()));
+    }
+
+    /// An `lv` the payload holds, copied as it is.
+    fn raw(&mut self, key: &str, bytes: &[u8]) {
+        let w = self.key(key);
+        self.pairs.extend(w.finish());
+        self.pairs.extend_from_slice(bytes);
+    }
+
+    fn finish(self) -> Vec<u8> {
+        let mut out = vec![nanoprobe_transport::layout::lv_tag::TABLE as u8];
+        out.extend_from_slice(&self.n.to_le_bytes());
+        out.extend(self.pairs);
+        out
+    }
+}
+
+/// The next `lv` of the payload, as the bytes it occupies.
+fn lv_bytes<'a>(rd: &mut Reader<'a>, body: &'a [u8]) -> Option<&'a [u8]> {
+    let from = rd.position();
+    rd.lv().ok()?;
+    Some(&body[from..rd.position()])
 }
 
 /// A command's arguments for its Lua handler, as an `lv` table, encoded:
-/// the fields of its layout by name. `None` when the payload does not decode.
-///
-/// The wrapper is written by hand, with the argument's own bytes copied in.
-/// `Writer::lv` counts depth from the wrapper and would cut an argument that
-/// is 16 deep from its own root, which the codec admits.
-fn arguments(opcode: u16, body: &[u8]) -> Option<Vec<u8>> {
-    use nanoprobe_transport::layout::lv_tag;
+/// the fields of its layout by name (spec/commands.md, "Handler arguments"),
+/// and the platform names built from the header. `None` when the payload does
+/// not decode.
+fn arguments(opcode: u16, h: &CommandHeader, body: &[u8]) -> Option<Vec<u8>> {
     let mut rd = Reader::new(body);
-    let (key, name) = match u64::from(opcode) {
-        op::EXTENSION_SET => ("source", Some(rd.str().ok()?.to_owned())),
-        op::EXTENSION_INVOKE => ("args", Some(rd.str().ok()?.to_owned())),
-        _ => ("", None),
-    };
-    let mut out = vec![lv_tag::TABLE as u8];
-    let Some(name) = name else {
-        out.extend_from_slice(&0u32.to_le_bytes());
-        return Some(out);
-    };
-    let from = rd.position();
-    rd.lv().ok()?;
-    let value = &body[from..rd.position()];
-    out.extend_from_slice(&2u32.to_le_bytes());
-    let mut w = Writer::new();
-    w.lv(&Lv::String(b"name".to_vec()));
-    w.lv(&Lv::String(name.into_bytes()));
-    w.lv(&Lv::String(key.as_bytes().to_vec()));
-    out.extend(w.finish());
-    out.extend_from_slice(value);
-    Some(out)
+    let mut f = Fields::default();
+    let group = || platform_name('g', h.campaign, h.entity);
+    match u64::from(opcode) {
+        op::EXTENSION_SET | op::EXTENSION_INVOKE => {
+            let key = if u64::from(opcode) == op::EXTENSION_SET {
+                "source"
+            } else {
+                "args"
+            };
+            f.text("name", rd.str().ok()?);
+            f.raw(key, lv_bytes(&mut rd, body)?);
+        }
+        op::GROUP_SPAWN => {
+            f.num("country", f64::from(rd.u32().ok()?));
+            f.num("category", f64::from(rd.u32().ok()?));
+            rd.str().ok()?;
+            f.text("name", &group());
+            f.raw("group", lv_bytes(&mut rd, body)?);
+        }
+        op::GROUP_ORDER => {
+            f.text("name", &group());
+            f.raw("task", lv_bytes(&mut rd, body)?);
+        }
+        op::GROUP_DESTROY | op::GROUP_CAPTURE_DESTROY => f.text("name", &group()),
+        op::GROUP_OPTION => {
+            f.num("option", f64::from(rd.u32().ok()?));
+            rd.skip(4).ok()?;
+            f.text("name", &group());
+            f.raw("value", lv_bytes(&mut rd, body)?);
+        }
+        op::STATIC_SPAWN => {
+            f.num("country", f64::from(rd.u32().ok()?));
+            rd.skip(4).ok()?;
+            rd.str().ok()?;
+            f.text("name", &platform_name('s', h.campaign, h.entity));
+            f.raw("static", lv_bytes(&mut rd, body)?);
+        }
+        op::STATIC_DESTROY => f.text("name", &platform_name('s', h.campaign, h.entity)),
+        op::AIRBASE_OWNER => {
+            f.num("coalition", f64::from(rd.u32().ok()?));
+            rd.skip(4).ok()?;
+            f.text("airbase", rd.str().ok()?);
+        }
+        op::WAREHOUSE_SET | op::WAREHOUSE_ADJUST => {
+            let key = if u64::from(opcode) == op::WAREHOUSE_SET {
+                "stock"
+            } else {
+                "delta"
+            };
+            f.text("airbase", rd.str().ok()?);
+            f.raw(key, lv_bytes(&mut rd, body)?);
+        }
+        op::DAMAGE => {
+            // `+ 0.0` turns -0.0 into 0.0 so the text reads "0.0000".
+            let life = rd.f64().ok()? + 0.0;
+            if !life.is_finite() || !(0.0..=100.0).contains(&life) {
+                return None;
+            }
+            f.text("name", &platform_name('u', h.campaign, h.entity));
+            // Text Rust formats, so no Lua locale reads it (spec/commands.md,
+            // "Layout: DAMAGE").
+            f.text("life_percent", &format!("{life:.4}"));
+        }
+        op::SOUND => {
+            let scope = rd.u32().ok()?;
+            rd.skip(4).ok()?;
+            let target = rd.u64().ok()?;
+            let file = rd.str().ok()?;
+            let name = scope_name(scope, target, h)?;
+            f.num("scope", f64::from(scope));
+            f.num("target", target as f64);
+            if let Some(name) = name {
+                f.text("name", &name);
+            }
+            f.text("file", file);
+        }
+        op::PICTURE => {
+            let scope = rd.u32().ok()?;
+            let clear_view = rd.u32().ok()?;
+            let target = rd.u64().ok()?;
+            let seconds = rd.f64().ok()? + 0.0;
+            let size = rd.f64().ok()? + 0.0;
+            let horizontal = rd.u32().ok()?;
+            let vertical = rd.u32().ok()?;
+            let size_units = rd.u32().ok()?;
+            rd.skip(4).ok()?;
+            let file = rd.str().ok()?;
+            let name = scope_name(scope, target, h)?;
+            if !(seconds.is_finite() && (0.0..=PICTURE_SECONDS_MAX).contains(&seconds))
+                || !(size.is_finite() && (PICTURE_SIZE_MIN..=PICTURE_SIZE_MAX).contains(&size))
+                || !nanoprobe_transport::picture_file_ok(file)
+            {
+                return None;
+            }
+            // Text Rust formats, so no Lua locale reads it, and a file name
+            // the hook can put in source (spec/commands.md, "Handler
+            // arguments").
+            f.text("scope", &scope.to_string());
+            f.text("target", &target.to_string());
+            if let Some(name) = name {
+                f.text("name", &name);
+            }
+            f.text("file", file);
+            f.text("seconds", &format!("{seconds:.4}"));
+            f.text("clear_view", if clear_view != 0 { "true" } else { "false" });
+            f.text("size", &format!("{size:.4}"));
+            f.text("horizontal", &horizontal.to_string());
+            f.text("vertical", &vertical.to_string());
+            f.text("size_units", &size_units.to_string());
+        }
+        op::CAPTURE => {
+            f.text("name", &group());
+            f.text("static_name", &platform_name('s', h.campaign, h.entity));
+        }
+        _ => {}
+    }
+    Some(f.finish())
+}
+
+/// The longest a `PICTURE` stays, in seconds.
+const PICTURE_SECONDS_MAX: f64 = 86_400.0;
+/// The smallest `PICTURE` size: its four-decimal text is never 0.
+const PICTURE_SIZE_MIN: f64 = 0.0001;
+/// The largest `PICTURE` size.
+const PICTURE_SIZE_MAX: f64 = 10_000.0;
+/// The largest target a Lua number holds exactly.
+const EXACT_TARGET_MAX: u64 = 1 << 53;
+
+/// The check of a `SOUND` or `PICTURE` scope and target: `None` when the
+/// scope is not 1 to 5 or the target is out of range for it. Otherwise the
+/// platform name of a `GROUP` or `UNIT` target, empty with campaign 0, or
+/// `None` inside for the other scopes.
+fn scope_name(scope: u32, target: u64, h: &CommandHeader) -> Option<Option<String>> {
+    match scope {
+        1 => Some(None),
+        2 | 5 => (target <= u64::from(u32::MAX)).then_some(None),
+        3 | 4 if target < EXACT_TARGET_MAX => {
+            let kind = if scope == 3 { 'g' } else { 'u' };
+            Some(Some(if h.campaign == 0 {
+                String::new()
+            } else {
+                platform_name(kind, h.campaign, target)
+            }))
+        }
+        _ => None,
+    }
+}
+
+/// What a spawn's result carries: the DCS ID the handler returned becomes the
+/// `RESULT`'s `object`, and the value is nil (spec/commands.md, "Handler
+/// arguments"). Any other result passes through.
+fn spawn_result(opcode: u16, code: u64, value: Lv) -> (u64, Lv) {
+    let spawn = matches!(u64::from(opcode), op::GROUP_SPAWN | op::STATIC_SPAWN);
+    match value {
+        Lv::Number(n) if spawn && code == result::APPLIED && n >= 0.0 && n.fract() == 0.0 => {
+            (n as u64, Lv::Nil)
+        }
+        value => (0, value),
+    }
 }
 
 /// The longest `RESULT` message, in bytes (spec/records.md, "Commands").
@@ -901,6 +1182,7 @@ fn capped(message: &str) -> &str {
 
 /// Write a command's `RESULT`, count its time, clear the breadcrumb, and
 /// return the time that counts against the budget.
+#[allow(clippy::too_many_arguments, reason = "one argument per RESULT field")]
 fn answer(
     d: &mut Driver,
     opcode: u16,
@@ -908,6 +1190,7 @@ fn answer(
     code: u64,
     started: Instant,
     message: &str,
+    object: u64,
     value: Lv,
 ) -> Duration {
     state::crumb(0);
@@ -917,7 +1200,7 @@ fn answer(
     d.link
         .record_command(elapsed.as_secs_f64() * 1e6, counted > d.commanded);
     let cost = elapsed.as_micros().min(u128::from(u32::MAX)) as u32;
-    d.link.answer(opcode, h, code, 0, cost, message, value);
+    d.link.answer(opcode, h, code, object, cost, message, value);
     counted
 }
 
@@ -935,6 +1218,7 @@ fn settle(d: &mut Driver, ending: bool) {
             result::LUA_ERROR,
             o.started,
             "no result",
+            0,
             Lv::Nil,
         );
         d.spent += counted;
@@ -944,11 +1228,9 @@ fn settle(d: &mut Driver, ending: bool) {
         // Taken as if no shim were loaded: `NOT_READY`. In the lifecycle
         // state `LOADING` the command waits instead; no frame sees that state
         // today (spec/commands.md, "Handlers").
-        let shim = std::mem::replace(&mut d.shim, false);
-        if let Step::Done(counted) = step(d, false) {
+        if let Step::Done(counted) = step(d, Who::Refuse) {
             d.spent += counted;
         }
-        d.shim = shim;
     }
 }
 
@@ -962,7 +1244,7 @@ fn handled(d: &mut Driver, counted: Duration) {
 /// commands handled in Rust are run on the way, in ring order, under the
 /// frame's budget. Returns the opcode, with its arguments in `args` as an
 /// encoded `lv` table, or None.
-pub fn command(args: &mut Vec<u8>) -> Option<u16> {
+pub fn command(args: &mut Vec<u8>, hook: bool) -> Option<u16> {
     with(|d| {
         settle(d, false);
         if d.forced && !d.pumped {
@@ -976,12 +1258,12 @@ pub fn command(args: &mut Vec<u8>) -> Option<u16> {
                 return None;
             }
             let started = Instant::now();
-            let step = step(d, true);
+            let step = step(d, if hook { Who::Hook } else { Who::Server });
             if d.begun.is_none() && !matches!(step, Step::Handler(_)) {
                 d.pump_commands += started.elapsed();
             }
             match step {
-                Step::Empty | Step::Lua => return None,
+                Step::Empty | Step::Lua | Step::Hook => return None,
                 Step::Done(counted) => {
                     d.ran = true;
                     d.spent += counted;
@@ -997,9 +1279,48 @@ pub fn command(args: &mut Vec<u8>) -> Option<u16> {
     .flatten()
 }
 
+/// Whether the opcode's handler names the objects it destroyed: the spawns of
+/// groups and of statics (a replaced group or static), the destroys of a group and of a static, and the
+/// capture-and-destroy.
+fn reads_destroyed(opcode: u16) -> bool {
+    matches!(
+        u64::from(opcode),
+        op::GROUP_SPAWN
+            | op::STATIC_SPAWN
+            | op::GROUP_DESTROY
+            | op::GROUP_CAPTURE_DESTROY
+            | op::STATIC_DESTROY
+    )
+}
+
+/// `APPLIED`, or `TOO_LARGE`: the command ran and only its value did not fit.
+fn is_applied(code: u64) -> bool {
+    code == result::APPLIED || code == result::TOO_LARGE
+}
+
+/// Whether the outstanding command's handler reports `destroyed`, so the
+/// entry reads the argument.
+pub fn wants_destroyed() -> bool {
+    with(|d| {
+        d.outstanding
+            .as_ref()
+            .is_some_and(|o| reads_destroyed(o.opcode))
+    })
+    .unwrap_or(false)
+}
+
 /// The shim's handler finished the outstanding command with `code`, a
-/// message and a value. A call with none outstanding is logged and ignored.
-pub fn command_done(code: u64, message: &str, value: Lv) {
+/// message, a value and the object IDs it destroyed. A call with none outstanding is logged and ignored.
+/// Returns how many of `destroyed` the agent took: all of them, or 0 when the
+/// command did not read them or did not apply.
+pub fn command_done(
+    code: u64,
+    message: &str,
+    value: Lv,
+    destroyed: &[u64],
+    cut_ids: usize,
+) -> usize {
+    let mut taken = 0;
     with(|d| {
         let Some(o) = d.outstanding.take() else {
             record(
@@ -1020,13 +1341,38 @@ pub fn command_done(code: u64, message: &str, value: Lv) {
             )
         };
         d.link.ran(code);
-        let counted = answer(d, o.opcode, &o.header, code, o.started, &message, value);
+        if reads_destroyed(o.opcode) && !destroyed.is_empty() && is_applied(code) {
+            // Before the RESULT: the rows leave as `DESTROYED`, and every ID
+            // enters the pending-destroy set.
+            d.sampler.destroyed(&mut d.link, destroyed);
+            taken = destroyed.len();
+            // IDs past the read limit cannot enter the pending set.
+            d.sampler.add_pending_overflow(cut_ids as u64);
+        }
+        let (object, value) = spawn_result(o.opcode, code, value);
+        if code == result::APPLIED && u64::from(o.opcode) == op::GROUP_SPAWN {
+            // The new group has no task (spec/commands.md, "Layout: GROUP_SPAWN").
+            d.link.clear_order(o.header.entity);
+        }
+        if code == result::APPLIED
+            && matches!(
+                u64::from(o.opcode),
+                op::GROUP_DESTROY | op::GROUP_CAPTURE_DESTROY | op::STATIC_DESTROY
+            )
+        {
+            // A destroy sets the applied revisions of what it removed to 0.
+            d.link.clear_entity(o.header.entity);
+        }
+        let counted = answer(
+            d, o.opcode, &o.header, code, o.started, &message, object, value,
+        );
         d.spent += counted;
         handled(d, counted);
         if d.begun.is_none() {
             d.pump_commands += counted;
         }
     });
+    taken
 }
 
 /// One command. This step has no handler for any opcode but `CAMPAIGN`, so
@@ -1289,6 +1635,12 @@ pub struct Summary {
     pub flags: u32,
     /// The frame number.
     pub frame: u64,
+    /// Objects in the pending-destroy set.
+    pub pending_destroy: usize,
+    /// Objects over the pending set's capacity, cumulative.
+    pub pending_overflow: u64,
+    /// Objects dropped from the pending set at the backstop, cumulative.
+    pub pending_expired: u64,
 }
 
 /// The link's state, if it is open.
@@ -1301,6 +1653,9 @@ pub fn summary() -> Option<Summary> {
         mission_gen: d.link.stamps().mission_gen,
         flags: d.link.flags(),
         frame: d.link.stamps().frame,
+        pending_destroy: d.sampler.pending_len(),
+        pending_overflow: d.sampler.pending_counts()[1],
+        pending_expired: d.sampler.pending_counts()[2],
     })
 }
 
@@ -1461,4 +1816,406 @@ pub fn suspect_next() {
 #[cfg(feature = "faults")]
 pub fn set_scale(scale: f64) -> Result<(), String> {
     with(|d| d.sampler.set_scale(scale)).ok_or_else(|| "no link is open".to_owned())?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn header(campaign: u64, entity: u64) -> CommandHeader {
+        CommandHeader {
+            seq: 1,
+            epoch: 1,
+            campaign,
+            entity,
+            rev: 1,
+            mission_gen: 1,
+        }
+    }
+
+    fn s(v: &str) -> Lv {
+        Lv::String(v.as_bytes().to_vec())
+    }
+
+    fn n(v: f64) -> Lv {
+        Lv::Number(v)
+    }
+
+    fn table(pairs: Vec<(&str, Lv)>) -> Lv {
+        Lv::Table(pairs.into_iter().map(|(k, v)| (s(k), v)).collect())
+    }
+
+    /// The arguments of a payload, decoded and sorted by key.
+    fn args(opcode: u64, h: &CommandHeader, body: &[u8]) -> Option<Vec<(String, Lv)>> {
+        let bytes = arguments(opcode as u16, h, body)?;
+        let Lv::Table(pairs) = Reader::new(&bytes).lv().expect("decodes") else {
+            panic!("not a table");
+        };
+        let mut out: Vec<_> = pairs
+            .into_iter()
+            .map(|(k, v)| match k {
+                Lv::String(k) => (String::from_utf8(k).unwrap(), v),
+                other => panic!("key {other:?}"),
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Some(out)
+    }
+
+    fn expect(opcode: u64, h: &CommandHeader, body: &[u8], mut want: Vec<(&str, Lv)>) {
+        want.sort_by(|a, b| a.0.cmp(b.0));
+        let want: Vec<_> = want.into_iter().map(|(k, v)| (k.to_owned(), v)).collect();
+        assert_eq!(args(opcode, h, body), Some(want), "opcode {opcode}");
+    }
+
+    #[test]
+    fn names_are_base36_without_leading_zeros() {
+        assert_eq!(platform_name('g', 0, 0), "np.g.0.0");
+        assert_eq!(platform_name('u', 71, 71), "np.u.1z.1z");
+        assert_eq!(platform_name('s', 36, 35), "np.s.10.z");
+        assert_eq!(
+            platform_name('g', u64::MAX, u64::MAX),
+            "np.g.3w5e11264sgsf.3w5e11264sgsf"
+        );
+    }
+
+    #[test]
+    fn every_layout_decodes_into_its_fields() {
+        let h = header(71, 36);
+        let group = table(vec![("name", s("np.g.1z.10"))]);
+        let mut w = Writer::new();
+        w.u32(2).u32(3).str("np.g.1z.10").lv(&group);
+        expect(
+            op::GROUP_SPAWN,
+            &h,
+            &w.finish(),
+            vec![
+                ("country", n(2.0)),
+                ("category", n(3.0)),
+                ("name", s("np.g.1z.10")),
+                ("group", group),
+            ],
+        );
+        let task = table(vec![("id", s("ComboTask"))]);
+        let mut w = Writer::new();
+        w.lv(&task);
+        expect(
+            op::GROUP_ORDER,
+            &h,
+            &w.finish(),
+            vec![("name", s("np.g.1z.10")), ("task", task)],
+        );
+        for opcode in [op::GROUP_DESTROY, op::GROUP_CAPTURE_DESTROY] {
+            expect(opcode, &h, &[], vec![("name", s("np.g.1z.10"))]);
+        }
+        let mut w = Writer::new();
+        w.u32(9).pad(4).lv(&Lv::Bool(true));
+        expect(
+            op::GROUP_OPTION,
+            &h,
+            &w.finish(),
+            vec![
+                ("name", s("np.g.1z.10")),
+                ("option", n(9.0)),
+                ("value", Lv::Bool(true)),
+            ],
+        );
+        let stat = table(vec![("type", s("Barrier"))]);
+        let mut w = Writer::new();
+        w.u32(1).pad(4).str("x").lv(&stat);
+        expect(
+            op::STATIC_SPAWN,
+            &h,
+            &w.finish(),
+            vec![
+                ("country", n(1.0)),
+                ("name", s("np.s.1z.10")),
+                ("static", stat),
+            ],
+        );
+        expect(op::STATIC_DESTROY, &h, &[], vec![("name", s("np.s.1z.10"))]);
+        let mut w = Writer::new();
+        w.u32(2).pad(4).str("Batumi");
+        expect(
+            op::AIRBASE_OWNER,
+            &h,
+            &w.finish(),
+            vec![("coalition", n(2.0)), ("airbase", s("Batumi"))],
+        );
+        let stock = table(vec![("liquids", table(vec![]))]);
+        for (opcode, key) in [
+            (op::WAREHOUSE_SET, "stock"),
+            (op::WAREHOUSE_ADJUST, "delta"),
+        ] {
+            let mut w = Writer::new();
+            w.str("Batumi").lv(&stock);
+            expect(
+                opcode,
+                &h,
+                &w.finish(),
+                vec![("airbase", s("Batumi")), (key, stock.clone())],
+            );
+        }
+        let mut w = Writer::new();
+        w.f64(10.5);
+        expect(
+            op::DAMAGE,
+            &h,
+            &w.finish(),
+            vec![("name", s("np.u.1z.10")), ("life_percent", s("10.5000"))],
+        );
+        for life in [0.0, 100.0] {
+            let mut w = Writer::new();
+            w.f64(life);
+            assert!(arguments(op::DAMAGE as u16, &h, &w.finish()).is_some());
+        }
+        expect(
+            op::CAPTURE,
+            &h,
+            &[],
+            vec![("name", s("np.g.1z.10")), ("static_name", s("np.s.1z.10"))],
+        );
+    }
+
+    fn sound(scope: u32, target: u64, file: &str) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u32(scope).pad(4).u64(target).str(file);
+        w.finish()
+    }
+
+    fn picture(scope: u32, target: u64, seconds: f64, size: f64, file: &str) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u32(scope)
+            .u32(1)
+            .u64(target)
+            .f64(seconds)
+            .f64(size)
+            .u32(2)
+            .u32(3)
+            .u32(4)
+            .pad(4)
+            .str(file);
+        w.finish()
+    }
+
+    #[test]
+    fn a_sound_names_its_target_by_scope() {
+        let h = header(71, 0);
+        expect(
+            op::SOUND,
+            &h,
+            &sound(1, 0, "gong.ogg"),
+            vec![
+                ("scope", n(1.0)),
+                ("target", n(0.0)),
+                ("file", s("gong.ogg")),
+            ],
+        );
+        for scope in [2, 5] {
+            expect(
+                op::SOUND,
+                &h,
+                &sound(scope, 2, "x.ogg"),
+                vec![
+                    ("scope", n(f64::from(scope))),
+                    ("target", n(2.0)),
+                    ("file", s("x.ogg")),
+                ],
+            );
+        }
+        // The file is a value, so any text is kept as it is.
+        let odd = "a\"b'c\\ \u{e9}";
+        expect(
+            op::SOUND,
+            &h,
+            &sound(1, 0, odd),
+            vec![("scope", n(1.0)), ("target", n(0.0)), ("file", s(odd))],
+        );
+        for (scope, name) in [(3, "np.g.1z.10"), (4, "np.u.1z.10")] {
+            expect(
+                op::SOUND,
+                &h,
+                &sound(scope, 36, "x.ogg"),
+                vec![
+                    ("scope", n(f64::from(scope))),
+                    ("target", n(36.0)),
+                    ("name", s(name)),
+                    ("file", s("x.ogg")),
+                ],
+            );
+        }
+        // Campaign 0 has no platform names: the name is empty.
+        let none = header(0, 0);
+        expect(
+            op::SOUND,
+            &none,
+            &sound(3, 36, "x.ogg"),
+            vec![
+                ("scope", n(3.0)),
+                ("target", n(36.0)),
+                ("name", s("")),
+                ("file", s("x.ogg")),
+            ],
+        );
+        // A scope outside 1 to 5, a target too big for it, a short payload.
+        assert!(arguments(op::SOUND as u16, &h, &sound(0, 0, "x")).is_none());
+        assert!(arguments(op::SOUND as u16, &h, &sound(6, 0, "x")).is_none());
+        assert!(arguments(op::SOUND as u16, &h, &sound(2, 1 << 32, "x")).is_none());
+        assert!(arguments(op::SOUND as u16, &h, &sound(4, 1 << 53, "x")).is_none());
+        assert!(arguments(op::SOUND as u16, &h, &[0; 15]).is_none());
+    }
+
+    #[test]
+    fn a_picture_has_its_numbers_as_text() {
+        let h = header(71, 0);
+        let all = |scope: &str, target: &str| {
+            vec![
+                ("scope", s(scope)),
+                ("target", s(target)),
+                ("file", s("Key_1")),
+                ("seconds", s("12.5000")),
+                ("clear_view", s("true")),
+                ("size", s("60.0000")),
+                ("horizontal", s("2")),
+                ("vertical", s("3")),
+                ("size_units", s("4")),
+            ]
+        };
+        expect(
+            op::PICTURE,
+            &h,
+            &picture(1, 0, 12.5, 60.0, "Key_1"),
+            all("1", "0"),
+        );
+        let mut want = all("2", "1");
+        expect(
+            op::PICTURE,
+            &h,
+            &picture(2, 1, 12.5, 60.0, "Key_1"),
+            want.clone(),
+        );
+        want[0].1 = s("4");
+        want[1].1 = s("36");
+        want.push(("name", s("np.u.1z.10")));
+        expect(op::PICTURE, &h, &picture(4, 36, 12.5, 60.0, "Key_1"), want);
+        let mut want = all("3", "36");
+        want.push(("name", s("np.g.1z.10")));
+        expect(op::PICTURE, &h, &picture(3, 36, 12.5, 60.0, "Key_1"), want);
+        // Out of range, not finite, a bad scope, or a file that is not safe.
+        for (scope, seconds, size, file) in [
+            (1, -1.0, 1.0, "k"),
+            (1, 86_400.5, 1.0, "k"),
+            (1, f64::NAN, 1.0, "k"),
+            (1, 1.0, f64::INFINITY, "k"),
+            (1, 1.0, -0.5, "k"),
+            (1, 1.0, 0.0, "k"),
+            (1, 1.0, -0.0, "k"),
+            (1, 1.0, 1e-5, "k"),
+            (1, 1.0, 10_000.5, "k"),
+            (0, 1.0, 1.0, "k"),
+            (6, 1.0, 1.0, "k"),
+            (1, 1.0, 1.0, ""),
+            (1, 1.0, 1.0, "a\"); x(\""),
+            (1, 1.0, 1.0, "a\\b"),
+            (1, 1.0, 1.0, "a\nb"),
+            (1, 1.0, 1.0, "a'b"),
+        ] {
+            assert!(
+                arguments(
+                    op::PICTURE as u16,
+                    &h,
+                    &picture(scope, 0, seconds, size, file)
+                )
+                .is_none(),
+                "{scope} {seconds} {size} {file:?}"
+            );
+        }
+        assert!(arguments(op::PICTURE as u16, &h, &[0; 47]).is_none());
+        // PICTURE_STOP carries nothing.
+        expect(op::PICTURE_STOP, &h, &[], vec![]);
+    }
+
+    #[test]
+    fn extensions_keep_their_fields() {
+        let h = header(1, 0);
+        let mut w = Writer::new();
+        w.str("ext").lv(&s("return 1"));
+        expect(
+            op::EXTENSION_SET,
+            &h,
+            &w.finish(),
+            vec![("name", s("ext")), ("source", s("return 1"))],
+        );
+    }
+
+    #[test]
+    fn a_payload_that_does_not_decode_has_no_arguments() {
+        let h = header(1, 1);
+        let mut w = Writer::new();
+        w.u32(2).u32(3).str("n").lv(&Lv::Nil);
+        let whole = w.finish();
+        for opcode in [
+            op::GROUP_SPAWN,
+            op::GROUP_ORDER,
+            op::GROUP_OPTION,
+            op::STATIC_SPAWN,
+            op::AIRBASE_OWNER,
+            op::WAREHOUSE_SET,
+            op::WAREHOUSE_ADJUST,
+            op::DAMAGE,
+        ] {
+            assert!(
+                arguments(opcode as u16, &h, &[]).is_none(),
+                "{opcode} empty"
+            );
+        }
+        // Cut inside the group table.
+        let mut w = Writer::new();
+        w.u32(2).u32(3).str("n");
+        let mut cut = w.finish();
+        cut.push(5);
+        cut.extend_from_slice(&9u32.to_le_bytes());
+        assert!(arguments(op::GROUP_SPAWN as u16, &h, &cut).is_none());
+        assert!(arguments(op::GROUP_SPAWN as u16, &h, &whole).is_some());
+        // A DAMAGE life of -0.0 is applied as 0.
+        let mut w = Writer::new();
+        w.f64(-0.0);
+        let got = arguments(op::DAMAGE as u16, &h, &w.finish()).expect("-0.0 life");
+        assert!(String::from_utf8_lossy(&got).contains("0.0000"));
+        assert!(!String::from_utf8_lossy(&got).contains("-0.0000"));
+        // A DAMAGE life that is out of range or not a number.
+        for life in [-0.1, 100.1, f64::NAN, f64::INFINITY] {
+            let mut w = Writer::new();
+            w.f64(life);
+            assert!(
+                arguments(op::DAMAGE as u16, &h, &w.finish()).is_none(),
+                "{life}"
+            );
+        }
+        // A DAMAGE payload one byte short.
+        assert!(arguments(op::DAMAGE as u16, &h, &[0; 7]).is_none());
+    }
+
+    #[test]
+    fn a_spawn_moves_its_id_into_object() {
+        let spawn = op::GROUP_SPAWN as u16;
+        let stat = op::STATIC_SPAWN as u16;
+        assert_eq!(
+            spawn_result(spawn, result::APPLIED, n(1_000_001.0)),
+            (1_000_001, Lv::Nil)
+        );
+        assert_eq!(
+            spawn_result(stat, result::APPLIED, n(16_777_728.0)),
+            (16_777_728, Lv::Nil)
+        );
+        // Failures and other opcodes keep their value.
+        assert_eq!(
+            spawn_result(spawn, result::DCS_REFUSED, n(5.0)),
+            (0, n(5.0))
+        );
+        let capture = op::CAPTURE as u16;
+        assert_eq!(spawn_result(capture, result::APPLIED, n(5.0)), (0, n(5.0)));
+        assert_eq!(spawn_result(spawn, result::APPLIED, Lv::Nil), (0, Lv::Nil));
+        assert_eq!(spawn_result(spawn, result::APPLIED, n(-1.0)), (0, n(-1.0)));
+    }
 }

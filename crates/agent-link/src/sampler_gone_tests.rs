@@ -1502,3 +1502,178 @@ fn an_event_costs_the_same_with_a_long_queue() {
     assert_eq!(out[0], 3000);
     assert_eq!(out[19], 2981);
 }
+
+// The pending-destroy set (spec/commands.md, "A destroy while paused is pending").
+
+#[test]
+fn a_destroy_writes_gone_for_the_rows_held_and_holds_every_id() {
+    let (mut s, mut rec) = with_row(object_kind::UNIT, 2);
+    s.destroyed(&mut rec, &[OBJ as u64, 5000]);
+    let gones = rec.gones();
+    assert_eq!(gones.len(), 1, "only the row held is written gone");
+    assert_eq!(
+        (gones[0].object, gones[0].reason),
+        (OBJ as u64, gone::DESTROYED)
+    );
+    assert_eq!(s.len(), 0);
+    assert_eq!(s.pending_len(), 2);
+    // Births and enumerations ignore both.
+    assert!(!s.wants(OBJ as u64) && !s.wants(5000));
+    assert_eq!(s.add(&mut rec, found(5000, object_kind::UNIT, 2), true), 0);
+    assert_eq!(s.len(), 0);
+    // The same ID again is held once.
+    s.destroyed(&mut rec, &[5000]);
+    assert_eq!(s.pending_len(), 2);
+}
+
+#[test]
+fn a_destroy_clears_the_late_death_memory() {
+    let (mut s, mut rec) = with_row(object_kind::UNIT, 2);
+    s.remove(&mut rec, OBJ as u64, gone::MISSING);
+    s.destroyed(&mut rec, &[OBJ as u64]);
+    let before = rec.gones().len();
+    s.death(&mut rec, Some(OBJ), Some(1.0));
+    assert_eq!(
+        rec.gones().len(),
+        before,
+        "a late death for a destroyed object is not a fact"
+    );
+    assert_eq!(s.pending_counts()[0], 1);
+}
+
+#[test]
+fn a_death_event_for_a_pending_object_removes_nothing_and_is_counted() {
+    let (mut s, mut rec) = with_row(object_kind::UNIT, 2);
+    s.destroyed(&mut rec, &[OBJ as u64]);
+    let records = rec.records.len();
+    assert_eq!(s.death(&mut rec, Some(OBJ), Some(1.0)), 0);
+    assert_eq!(rec.records.len(), records);
+    assert_eq!(s.pending_counts(), [1, 0, 0]);
+}
+
+#[test]
+fn the_existence_checks_resolve_the_pending_set() {
+    let mut s = sampler();
+    let mut rec = Rec::new();
+    s.sampling = true;
+    s.destroyed(&mut rec, &[10, 11]);
+    let mut out = Vec::new();
+    assert_eq!(s.checks(&mut out), 2);
+    assert_eq!(out, vec![10, 11]);
+    // Still existing: kept, and checked again on a later pump.
+    s.alive(&mut rec, 10, true);
+    // `isExist` false or raising: left silently.
+    s.alive(&mut rec, 11, false);
+    assert_eq!(s.pending_len(), 1);
+    assert!(s.wants(11) && !s.wants(10));
+    assert_eq!(s.checks(&mut out), 1);
+    assert_eq!(out, vec![10]);
+    s.alive(&mut rec, 10, false);
+    assert_eq!(s.pending_len(), 0);
+    assert_eq!(s.checks(&mut out), 0);
+    assert!(rec.gones().is_empty());
+}
+
+#[test]
+fn a_pump_checks_a_few_pending_objects_and_takes_turns() {
+    let mut s = sampler();
+    let mut rec = Rec::new();
+    s.sampling = true;
+    let ids: Vec<u64> = (100..110).collect();
+    s.destroyed(&mut rec, &ids);
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for _ in 0..3 {
+        let n = s.checks(&mut out);
+        assert!(n <= PENDING_PER_PUMP);
+        seen.extend(out.iter().copied());
+    }
+    assert_eq!(seen.len(), 10, "every object is reached in turn");
+}
+
+#[test]
+fn an_object_still_existing_after_60_unpaused_seconds_is_dropped() {
+    let mut s = sampler();
+    let mut rec = Rec::new();
+    s.model_time(100.0, false);
+    s.destroyed(&mut rec, &[7]);
+    // A pause does not count.
+    s.model_time(100.0, true);
+    s.model_time(100.0, true);
+    s.model_time(130.0, false);
+    assert_eq!(s.pending_len(), 1);
+    s.model_time(159.0, false);
+    assert_eq!(s.pending_len(), 1);
+    s.model_time(160.5, false);
+    assert_eq!(s.pending_len(), 0);
+    assert_eq!(s.pending_counts(), [0, 0, 1]);
+    // A later enumeration can add the object back.
+    assert!(s.wants(7));
+}
+
+#[test]
+fn the_set_holds_no_more_than_its_capacity() {
+    let mut s = sampler();
+    let mut rec = Rec::new();
+    let ids: Vec<u64> = (1..=(PENDING_CAP as u64 + 3)).collect();
+    s.destroyed(&mut rec, &ids);
+    assert_eq!(s.pending_len(), PENDING_CAP);
+    assert_eq!(s.pending_counts()[1], 3);
+}
+
+#[test]
+fn a_new_generation_clears_the_set() {
+    let mut s = sampler();
+    let mut rec = Rec::new();
+    s.destroyed(&mut rec, &[7, 8]);
+    s.new_generation(2);
+    assert_eq!(s.pending_len(), 0);
+    assert!(s.wants(7));
+}
+
+#[test]
+fn a_frame_touches_only_the_expired_front_of_a_full_set() {
+    let mut s = sampler();
+    let mut rec = Rec::new();
+    s.model_time(0.0, false);
+    let ids: Vec<u64> = (1..=PENDING_CAP as u64).collect();
+    s.destroyed(&mut rec, &ids);
+    // Frames that expire nothing pop nothing: the queue keeps its length.
+    for f in 1..=100 {
+        s.model_time(f as f64 * 0.01, false);
+        assert_eq!(s.pending_expiry.len(), PENDING_CAP);
+    }
+    // An early removal leaves a stale entry; it goes when it reaches the front.
+    s.alive(&mut rec, 1, false);
+    assert_eq!(s.pending_len(), PENDING_CAP - 1);
+    assert_eq!(s.pending_expiry.len(), PENDING_CAP);
+    s.model_time(61.0, false);
+    assert_eq!(s.pending_len(), 0);
+    assert!(s.pending_expiry.is_empty());
+    assert_eq!(s.pending_counts()[2], PENDING_CAP as u64 - 1);
+}
+
+#[test]
+fn a_gone_report_for_a_pending_object_resolves_it() {
+    // The shim still holds a handle for an object the agent destroyed, so its
+    // check reports `isExist` false through `gone`, not `alive`.
+    let mut s = sampler();
+    let mut rec = Rec::new();
+    s.sampling = true;
+    s.destroyed(&mut rec, &[10]);
+    assert_eq!(
+        s.gone(&mut rec, 10, Read::Value(None), Read::Value(None)),
+        0
+    );
+    assert_eq!(s.pending_len(), 0);
+    assert!(rec.gones().is_empty());
+}
+
+#[test]
+fn ids_cut_past_the_read_limit_count_as_overflow() {
+    let mut s = sampler();
+    s.add_pending_overflow(3);
+    s.add_pending_overflow(0);
+    assert_eq!(s.pending_counts()[1], 3);
+    assert_eq!(s.pending_len(), 0);
+}

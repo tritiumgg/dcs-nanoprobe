@@ -116,6 +116,16 @@ for script in "$ROOT"/lua/tests/*.lua; do
             "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" bounded-results
             "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" bad-code
             "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" deep-tables
+            "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" world
+            "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" world-gone
+            "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" destroyed-overflow
+            for name in hook-order hook-budget hook-no-result hook-no-shim sound picture; do
+                "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" "$name"
+            done
+            ;;
+        world_exit.lua)
+            "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" groups
+            "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" paused
             ;;
         *) "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" ;;
     esac

@@ -1122,6 +1122,19 @@ impl Link {
         }
     }
 
+    /// Set an entity's applied order revision to 0: a spawn gives the group
+    /// no task, so the sidecar sends the order again.
+    pub fn clear_order(&mut self, entity: u64) {
+        self.revisions.set(RevKey::Order(entity), 0);
+    }
+
+    /// Set an entity's applied spec and order revisions to 0: a destroy
+    /// removed it.
+    pub fn clear_entity(&mut self, entity: u64) {
+        self.revisions.set(RevKey::Spec(entity), 0);
+        self.revisions.set(RevKey::Order(entity), 0);
+    }
+
     /// Whether an `EXTENSION_SET` of this name has been applied in this
     /// campaign. The agent answers an `EXTENSION_INVOKE` of any other name
     /// `LUA_ERROR`, after the raw-Lua and not-ready rows.

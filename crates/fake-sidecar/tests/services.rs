@@ -324,13 +324,18 @@ async fn orders_statics_authority_and_policy() {
 
     // A not-built call answers UNIMPLEMENTED with a detail.
     let e = cmd
-        .do_effect(pb::DoEffectRequest::default())
+        .do_effect(pb::DoEffectRequest {
+            write: write(&l, "boom", c),
+            effect: Some(pb::Effect {
+                effect: Some(pb::effect::Effect::Explosion(pb::Explosion::default())),
+            }),
+        })
         .await
         .expect_err("not built");
     assert_eq!(e.code(), Code::Unimplemented);
     assert_eq!(
         nanoprobe_proto::errors::detail(&e).expect("detail").field,
-        "DoEffect"
+        "DoEffect for this effect"
     );
 }
 

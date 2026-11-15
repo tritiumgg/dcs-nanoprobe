@@ -59,6 +59,23 @@
 --   - a_unit_set_life_percentage in the mission state takes a mission ID and
 --     sets the unit's life (LIVE).
 --   - A mission load removes every runtime object (LIVE).
+--   - An airbase's warehouse keeps counts: setItem and setLiquidAmount set,
+--     addItem and addLiquid add, removeItem and removeLiquid take away and
+--     stop at zero with no error (LIVE, E6, step S15), and
+--     getInventory reads them back. A weapon's name starts with `weapons.`.
+--   - Airbase:autoCapture(flag) records the flag; setCoalition sets the owner.
+--   - Controller:setOption records each option's value by group.
+--   - trigger.action.outSound and its Coalition, Country, Group and Unit
+--     forms (server state) take a file and, for a form, a number first; the
+--     mock records each call in `sim.sounds` as { call, target, file }, for any
+--     file, a missing one included (LIVE: DCS raises nothing). The mission
+--     state's a_out_picture, _s, _c, _g and _u take the target (not for the
+--     plain one), a resource key, the seconds, clear view as a boolean, the
+--     start delay, horizontal, vertical, size and size units, and record each
+--     call in `sim.pictures`; a_out_picture_stop counts in
+--     `sim.picture_stops`; getValueResourceByKey returns a key it does not
+--     know as it is (LIVE). The shapes of the arguments are ED-CODE; their
+--     values on screen are UNVERIFIED.
 -- UNVERIFIED choices: births reach handlers at the next frame; the other
 -- getters on a unit that no longer exists raise; a static's initiator_data
 -- has no mission_id; an explosion kills within 10 m.
@@ -85,7 +102,31 @@ local TYPES = {
   -- The death probe (lua/sampling/deaths.lua). UNVERIFIED figures.
   ['A-10A'] = { life = 1, air = true, fuel_max = 5029 },
   ['Ural-375'] = { life = 1 },
+  -- Types the world commands' tests spawn (S15). UNVERIFIED figures.
+  ['BTR-80'] = { life = 2, ammo = { { 'weapons.shells.2A72_30', 500 } } },
+  ['Mi-8MT'] = { life = 2, air = true, fuel_max = 1929, gun = { 'weapons.shells.PKT_7_62', 1000 } },
+  ['Su-27'] = { life = 1, air = true, fuel_max = 9400, gun = { 'weapons.shells.GSH301_30_HE', 150 } },
+  -- Many ammo rows, for the capture size test (S15). UNVERIFIED figures.
+  ['T-90'] = {
+    life = 2,
+    ammo = {
+      { 'weapons.shells.125_HE', 10 }, { 'weapons.shells.125_AP', 10 }, { 'weapons.shells.125_HEAT', 10 },
+      { 'weapons.missiles.9M119', 4 }, { 'weapons.shells.PKT_7_62', 2000 }, { 'weapons.shells.NSVT_12_7', 300 },
+      { 'weapons.shells.125_SM1', 4 }, { 'weapons.shells.125_SM2', 4 }, { 'weapons.shells.125_SM3', 4 },
+      { 'weapons.shells.125_SM4', 4 }, { 'weapons.shells.125_SM5', 4 }, { 'weapons.shells.125_SM6', 4 },
+    },
+  },
+  ['MOSCOW'] = { life = 8, ammo = { { 'weapons.missiles.S_300F_48N6', 64 } } },
 }
+
+-- An ammunition row's desc: DCS gives the full descriptor, not just the name.
+local function ammo_desc(type_name)
+  return {
+    typeName = type_name, displayName = type_name, category = 0, life = 1, box = { min = {}, max = {} },
+    warhead = { caliber = 30, explosiveMass = 0.1, mass = 0.4, type = 1 },
+    a = 1, b = 2, c = 3, d = 4,
+  }
+end
 
 local Sim = {}
 Sim.__index = Sim
@@ -99,6 +140,8 @@ function Sim:clear()
   self.groups, self.statics = {}, {}
   self.marks = {}
   self.orders = {}
+  -- Controller options by group ID, then option number.
+  self.options = {}
   self.mission_ids, self.group_ids = {}, {}
   self.next_object, self.next_mission, self.next_group = 16777472, 1000000, 1000000
   self.queue = {}
@@ -113,6 +156,10 @@ local function new_sim(host)
     { id = 2, name = 'Bravo', x = 50000, z = 20000, coalition = 0 },
     { id = 3, name = 'Charlie', x = -30000, z = 60000, coalition = 0 },
   }
+  for _, airbase in ipairs(sim.airbases) do
+    -- `auto_capture` is nil until a script sets it.
+    airbase.stock = { aircraft = {}, weapon = {}, liquids = { [0] = 100000, [1] = 100000, [2] = 100000, [3] = 100000 } }
+  end
   return sim
 end
 
@@ -555,10 +602,14 @@ local function scripting(host, name)
       return static.cargo and 6 or 3
     end,
     getPosition = function(self)
-      local unit = live(self, 'getPosition')
-      local c, s = math.cos(unit.heading), math.sin(unit.heading)
+      local unit = sim.units[self.id_] or static_of(self)
+      if not unit or unit.alive == false then
+        unit = live(self, 'getPosition')
+      end
+      local heading = unit.heading or 0
+      local c, s = math.cos(heading), math.sin(heading)
       return {
-        p = { x = unit.x, y = unit.y, z = unit.z },
+        p = { x = unit.x, y = unit.y or 0, z = unit.z },
         x = { x = c, y = 0, z = s },
         y = { x = 0, y = 1, z = 0 },
         z = { x = -s, y = 0, z = c },
@@ -620,12 +671,12 @@ local function scripting(host, name)
       local unit = live(self, 'getAmmo')
       local out = {}
       for i, entry in ipairs(unit.kind.ammo or {}) do
-        out[i] = { count = entry[2], desc = { typeName = entry[1] } }
+        out[i] = { count = entry[2], desc = ammo_desc(entry[1]) }
       end
       if unit.kind.gun then
         out[#out + 1] = {
           count = math.floor(unit.kind.gun[2] * unit.gun / 100),
-          desc = { typeName = unit.kind.gun[1] },
+          desc = ammo_desc(unit.kind.gun[1]),
         }
       end
       return #out > 0 and out or nil
@@ -677,7 +728,12 @@ local function scripting(host, name)
       sim.orders[#sim.orders + 1] = { group = self.id_, task = task }
     end,
     setOption = function(self, option, value)
+      if type(option) ~= 'number' then
+        error('mock: Controller.setOption needs a number for the option, got ' .. type(option), 2)
+      end
       sim.orders[#sim.orders + 1] = { group = self.id_, option = option, value = value }
+      sim.options[self.id_] = sim.options[self.id_] or {}
+      sim.options[self.id_][option] = value
     end,
   })
 
@@ -767,9 +823,72 @@ local function scripting(host, name)
     end,
   })
 
+  -- The stock of the airbase a warehouse handle names.
+  local function stock_of(self)
+    return airbase_of(self).stock
+  end
+
+  local function bucket(stock, item)
+    if type(item) ~= 'string' then
+      error('mock: a warehouse item is a name, got ' .. type(item), 3)
+    end
+    return item:find('^weapons%.') and stock.weapon or stock.aircraft
+  end
+
+  local function count(n, method)
+    if type(n) ~= 'number' or n ~= n or n < 0 then
+      error('mock: Warehouse.' .. method .. ' takes a count of 0 or more, got ' .. tostring(n), 3)
+    end
+    return n
+  end
+
+  local function liquid(stock, kind)
+    if type(kind) ~= 'number' or stock.liquids[kind] == nil then
+      error('mock: Warehouse liquid ' .. tostring(kind) .. ' is not 0 to 3', 3)
+    end
+    return kind
+  end
+
   state.Warehouse = ns(name, 'Warehouse', {
-    getInventory = function()
-      return { aircraft = {}, weapon = {}, liquids = { [0] = 100000, [1] = 100000, [2] = 100000, [3] = 100000 } }
+    getInventory = function(self)
+      local stock = stock_of(self)
+      local out = { aircraft = {}, weapon = {}, liquids = {} }
+      for key, items in pairs({ aircraft = stock.aircraft, weapon = stock.weapon, liquids = stock.liquids }) do
+        for k, v in pairs(items) do
+          out[key][k] = v
+        end
+      end
+      return out
+    end,
+    getItemCount = function(self, item)
+      return bucket(stock_of(self), item)[item] or 0
+    end,
+    setItem = function(self, item, n)
+      bucket(stock_of(self), item)[item] = count(n, 'setItem')
+    end,
+    addItem = function(self, item, n)
+      local items = bucket(stock_of(self), item)
+      items[item] = (items[item] or 0) + count(n, 'addItem')
+    end,
+    removeItem = function(self, item, n)
+      local items = bucket(stock_of(self), item)
+      items[item] = math.max(0, (items[item] or 0) - count(n, 'removeItem'))
+    end,
+    getLiquidAmount = function(self, kind)
+      local stock = stock_of(self)
+      return stock.liquids[liquid(stock, kind)]
+    end,
+    setLiquidAmount = function(self, kind, n)
+      local stock = stock_of(self)
+      stock.liquids[liquid(stock, kind)] = count(n, 'setLiquidAmount')
+    end,
+    addLiquid = function(self, kind, n)
+      local stock = stock_of(self)
+      stock.liquids[liquid(stock, kind)] = stock.liquids[kind] + count(n, 'addLiquid')
+    end,
+    removeLiquid = function(self, kind, n)
+      local stock = stock_of(self)
+      stock.liquids[liquid(stock, kind)] = math.max(0, stock.liquids[kind] - count(n, 'removeLiquid'))
     end,
   })
 
@@ -802,9 +921,19 @@ local function scripting(host, name)
       }
     end,
     setCoalition = function(self, side)
+      -- UNVERIFIED: DCS refuses a side that is not 0 (neutral), 1 (red) or 2 (blue).
+      if side ~= 0 and side ~= 1 and side ~= 2 then
+        error('mock: Airbase.setCoalition needs 0, 1 or 2, got ' .. tostring(side), 2)
+      end
       airbase_of(self).coalition = side
     end,
-    autoCapture = function() end,
+    -- Records the flag, in `auto_capture` on the airbase (the test's view).
+    autoCapture = function(self, flag)
+      if type(flag) ~= 'boolean' then
+        error('mock: Airbase.autoCapture needs a boolean, got ' .. type(flag), 2)
+      end
+      airbase_of(self).auto_capture = flag
+    end,
     getWarehouse = function(self)
       return handle({ 'Warehouse' }, self.id_)
     end,
@@ -893,6 +1022,31 @@ local function scripting(host, name)
       end,
     },
   })
+
+  -- A sound call: records and checks the argument types the way DCS takes
+  -- them. A test sets `sim.sound_raises` to make the call raise.
+  local function sound(call, targeted)
+    return function(...)
+      local n = select('#', ...)
+      local target, file = ...
+      if not targeted then
+        target, file = nil, ...
+      end
+      if n ~= (targeted and 2 or 1) or type(file) ~= 'string' or (targeted and type(target) ~= 'number') then
+        error('mock: ' .. call .. ' takes ' .. (targeted and 'a number and ' or '') .. 'a file name', 2)
+      end
+      if sim.sound_raises then
+        error('mock: ' .. call .. ' raises', 2)
+      end
+      sim.sounds = sim.sounds or {}
+      sim.sounds[#sim.sounds + 1] = { call = call, target = target, file = file }
+    end
+  end
+  state.trigger.action.outSound = sound('outSound', false)
+  state.trigger.action.outSoundForCoalition = sound('outSoundForCoalition', true)
+  state.trigger.action.outSoundForCountry = sound('outSoundForCountry', true)
+  state.trigger.action.outSoundForGroup = sound('outSoundForGroup', true)
+  state.trigger.action.outSoundForUnit = sound('outSoundForUnit', true)
 
   state.land = ns(name, 'land', {
     getHeight = function()
@@ -1079,7 +1233,68 @@ function W.install(host, name)
       end,
     })
   elseif name == 'mission' then
+    -- True for a unit that is not alive: killed, removed or unknown. A test
+    -- sets `sim.dead_ids[mission_id]` to make a live unit read dead.
+    -- `sim.dead_checks` counts the calls.
+    state.c_unit_dead = function(mission_id)
+      sim.dead_checks = (sim.dead_checks or 0) + 1
+      if sim.dead_ids and sim.dead_ids[tonumber(mission_id)] then
+        return true
+      end
+      for _, unit in pairs(sim.units) do
+        if unit.mission_id == tonumber(mission_id) then
+          return false
+        end
+      end
+      return true
+    end
+    state.getValueResourceByKey = function(key)
+      if type(key) ~= 'string' then
+        error('mock: getValueResourceByKey takes a key', 2)
+      end
+      return key
+    end
+    -- The picture functions record { call, target, file, seconds, clear_view,
+    -- delay, horizontal, vertical, size, size_units } in `sim.pictures`. A
+    -- test sets `sim.picture_raises` to make a call raise.
+    local function picture(call, targeted)
+      return function(...)
+        local args = { ... }
+        local n = targeted and 9 or 8
+        local at = targeted and 2 or 1
+        local ok = select('#', ...) == n and (not targeted or type(args[1]) == 'number')
+          and type(args[at]) == 'string' and type(args[at + 2]) == 'boolean'
+        for _, i in ipairs({ at + 1, at + 3, at + 4, at + 5, at + 6, at + 7 }) do
+          ok = ok and type(args[i]) == 'number'
+        end
+        if not ok then
+          error('mock: ' .. call .. ' takes the arguments of the Mission Editor action', 2)
+        end
+        if sim.picture_raises then
+          error('mock: ' .. call .. ' raises', 2)
+        end
+        sim.pictures = sim.pictures or {}
+        sim.pictures[#sim.pictures + 1] = {
+          call = call, target = targeted and args[1] or nil, file = args[at], seconds = args[at + 1],
+          clear_view = args[at + 2], delay = args[at + 3], horizontal = args[at + 4],
+          vertical = args[at + 5], size = args[at + 6], size_units = args[at + 7],
+        }
+      end
+    end
+    state.a_out_picture = picture('a_out_picture', false)
+    state.a_out_picture_s = picture('a_out_picture_s', true)
+    state.a_out_picture_c = picture('a_out_picture_c', true)
+    state.a_out_picture_g = picture('a_out_picture_g', true)
+    state.a_out_picture_u = picture('a_out_picture_u', true)
+    state.a_out_picture_stop = function()
+      sim.picture_stops = (sim.picture_stops or 0) + 1
+    end
     state.a_unit_set_life_percentage = function(mission_id, percent)
+      sim.life_calls = (sim.life_calls or 0) + 1
+      -- A test sets `sim.life_raises` to make the call raise.
+      if sim.life_raises then
+        error('mock: a_unit_set_life_percentage raises', 2)
+      end
       for _, unit in pairs(sim.units) do
         if unit.mission_id == tonumber(mission_id) then
           unit.life = unit.kind.life * percent / 100

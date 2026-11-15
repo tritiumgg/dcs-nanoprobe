@@ -29,6 +29,132 @@ const THEATRE: &str = "theatre";
 pub struct Changes {
     /// Mission start time, seconds after midnight.
     pub start_time: Option<u32>,
+    /// The airport (by its airbase ID) whose warehouse is made limited.
+    pub limited_airport: Option<u32>,
+    /// Resource files to pack: `l10n/DEFAULT/<file>` members, each with a
+    /// `mapResource` entry from its key to the file name.
+    pub resources: Vec<Resource>,
+}
+
+/// One packed resource file (ED-CODE: `Scripts/dictionary.lua`,
+/// `setValueToResource`: `mapResource[key] = file name`, the bytes at
+/// `l10n/DEFAULT/<file name>`).
+#[derive(Debug, Clone)]
+pub struct Resource {
+    pub key: String,
+    pub file: String,
+    pub bytes: Vec<u8>,
+}
+
+/// The test resources `--sound-picture` packs: a 0.5 s 440 Hz tone and an
+/// 8 by 8 picture, both generated here.
+pub fn test_resources() -> Vec<Resource> {
+    vec![
+        Resource {
+            key: "ResKey_Action_901".into(),
+            file: "np-tone.wav".into(),
+            bytes: tone_wav(),
+        },
+        Resource {
+            key: "ResKey_Action_902".into(),
+            file: "np-picture.png".into(),
+            bytes: picture_png(),
+        },
+    ]
+}
+
+/// A 16-bit mono 22,050 Hz WAV of a 440 Hz sine, half a second.
+fn tone_wav() -> Vec<u8> {
+    let rate = 22_050u32;
+    let samples = rate / 2;
+    let data_len = samples * 2;
+    let mut out = Vec::new();
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_len).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&rate.to_le_bytes());
+    out.extend_from_slice(&(rate * 2).to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+    for i in 0..samples {
+        let t = i as f64 / rate as f64;
+        let v = (t * 440.0 * std::f64::consts::TAU).sin() * 12_000.0;
+        out.extend_from_slice(&(v as i16).to_le_bytes());
+    }
+    out
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in bytes {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
+fn adler32(bytes: &[u8]) -> u32 {
+    let (mut a, mut b) = (1u32, 0u32);
+    for &x in bytes {
+        a = (a + x as u32) % 65_521;
+        b = (b + a) % 65_521;
+    }
+    (b << 16) | a
+}
+
+/// An 8 by 8 RGB PNG, red and blue squares, with stored (uncompressed)
+/// deflate blocks.
+fn picture_png() -> Vec<u8> {
+    let mut raw = Vec::new();
+    for y in 0..8u8 {
+        raw.push(0);
+        for x in 0..8u8 {
+            let red = (x / 4 + y / 4) % 2 == 0;
+            raw.extend_from_slice(if red { &[220, 30, 30] } else { &[30, 30, 220] });
+        }
+    }
+    let mut z = vec![0x78, 0x01, 0x01];
+    z.extend_from_slice(&(raw.len() as u16).to_le_bytes());
+    z.extend_from_slice(&(!(raw.len() as u16)).to_le_bytes());
+    z.extend_from_slice(&raw);
+    z.extend_from_slice(&adler32(&raw).to_be_bytes());
+    let mut out = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    let mut chunk = |kind: &[u8; 4], data: &[u8]| {
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        let mut body = kind.to_vec();
+        body.extend_from_slice(data);
+        out.extend_from_slice(&body);
+        out.extend_from_slice(&crc32(&body).to_be_bytes());
+    };
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&8u32.to_be_bytes());
+    ihdr.extend_from_slice(&8u32.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+    chunk(b"IHDR", &ihdr);
+    chunk(b"IDAT", &z);
+    chunk(b"IEND", &[]);
+    out
+}
+
+/// `mapResource` as the Mission Editor writes it.
+fn map_resource(resources: &[Resource]) -> Vec<u8> {
+    let mut text = String::from("mapResource = \n{\n");
+    for r in resources {
+        text.push_str(&format!("\t[\"{}\"] = \"{}\",\n", r.key, r.file));
+    }
+    text.push_str("} -- end of mapResource\n");
+    text.into_bytes()
 }
 
 /// The members of a `.miz`, in file order, with their bytes.
@@ -67,6 +193,25 @@ pub fn generate(template: &[u8], changes: &Changes) -> Result<Vec<u8>, String> {
             .find(|(n, _)| n == "mission")
             .expect("checked above");
         mission.1 = set_start_time(&mission.1, start)?;
+    }
+
+    if let Some(id) = changes.limited_airport {
+        let warehouses = members
+            .iter_mut()
+            .find(|(n, _)| n == "warehouses")
+            .expect("checked above");
+        warehouses.1 = limit_warehouse(&warehouses.1, id)?;
+    }
+
+    if !changes.resources.is_empty() {
+        let map = members
+            .iter_mut()
+            .find(|(n, _)| n == "l10n/DEFAULT/mapResource")
+            .expect("checked above");
+        map.1 = map_resource(&changes.resources);
+        for r in &changes.resources {
+            members.push((format!("l10n/DEFAULT/{}", r.file), r.bytes.clone()));
+        }
     }
 
     let rank = |name: &str| {
@@ -122,6 +267,76 @@ fn set_start_time(mission: &[u8], start: u32) -> Result<Vec<u8>, String> {
     if found != 1 {
         return Err(format!(
             "`mission` has {found} start_time lines; version 0 changes exactly one"
+        ));
+    }
+    Ok(out.into_bytes())
+}
+
+/// Starting counts of a limited warehouse: 10 F-15C, 100 Mk-82 bombs (wsType
+/// 4.5.9.31, UNVERIFIED), and 100 of each fuel.
+const LIMITED_AIRCRAFTS: &str = "{ [\"plane\"] = { [\"F-15C\"] = { [\"initialAmount\"] = 10 } } },";
+const LIMITED_WEAPONS: &str =
+    "{ [1] = { [\"initialAmount\"] = 100, [\"wsType\"] = { 4, 5, 9, 31 } } },";
+
+/// Make the warehouse of airport `id` limited: the three `unlimited*` flags
+/// false, and the aircraft and weapon tables hold the counts above (ED-CODE:
+/// the `warehouses` member of a `.miz`). Fuel keeps its `InitFuel` values.
+fn limit_warehouse(warehouses: &[u8], id: u32) -> Result<Vec<u8>, String> {
+    let text =
+        std::str::from_utf8(warehouses).map_err(|_| "`warehouses` is not UTF-8".to_owned())?;
+    let opening = format!("[{id}] =");
+    let mut out = String::with_capacity(text.len());
+    let (mut in_airports, mut inside, mut depth, mut found) = (false, false, 0i32, false);
+    let mut changed = 0;
+    for line in text.split_inclusive('\n') {
+        let t = line.trim();
+        let mut replacement: Option<String> = None;
+        if !inside {
+            if t.starts_with("[\"airports\"]") {
+                in_airports = true;
+            } else if in_airports && t.starts_with(&opening) {
+                inside = true;
+                found = true;
+                depth = 0;
+            }
+        } else {
+            let key = |k: &str| t.starts_with(&format!("[\"{k}\"] = "));
+            let indent = &line[..line.len() - line.trim_start().len()];
+            let eol = if line.ends_with("\r\n") { "\r\n" } else { "\n" };
+            if depth == 1 {
+                for flag in ["unlimitedMunitions", "unlimitedAircrafts", "unlimitedFuel"] {
+                    if key(flag) {
+                        replacement = Some(format!("{indent}[\"{flag}\"] = false,{eol}"));
+                    }
+                }
+                if key("aircrafts") && t.ends_with("{},") {
+                    replacement = Some(format!(
+                        "{indent}[\"aircrafts\"] = {LIMITED_AIRCRAFTS}{eol}"
+                    ));
+                }
+                if key("weapons") && t.ends_with("{},") {
+                    replacement = Some(format!("{indent}[\"weapons\"] = {LIMITED_WEAPONS}{eol}"));
+                }
+            }
+        }
+        if inside {
+            depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+            if replacement.is_some() {
+                changed += 1;
+            }
+            if depth <= 0 && line.contains('}') {
+                inside = false;
+                in_airports = false;
+            }
+        }
+        out.push_str(replacement.as_deref().unwrap_or(line));
+    }
+    if !found {
+        return Err(format!("`warehouses` has no airport {id}"));
+    }
+    if changed != 5 {
+        return Err(format!(
+            "airport {id}: changed {changed} of 5 fields (three flags, aircrafts, weapons)"
         ));
     }
     Ok(out.into_bytes())
@@ -198,6 +413,7 @@ mod tests {
             &template(),
             &Changes {
                 start_time: Some(3600),
+                ..Changes::default()
             },
         )
         .unwrap();
@@ -208,6 +424,84 @@ mod tests {
             "{mission}"
         );
         assert!(mission.contains("[\"theatre\"] = \"Caucasus\""));
+    }
+
+    const WAREHOUSES: &str = "warehouses = \n{\n\t[\"airports\"] = \n\t{\n\t\t[12] = \n\t\t{\n\t\t\t[\"unlimitedMunitions\"] = true,\n\t\t\t[\"jet_fuel\"] = \n\t\t\t{\n\t\t\t\t[\"InitFuel\"] = 100,\n\t\t\t}, -- end of [\"jet_fuel\"]\n\t\t\t[\"unlimitedAircrafts\"] = true,\n\t\t\t[\"unlimitedFuel\"] = true,\n\t\t\t[\"aircrafts\"] = {},\n\t\t\t[\"weapons\"] = {},\n\t\t}, -- end of [12]\n\t\t[13] = \n\t\t{\n\t\t\t[\"unlimitedMunitions\"] = true,\n\t\t\t[\"unlimitedAircrafts\"] = true,\n\t\t\t[\"unlimitedFuel\"] = true,\n\t\t\t[\"aircrafts\"] = {},\n\t\t\t[\"weapons\"] = {},\n\t\t}, -- end of [13]\n\t}, -- end of [\"airports\"]\n}\n";
+
+    #[test]
+    fn limits_one_airport_only() {
+        let out = String::from_utf8(limit_warehouse(WAREHOUSES.as_bytes(), 13).unwrap()).unwrap();
+        let (first, second) = out.split_once("[13] = ").unwrap();
+        assert!(first.contains("[\"unlimitedMunitions\"] = true"), "{first}");
+        assert!(first.contains("[\"aircrafts\"] = {},"));
+        assert!(!second.contains("= true"), "{second}");
+        assert!(second.contains("[\"initialAmount\"] = 10 "), "{second}");
+        assert!(second.contains("[\"initialAmount\"] = 100,"), "{second}");
+        let out = String::from_utf8(limit_warehouse(WAREHOUSES.as_bytes(), 12).unwrap()).unwrap();
+        let (first, second) = out.split_once("[13] = ").unwrap();
+        assert!(!first.contains("unlimitedFuel\"] = true"), "{first}");
+        assert!(first.contains("InitFuel"));
+        assert!(second.contains("[\"unlimitedFuel\"] = true"));
+    }
+
+    #[test]
+    fn packs_the_test_resources_with_a_map_entry_each() {
+        let shell = generate(
+            &template(),
+            &Changes {
+                resources: test_resources(),
+                ..Changes::default()
+            },
+        )
+        .unwrap();
+        let members = read(&shell).unwrap();
+        let get = |n: &str| members.iter().find(|(m, _)| m == n).map(|(_, b)| b.clone());
+        let map = String::from_utf8(get("l10n/DEFAULT/mapResource").unwrap()).unwrap();
+        assert!(
+            map.contains("[\"ResKey_Action_901\"] = \"np-tone.wav\","),
+            "{map}"
+        );
+        assert!(
+            map.contains("[\"ResKey_Action_902\"] = \"np-picture.png\","),
+            "{map}"
+        );
+        let wav = get("l10n/DEFAULT/np-tone.wav").unwrap();
+        assert_eq!(&wav[..4], b"RIFF");
+        assert_eq!(wav.len(), 44 + 22_050);
+        let png = get("l10n/DEFAULT/np-picture.png").unwrap();
+        assert_eq!(&png[1..4], b"PNG");
+        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+        assert_eq!(members.last().unwrap().0, "theatre");
+    }
+
+    #[test]
+    fn refuses_an_unknown_airport() {
+        assert!(limit_warehouse(WAREHOUSES.as_bytes(), 99).is_err());
+    }
+
+    #[test]
+    fn limits_the_committed_caucasus_template() {
+        let bytes = std::fs::read(crate::repository().join("templates/caucasus.miz")).unwrap();
+        let shell = generate(
+            &bytes,
+            &Changes {
+                limited_airport: Some(12),
+                ..Changes::default()
+            },
+        )
+        .unwrap();
+        let members = read(&shell).unwrap();
+        let text = String::from_utf8(
+            members
+                .iter()
+                .find(|(n, _)| n == "warehouses")
+                .unwrap()
+                .1
+                .clone(),
+        )
+        .unwrap();
+        assert_eq!(text.matches("[\"unlimitedFuel\"] = false").count(), 1);
+        assert!(text.contains("\"F-15C\""));
     }
 
     #[test]
@@ -248,6 +542,7 @@ mod tests {
                 &bytes,
                 &Changes {
                     start_time: Some(43_200),
+                    ..Changes::default()
                 },
             )
             .unwrap_or_else(|e| panic!("{}: {e}", path.display()));

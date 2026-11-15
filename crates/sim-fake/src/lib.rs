@@ -36,9 +36,12 @@ use nanoprobe_sidecar::sim::wire::{
     object_kind, opcode,
 };
 use nanoprobe_sidecar::sim::{Detached, RawRecord, SimAdapter};
+use nanoprobe_sidecar::stock::{Item, Stock};
 use nanoprobe_transport::codec::Lv;
 use nanoprobe_transport::layout::{Class, gap_class, lifecycle as lc, record_class, result as rc};
-use nanoprobe_transport::records::{CommandResult, Frame, Gap, Hello, Lifecycle};
+use nanoprobe_transport::records::{
+    Airbase, CommandResult, Frame, Gap, Hello, Lifecycle, Rates, Warehouse,
+};
 
 /// Scenery objects that die with each unit or static the fake kills.
 pub const SCENERY_PER_DEATH: u64 = 50;
@@ -86,6 +89,8 @@ pub struct Config {
     pub death_delay_max: f64,
     /// The seed of the death delays.
     pub death_seed: u64,
+    /// Frames between `AIRBASE` and `WAREHOUSE` samples.
+    pub warehouse_every: u64,
 }
 
 impl Default for Config {
@@ -102,8 +107,21 @@ impl Default for Config {
             first_boot: 0x1000,
             death_delay_max: 0.0,
             death_seed: 0,
+            warehouse_every: 5,
         }
     }
+}
+
+/// The coalition of each country the fake knows, answered to `COUNTRIES`:
+/// country 0 is red, country 2 is blue (DCS numbering).
+pub const COUNTRY_COALITIONS: [(u32, u32); 2] = [(0, 1), (2, 2)];
+
+/// One airbase of the mission: its DCS object ID, owner and warehouse.
+#[derive(Clone, Debug, PartialEq)]
+struct FAirbase {
+    object: u64,
+    coalition: u32,
+    stock: Stock,
 }
 
 /// Ground truth for the tests.
@@ -113,6 +131,9 @@ pub struct Ledger {
     pub deaths: BTreeSet<(u64, u64)>,
     /// Spawns that replaced a group DCS still held under the name.
     pub replacements: u64,
+    /// Of those, the spawns at a spec revision above the one the replaced
+    /// group was spawned at: a changed spec spawned in place.
+    pub in_place: u64,
     /// Spawns that reached the handler: agent boot, generation, group entity,
     /// spec revision, and the unit entities spawned.
     pub spawns: Vec<(u64, u32, u64, u64, Vec<u64>)>,
@@ -154,6 +175,18 @@ pub struct Ledger {
     /// (`args[1]`), and how many times. The agent boot is not in the key: an
     /// effect sent again to a new boot counts a second time.
     pub invokes: BTreeMap<(String, u64), u32>,
+    /// `GROUP_OPTION`s the agent applied.
+    pub options_applied: u32,
+    /// `WAREHOUSE_ADJUST`s the agent applied, by airbase.
+    pub adjustments: BTreeMap<String, u32>,
+    /// `COUNTRIES` queries the agent answered.
+    pub countries_asked: u32,
+    /// `SOUND`s the agent applied: scope, target, file.
+    pub sounds: Vec<(u32, u64, String)>,
+    /// `PICTURE`s the agent applied, each as the `Picture` body it was sent.
+    pub pictures: Vec<Body>,
+    /// `PICTURE_STOP`s the agent applied.
+    pub picture_stops: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -289,6 +322,19 @@ pub struct FakeSim {
     sent: BTreeSet<u64>,
     /// The agent's `full` flag (spec/records.md, "Layout: SEEN").
     full: bool,
+    /// The mission's airbases as the mission file has them, by name.
+    airbase_seed: BTreeMap<String, FAirbase>,
+    /// The airbases as DCS holds them now.
+    airbases: BTreeMap<String, FAirbase>,
+    /// Controller options applied, by group entity.
+    options: BTreeMap<u64, BTreeMap<u32, Lv>>,
+    /// Life of a unit object as a percentage of its initial life, when set.
+    life: BTreeMap<u64, f64>,
+    /// The sample rates last received.
+    rates: Rates,
+    rates_received: u32,
+    /// The DCS object an `AttackUnit` task names, by DCS group.
+    attack_unit: BTreeMap<u64, u64>,
 }
 
 impl FakeSim {
@@ -341,9 +387,78 @@ impl FakeSim {
             hidden: BTreeSet::new(),
             sent: BTreeSet::new(),
             full: true,
+            airbase_seed: BTreeMap::new(),
+            airbases: BTreeMap::new(),
+            options: BTreeMap::new(),
+            life: BTreeMap::new(),
+            rates: Rates::default(),
+            rates_received: 0,
+            attack_unit: BTreeMap::new(),
         };
         f.load_mission();
         f
+    }
+
+    /// Add an airbase to the mission, as the mission file has it. It is in
+    /// DCS now and after each mission load.
+    pub fn add_airbase(&mut self, name: &str, coalition: u32, stock: Stock) {
+        let object = 1_000_000 + self.airbase_seed.len() as u64;
+        let a = FAirbase {
+            object,
+            coalition,
+            stock,
+        };
+        self.airbase_seed.insert(name.to_owned(), a.clone());
+        self.airbases.insert(name.to_owned(), a);
+    }
+
+    /// DCS captures an airbase: its owner changes without a command.
+    pub fn capture_airbase(&mut self, name: &str, coalition: u32) {
+        if let Some(a) = self.airbases.get_mut(name) {
+            a.coalition = coalition;
+        }
+    }
+
+    /// DCS uses stock: an item's count changes without a command.
+    pub fn use_stock(&mut self, name: &str, item: Item, count: f64) {
+        if let Some(a) = self.airbases.get_mut(name) {
+            a.stock.set(item, count);
+        }
+    }
+
+    /// The owner of an airbase in DCS.
+    pub fn airbase_owner(&self, name: &str) -> Option<u32> {
+        self.airbases.get(name).map(|a| a.coalition)
+    }
+
+    /// The stock of an airbase in DCS.
+    pub fn airbase_stock(&self, name: &str) -> Option<&Stock> {
+        self.airbases.get(name).map(|a| &a.stock)
+    }
+
+    /// The value of a controller option DCS holds for a group entity.
+    pub fn option_of(&self, entity: u64, option: u32) -> Option<&Lv> {
+        self.options.get(&entity)?.get(&option)
+    }
+
+    /// The life, as a percentage of the initial life, of a unit entity's
+    /// object, when a `DAMAGE` set it.
+    pub fn life_percent_of(&self, entity: u64) -> Option<f64> {
+        let (o, _) = self.objects.iter().find(|(_, x)| x.entity == entity)?;
+        self.life.get(o).copied()
+    }
+
+    /// The DCS object the group of an entity was told to attack with an
+    /// `AttackUnit` task.
+    pub fn attack_unit_of(&self, campaign: u64, entity: u64) -> Option<u64> {
+        let gid = self.group_in(campaign, entity)?;
+        self.attack_unit.get(&gid).copied()
+    }
+
+    /// The sample rates the agent last received, and how many `RATES`
+    /// commands it took.
+    pub fn rates(&self) -> (Rates, u32) {
+        (self.rates, self.rates_received)
     }
 
     /// The ground truth.
@@ -606,6 +721,11 @@ impl FakeSim {
         self.graves.clear();
         self.applied_spec.clear();
         self.applied_order.clear();
+        // The mission file's airbases, owners and stock; no option or life
+        // survives its group.
+        self.airbases = self.airbase_seed.clone();
+        self.options.clear();
+        self.life.clear();
         self.lifecycle = lc::LOADING as u32;
         self.loading = self.cfg.load_frames.max(1);
         self.lifecycle_record();
@@ -1324,6 +1444,24 @@ impl FakeSim {
                 self.start_enumeration();
             }
             self.enumeration_slice();
+            if self.frame.is_multiple_of(self.cfg.warehouse_every.max(1)) {
+                let bases: Vec<(String, FAirbase)> = self
+                    .airbases
+                    .iter()
+                    .map(|(n, a)| (n.clone(), a.clone()))
+                    .collect();
+                for (name, a) in bases {
+                    self.emit(Input::Airbase(Airbase {
+                        object: a.object,
+                        coalition: a.coalition,
+                        airbase: name.clone(),
+                    }));
+                    self.emit(Input::Warehouse(Warehouse {
+                        airbase: name,
+                        stock: a.stock.to_lv(),
+                    }));
+                }
+            }
             if self.frame.is_multiple_of(self.cfg.positions_every) {
                 let rows: Vec<Position> = self
                     .table
@@ -1436,6 +1574,10 @@ impl FakeSim {
                 Body::Enumerate => {
                     self.full = true;
                     self.start_enumeration();
+                }
+                Body::Rates(r) => {
+                    self.rates = r;
+                    self.rates_received += 1;
                 }
                 _ => {}
             }
@@ -1565,6 +1707,13 @@ impl FakeSim {
                     .filter(|_| lv::str_at(task, "id").as_deref() == Some("AttackGroup"))
                     .and_then(|p| lv::num_at(p, "groupId"))
                     .map(|v| v as u64);
+                match lv::get(task, "params")
+                    .filter(|_| lv::str_at(task, "id").as_deref() == Some("AttackUnit"))
+                    .and_then(|p| lv::num_at(p, "unitId"))
+                {
+                    Some(u) => self.attack_unit.insert(gid, u as u64),
+                    None => self.attack_unit.remove(&gid),
+                };
                 self.applied_order.insert(h.entity, h.rev);
                 self.result(&cmd, rc::APPLIED, gid, "", Lv::Nil);
             }
@@ -1601,10 +1750,117 @@ impl FakeSim {
                     self.result(&cmd, rc::APPLIED, gid, "", value);
                 }
             }
+            Body::GroupOption { option, value } => {
+                if self.group_of(h.entity).is_none() {
+                    return self.result(&cmd, rc::NOT_BOUND, 0, "", Lv::Nil);
+                }
+                self.options
+                    .entry(h.entity)
+                    .or_default()
+                    .insert(*option, value.clone());
+                self.ledger.options_applied += 1;
+                self.result(&cmd, rc::APPLIED, 0, "", Lv::Nil);
+            }
+            Body::AirbaseOwner { coalition, airbase } => {
+                let Some(a) = self.airbases.get_mut(airbase) else {
+                    return self.result(&cmd, rc::NOT_BOUND, 0, "", Lv::Nil);
+                };
+                a.coalition = *coalition;
+                self.result(&cmd, rc::APPLIED, 0, "", Lv::Nil);
+            }
+            Body::WarehouseSet { airbase, stock } => {
+                let Some(a) = self.airbases.get_mut(airbase) else {
+                    return self.result(&cmd, rc::NOT_BOUND, 0, "", Lv::Nil);
+                };
+                let set = Stock::from_lv(stock);
+                if set.items().iter().any(|(_, c)| *c < 0.0) {
+                    return self.result(&cmd, rc::DCS_REFUSED, 0, "a negative count", Lv::Nil);
+                }
+                a.stock.merge(&set);
+                self.result(&cmd, rc::APPLIED, 0, "", Lv::Nil);
+            }
+            Body::WarehouseAdjust { airbase, delta } => {
+                let Some(a) = self.airbases.get_mut(airbase) else {
+                    return self.result(&cmd, rc::NOT_BOUND, 0, "", Lv::Nil);
+                };
+                let delta = Stock::from_lv(delta);
+                // DCS clamps a count at zero and raises no error (LIVE, E6,
+                // step S15): each item stops at zero.
+                for (i, d) in delta.items() {
+                    let now = a.stock.get(&i).unwrap_or(0.0);
+                    a.stock.set(i, (now + d).max(0.0));
+                }
+                *self.ledger.adjustments.entry(airbase.clone()).or_default() += 1;
+                self.result(&cmd, rc::APPLIED, 0, "", Lv::Nil);
+            }
+            Body::Damage { life_percent } => {
+                let campaign = self.campaign;
+                let Some((o, _)) = self
+                    .objects
+                    .iter()
+                    .find(|(_, x)| x.entity == h.entity && x.campaign == campaign)
+                else {
+                    return self.result(&cmd, rc::NOT_BOUND, 0, "", Lv::Nil);
+                };
+                let o = *o;
+                self.life.insert(o, *life_percent);
+                self.result(&cmd, rc::APPLIED, o, "", Lv::Nil);
+            }
+            Body::Sound {
+                scope,
+                target,
+                file,
+            } => {
+                if !self.scope_held(h.campaign, *scope, *target) {
+                    return self.result(&cmd, rc::NOT_BOUND, 0, "", Lv::Nil);
+                }
+                self.ledger.sounds.push((*scope, *target, file.clone()));
+                self.result(&cmd, rc::APPLIED, 0, "", Lv::Nil);
+            }
+            Body::Picture { scope, target, .. } => {
+                if !self.scope_held(h.campaign, *scope, *target) {
+                    return self.result(&cmd, rc::NOT_BOUND, 0, "", Lv::Nil);
+                }
+                self.ledger.pictures.push(cmd.body.clone());
+                self.result(&cmd, rc::APPLIED, 0, "", Lv::Nil);
+            }
+            Body::PictureStop => {
+                self.ledger.picture_stops += 1;
+                self.result(&cmd, rc::APPLIED, 0, "", Lv::Nil);
+            }
+            Body::Countries => {
+                let v = Lv::Table(
+                    COUNTRY_COALITIONS
+                        .iter()
+                        .map(|(c, k)| (lv::n(f64::from(*c)), lv::n(f64::from(*k))))
+                        .collect(),
+                );
+                self.ledger.countries_asked += 1;
+                self.result(&cmd, rc::APPLIED, 0, "", v);
+            }
             Body::ExtensionSet { .. } | Body::ExtensionInvoke { .. } => {
                 unreachable!("answered above")
             }
-            Body::Campaign(_) | Body::Enumerate | Body::Burst(_) => unreachable!("control"),
+            Body::Campaign(_) | Body::Enumerate | Body::Burst(_) | Body::Rates(_) => {
+                unreachable!("control")
+            }
+        }
+    }
+
+    /// Whether DCS holds what a `SOUND` or `PICTURE` scope names: a group
+    /// or unit of the campaign for `GROUP` and `UNIT` (never with campaign
+    /// 0), anything for the other scopes.
+    fn scope_held(&self, campaign: u64, scope: u32, target: u64) -> bool {
+        match scope {
+            3 => campaign != 0 && self.group_in(campaign, target).is_some(),
+            4 => {
+                campaign != 0
+                    && self
+                        .objects
+                        .values()
+                        .any(|x| x.entity == target && x.campaign == campaign)
+            }
+            _ => true,
         }
     }
 
@@ -1637,6 +1893,9 @@ impl FakeSim {
         {
             if !self.orphans.contains(&old) {
                 self.ledger.replacements += 1;
+                if h.rev > self.applied_spec.get(&h.entity).copied().unwrap_or(0) {
+                    self.ledger.in_place += 1;
+                }
             }
             self.destroy_group(old);
         }
@@ -1729,6 +1988,7 @@ impl FakeSim {
         }
         self.applied_spec.remove(&entity);
         self.applied_order.remove(&entity);
+        self.options.remove(&entity);
     }
 
     fn capture(&self, gid: u64) -> Lv {
@@ -1744,7 +2004,7 @@ impl FakeSim {
                     ("y", lv::n(o.at.y)),
                     ("z", lv::n(o.at.z)),
                     ("heading", lv::n(0.0)),
-                    ("life", lv::n(1.0)),
+                    ("life", lv::n(self.life.get(m).map_or(1.0, |p| p / 100.0))),
                     ("fuel", lv::n(0.5)),
                 ])
             })
