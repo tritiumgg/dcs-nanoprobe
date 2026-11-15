@@ -44,7 +44,7 @@ esac
 (cd "$ROOT" && cargo build -p nanoprobe-agent --no-default-features --features faults \
     --target-dir "$ROOT/target/faults")
 # The sidecar side of the link rehearsal, lua/tests/link.lua.
-(cd "$ROOT" && cargo build -p nanoprobe-fake-agent --bin link-probe -p nanoprobe-cli --bin nanoprobe)
+(cd "$ROOT" && cargo build -p nanoprobe-fake-agent --bin link-probe --bin command-probe --bin command-script -p nanoprobe-cli --bin nanoprobe)
 PROBE="$ROOT/target/debug/link-probe"
 INSPECT="$ROOT/target/debug/nanoprobe"
 # The catalogue builder, which lua/tests/probes.lua runs on the scenarios'
@@ -102,6 +102,20 @@ for script in "$ROOT"/lua/tests/*.lua; do
             "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" deaths
             "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" sweep
             "$LUA" "$script" "$FAULTS_MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" tenth
+            ;;
+        # The agent's state lasts as long as the process: one scenario each.
+        dispatch.lua)
+            "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" no-shim
+            "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" no-answer
+            "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" budget
+            "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" raw-off
+            "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" unknown-extension
+            "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" unknown-raw-off
+            "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" unknown-no-shim
+            "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" begin-only-pump
+            "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" bounded-results
+            "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" bad-code
+            "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" deep-tables
             ;;
         *) "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" ;;
     esac

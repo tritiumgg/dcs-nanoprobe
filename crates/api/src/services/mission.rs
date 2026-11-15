@@ -56,6 +56,7 @@ impl MissionService for Mission {
                 event_gaps: g.link.event_gaps,
                 attached: g.link.attached,
                 attach_error: g.backend.attach_error(),
+                agent_interface: g.link.agent_interface,
                 ..ServerStatus::default()
             }),
         }))

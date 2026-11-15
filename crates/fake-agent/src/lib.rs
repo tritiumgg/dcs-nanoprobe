@@ -5,6 +5,7 @@
 
 pub mod agent;
 pub mod content;
+pub mod linksim;
 pub mod stub;
 pub mod verify;
 

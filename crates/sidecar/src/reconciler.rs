@@ -34,6 +34,25 @@ use crate::store::{
     UnitState,
 };
 
+/// A `NOT_READY` hold: the revision, the lifecycle change count and the FRAME
+/// count at the answer.
+type NotReady = (u64, u64, u64);
+
+/// A spawn, order, destroy, capture or extension answered `NOT_READY` is not
+/// sent again until a lifecycle change, a `HELLO`, or this many FRAMEs are
+/// read since the answer. A NOT_READY with no lifecycle cause (a pump that
+/// never reached `command`, a shim reloaded without a LIFECYCLE record) would
+/// otherwise hold until the next `HELLO`. One FRAME comes per pump, so 300 is
+/// a few seconds of a running mission: slow enough that a shim that is still
+/// starting is not asked every frame, quick enough that a lost cause is
+/// retried.
+pub const NOT_READY_HOLD_FRAMES: u64 = 300;
+
+const HOLD_SPAWN: u8 = 0;
+const HOLD_ORDER: u8 = 1;
+const HOLD_DESTROY: u8 = 2;
+const HOLD_CAPTURE: u8 = 3;
+
 /// The reconciler's settings (spec/config.md, `[world]`).
 #[derive(Clone, Copy, Debug)]
 pub struct Config {
@@ -189,6 +208,29 @@ pub struct Reconciler {
     order_held: HashMap<EntityId, u64>,
     /// An order revision DCS refused; not sent again until it changes.
     order_refused: HashMap<EntityId, u64>,
+    /// The revision of each extension the agent holds, as far as answers
+    /// show, in this agent boot and campaign.
+    ext_held: HashMap<String, u64>,
+    /// An extension revision the agent refused: not sent again until the
+    /// revision changes.
+    ext_refused: HashMap<String, u64>,
+    /// An extension revision the agent answered `NOT_READY`, with the
+    /// lifecycle change count and the FRAME count at the answer: not sent
+    /// again until the revision, a lifecycle change or the agent's `HELLO`
+    /// changes, or [`NOT_READY_HOLD_FRAMES`] FRAMEs are read.
+    ext_not_ready: HashMap<String, NotReady>,
+    /// A spawn, order, destroy or capture of one entity the agent answered
+    /// `NOT_READY` (the key's `u8` is a `HOLD_` constant), held under the same
+    /// rule as extensions. A destroy or capture has revision 0.
+    cmd_not_ready: HashMap<(EntityId, u8), NotReady>,
+    /// FRAMEs read: the second clock of the `NOT_READY` holds.
+    frames_read: u64,
+    /// LIFECYCLE records read, and FRAMEs that changed the state: the clock
+    /// the `NOT_READY` holds run on. `plan` sees only RUNNING and PAUSED, so
+    /// a state value cannot tell a restart from no change.
+    lifecycle_changes: u64,
+    /// The extension each `EXTENSION_SET` in flight names, by (epoch, seq).
+    ext_sent: HashMap<(u64, u64), String>,
     /// Drift destroys (of an entity DCS should not hold) refused or unknown,
     /// by entity, in the loaded generation. At the limit they stop.
     drift_destroy_failures: HashMap<EntityId, u32>,
@@ -222,7 +264,7 @@ fn classify(code: u16, opcode: u16) -> Outcome {
 fn rejected_for_now(code: u16) -> bool {
     matches!(
         u64::from(code),
-        rc::STALE_EPOCH | rc::WRONG_CAMPAIGN | rc::WRONG_GENERATION
+        rc::STALE_EPOCH | rc::WRONG_CAMPAIGN | rc::WRONG_GENERATION | rc::NOT_READY
     )
 }
 
@@ -250,6 +292,13 @@ impl Reconciler {
             enum_wanted: false,
             order_held: HashMap::new(),
             order_refused: HashMap::new(),
+            ext_held: HashMap::new(),
+            ext_refused: HashMap::new(),
+            ext_not_ready: HashMap::new(),
+            cmd_not_ready: HashMap::new(),
+            lifecycle_changes: 0,
+            frames_read: 0,
+            ext_sent: HashMap::new(),
             drift_destroy_failures: HashMap::new(),
             spawn_rejected: HashMap::new(),
             campaign_sent: false,
@@ -330,16 +379,21 @@ impl Reconciler {
         };
         match input {
             Input::Frame(f) => {
+                self.frames_read += 1;
                 self.stamp = (r.agent_boot, f.mission_gen, f.campaign);
                 if f.replay == 0 {
                     if r.agent_boot == self.agent_boot || self.agent_boot == 0 {
+                        if self.lifecycle != f.lifecycle {
+                            self.lifecycle_changes += 1;
+                        }
                         self.lifecycle = f.lifecycle;
                     }
                     self.seen_mission(store, r.agent_boot, f.mission_gen, None);
                 }
             }
-            Input::Hello(h) => self.hello(store, r.agent_boot, &h),
+            Input::Hello(h) => self.hello(store, r.agent_boot, &h, r.resync),
             Input::Lifecycle(l) => {
+                self.lifecycle_changes += 1;
                 if r.agent_boot == self.agent_boot || self.agent_boot == 0 {
                     self.lifecycle = l.state;
                 }
@@ -491,14 +545,19 @@ impl Reconciler {
         }
     }
 
-    fn hello(&mut self, store: &mut Store, agent_boot: u64, h: &Hello) {
+    fn hello(&mut self, store: &mut Store, agent_boot: u64, h: &Hello, resync: bool) {
         // Every command the HELLO does not answer: taken (at or before
         // in_head) and its result lost, or never taken. A command of another
-        // agent boot cannot be answered any more.
+        // agent boot cannot be answered any more, whatever its position
+        // (spec/commands.md, "After DCS dies"). A resync HELLO leaves the
+        // ring as it was, so a command after its in_head is still there and
+        // stays pending (spec/commands.md, "After CONTROL_LOST").
         let open: Vec<Journalled> = self.inflight.values().cloned().collect();
         for c in open {
             let outcome = if c.agent_boot != h.agent_boot || c.position <= h.in_head {
                 Outcome::Unknown
+            } else if resync {
+                continue;
             } else {
                 Outcome::NotSent
             };
@@ -518,8 +577,12 @@ impl Reconciler {
             self.unresolved.clear();
             self.order_held.clear();
             self.order_refused.clear();
+            self.ext_held.clear();
+            self.ext_refused.clear();
             self.run = None;
         }
+        self.ext_not_ready.clear();
+        self.cmd_not_ready.clear();
         self.agent_boot = agent_boot;
         self.attached = true;
         self.campaign_sent = false;
@@ -539,6 +602,15 @@ impl Reconciler {
             seq: c.seq,
             outcome,
         });
+        match c.opcode {
+            opcode::EXTENSION_SET => {
+                self.extension_resolved(c, outcome, res);
+                return;
+            }
+            // An effect: reported, never sent again.
+            opcode::EXTENSION_INVOKE => return,
+            _ => {}
+        }
         let Some(g) = store.group(c.entity) else {
             return;
         };
@@ -616,10 +688,12 @@ impl Reconciler {
                             .expect("materializing");
                     }
                     Outcome::Rejected => {
-                        if let Some(r) = res
-                            && !rejected_for_now(r.code)
-                        {
-                            self.spawn_rejected.insert(id, (c.rev, c.mission_gen));
+                        if let Some(r) = res {
+                            if u64::from(r.code) == rc::NOT_READY {
+                                self.hold_not_ready(id, HOLD_SPAWN, c.rev);
+                            } else if !rejected_for_now(r.code) {
+                                self.spawn_rejected.insert(id, (c.rev, c.mission_gen));
+                            }
                         }
                     }
                     Outcome::NotSent => {}
@@ -637,6 +711,9 @@ impl Reconciler {
                     Outcome::Refused => {
                         self.order_refused.insert(id, c.rev);
                     }
+                    Outcome::Rejected if code == Some(rc::NOT_READY) => {
+                        self.hold_not_ready(id, HOLD_ORDER, c.rev);
+                    }
                     _ => {}
                 }
             }
@@ -645,7 +722,11 @@ impl Reconciler {
                     return;
                 }
                 if outcome == Outcome::Rejected || outcome == Outcome::NotSent {
-                    // Not tried: the next plan sends it again.
+                    // Not tried: the next plan sends it again, but not for
+                    // a while after NOT_READY.
+                    if code == Some(rc::NOT_READY) {
+                        self.hold_not_ready(id, HOLD_CAPTURE, 0);
+                    }
                     return;
                 }
                 if code == Some(rc::APPLIED)
@@ -693,6 +774,8 @@ impl Reconciler {
                     .transition(id, Trigger::CaptureDone)
                     .expect("dematerializing");
             }
+        } else if outcome == Outcome::Rejected && code == Some(rc::NOT_READY) {
+            self.hold_not_ready(id, HOLD_DESTROY, 0);
         } else if matches!(outcome, Outcome::Refused | Outcome::Unknown) {
             // Sent again, safely (destroying nothing is APPLIED),
             // up to the limit.
@@ -837,6 +920,15 @@ impl Reconciler {
                 // A revived member brings back the DCS group that refused the order.
                 self.order_refused.remove(&row.group);
             }
+        }
+        // A member DCS lacked, MISSING or REMOVED and found again: the
+        // group may take an order DCS refused while it held none of it, as
+        // after a revival (spec/commands.md, "Layout: GROUP_ORDER").
+        if store
+            .unit(row.unit)
+            .is_some_and(|u| !u.dead && (u.missing || u.removed))
+        {
+            self.order_refused.remove(&row.group);
         }
         store.set_missing(row.unit, false);
         store.set_object(row.unit, o.object);
@@ -1124,6 +1216,27 @@ impl Reconciler {
         }
     }
 
+    /// The clocks of a `NOT_READY` answer read now.
+    fn not_ready_now(&self, rev: u64) -> NotReady {
+        (rev, self.lifecycle_changes, self.frames_read)
+    }
+
+    fn hold_not_ready(&mut self, id: EntityId, what: u8, rev: u64) {
+        let hold = self.not_ready_now(rev);
+        self.cmd_not_ready.insert((id, what), hold);
+    }
+
+    /// Whether a `NOT_READY` hold for `rev` still stands: the revision and
+    /// the lifecycle are those of the answer, and fewer than
+    /// [`NOT_READY_HOLD_FRAMES`] FRAMEs were read since.
+    fn is_held(&self, hold: Option<&NotReady>, rev: u64) -> bool {
+        hold.is_some_and(|h| {
+            h.0 == rev
+                && h.1 == self.lifecycle_changes
+                && self.frames_read.saturating_sub(h.2) < NOT_READY_HOLD_FRAMES
+        })
+    }
+
     fn inflight_for(&self, store: &Store, entity: EntityId, ops: &[u16]) -> bool {
         let Some(l) = store.loaded() else {
             return false;
@@ -1134,6 +1247,92 @@ impl Reconciler {
                 && c.agent_boot == l.agent_boot
                 && c.mission_gen == l.mission_gen
         })
+    }
+
+    /// An `EXTENSION_SET` resolved. Applied, the agent holds the revision;
+    /// refused, or rejected for good, it is not sent again until the
+    /// revision changes; any other outcome derives it again (spec/errors.md).
+    fn extension_resolved(
+        &mut self,
+        c: &Journalled,
+        outcome: Outcome,
+        res: Option<&CommandResult>,
+    ) {
+        let Some(name) = self.ext_sent.remove(&(c.epoch, c.seq)) else {
+            // Sent before a sidecar restart: derived again, and an
+            // AT_REVISION answer shows it held.
+            return;
+        };
+        if c.agent_boot != self.agent_boot {
+            return;
+        }
+        match outcome {
+            Outcome::Applied => {
+                let held = self.ext_held.entry(name).or_default();
+                *held = (*held).max(c.rev);
+            }
+            Outcome::Refused => {
+                self.ext_refused.insert(name, c.rev);
+            }
+            Outcome::Rejected if !res.is_some_and(|r| rejected_for_now(r.code)) => {
+                self.ext_refused.insert(name, c.rev);
+            }
+            Outcome::Rejected if res.is_some_and(|r| u64::from(r.code) == rc::NOT_READY) => {
+                let hold = self.not_ready_now(c.rev);
+                self.ext_not_ready.insert(name, hold);
+            }
+            _ => {}
+        }
+    }
+
+    /// Send what the store's extensions need: every one whose revision the
+    /// agent does not hold, once at a time. Returns false when a send failed.
+    fn extensions(&mut self, store: &mut Store, sim: &mut dyn SimAdapter) -> bool {
+        let wanted: Vec<(String, u64, String)> = store
+            .extensions()
+            .map(|e| (e.name.clone(), e.spec_rev, e.source.clone()))
+            .collect();
+        for (name, rev, source) in wanted {
+            if self.ext_held.get(&name).is_some_and(|h| *h >= rev)
+                || self.ext_refused.get(&name) == Some(&rev)
+                || self.is_held(self.ext_not_ready.get(&name), rev)
+                || self.ext_sent.values().any(|n| *n == name)
+            {
+                continue;
+            }
+            let key = (self.epoch, self.next_seq);
+            let body = Body::ExtensionSet {
+                name: name.clone(),
+                source: Lv::String(source.into_bytes()),
+            };
+            if !self.send(store, sim, EntityId(0), rev, body) {
+                return false;
+            }
+            self.ext_sent.insert(key, name);
+        }
+        true
+    }
+
+    /// Run an extension's `invoke` in DCS with `args`, an array: an
+    /// `EXTENSION_INVOKE`, an effect, never sent again. Returns the
+    /// command's (epoch, seq), whose outcome the journal gets, or None when
+    /// nothing can be sent now.
+    pub fn invoke(
+        &mut self,
+        store: &mut Store,
+        sim: &mut dyn SimAdapter,
+        name: &str,
+        args: Lv,
+    ) -> Option<(u64, u64)> {
+        if !self.ready(store) || !self.attached || !self.campaign_sent {
+            return None;
+        }
+        let key = (self.epoch, self.next_seq);
+        let body = Body::ExtensionInvoke {
+            name: name.to_owned(),
+            args,
+        };
+        self.send(store, sim, EntityId(0), 0, body).then_some(key)
     }
 
     fn plan(&mut self, store: &mut Store, sim: &mut dyn SimAdapter) {
@@ -1153,6 +1352,9 @@ impl Reconciler {
             }
             self.enum_wanted = false;
             self.counters.enumerate_requests += 1;
+        }
+        if !self.extensions(store, sim) {
+            return;
         }
         let loaded = store.loaded().expect("ready").clone();
         self.held
@@ -1200,8 +1402,9 @@ impl Reconciler {
                         .expect("materializing");
                 }
                 State::Materializing => {
-                    let rejected =
-                        self.spawn_rejected.get(&id) == Some(&(g.spec_rev, loaded.mission_gen));
+                    let rejected = self.spawn_rejected.get(&id)
+                        == Some(&(g.spec_rev, loaded.mission_gen))
+                        || self.is_held(self.cmd_not_ready.get(&(id, HOLD_SPAWN)), g.spec_rev);
                     if here
                         && spawns > 0
                         && !rejected
@@ -1276,7 +1479,10 @@ impl Reconciler {
         let ops = [opcode::GROUP_DESTROY, opcode::STATIC_DESTROY];
         let given_up = self.drift_destroy_failures.get(&id).copied().unwrap_or(0)
             >= self.cfg.destroy_retries.max(1);
-        if given_up || self.inflight_for(store, id, &ops) {
+        if given_up
+            || self.inflight_for(store, id, &ops)
+            || self.is_held(self.cmd_not_ready.get(&(id, HOLD_DESTROY)), 0)
+        {
             return;
         }
         let body = match store.group(id).expect("group").kind {
@@ -1287,6 +1493,9 @@ impl Reconciler {
     }
 
     fn dematerialize(&mut self, store: &mut Store, sim: &mut dyn SimAdapter, id: EntityId) {
+        if self.is_held(self.cmd_not_ready.get(&(id, HOLD_CAPTURE)), 0) {
+            return;
+        }
         let body = match store.group(id).expect("group").kind {
             Kind::Group => Body::GroupCaptureDestroy,
             Kind::Static => Body::Capture,
@@ -1375,7 +1584,10 @@ impl Reconciler {
         let target_now = |t: EntityId| bound.get(&t).copied().filter(|v| *v != 0);
         let rev = g.order_rev;
         let held = self.order_held.get(&id).copied().unwrap_or(0);
-        if held >= rev || self.order_refused.get(&id) == Some(&rev) {
+        if held >= rev
+            || self.order_refused.get(&id) == Some(&rev)
+            || self.is_held(self.cmd_not_ready.get(&(id, HOLD_ORDER)), rev)
+        {
             return;
         }
         let lead = g
@@ -1467,6 +1679,7 @@ mod tests {
             (rc::LUA_ERROR, Outcome::Refused),
             (rc::WRONG_CAMPAIGN, Outcome::Rejected),
             (rc::WRONG_GENERATION, Outcome::Rejected),
+            (rc::NOT_READY, Outcome::Rejected),
         ] {
             assert_eq!(classify(code as u16, set_state), want, "code {code}");
             assert_eq!(classify(code as u16, query), want, "code {code}");
@@ -1475,7 +1688,7 @@ mod tests {
         assert_eq!(classify(rc::TOO_LARGE as u16, query), Outcome::Refused);
         assert_eq!(
             nanoprobe_transport::layout::result::ALL.len(),
-            14,
+            15,
             "a code without a row here"
         );
     }

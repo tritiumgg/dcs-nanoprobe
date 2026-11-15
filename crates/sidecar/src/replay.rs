@@ -14,9 +14,12 @@
 //! {"t":<wall ms>,"boot":"<16 hex>","number":N,"kind":N,"payload":"<hex>"}
 //! ```
 //!
-//! The file has no batches and no restart marker: [`Recording::read_jsonl`]
-//! makes one batch per `FRAME`, and [`fold`] takes restart points as an
-//! argument. A recording of a real server holds server data and stays out of
+//! A `"resync":true` key follows `payload` on a record that carries the flag.
+//! A line `{"attach":true}` marks a link attach (a [`Batch::Attach`]): the
+//! next `HELLO` is the first of an attach even when it names the agent boot
+//! the last one did. The file has no other batches and no restart marker:
+//! [`Recording::read_jsonl`] makes one batch per `FRAME`, and [`fold`] takes
+//! restart points as an argument. A recording of a real server holds server data and stays out of
 //! the repository.
 
 use std::io::{self, BufRead, Write};
@@ -37,6 +40,10 @@ pub enum Batch {
     Records(Vec<RawRecord>),
     /// The sidecar restarted here: its volatile state was lost.
     SidecarRestart,
+    /// The link attached again here, to the same agent boot or another,
+    /// without a sidecar restart: a new handshake, so the next `HELLO` is
+    /// the first of an attach.
+    Attach,
 }
 
 /// A recording.
@@ -67,31 +74,59 @@ impl Recording {
     pub fn records(&self) -> impl Iterator<Item = &RawRecord> {
         self.batches.iter().flat_map(|b| match b {
             Batch::Records(r) => r.as_slice(),
-            Batch::SidecarRestart => &[],
+            Batch::SidecarRestart | Batch::Attach => &[],
         })
     }
 
-    /// Write the records as JSON Lines, with `t` 0. Restart markers are
-    /// not written.
+    /// Write the records as JSON Lines, with `t` 0, and `"resync":true` on a
+    /// record that carries the flag. A [`Batch::Attach`] is written as an
+    /// `{"attach":true}` line; a sidecar restart is not written.
     pub fn write_jsonl(&self, w: &mut impl Write) -> io::Result<()> {
-        for r in self.records() {
-            let hex: String = r.payload.iter().map(|b| format!("{b:02x}")).collect();
-            writeln!(
-                w,
-                "{{\"t\":0,\"boot\":\"{:016x}\",\"number\":{},\"kind\":{},\"payload\":\"{hex}\"}}",
-                r.agent_boot, r.number, r.kind
-            )?;
+        for b in &self.batches {
+            let rs = match b {
+                Batch::Records(rs) => rs.as_slice(),
+                Batch::SidecarRestart => &[],
+                Batch::Attach => {
+                    writeln!(w, "{{\"attach\":true}}")?;
+                    &[]
+                }
+            };
+            write_records(w, rs)?;
         }
         Ok(())
     }
+}
 
-    /// Read JSON Lines, one batch per `FRAME`. A blank line is skipped; any
-    /// other line that is not a record fails, naming its line number.
+fn write_records(w: &mut impl Write, records: &[RawRecord]) -> io::Result<()> {
+    {
+        for r in records {
+            let hex: String = r.payload.iter().map(|b| format!("{b:02x}")).collect();
+            let resync = if r.resync { ",\"resync\":true" } else { "" };
+            writeln!(
+                w,
+                "{{\"t\":0,\"boot\":\"{:016x}\",\"number\":{},\"kind\":{},\"payload\":\"{hex}\"{resync}}}",
+                r.agent_boot, r.number, r.kind
+            )?;
+        }
+    }
+    Ok(())
+}
+
+impl Recording {
+    /// Read JSON Lines, one batch per `FRAME`, and a [`Batch::Attach`] at
+    /// each attach line. A blank line is skipped; any other line that is not
+    /// a record fails, naming its line number.
     pub fn read_jsonl(r: impl BufRead) -> io::Result<Recording> {
+        let mut batches = Vec::new();
         let mut records = Vec::new();
         for (i, line) in r.lines().enumerate() {
             let line = line?;
             if line.trim().is_empty() {
+                continue;
+            }
+            if is_attach_line(&line) {
+                batches.extend(Recording::from_records(std::mem::take(&mut records)).batches);
+                batches.push(Batch::Attach);
                 continue;
             }
             let rec = parse_line(&line).ok_or_else(|| {
@@ -102,8 +137,18 @@ impl Recording {
             })?;
             records.push(rec);
         }
-        Ok(Recording::from_records(records))
+        batches.extend(Recording::from_records(records).batches);
+        Ok(Recording { batches })
     }
+}
+
+/// Whether `line` is the attach marker.
+fn is_attach_line(line: &str) -> bool {
+    let line = line.trim();
+    line.starts_with('{')
+        && line.ends_with('}')
+        && !line.contains("\"payload\"")
+        && field(line, "attach") == Some("true")
 }
 
 /// The text of `"key":` in a flat JSON object, up to the next `,` or `}`, with
@@ -138,6 +183,7 @@ fn parse_line(line: &str) -> Option<RawRecord> {
         number: field(line, "number")?.parse().ok()?,
         kind: field(line, "kind")?.parse().ok()?,
         payload,
+        resync: field(line, "resync") == Some("true"),
     })
 }
 
@@ -152,12 +198,28 @@ pub enum Persistence<'a> {
     Off(&'a dyn Fn() -> Store),
 }
 
+/// Whether `r` is a resync `HELLO`: one the recording marks, or a `HELLO` of
+/// the agent boot that `hello_boot` names, the last one read since the attach.
+/// Updates it.
+fn hello_resync(hello_boot: &mut Option<u64>, r: &RawRecord) -> bool {
+    if u64::from(r.kind) != kind::HELLO {
+        return r.resync;
+    }
+    let resync = r.resync || *hello_boot == Some(r.agent_boot);
+    *hello_boot = Some(r.agent_boot);
+    resync
+}
+
 /// Fold a recording into a store, as a sidecar that reads it and writes
 /// nothing. The sidecar restarts at every [`Batch::SidecarRestart`], and at
 /// the first `FRAME` at or after each record index in `restarts`: a
 /// restarted sidecar reads on from a `FRAME`, whose stamps it applies
 /// (spec/transport.md, "Attaching"). An index past the last `FRAME` restarts
-/// at the tail. Returns the counters of every reconciler, summed.
+/// at the tail. A `HELLO` is a resync when the recording marks it
+/// ([`RawRecord::resync`]) or, where it does not, when the link read an
+/// earlier `HELLO` of the same agent boot since its attach, which a sidecar
+/// restart and a [`Batch::Attach`] begin. Returns the
+/// counters of every reconciler, summed.
 pub fn fold(
     cfg: Config,
     store: &mut Store,
@@ -174,20 +236,38 @@ pub fn fold(
         }
         *rec = Reconciler::new(cfg, store);
     };
+    // The agent boot of the last `HELLO` read since the attach.
+    let mut hello_boot: Option<u64> = None;
     let mut pending: Vec<usize> = restarts.to_vec();
     pending.sort_unstable();
     let mut i = 0usize;
     for b in &recording.batches {
         match b {
-            Batch::SidecarRestart => restart(&mut rec, store, &mut total),
+            Batch::SidecarRestart => {
+                hello_boot = None;
+                restart(&mut rec, store, &mut total);
+            }
+            Batch::Attach => hello_boot = None,
             Batch::Records(rs) => {
                 for r in rs {
                     let due = pending.first().is_some_and(|p| *p <= i);
                     if due && u64::from(r.kind) == kind::FRAME {
                         pending.retain(|p| *p > i);
+                        hello_boot = None;
                         restart(&mut rec, store, &mut total);
                     }
-                    rec.record(store, r);
+                    let resync = hello_resync(&mut hello_boot, r);
+                    if resync == r.resync {
+                        rec.record(store, r);
+                    } else {
+                        rec.record(
+                            store,
+                            &RawRecord {
+                                resync,
+                                ..r.clone()
+                            },
+                        );
+                    }
                     i += 1;
                 }
             }
@@ -217,6 +297,7 @@ mod tests {
                 number,
                 kind,
                 payload,
+                resync: false,
             })
     }
 
@@ -236,12 +317,35 @@ mod tests {
     }
 
     #[test]
+    fn a_hello_after_the_first_of_an_attach_is_a_resync() {
+        let hello = |boot| RawRecord {
+            agent_boot: boot,
+            number: 1,
+            kind: kind::HELLO as u16,
+            payload: vec![],
+            resync: false,
+        };
+        let mut seen = None;
+        assert!(!hello_resync(&mut seen, &hello(7)));
+        assert!(hello_resync(&mut seen, &hello(7)));
+        assert!(!hello_resync(&mut seen, &hello(8)), "a new boot attaches");
+        let other = RawRecord {
+            kind: kind::FRAME as u16,
+            ..hello(8)
+        };
+        assert!(!hello_resync(&mut seen, &other));
+        seen = None;
+        assert!(!hello_resync(&mut seen, &hello(8)), "a restart attaches");
+    }
+
+    #[test]
     fn a_plain_stream_splits_at_each_frame() {
         let r = |kind: u64, number| RawRecord {
             agent_boot: 1,
             number,
             kind: kind as u16,
             payload: vec![],
+            resync: false,
         };
         let rec = Recording::from_records([
             r(kind::HELLO, 1),

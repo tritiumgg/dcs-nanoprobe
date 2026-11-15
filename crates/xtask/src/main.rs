@@ -8,6 +8,7 @@ mod catalogue;
 mod chaos;
 mod check;
 mod client;
+mod commands;
 mod eval;
 mod faults;
 mod hello;
@@ -112,6 +113,14 @@ commands:
                             Set the oracle's dump (lua/sampling/oracle.lua) against
                             the sidecar's mirror (link-probe --mirror); exit 1 when
                             the mirror does not match
+  commands <name> [--seed N] [--commands 1000] [--restart-every 100]
+                            The S14 exit test on a docker-wine target: deploy with
+                            --dev, turn raw Lua on in agent.toml, restart DCS, load a
+                            fresh shell, and run command-probe in the container as
+                            the sidecar, holding the simulation running. Puts
+                            agent.toml back as found; the caller restores the rest.
+                            Writes bundles/commands-<name>-<time>/commands.json.
+                            Exit 0 PASS, 1 FAIL.
   soak <name> [--minutes 30] [--units 1200] [--collect-every MIN] [--no-sidecar]
                             The S11 churn soak on a docker-wine target: deploy with
                             --dev, restart DCS, load a fresh shell, attach link-probe
@@ -210,6 +219,7 @@ fn main() -> ExitCode {
         ["faults", name, rest @ ..] => faults::command(name, rest),
         ["catalogue", rest @ ..] => catalogue::command(&repository(), rest),
         ["sampling", rest @ ..] => sampling::command(&repository(), rest),
+        ["commands", rest @ ..] => commands::command(&repository(), rest),
         ["soak", name, rest @ ..] => soak::command(&repository(), name, rest),
         ["client", rest @ ..] => client::command(rest),
         ["hello"] => hello::command(None),

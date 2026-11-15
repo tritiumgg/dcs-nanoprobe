@@ -346,7 +346,7 @@ impl Agent {
             ));
             return;
         };
-        let code = match self.link.admit(&h) {
+        let code = match self.link.admit(&h, opcode, None) {
             // The fake agent handles no control opcode, so every one is
             // unknown to it (spec/commands.md, "Unknown opcodes").
             Admit::Control => {
@@ -358,6 +358,7 @@ impl Agent {
             Admit::Run if u64::from(opcode) == content::OPCODE => result::APPLIED,
             Admit::Run => result::UNKNOWN_OPCODE,
         };
+        self.link.ran(code);
         self.link.answer(
             opcode,
             &h,

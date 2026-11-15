@@ -14,8 +14,10 @@ use nanoprobe_agent_link::config::{AgentToml, read_token};
 pub use nanoprobe_agent_link::sampler::{Found, Read};
 use nanoprobe_agent_link::sampler::{Rates, Report, Sampler, clock_cost};
 use nanoprobe_agent_link::{Admit, Link, Options};
-use nanoprobe_transport::codec::{Lv, Reader};
-use nanoprobe_transport::layout::{kind, lifecycle, result};
+use nanoprobe_transport::codec::{Lv, Reader, Writer};
+use nanoprobe_transport::layout::{
+    HandlerState, kind, lifecycle, opcode as op, opcode_row, result,
+};
 use nanoprobe_transport::log::{Level, Value};
 use nanoprobe_transport::records::{Airbase, Bind, CommandHeader, Event, Log, Subscribe};
 
@@ -40,6 +42,7 @@ const ENUMERATE: u16 = 2;
 const RATES: u16 = 3;
 const SUBSCRIBE: u16 = 4;
 const BIND: u16 = 5;
+const BURST: u16 = 6;
 
 /// The `event_field` codes the table reads from a death event.
 const INITIATOR: u16 = 2;
@@ -76,6 +79,51 @@ struct Driver {
     payload: Vec<u8>,
     /// A reload request could not be removed, and that was logged.
     reload_failed: bool,
+    /// The hook has a shim loaded in the `server` state.
+    shim: bool,
+    /// This frame makes the agent's system calls.
+    syscall: bool,
+    /// A command with a `server` handler waits at the ring's head.
+    waiting: bool,
+    /// This frame's pump is for commands only: it samples nothing.
+    forced: bool,
+    /// The pump called `command` at least once.
+    pumped: bool,
+    /// The time this frame's handlers spent from take to done.
+    handler_time: Duration,
+    /// When `frame` returned, for a pump for commands only.
+    pump_started: Instant,
+    /// A command ran this frame.
+    ran: bool,
+    /// The frame's commanded work so far.
+    spent: Duration,
+    /// The command the shim's handler runs, until `command_done`.
+    outstanding: Option<Outstanding>,
+    /// Whether the sampler began in this pump, and whether it samples.
+    begun: Option<bool>,
+    /// The time this pump spent on commands before the sampler began.
+    pump_commands: Duration,
+    /// The arguments of the command `command` returns, encoded.
+    staged: Vec<u8>,
+}
+
+/// A command taken in the pump whose handler runs in Lua.
+struct Outstanding {
+    opcode: u16,
+    header: CommandHeader,
+    started: Instant,
+}
+
+/// What the next command at the ring's head needs.
+enum Step {
+    /// None waits, or the frame waits for the shim to load.
+    Empty,
+    /// A command with a `server` handler; it stays at the head.
+    Lua,
+    /// A command handled in Rust, and the time it counts.
+    Done(Duration),
+    /// A command taken and admitted for its Lua handler.
+    Handler(u16),
 }
 
 /// Reads one unit's position by its object ID in the caller's Lua state:
@@ -233,6 +281,19 @@ pub fn start(root: &Path, dcs_version: &str) -> Result<String, String> {
         mission: String::new(),
         payload: Vec::new(),
         reload_failed: false,
+        shim: false,
+        syscall: false,
+        waiting: false,
+        forced: false,
+        pumped: false,
+        handler_time: Duration::ZERO,
+        pump_started: Instant::now(),
+        ran: false,
+        spent: Duration::ZERO,
+        outstanding: None,
+        begun: None,
+        pump_commands: Duration::ZERO,
+        staged: Vec::new(),
     };
     let boot = format!("{:016x}", d.link.boot());
     record(
@@ -391,6 +452,7 @@ pub fn frame(
     real: f64,
     model: f64,
     paused: bool,
+    shim: bool,
     mut read: Option<&mut ReadPosition<'_>>,
 ) -> (Frame, bool) {
     with(|d| {
@@ -398,6 +460,7 @@ pub fn frame(
             // The hook did not call finish for the last frame.
             end_frame(d);
         }
+        d.shim = shim;
         let code = frame_with(d, real, model, paused);
         let sampling = d.open
             && d.link.reading_commands()
@@ -414,13 +477,22 @@ pub fn frame(
         if sampling && let Some(read) = read.as_mut() {
             now = d.sampler.sweep(&mut d.link, now, read, Instant::now);
         }
-        let pump = d.open && d.sampler.gate(&d.link, now) && sampling;
+        let sample = d.open && d.sampler.gate(&d.link, now) && sampling;
+        // A command with a `server` handler at the ring's head asks for a
+        // pump of its own, never on the system-call frame (spec/commands.md,
+        // "Handlers").
+        let commands = d.open && d.waiting && d.shim && !d.syscall;
+        let pump = sample || commands;
+        d.forced = pump && !sample;
+        d.pumped = false;
+        d.handler_time = Duration::ZERO;
         if !pump && d.open {
             // Nothing comes between this and `finish` on a frame that does
             // not sample, so the frame ends here and the hook makes one
             // call, not two.
             end_frame(d);
         }
+        d.pump_started = Instant::now();
         (code, pump)
     })
     .unwrap_or((Frame::NoLink, false))
@@ -437,6 +509,16 @@ pub fn finish() {
 }
 
 fn end_frame(d: &mut Driver) {
+    let forced = d.forced;
+    settle(d, true);
+    if forced {
+        // A pump for commands only is all commanded work, the cross-state
+        // call included, and its time stays out of the sampling debt
+        // (spec/commands.md, "Handlers"). The handlers' own spans are out
+        // already.
+        d.sampler
+            .excuse_commanded(d.pump_started.elapsed().saturating_sub(d.handler_time));
+    }
     d.open = false;
     if let Some(r) = d.sampler.end_frame(&mut d.link, Instant::now()) {
         report(d, &r);
@@ -573,6 +655,7 @@ fn frame_with(d: &mut Driver, real: f64, model: f64, paused: bool) -> Frame {
     }
     let now = Instant::now();
     let syscall = d.link.begin(now, model, real);
+    d.syscall = syscall;
     state::set_frame(d.link.stamps().frame);
     #[cfg(feature = "faults")]
     injected(d);
@@ -646,19 +729,304 @@ fn frame_with(d: &mut Driver, real: f64, model: f64, paused: bool) -> Frame {
 
 /// Run commands while the frame's commanded work is under the budget, and
 /// always one if one waits (spec/commands.md, "Budget"). Only the time of
-/// commands that are not control commands counts.
+/// commands that are not control commands counts. Reading stops at a command
+/// whose handler runs in the `server` state: the pump takes it.
 fn commands(d: &mut Driver) {
-    let mut payload = std::mem::take(&mut d.payload);
-    let mut spent = Duration::ZERO;
-    let mut first = true;
-    while first || spent < d.commanded {
-        let Some(opcode) = d.link.take_command(&mut payload) else {
-            break;
-        };
-        first = false;
-        spent += run_command(d, opcode, &payload);
+    d.waiting = false;
+    d.ran = false;
+    d.spent = Duration::ZERO;
+    while !d.ran || d.spent < d.commanded || d.link.unbudgeted() {
+        match step(d, false) {
+            Step::Empty => break,
+            Step::Lua => {
+                d.waiting = true;
+                break;
+            }
+            Step::Done(counted) => {
+                d.ran = true;
+                d.spent += counted;
+            }
+            Step::Handler(_) => unreachable!("only the pump takes a Lua command"),
+        }
     }
+}
+
+/// The opcodes whose handlers need raw Lua (spec/commands.md).
+fn needs_raw_lua(opcode: u16) -> bool {
+    matches!(
+        u64::from(opcode),
+        op::EXTENSION_SET | op::EXTENSION_REMOVE | op::EXTENSION_INVOKE | op::EVAL
+    )
+}
+
+/// The next command at the ring's head. Outside the pump, a sequenced
+/// command with a `server` handler stays there (`Lua`), or is answered
+/// `NOT_READY` when no shim is loaded and no mission is loading. In the
+/// pump it is taken and admitted; an admitted one is left outstanding for
+/// its handler (`Handler`), with its arguments in `d.payload`'s place in
+/// `staged`.
+fn step(d: &mut Driver, in_pump: bool) -> Step {
+    let mut payload = std::mem::take(&mut d.payload);
+    let Some(opcode) = d.link.peek_command(&mut payload) else {
+        d.payload = payload;
+        return Step::Empty;
+    };
+    let header = CommandHeader::read(&mut Reader::new(&payload)).ok();
+    let lua = header.as_ref().is_some_and(|h| h.seq != 0) && has_server_handler(opcode);
+    if lua && !in_pump {
+        if d.shim {
+            d.payload = payload;
+            return Step::Lua;
+        }
+        if d.link.stamps().lifecycle == lifecycle::LOADING as u32 {
+            d.payload = payload;
+            return Step::Empty;
+        }
+    }
+    let Some(opcode) = d.link.take_command(&mut payload) else {
+        d.payload = payload;
+        return Step::Empty;
+    };
+    let out = if lua {
+        lua_command(d, opcode, &payload, in_pump)
+    } else {
+        Step::Done(run_command(d, opcode, &payload))
+    };
     d.payload = payload;
+    out
+}
+
+/// Whether the opcode's handler runs in the `server` state.
+fn has_server_handler(opcode: u16) -> bool {
+    opcode_row(opcode.into()).and_then(|r| r.state) == Some(HandlerState::Server)
+}
+
+/// Whether a sequenced command with a `server` handler is at the ring's
+/// head, looked at without taking it.
+fn head_is_lua(d: &mut Driver) -> bool {
+    let mut payload = std::mem::take(&mut d.payload);
+    let lua = d.link.peek_command(&mut payload).is_some_and(|opcode| {
+        CommandHeader::read(&mut Reader::new(&payload)).is_ok_and(|h| h.seq != 0)
+            && has_server_handler(opcode)
+    });
+    d.payload = payload;
+    lua
+}
+
+/// A taken command with a `server` handler: admitted, then answered
+/// `NOT_READY` outside the pump, or left outstanding for the shim.
+fn lua_command(d: &mut Driver, opcode: u16, payload: &[u8], in_pump: bool) -> Step {
+    let started = Instant::now();
+    let mut rd = Reader::new(payload);
+    let h = CommandHeader::read(&mut rd).expect("read at the peek");
+    state::crumb_with(crumbs::COMMAND + u64::from(opcode), h.seq);
+    let body = &payload[rd.position()..];
+    let name = matches!(u64::from(opcode), op::EXTENSION_SET | op::EXTENSION_INVOKE)
+        .then(|| Reader::new(body).str().ok().map(str::as_bytes))
+        .flatten();
+    let mut message = "";
+    let code = match d.link.admit(&h, opcode, name) {
+        Admit::Answer(code) => code,
+        Admit::Control => unreachable!("a sequenced command"),
+        Admit::Run if needs_raw_lua(opcode) && !d.link.raw_lua() => result::RAW_LUA_OFF,
+        Admit::Run if !in_pump => result::NOT_READY,
+        Admit::Run
+            if u64::from(opcode) == op::EXTENSION_INVOKE
+                && name.is_some_and(|n| !d.link.has_extension(n)) =>
+        {
+            // Nothing is registered under the name in this campaign.
+            message = "no extension of that name";
+            result::LUA_ERROR
+        }
+        Admit::Run => match arguments(opcode, body) {
+            Some(args) => {
+                d.staged = args;
+                d.outstanding = Some(Outstanding {
+                    opcode,
+                    header: h,
+                    started,
+                });
+                return Step::Handler(opcode);
+            }
+            None => result::BAD_PAYLOAD,
+        },
+    };
+    d.link.ran(code);
+    Step::Done(answer(d, opcode, &h, code, started, message, Lv::Nil))
+}
+
+/// A command's arguments for its Lua handler, as an `lv` table, encoded:
+/// the fields of its layout by name. `None` when the payload does not decode.
+///
+/// The wrapper is written by hand, with the argument's own bytes copied in.
+/// `Writer::lv` counts depth from the wrapper and would cut an argument that
+/// is 16 deep from its own root, which the codec admits.
+fn arguments(opcode: u16, body: &[u8]) -> Option<Vec<u8>> {
+    use nanoprobe_transport::layout::lv_tag;
+    let mut rd = Reader::new(body);
+    let (key, name) = match u64::from(opcode) {
+        op::EXTENSION_SET => ("source", Some(rd.str().ok()?.to_owned())),
+        op::EXTENSION_INVOKE => ("args", Some(rd.str().ok()?.to_owned())),
+        _ => ("", None),
+    };
+    let mut out = vec![lv_tag::TABLE as u8];
+    let Some(name) = name else {
+        out.extend_from_slice(&0u32.to_le_bytes());
+        return Some(out);
+    };
+    let from = rd.position();
+    rd.lv().ok()?;
+    let value = &body[from..rd.position()];
+    out.extend_from_slice(&2u32.to_le_bytes());
+    let mut w = Writer::new();
+    w.lv(&Lv::String(b"name".to_vec()));
+    w.lv(&Lv::String(name.into_bytes()));
+    w.lv(&Lv::String(key.as_bytes().to_vec()));
+    out.extend(w.finish());
+    out.extend_from_slice(value);
+    Some(out)
+}
+
+/// The longest `RESULT` message, in bytes (spec/records.md, "Commands").
+const MESSAGE_CAP: usize = 1024;
+
+/// The message cut to [`MESSAGE_CAP`] bytes at a UTF-8 boundary.
+fn capped(message: &str) -> &str {
+    let mut end = message.len().min(MESSAGE_CAP);
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    &message[..end]
+}
+
+/// Write a command's `RESULT`, count its time, clear the breadcrumb, and
+/// return the time that counts against the budget.
+fn answer(
+    d: &mut Driver,
+    opcode: u16,
+    h: &CommandHeader,
+    code: u64,
+    started: Instant,
+    message: &str,
+    value: Lv,
+) -> Duration {
+    state::crumb(0);
+    let message = capped(message);
+    let elapsed = started.elapsed();
+    let counted = if h.seq == 0 { Duration::ZERO } else { elapsed };
+    d.link
+        .record_command(elapsed.as_secs_f64() * 1e6, counted > d.commanded);
+    let cost = elapsed.as_micros().min(u128::from(u32::MAX)) as u32;
+    d.link.answer(opcode, h, code, 0, cost, message, value);
+    counted
+}
+
+/// Answer the outstanding command `LUA_ERROR` "no result"; at the end of a
+/// frame whose pump was for commands, and whose shim never called `command`,
+/// answer a `server` command at the head `NOT_READY` (spec/commands.md,
+/// "Handlers"). A command left because the budget ran out stays in the ring.
+fn settle(d: &mut Driver, ending: bool) {
+    if let Some(o) = d.outstanding.take() {
+        d.link.ran(result::LUA_ERROR);
+        let counted = answer(
+            d,
+            o.opcode,
+            &o.header,
+            result::LUA_ERROR,
+            o.started,
+            "no result",
+            Lv::Nil,
+        );
+        d.spent += counted;
+        handled(d, counted);
+    }
+    if ending && std::mem::take(&mut d.forced) && !d.pumped && head_is_lua(d) {
+        // Taken as if no shim were loaded: `NOT_READY`. In the lifecycle
+        // state `LOADING` the command waits instead; no frame sees that state
+        // today (spec/commands.md, "Handlers").
+        let shim = std::mem::replace(&mut d.shim, false);
+        if let Step::Done(counted) = step(d, false) {
+            d.spent += counted;
+        }
+        d.shim = shim;
+    }
+}
+
+/// A handler's take-to-done time: commanded work only.
+fn handled(d: &mut Driver, counted: Duration) {
+    d.handler_time += counted;
+    d.sampler.excuse_commanded(counted);
+}
+
+/// The shim's pump asks for the next command whose handler it runs:
+/// commands handled in Rust are run on the way, in ring order, under the
+/// frame's budget. Returns the opcode, with its arguments in `args` as an
+/// encoded `lv` table, or None.
+pub fn command(args: &mut Vec<u8>) -> Option<u16> {
+    with(|d| {
+        settle(d, false);
+        if d.forced && !d.pumped {
+            // The cross-state call of a pump for commands only is commanded
+            // work (spec/commands.md, "Handlers").
+            d.spent += d.pump_started.elapsed();
+        }
+        d.pumped = true;
+        loop {
+            if d.ran && d.spent >= d.commanded && !d.link.unbudgeted() {
+                return None;
+            }
+            let started = Instant::now();
+            let step = step(d, true);
+            if d.begun.is_none() && !matches!(step, Step::Handler(_)) {
+                d.pump_commands += started.elapsed();
+            }
+            match step {
+                Step::Empty | Step::Lua => return None,
+                Step::Done(counted) => {
+                    d.ran = true;
+                    d.spent += counted;
+                }
+                Step::Handler(opcode) => {
+                    d.ran = true;
+                    std::mem::swap(args, &mut d.staged);
+                    return Some(opcode);
+                }
+            }
+        }
+    })
+    .flatten()
+}
+
+/// The shim's handler finished the outstanding command with `code`, a
+/// message and a value. A call with none outstanding is logged and ignored.
+pub fn command_done(code: u64, message: &str, value: Lv) {
+    with(|d| {
+        let Some(o) = d.outstanding.take() else {
+            record(
+                d,
+                Level::Warn,
+                "command_done with no command outstanding",
+                &[("code", Value::Int(code as i64))],
+            );
+            return;
+        };
+        let (code, message, value) = if result::ALL.iter().any(|&(_, c)| c == code) {
+            (code, message.to_owned(), value)
+        } else {
+            (
+                result::LUA_ERROR,
+                format!("the handler returned the undefined code {code}"),
+                Lv::Nil,
+            )
+        };
+        d.link.ran(code);
+        let counted = answer(d, o.opcode, &o.header, code, o.started, &message, value);
+        d.spent += counted;
+        handled(d, counted);
+        if d.begun.is_none() {
+            d.pump_commands += counted;
+        }
+    });
 }
 
 /// One command. This step has no handler for any opcode but `CAMPAIGN`, so
@@ -685,9 +1053,12 @@ fn run_command(d: &mut Driver, opcode: u16, payload: &[u8]) -> Duration {
     };
     state::crumb_with(crumbs::COMMAND + u64::from(opcode), h.seq);
     let body = &payload[rd.position()..];
-    let code = match d.link.admit(&h) {
+    let code = match d.link.admit(&h, opcode, None) {
         Admit::Control => control(d, opcode, body),
-        Admit::Run => Some(result::UNKNOWN_OPCODE),
+        Admit::Run => {
+            d.link.ran(result::UNKNOWN_OPCODE);
+            Some(result::UNKNOWN_OPCODE)
+        }
         Admit::Answer(code) => Some(code),
     };
     state::crumb(0);
@@ -749,6 +1120,13 @@ fn control(d: &mut Driver, opcode: u16, body: &[u8]) -> Option<u64> {
                     .zip(b.object.iter().copied())
                     .collect();
                 d.sampler.bind(b.kind, &pairs);
+                None
+            }
+            _ => Some(result::BAD_PAYLOAD),
+        },
+        BURST => match Reader::new(body).u32() {
+            Ok(on @ (0 | 1)) => {
+                d.link.set_burst(on == 1);
                 None
             }
             _ => Some(result::BAD_PAYLOAD),
@@ -935,14 +1313,33 @@ pub fn pump_begin(births: usize, airbases: usize, heap_kib: f64) -> Option<(u32,
             d.link.set_lua_heap(heap_kib as u64);
         }
         d.sampler.set_pending(births, airbases);
-        let b = d.sampler.begin(&d.link, Instant::now());
-        (b.generation, b.sample)
+        // The sampler begins after the pump's commands (spec/commands.md,
+        // "Handlers"), at its first `checks` or `plan`.
+        d.begun = None;
+        d.pump_commands = Duration::ZERO;
+        (d.sampler.generation(), !d.forced)
     })
+}
+
+/// Begin the sampler's part of the pump once, after the commands: their
+/// time is not the cross-state call's. A pump for commands only does not
+/// begin it. Returns whether to sample.
+fn begun(d: &mut Driver) -> bool {
+    if d.forced {
+        return false;
+    }
+    if let Some(sample) = d.begun {
+        return sample;
+    }
+    d.sampler.excuse(std::mem::take(&mut d.pump_commands));
+    let sample = d.sampler.begin(&d.link, Instant::now()).sample;
+    d.begun = Some(sample);
+    sample
 }
 
 /// The objects whose existence the pump checks now, into `out`; how many.
 pub fn checks(out: &mut Vec<u64>) -> usize {
-    with(|d| d.sampler.checks(out)).unwrap_or(0)
+    with(|d| if begun(d) { d.sampler.checks(out) } else { 0 }).unwrap_or(0)
 }
 
 /// An object in the table no longer exists, with what the reads that tell a
@@ -961,6 +1358,9 @@ pub fn alive(object: u64, sure: bool) {
 /// The next batch: its tier code, rows and flag, with the slots in `slots`.
 pub fn plan(slots: &mut Vec<u32>, values: &mut Vec<i64>) -> Option<(u8, usize, bool)> {
     with(|d| {
+        if !begun(d) {
+            return None;
+        }
         let p = d.sampler.plan(&mut d.link, Instant::now, slots)?;
         d.sampler.buffer_values(p.tier, p.flag, slots, values);
         Some((p.tier as u8, p.rows, p.flag))
@@ -970,7 +1370,14 @@ pub fn plan(slots: &mut Vec<u32>, values: &mut Vec<i64>) -> Option<(u8, usize, b
 
 /// The pump ended: close the last batch.
 pub fn pump_end() {
-    with(|d| d.sampler.end_pump(&mut d.link, Instant::now));
+    with(|d| {
+        settle(d, false);
+        // A sampling pump whose shim asked for no row still began.
+        if !d.forced {
+            begun(d);
+            d.sampler.end_pump(&mut d.link, Instant::now);
+        }
+    });
 }
 
 /// A position for the batch's next row; true to stop.

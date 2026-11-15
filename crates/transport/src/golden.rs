@@ -171,6 +171,14 @@ pub fn layout(name: &str) -> Option<Layout<'static>> {
     Some(out)
 }
 
+/// The status block's `layout_version` the golden file was made with.
+pub fn layout_version() -> Option<u32> {
+    GOLDEN
+        .lines()
+        .find_map(|l| l.strip_prefix("layout_version "))
+        .and_then(|v| v.parse().ok())
+}
+
 /// The rows of the codes section named `name`, empty when there is none.
 pub fn codes(name: &str) -> Vec<Code<'static>> {
     let mut lines = GOLDEN.lines();

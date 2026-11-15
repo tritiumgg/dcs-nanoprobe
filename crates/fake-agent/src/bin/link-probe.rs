@@ -62,6 +62,10 @@
 //! {"t":..,"boot":"<hex>","number":N,"kind":N,"payload":"<hex>"}
 //! ```
 //!
+//! Each attach to the link also appends the line `{"attach":true}`, which a
+//! replay reads as a new handshake: a `HELLO` of the same agent boot after it
+//! is not a resync.
+//!
 //! `boot` is the agent boot and `number` the record's number
 //! (spec/records.md, "Stamps"); `FRAME` records are kept, so the stamps of
 //! every record can be read back. A recording holds server data and stays
@@ -451,6 +455,10 @@ fn lv_json(v: &Lv) -> String {
 
 impl Sink for Probe {
     fn attached(&mut self, agent_boot: u64, _sidecar_boot: u64) {
+        if let Some(rec) = self.recording.as_mut() {
+            // A failed write surfaces at the next record.
+            let _ = rec.write_all(b"{\"attach\":true}\n");
+        }
         if let Some(m) = self.mirror.as_mut() {
             m.mirror.attached();
             m.subscribed.clear();

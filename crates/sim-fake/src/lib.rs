@@ -147,6 +147,13 @@ pub struct Ledger {
     /// was made under another campaign). Agent boot, generation, campaign,
     /// entity.
     pub unreported: BTreeSet<(u64, u32, u64, u64)>,
+    /// Extension chunks the agent ran: agent boot, campaign, name, revision,
+    /// and how many times.
+    pub extension_runs: BTreeMap<(u64, u64, String, u64), u32>,
+    /// `EXTENSION_INVOKE`s the agent ran: extension name, the invoke's token
+    /// (`args[1]`), and how many times. The agent boot is not in the key: an
+    /// effect sent again to a new boot counts a second time.
+    pub invokes: BTreeMap<(String, u64), u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -239,6 +246,7 @@ pub struct FakeSim {
     last_applied_seq: u64,
     applied_spec: HashMap<u64, u64>,
     applied_order: HashMap<u64, u64>,
+    applied_extension: HashMap<String, u64>,
     // The link.
     attached: bool,
     sidecar_boot: u64,
@@ -305,6 +313,7 @@ impl FakeSim {
             epoch: 0,
             last_applied_seq: 0,
             applied_spec: HashMap::new(),
+            applied_extension: HashMap::new(),
             applied_order: HashMap::new(),
             attached: false,
             sidecar_boot: 0,
@@ -437,6 +446,7 @@ impl FakeSim {
             number: self.number,
             kind,
             payload,
+            resync: false,
         });
     }
 
@@ -685,6 +695,7 @@ impl FakeSim {
         self.campaign = c;
         self.applied_spec.clear();
         self.applied_order.clear();
+        self.applied_extension.clear();
         // The binding the kept rows were made under is gone: a death event
         // after the switch names no entity of either campaign.
         self.late.clear();
@@ -1445,6 +1456,48 @@ impl FakeSim {
         if h.campaign != self.campaign {
             return self.result(&cmd, rc::WRONG_CAMPAIGN, 0, "", Lv::Nil);
         }
+        // The extension opcodes need a campaign (the real admission table's
+        // NO_CAMPAIGN row, before the revision check) but not a generation.
+        if matches!(
+            cmd.body,
+            Body::ExtensionSet { .. } | Body::ExtensionInvoke { .. }
+        ) && self.campaign == 0
+        {
+            return self.result(&cmd, rc::NO_CAMPAIGN, 0, "", Lv::Nil);
+        }
+        if let Body::ExtensionSet { name, .. } = &cmd.body {
+            let name = name.clone();
+            if h.rev == 0 {
+                return self.result(&cmd, rc::BAD_PAYLOAD, 0, "no revision", Lv::Nil);
+            }
+            if h.rev <= self.applied_extension.get(&name).copied().unwrap_or(0) {
+                return self.result(&cmd, rc::AT_REVISION, 0, "", Lv::Nil);
+            }
+            self.applied_extension.insert(name.clone(), h.rev);
+            let key = (self.agent_boot, self.campaign, name, h.rev);
+            *self.ledger.extension_runs.entry(key).or_default() += 1;
+            return self.result(&cmd, rc::APPLIED, 0, "", Lv::Nil);
+        }
+        if let Body::ExtensionInvoke { name, args } = &cmd.body {
+            if !self.applied_extension.contains_key(name) {
+                return self.result(&cmd, rc::LUA_ERROR, 0, "no extension", Lv::Nil);
+            }
+            // An effect is identified by its token, the number at args[1],
+            // so a copy sent under a new sequence number counts twice. An
+            // invoke with no token falls back to its wire position.
+            let token = match args {
+                Lv::Table(p) => p.iter().find_map(|(k, v)| match (k, v) {
+                    (Lv::Number(k), Lv::Number(t)) if *k == 1.0 => Some(*t as u64),
+                    _ => None,
+                }),
+                _ => None,
+            };
+            let key = (name.clone(), token.unwrap_or(h.epoch << 40 ^ h.seq));
+            let n = self.ledger.invokes.entry(key).or_default();
+            *n += 1;
+            let v = Lv::Number(f64::from(*n));
+            return self.result(&cmd, rc::APPLIED, 0, "", v);
+        }
         if h.mission_gen != self.mission_gen_ {
             return self.result(&cmd, rc::WRONG_GENERATION, 0, "", Lv::Nil);
         }
@@ -1547,6 +1600,9 @@ impl FakeSim {
                 } else {
                     self.result(&cmd, rc::APPLIED, gid, "", value);
                 }
+            }
+            Body::ExtensionSet { .. } | Body::ExtensionInvoke { .. } => {
+                unreachable!("answered above")
             }
             Body::Campaign(_) | Body::Enumerate | Body::Burst(_) => unreachable!("control"),
         }

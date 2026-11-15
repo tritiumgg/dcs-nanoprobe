@@ -193,7 +193,8 @@ fn spec_outcome(code: u16, op: u16) -> Outcome {
         | rc::NO_CAMPAIGN
         | rc::BAD_PAYLOAD
         | rc::UNKNOWN_OPCODE
-        | rc::RAW_LUA_OFF => Outcome::Rejected,
+        | rc::RAW_LUA_OFF
+        | rc::NOT_READY => Outcome::Rejected,
         // DUPLICATE says only that the number was handled before; it never
         // becomes `applied`.
         _ => Outcome::Unknown,
@@ -609,6 +610,7 @@ impl World {
             Op::Reattach => {
                 if !self.sim.attached() {
                     self.sim.attach(self.sidecar_boot);
+                    self.recording.batches.push(Batch::Attach);
                 }
             }
             Op::SidecarRestart => self.restart_sidecar(),
@@ -736,6 +738,7 @@ impl World {
         self.sidecar_boot += 1;
         self.rec = Reconciler::new(self.rec_cfg, &self.store);
         self.sim.attach(self.sidecar_boot);
+        self.recording.batches.push(Batch::Attach);
     }
 
     fn check_safety(&mut self) -> Result<(), Violation> {
@@ -887,6 +890,7 @@ impl World {
         // whose result was lost.
         self.sim.detach();
         self.sim.attach(self.sidecar_boot);
+        self.recording.batches.push(Batch::Attach);
         // Long enough for a load, several enumerations and every spawn at
         // two per step.
         let frames = 400

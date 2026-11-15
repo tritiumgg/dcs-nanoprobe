@@ -32,6 +32,10 @@ pub mod opcode {
     pub const STATIC_SPAWN: u16 = 21;
     /// `STATIC_DESTROY`
     pub const STATIC_DESTROY: u16 = 22;
+    /// `EXTENSION_SET`
+    pub const EXTENSION_SET: u16 = 31;
+    /// `EXTENSION_INVOKE`
+    pub const EXTENSION_INVOKE: u16 = 57;
     /// `CAPTURE`
     pub const CAPTURE: u16 = 64;
     /// Every opcode here, by name, for the golden check.
@@ -45,6 +49,8 @@ pub mod opcode {
         ("GROUP_CAPTURE_DESTROY", GROUP_CAPTURE_DESTROY),
         ("STATIC_SPAWN", STATIC_SPAWN),
         ("STATIC_DESTROY", STATIC_DESTROY),
+        ("EXTENSION_SET", EXTENSION_SET),
+        ("EXTENSION_INVOKE", EXTENSION_INVOKE),
         ("CAPTURE", CAPTURE),
     ];
 }
@@ -305,6 +311,20 @@ pub enum Body {
     },
     /// `STATIC_DESTROY`
     StaticDestroy,
+    /// `EXTENSION_SET`
+    ExtensionSet {
+        /// The extension's name.
+        name: String,
+        /// Its Lua source, a string.
+        source: Lv,
+    },
+    /// `EXTENSION_INVOKE`
+    ExtensionInvoke {
+        /// The extension's name.
+        name: String,
+        /// An array of arguments.
+        args: Lv,
+    },
     /// `CAPTURE`
     Capture,
 }
@@ -322,6 +342,8 @@ impl Body {
             Body::GroupCaptureDestroy => opcode::GROUP_CAPTURE_DESTROY,
             Body::StaticSpawn { .. } => opcode::STATIC_SPAWN,
             Body::StaticDestroy => opcode::STATIC_DESTROY,
+            Body::ExtensionSet { .. } => opcode::EXTENSION_SET,
+            Body::ExtensionInvoke { .. } => opcode::EXTENSION_INVOKE,
             Body::Capture => opcode::CAPTURE,
         }
     }
@@ -371,6 +393,9 @@ impl Command {
             } => {
                 w.u32(*country).pad(4).str(name).lv(table);
             }
+            Body::ExtensionSet { name, source: v } | Body::ExtensionInvoke { name, args: v } => {
+                w.str(name).lv(v);
+            }
             Body::Enumerate
             | Body::GroupDestroy
             | Body::GroupCaptureDestroy
@@ -417,6 +442,14 @@ impl Command {
                 }
             }
             opcode::STATIC_DESTROY => Body::StaticDestroy,
+            opcode::EXTENSION_SET => Body::ExtensionSet {
+                name: r.str()?.to_owned(),
+                source: r.lv()?,
+            },
+            opcode::EXTENSION_INVOKE => Body::ExtensionInvoke {
+                name: r.str()?.to_owned(),
+                args: r.lv()?,
+            },
             opcode::CAPTURE => Body::Capture,
             _ => return Ok(None),
         };
@@ -644,6 +677,14 @@ mod tests {
                 table: lv::obj(vec![("type", lv::s("Tent"))]),
             },
             Body::StaticDestroy,
+            Body::ExtensionSet {
+                name: "count".into(),
+                source: lv::s("return {}"),
+            },
+            Body::ExtensionInvoke {
+                name: "count".into(),
+                args: lv::obj(vec![("1", lv::s("a"))]),
+            },
             Body::Capture,
         ] {
             let c = Command { header: h, body };

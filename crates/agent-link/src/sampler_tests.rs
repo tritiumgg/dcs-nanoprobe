@@ -3373,3 +3373,114 @@ fn at_a_tenth_pending_births_cause_no_empty_pumps_and_still_resolve() {
 
 #[path = "sampler_sweep_tests.rs"]
 mod sweep;
+
+/// One 110 Hz frame of `frame_us` microseconds, with `excused_us` of it
+/// commanded work; returns the sampler's debt, credit and window agent time.
+fn frame_with_excuse(frame_us: u64, excused_us: u64) -> (f64, f64, f64) {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let rec = &mut Rec::new(0.003, 1e6 / 110.0);
+    let t0 = rec.began;
+    for f in 0..50u64 {
+        let t = t0 + Duration::from_micros(9091 * f);
+        rec.began = t;
+        s.decide(rec, t);
+        s.end_frame(rec, t + Duration::from_micros(2));
+    }
+    let t = t0 + Duration::from_micros(9091 * 50);
+    rec.began = t;
+    s.decide(rec, t);
+    s.excuse_commanded(Duration::from_micros(excused_us));
+    let before = s.window.agent_us;
+    s.end_frame(rec, t + Duration::from_micros(frame_us));
+    (s.budget.debt, s.credit_us(), s.window.agent_us - before)
+}
+
+/// Commanded work is out of the debt, the credit and the window's agent
+/// time: a frame with a slow command matches one without it, and an excuse
+/// past the frame's time clamps the agent time at zero.
+#[test]
+fn commanded_time_is_out_of_the_debt_the_credit_and_the_share() {
+    let plain = frame_with_excuse(500, 0);
+    let commanded = frame_with_excuse(2000, 1500);
+    assert!(
+        (plain.0 - commanded.0).abs() < 1e-6,
+        "debt {plain:?} {commanded:?}"
+    );
+    assert!(
+        (plain.1 - commanded.1).abs() < 1e-6,
+        "credit {plain:?} {commanded:?}"
+    );
+    assert!(
+        (plain.2 - commanded.2).abs() < 1e-6,
+        "agent time {plain:?} {commanded:?}"
+    );
+    let slow = frame_with_excuse(2000, 0);
+    assert!(
+        slow.0 > plain.0 && slow.2 > plain.2,
+        "an unexcused frame costs"
+    );
+    let over = frame_with_excuse(2000, 3000);
+    let none = frame_with_excuse(0, 0);
+    assert_eq!(over.2, 0.0);
+    assert!((over.0 - none.0).abs() < 1e-6 && (over.1 - none.1).abs() < 1e-6);
+}
+
+/// What a frame that began `elapsed_us` before `t` and holds `excused_us` of
+/// commanded work gets: the rows its sweep reads, the frames the gate counts
+/// as starved, and the budget `begin` fixes.
+fn commanded_frame(elapsed_us: u64, excused_us: u64) -> (usize, u64, f64) {
+    let (mut s, mut rec, w) = table(500);
+    let t = rec.began + Duration::from_secs(10);
+    rec.began = t - Duration::from_micros(elapsed_us);
+    rec.syscall = false;
+    s.accrue(t);
+    s.last_sweep = Some(t - Duration::from_secs(1));
+    s.sweep_fund = 1e5;
+    s.budget.debt = -CREDIT_CAP_US;
+    s.slice(&rec, t);
+    s.excuse_commanded(Duration::from_micros(excused_us));
+    s.tiers[Tier::Positions.index()].credit = 100.0;
+    let reads = std::cell::Cell::new(0usize);
+    let objects = &w.objects;
+    s.sweep(
+        &mut rec,
+        t,
+        &mut |o| {
+            reads.set(reads.get() + 1);
+            Ok(objects.get(&o).map(|o| o.pos))
+        },
+        || t,
+    );
+    s.gate(&rec, t);
+    s.begin(&rec, t);
+    (reads.get(), s.starved, s.budget.budget)
+}
+
+/// Commanded work is out of the fixed time that sizes the sweep, the gate's
+/// starved count and the pump's budget: a frame whose elapsed time is all
+/// commanded work gets what a frame with none gets.
+#[test]
+fn commanded_time_is_out_of_the_fixed_part_of_the_sweep_the_gate_and_the_plan() {
+    let plain = commanded_frame(0, 0);
+    let commanded = commanded_frame(4000, 4000);
+    let slow = commanded_frame(4000, 0);
+    assert!(
+        plain.0 > 0 && plain.2 > 0.0,
+        "the plain frame samples: {plain:?}"
+    );
+    assert_eq!(commanded.0, plain.0, "sweep {plain:?} {commanded:?}");
+    assert_eq!(commanded.1, plain.1, "gate {plain:?} {commanded:?}");
+    assert!(
+        (commanded.2 - plain.2).abs() < 1e-6,
+        "plan {plain:?} {commanded:?}"
+    );
+    assert!(
+        slow.0 < plain.0,
+        "an unexcused frame reads fewer rows: {slow:?}"
+    );
+    assert!(slow.1 > plain.1, "an unexcused frame is starved: {slow:?}");
+    assert!(
+        slow.2 < plain.2,
+        "an unexcused frame has less budget: {slow:?}"
+    );
+}

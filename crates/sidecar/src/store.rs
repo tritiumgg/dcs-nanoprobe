@@ -207,6 +207,13 @@ pub enum Entry {
         /// The new revision.
         rev: u64,
     },
+    /// An extension was registered or its source changed.
+    ExtensionSpec {
+        /// The extension's name.
+        name: String,
+        /// The new revision.
+        rev: u64,
+    },
     /// An order was set.
     Order {
         /// The group.
@@ -382,6 +389,19 @@ pub struct Store {
     changes: VecDeque<(u64, EntityId)>,
     changes_keep: usize,
     grid: Grid,
+    extensions: BTreeMap<String, Extension>,
+}
+
+/// A registered Lua extension the campaign wants in DCS (spec/world.md,
+/// spec/commands.md "Extensions"). Its identity is its name.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Extension {
+    /// The name.
+    pub name: String,
+    /// The spec revision: 1 when set first, one more on each change.
+    pub spec_rev: u64,
+    /// The Lua source.
+    pub source: String,
 }
 
 /// A change the store refused.
@@ -418,7 +438,43 @@ impl Store {
             changes: VecDeque::new(),
             changes_keep,
             grid: Grid::new(GRID_CELL_M),
+            extensions: BTreeMap::new(),
         }
+    }
+
+    /// Register an extension, or change its source: a new spec revision,
+    /// journalled. The same source again changes nothing. Returns the
+    /// revision.
+    pub fn set_extension(&mut self, name: &str, source: &str) -> u64 {
+        if let Some(e) = self.extensions.get(name)
+            && e.source == source
+        {
+            return e.spec_rev;
+        }
+        let rev = self.extensions.get(name).map_or(1, |e| e.spec_rev + 1);
+        self.extensions.insert(
+            name.to_owned(),
+            Extension {
+                name: name.to_owned(),
+                spec_rev: rev,
+                source: source.to_owned(),
+            },
+        );
+        self.journal(Entry::ExtensionSpec {
+            name: name.to_owned(),
+            rev,
+        });
+        rev
+    }
+
+    /// An extension by name.
+    pub fn extension(&self, name: &str) -> Option<&Extension> {
+        self.extensions.get(name)
+    }
+
+    /// Every extension, by name.
+    pub fn extensions(&self) -> impl Iterator<Item = &Extension> {
+        self.extensions.values()
     }
 
     /// The campaign.

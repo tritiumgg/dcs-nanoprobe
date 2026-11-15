@@ -382,6 +382,10 @@ fn merge_recording(
             }
             continue;
         };
+        // link-probe writes an attach marker line on each attach.
+        if r["attach"] == serde_json::Value::Bool(true) {
+            continue;
+        }
         let (Some(boot), Some(number)) = (r["boot"].as_str(), r["number"].as_u64()) else {
             recorded
                 .undecodable

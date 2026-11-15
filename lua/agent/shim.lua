@@ -16,7 +16,7 @@
 local agent, root, dir, previous = ...
 
 -- The agent's interface version this shim was written for.
-local ABI = '7'
+local ABI = '8'
 if type(agent) ~= 'table' or agent.abi ~= ABI then
   error('the shim needs agent ABI ' .. ABI .. '; the DLL has '
     .. tostring(type(agent) == 'table' and agent.abi or agent), 0)
@@ -843,6 +843,114 @@ local function functions()
   return { fast, Unit.getLife, Unit.getFuel, StaticObject.getLife, Object.getPoint }
 end
 
+-- Result codes (spec/commands.md, "Codes: result").
+local APPLIED, UNKNOWN_OPCODE, LUA_ERROR = 0, 20, 23
+
+-- Extensions by name: the source, the environment's hooks, and the chunk's
+-- revision is the agent's (spec/commands.md, "Extensions"). The registry
+-- survives a shim reload.
+M.extensions = previous and previous.extensions or {}
+
+-- The globals an extension sees: the state's, through its own table. The
+-- replaced globals of spec/commands.md, "The environment", are step S16's.
+local function environment()
+  return setmetatable({}, { __index = _G })
+end
+
+-- Compile and run an extension's chunk. Returns its hooks, or nil and why.
+local function load_extension(name, source)
+  if type(source) ~= 'string' then
+    return nil, 'the source is not a string'
+  end
+  local chunk, err = loadstring(source, '=' .. name)
+  if not chunk then
+    return nil, err
+  end
+  setfenv(chunk, environment())
+  local ok, hooks = pcall(chunk)
+  if not ok then
+    return nil, tostring(hooks)
+  end
+  if hooks ~= nil and type(hooks) ~= 'table' then
+    return nil, 'the chunk returned ' .. type(hooks) .. ', not a table'
+  end
+  return hooks or {}
+end
+
+local function stop_extension(e)
+  if e and type(e.hooks.on_stop) == 'function' then
+    local ok, err = pcall(e.hooks.on_stop)
+    if not ok then
+      M.file.write('warn', 'extension on_stop raised', { name = e.name, error = tostring(err) })
+    end
+  end
+end
+
+-- Command handlers by opcode. Each returns a result code, then a value or a
+-- message. The agent has admitted the command and checked raw Lua.
+local HANDLERS = {
+  -- EXTENSION_SET: the old extension keeps running when the new one fails.
+  [31] = function(a)
+    local hooks, err = load_extension(a.name, a.source)
+    if not hooks then
+      return LUA_ERROR, nil, err
+    end
+    stop_extension(M.extensions[a.name])
+    M.extensions[a.name] = { name = a.name, source = a.source, hooks = hooks }
+    return APPLIED
+  end,
+  -- EXTENSION_INVOKE: the first value `invoke` returns.
+  [57] = function(a)
+    local e = M.extensions[a.name]
+    if not e or type(e.hooks.invoke) ~= 'function' then
+      return LUA_ERROR, nil, 'no extension ' .. tostring(a.name) .. ' with invoke'
+    end
+    local args = type(a.args) == 'table' and a.args or {}
+    local ok, value = pcall(e.hooks.invoke, unpack(args, 1, table.maxn(args)))
+    if not ok then
+      return LUA_ERROR, nil, tostring(value)
+    end
+    return APPLIED, value
+  end,
+}
+
+-- Run the commands the agent hands out, in ring order, until it has none.
+local function commands()
+  while true do
+    local opcode, args = agent.command()
+    if not opcode then
+      return
+    end
+    local handler = HANDLERS[opcode]
+    if not handler then
+      agent.command_done(UNKNOWN_OPCODE, 'no handler in the shim')
+    else
+      local ok, code, value, message = pcall(handler, args or {})
+      if not ok then
+        agent.command_done(LUA_ERROR, tostring(code))
+      elseif type(code) ~= 'number' then
+        agent.command_done(LUA_ERROR, 'the handler returned no code')
+      else
+        agent.command_done(code, message, value)
+      end
+    end
+  end
+end
+
+-- Run every registered extension's chunk again with a new environment, on a
+-- mission start: nothing an extension held survives a load.
+local function restart_extensions()
+  for name, e in pairs(M.extensions) do
+    local hooks, err = load_extension(name, e.source)
+    if hooks then
+      e.hooks = hooks
+    else
+      e.hooks = {}
+      M.file.write('error', 'extension did not start again', { name = name, error = err })
+    end
+  end
+end
+
 local function pump()
   local gen, sample = agent.pump_begin(#T.births, #T.airbases, collectgarbage('count'))
   if gen == nil then
@@ -851,6 +959,11 @@ local function pump()
   if gen ~= T.gen then
     reset(gen)
     -- The airbases count for this frame's plan comes on the next pump.
+  end
+  -- Commands go before sampling (spec/commands.md, "Handlers").
+  local ok, err = pcall(commands)
+  if not ok then
+    M.file.write('error', 'commands raised', { error = tostring(err) })
   end
   if not sample then
     return
@@ -915,6 +1028,9 @@ function M.start()
       M.probed = true
     end
     register()
+    if M.starts > 1 then
+      restart_extensions()
+    end
   end)
   if not ok then
     M.file.write('error', 'start raised', { error = tostring(err) })

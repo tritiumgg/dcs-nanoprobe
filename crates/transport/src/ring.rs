@@ -276,7 +276,7 @@ impl Producer {
 }
 
 /// The consumer's side of a ring.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Consumer {
     ring: Ring,
     head: u64,

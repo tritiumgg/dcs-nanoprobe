@@ -20,6 +20,12 @@ pub struct RawRecord {
     pub kind: u16,
     /// The payload.
     pub payload: Vec<u8>,
+    /// A `HELLO` that resyncs within its attach, after the agent lost a
+    /// control record: the second or later `HELLO` the link read in one
+    /// session. The inbound ring is untouched, so commands after its
+    /// `in_head` are still there (spec/commands.md, "After `CONTROL_LOST`").
+    /// False for every other record, and where the reader cannot tell.
+    pub resync: bool,
 }
 
 /// The adapter refused a command: no agent is attached.

@@ -57,6 +57,7 @@ fn restart_markers(rec: &Recording) -> Vec<usize> {
         match b {
             Batch::Records(rs) => i += rs.len(),
             Batch::SidecarRestart => out.push(i),
+            Batch::Attach => {}
         }
     }
     out
@@ -421,4 +422,172 @@ fn between_a_switch_and_the_next_load_the_old_campaign_is_ignored() {
         w.store.group(EntityId(1)).unwrap().state,
         nanoprobe_sidecar::lifecycle::State::Live
     );
+}
+
+/// A command written and not yet taken, and a recording of one `HELLO` that
+/// lies before it; the outcomes the replay journals for it.
+fn replayed_hello(resync: bool) -> Vec<nanoprobe_sidecar::store::Outcome> {
+    replayed_with(|hello| Recording::from_records([hello(resync)]))
+}
+
+/// As [`replayed_hello`], for a recording made from a function that gets one
+/// that makes the `HELLO` record, given its `resync` mark.
+fn replayed_with(
+    make: impl FnOnce(&dyn Fn(bool) -> nanoprobe_sidecar::sim::RawRecord) -> Recording,
+) -> Vec<nanoprobe_sidecar::store::Outcome> {
+    use nanoprobe_sidecar::intents::{Intent, Waypoint};
+    use nanoprobe_sidecar::sim::RawRecord;
+    use nanoprobe_sidecar::sim::wire::opcode;
+    use nanoprobe_sidecar::store::Outcome;
+    use nanoprobe_transport::records::Hello;
+
+    let mut w = World::new(1, 0, LostPolicy::Report);
+    w.settle().unwrap();
+    let g = w.store.groups().next().unwrap().id;
+    w.store
+        .set_order(
+            g,
+            Intent::Route {
+                waypoints: vec![Waypoint { x: 1.0, z: 2.0 }],
+                speed: 10.0,
+                on_road: false,
+            },
+        )
+        .unwrap();
+    w.rec.step(&mut w.store, &mut w.sim);
+    let c = w
+        .rec
+        .inflight()
+        .find(|c| c.opcode == opcode::GROUP_ORDER)
+        .cloned()
+        .unwrap();
+    let (k, payload) = Input::Hello(nanoprobe_transport::records::Hello {
+        agent_boot: c.agent_boot,
+        sidecar_boot: 1,
+        campaign: w.store.campaign().0,
+        epoch: c.epoch,
+        last_applied_seq: c.seq - 1,
+        in_head: c.position - 1,
+        ..Hello::default()
+    })
+    .encode();
+    let rec = make(&|resync| RawRecord {
+        agent_boot: c.agent_boot,
+        number: 1,
+        kind: k,
+        payload: payload.clone(),
+        resync,
+    });
+    // The store, as a restarted sidecar reads it: the order is journalled
+    // and unanswered.
+    let mut store = w.store.clone();
+    fold(Config::default(), &mut store, &rec, &[], Persistence::On);
+    store
+        .entries()
+        .iter()
+        .filter_map(|e| match e {
+            Entry::Outcome {
+                epoch,
+                seq,
+                outcome,
+            } if (*epoch, *seq) == (c.epoch, c.seq) => Some(*outcome),
+            _ => None,
+        })
+        .collect::<Vec<Outcome>>()
+}
+
+/// A CONTROL_LOST resync HELLO leaves a command after its `in_head`
+/// pending in a replay, as in the live run (spec/commands.md, "After
+/// CONTROL_LOST").
+#[test]
+fn a_replayed_resync_hello_keeps_a_later_command_pending() {
+    use nanoprobe_sidecar::store::Outcome;
+
+    assert!(replayed_hello(true).is_empty());
+    assert_eq!(replayed_hello(false), vec![Outcome::NotSent]);
+}
+
+/// Two `HELLO`s of one agent boot with an attach between them: the second is
+/// the first of its attach, not a resync, as in the live run. Without the
+/// marker the replay would read it as a resync and leave the command pending.
+#[test]
+fn a_replayed_reattach_hello_is_not_a_resync() {
+    use nanoprobe_sidecar::store::Outcome;
+
+    let with_attach = replayed_with(|hello| Recording {
+        // The first HELLO is marked as a resync, to leave the command open.
+        batches: vec![
+            Batch::Records(vec![hello(true)]),
+            Batch::Attach,
+            Batch::Records(vec![hello(false)]),
+        ],
+    });
+    assert_eq!(with_attach, vec![Outcome::NotSent]);
+    let without = replayed_with(|hello| Recording {
+        batches: vec![Batch::Records(vec![hello(true), hello(false)])],
+    });
+    assert!(without.is_empty(), "the second HELLO of an attach resyncs");
+    // The attach survives the file.
+    let through_file = replayed_with(|hello| {
+        let rec = Recording {
+            batches: vec![
+                Batch::Records(vec![hello(true)]),
+                Batch::Attach,
+                Batch::Records(vec![hello(false)]),
+            ],
+        };
+        let mut buf = Vec::new();
+        rec.write_jsonl(&mut buf).unwrap();
+        let back = Recording::read_jsonl(buf.as_slice()).unwrap();
+        assert_eq!(back, rec);
+        back
+    });
+    assert_eq!(through_file, vec![Outcome::NotSent]);
+}
+
+/// A same-boot reattach in a live run folds to the same journal from the
+/// file as from memory.
+#[test]
+fn a_same_boot_reattach_survives_the_file_format() {
+    let mut w = World::new(1, 0, LostPolicy::Report);
+    w.settle().unwrap();
+    w.apply(&Op::Detach).unwrap();
+    w.apply(&Op::Reattach).unwrap();
+    w.settle().unwrap();
+    assert!(w.recording.batches.contains(&Batch::Attach));
+    let mut buf = Vec::new();
+    w.recording.write_jsonl(&mut buf).unwrap();
+    let back = Recording::read_jsonl(buf.as_slice()).unwrap();
+    assert!(back.batches.contains(&Batch::Attach));
+    let journal = |rec: &Recording| {
+        let mut store = new_store(1, 0);
+        fold(Config::default(), &mut store, rec, &[], Persistence::On);
+        format!("{:?}", store.entries())
+    };
+    assert_eq!(journal(&back), journal(&w.recording));
+}
+
+/// The resync mark survives the file format.
+#[test]
+fn the_resync_mark_survives_the_file_format() {
+    let rec = replayed_with_recording();
+    let mut buf = Vec::new();
+    rec.write_jsonl(&mut buf).unwrap();
+    assert!(
+        String::from_utf8(buf.clone())
+            .unwrap()
+            .contains("\"resync\":true")
+    );
+    assert_eq!(Recording::read_jsonl(buf.as_slice()).unwrap(), rec);
+}
+
+fn replayed_with_recording() -> Recording {
+    use nanoprobe_sidecar::sim::RawRecord;
+    Recording::from_records([RawRecord {
+        agent_boot: 3,
+        number: 1,
+        kind: kind::HELLO as u16,
+        payload: vec![1, 2],
+        resync: true,
+    }])
 }

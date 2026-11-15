@@ -188,6 +188,7 @@ fn a_lost_group_whose_members_die_is_dead() {
             number: u64::MAX - n as u64,
             kind,
             payload,
+            resync: false,
         };
         w.rec.record(&mut w.store, &r);
     }
@@ -220,6 +221,7 @@ fn a_death_with_a_binding_of_another_group_is_ignored() {
             number: u64::MAX,
             kind,
             payload,
+            resync: false,
         },
     );
     assert!(!w.store.unit(unit).unwrap().dead);
@@ -373,6 +375,100 @@ fn a_refused_order_is_sent_again_when_a_member_is_revived() {
     assert!(commands(&w, id, opcode::GROUP_ORDER) > sent);
     assert_eq!(w.sim.applied_order(id.0), rev);
     assert_eq!(w.store.group(id).unwrap().state, State::Live);
+}
+
+/// A group whose last present member left DCS with no death, its other
+/// members dead, then that member found again. `silent` removes it with no
+/// event (MISSING after the enumeration), else with an event (REMOVED).
+fn refused_then_found(silent: bool) {
+    use nanoprobe_sidecar::sim::wire::opcode;
+    use nanoprobe_sim_fake::harness::Op;
+
+    let mut w = World::new(1, 0, LostPolicy::Report);
+    w.settle().unwrap();
+    let id = w.store.groups().next().unwrap().id;
+    let members: Vec<(u64, u64)> = w
+        .sim
+        .objects()
+        .into_iter()
+        .filter(|(_, _, entity)| *entity != 0)
+        .map(|(o, _, e)| (o, e))
+        .collect();
+    let (&(last, last_entity), dead) = members.split_last().unwrap();
+    for (o, _) in dead {
+        w.sim.kill(*o);
+        w.apply(&Op::Frames(2)).unwrap();
+    }
+    if silent {
+        w.sim.remove_silently(last);
+    } else {
+        w.sim.remove_with_event(last);
+    }
+    let unit = nanoprobe_sidecar::ids::EntityId(last_entity);
+    for _ in 0..200 {
+        let u = w.store.unit(unit).unwrap();
+        if u.missing || u.removed {
+            break;
+        }
+        w.apply(&Op::Frames(4)).unwrap();
+    }
+    let u = w.store.unit(unit).unwrap();
+    assert!(u.missing || u.removed, "the member left unexplained");
+    assert!(!u.dead);
+    w.apply(&Op::Order(0)).unwrap();
+    w.apply(&Op::Frames(4)).unwrap();
+    assert_eq!(w.sim.applied_order(id.0), 0, "DCS held no group");
+    let rev = w.store.group(id).unwrap().order_rev;
+    let sent = commands(&w, id, opcode::GROUP_ORDER);
+    w.apply(&Op::Frames(8)).unwrap();
+    assert_eq!(
+        commands(&w, id, opcode::GROUP_ORDER),
+        sent,
+        "held while refused"
+    );
+    assert!(w.sim.revive(last));
+    // A MISSING last member leaves the group `lost`; the enumeration that
+    // finds it makes it `live` again.
+    for _ in 0..200 {
+        if commands(&w, id, opcode::GROUP_ORDER) > sent {
+            break;
+        }
+        w.apply(&Op::Frames(4)).unwrap();
+    }
+    assert!(commands(&w, id, opcode::GROUP_ORDER) > sent);
+    w.settle().unwrap();
+    assert_eq!(w.sim.applied_order(id.0), rev);
+}
+
+/// A refused order is sent again when a MISSING member is found.
+#[test]
+fn a_refused_order_is_sent_again_when_a_missing_member_is_found() {
+    refused_then_found(true);
+}
+
+/// A refused order is sent again when a REMOVED member is found.
+#[test]
+fn a_refused_order_is_sent_again_when_a_removed_member_is_found() {
+    refused_then_found(false);
+}
+
+/// A member that never left does not send an applied order again across
+/// enumerations.
+#[test]
+fn a_member_never_gone_sends_no_order_again() {
+    use nanoprobe_sidecar::sim::wire::opcode;
+    use nanoprobe_sim_fake::harness::Op;
+
+    let mut w = World::new(1, 0, LostPolicy::Report);
+    w.settle().unwrap();
+    let id = w.store.groups().next().unwrap().id;
+    w.apply(&Op::Order(0)).unwrap();
+    w.settle().unwrap();
+    let sent = commands(&w, id, opcode::GROUP_ORDER);
+    for _ in 0..50 {
+        w.apply(&Op::Frames(8)).unwrap();
+    }
+    assert_eq!(commands(&w, id, opcode::GROUP_ORDER), sent);
 }
 
 /// An attack order sent while its target is spawned again in the same
@@ -711,6 +807,7 @@ fn a_gap_of_events_holds_a_respawn_until_the_next_enumeration() {
             number: u64::MAX - n,
             kind,
             payload,
+            resync: false,
         }
     };
     let gone = record(
@@ -768,6 +865,7 @@ fn a_row_gone_and_bound_again_inside_an_enumeration_is_not_missing() {
             number: u64::MAX - n,
             kind,
             payload,
+            resync: false,
         }
     };
     let begin = record(
@@ -835,6 +933,7 @@ impl Feed {
             number: self.next,
             kind,
             payload,
+            resync: false,
         };
         w.rec.record(&mut w.store, &r);
     }
@@ -1088,4 +1187,454 @@ fn an_unresolved_object_asks_once_when_its_unit_appears() {
         w.tick().unwrap();
     }
     assert_eq!(w.rec.counters().enumerate_requests, asked + 1);
+}
+
+/// A GROUP_ORDER written but not yet taken, and a HELLO of `agent_boot`
+/// whose `in_head` lies before it; the outcomes journalled for it.
+fn order_then_hello(
+    agent_boot_of: impl Fn(&World) -> u64,
+    resync: bool,
+) -> (World, Vec<nanoprobe_sidecar::store::Outcome>) {
+    use nanoprobe_sidecar::intents::{Intent, Waypoint};
+    use nanoprobe_sidecar::sim::RawRecord;
+    use nanoprobe_sidecar::sim::wire::{Input, opcode};
+    use nanoprobe_sidecar::store::Entry;
+    use nanoprobe_transport::records::Hello;
+
+    let mut w = World::new(1, 0, LostPolicy::Report);
+    w.settle().unwrap();
+    let g = w.store.groups().next().unwrap().id;
+    w.store
+        .set_order(
+            g,
+            Intent::Route {
+                waypoints: vec![Waypoint { x: 1.0, z: 2.0 }],
+                speed: 10.0,
+                on_road: false,
+            },
+        )
+        .unwrap();
+    // The reconciler writes the order; the fake DCS runs no frame, so the
+    // agent does not take it.
+    w.rec.step(&mut w.store, &mut w.sim);
+    let c = w
+        .rec
+        .inflight()
+        .find(|c| c.opcode == opcode::GROUP_ORDER)
+        .cloned()
+        .expect("the order is in flight");
+    let hello = Hello {
+        agent_boot: agent_boot_of(&w),
+        sidecar_boot: 1,
+        campaign: w.store.campaign().0,
+        epoch: c.epoch,
+        last_applied_seq: c.seq - 1,
+        in_head: c.position - 1,
+        ..Hello::default()
+    };
+    let (kind, payload) = Input::Hello(hello).encode();
+    let r = RawRecord {
+        agent_boot: agent_boot_of(&w),
+        number: u64::MAX,
+        kind,
+        payload,
+        resync,
+    };
+    w.rec.record(&mut w.store, &r);
+    let outcomes = w
+        .store
+        .entries()
+        .iter()
+        .filter_map(|e| match e {
+            Entry::Outcome {
+                epoch,
+                seq,
+                outcome,
+                ..
+            } if (*epoch, *seq) == (c.epoch, c.seq) => Some(*outcome),
+            _ => None,
+        })
+        .collect();
+    (w, outcomes)
+}
+
+/// A resync HELLO after CONTROL_LOST leaves the ring untouched: a command
+/// after its `in_head` stays pending, and is not derived again.
+#[test]
+fn a_resync_hello_leaves_a_command_after_in_head_pending() {
+    use nanoprobe_sidecar::store::Outcome;
+
+    let (w, outcomes) = order_then_hello(|w| w.sim.agent_boot(), true);
+    assert!(outcomes.is_empty(), "{outcomes:?}");
+    assert!(w.rec.inflight().any(|c| c.opcode == 17));
+    let (_, outcomes) = order_then_hello(|w| w.sim.agent_boot(), false);
+    assert_eq!(
+        outcomes,
+        vec![Outcome::NotSent],
+        "a new attach: never taken"
+    );
+}
+
+/// A command of an agent boot that ended resolves `unknown` at the first
+/// HELLO of a new boot, though it lies past that boot's last `in_head`
+/// (spec/commands.md, "After DCS dies").
+#[test]
+fn a_dead_boot_s_command_past_its_in_head_is_unknown() {
+    use nanoprobe_sidecar::store::Outcome;
+
+    let (_, outcomes) = order_then_hello(|w| w.sim.agent_boot() + 1, false);
+    assert_eq!(outcomes, vec![Outcome::Unknown]);
+}
+
+mod extension_answers {
+    use super::*;
+    use nanoprobe_sidecar::sim::RawRecord;
+    use nanoprobe_sidecar::sim::wire::{Input, opcode};
+    use nanoprobe_sidecar::store::{Entry, Outcome};
+    use nanoprobe_transport::codec::Lv;
+    use nanoprobe_transport::layout::{lifecycle as lc, result as rc};
+    use nanoprobe_transport::records::{CommandResult, Hello, Lifecycle};
+
+    fn feed(w: &mut World, input: Input) {
+        let (kind, payload) = input.encode();
+        let r = RawRecord {
+            agent_boot: w.sim.agent_boot(),
+            number: u64::MAX,
+            kind,
+            payload,
+            resync: false,
+        };
+        w.rec.record(&mut w.store, &r);
+    }
+
+    fn sets(w: &World) -> usize {
+        w.store
+            .entries()
+            .iter()
+            .filter(|e| matches!(e, Entry::Command(c) if c.opcode == opcode::EXTENSION_SET))
+            .count()
+    }
+
+    fn outcomes(w: &World) -> Vec<Outcome> {
+        w.store
+            .entries()
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Outcome { outcome, .. } => Some(*outcome),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A settled world, and its extension `x` written once. The fake DCS
+    /// runs no frame, so the agent never takes the command.
+    fn world() -> World {
+        let mut w = World::new(1, 0, LostPolicy::Report);
+        w.settle().unwrap();
+        w.store.set_extension("x", "return 1");
+        w.rec.step(&mut w.store, &mut w.sim);
+        assert_eq!(sets(&w), 1);
+        w
+    }
+
+    /// Answer the `EXTENSION_SET` in flight with `code`.
+    fn answer(w: &mut World, code: u64) {
+        let c = w
+            .rec
+            .inflight()
+            .find(|c| c.opcode == opcode::EXTENSION_SET)
+            .cloned()
+            .expect("an EXTENSION_SET is in flight");
+        feed(
+            w,
+            Input::Result(CommandResult {
+                seq: c.seq,
+                epoch: c.epoch,
+                campaign: w.store.campaign().0,
+                entity: 0,
+                rev: c.rev,
+                object: 0,
+                cost_us: 0,
+                opcode: opcode::EXTENSION_SET,
+                code: code as u16,
+                message: String::new(),
+                value: Lv::Nil,
+            }),
+        );
+    }
+
+    fn lifecycle(w: &mut World, state: u64) {
+        let l = w.store.loaded().cloned().unwrap();
+        feed(
+            w,
+            Input::Lifecycle(Lifecycle {
+                state: state as u32,
+                mission_gen: l.mission_gen,
+                theater: l.theater,
+                ..Lifecycle::default()
+            }),
+        );
+    }
+
+    #[test]
+    fn a_refused_revision_is_not_sent_again_until_the_source_changes() {
+        let mut w = world();
+        answer(&mut w, rc::LUA_ERROR);
+        assert_eq!(outcomes(&w).last(), Some(&Outcome::Refused));
+        for _ in 0..3 {
+            w.rec.step(&mut w.store, &mut w.sim);
+        }
+        assert_eq!(sets(&w), 1);
+        assert_eq!(w.store.set_extension("x", "return 2"), 2);
+        w.rec.step(&mut w.store, &mut w.sim);
+        assert_eq!(sets(&w), 2, "the next revision is sent");
+    }
+
+    #[test]
+    fn a_rejected_revision_is_not_sent_again() {
+        let mut w = world();
+        answer(&mut w, rc::BAD_PAYLOAD);
+        assert_eq!(outcomes(&w).last(), Some(&Outcome::Rejected));
+        for _ in 0..3 {
+            w.rec.step(&mut w.store, &mut w.sim);
+        }
+        assert_eq!(sets(&w), 1);
+    }
+
+    #[test]
+    fn a_stale_epoch_answer_derives_the_revision_again() {
+        let mut w = world();
+        answer(&mut w, rc::STALE_EPOCH);
+        w.rec.step(&mut w.store, &mut w.sim);
+        assert_eq!(sets(&w), 2);
+        let c = w.rec.inflight().last().cloned().unwrap();
+        assert_eq!(c.rev, 1);
+    }
+
+    #[test]
+    fn a_not_ready_answer_is_sent_again_once_per_change() {
+        let mut w = world();
+        answer(&mut w, rc::NOT_READY);
+        for _ in 0..5 {
+            w.rec.step(&mut w.store, &mut w.sim);
+        }
+        assert_eq!(sets(&w), 1, "the lifecycle did not change");
+        // A new lifecycle state, then back to RUNNING: one resend each.
+        lifecycle(&mut w, lc::PAUSED);
+        for _ in 0..5 {
+            w.rec.step(&mut w.store, &mut w.sim);
+        }
+        assert_eq!(sets(&w), 2);
+        answer(&mut w, rc::NOT_READY);
+        for _ in 0..5 {
+            w.rec.step(&mut w.store, &mut w.sim);
+        }
+        assert_eq!(sets(&w), 2);
+        lifecycle(&mut w, lc::RUNNING);
+        for _ in 0..5 {
+            w.rec.step(&mut w.store, &mut w.sim);
+        }
+        assert_eq!(sets(&w), 3);
+        // A new revision is sent at once.
+        answer(&mut w, rc::NOT_READY);
+        w.store.set_extension("x", "return 2");
+        w.rec.step(&mut w.store, &mut w.sim);
+        assert_eq!(sets(&w), 4);
+    }
+
+    #[test]
+    fn a_not_ready_revision_is_sent_again_after_a_restart_to_the_same_state() {
+        let mut w = world();
+        answer(&mut w, rc::NOT_READY);
+        w.rec.step(&mut w.store, &mut w.sim);
+        assert_eq!(sets(&w), 1);
+        // The plan sees no state between: the mission restarts and runs.
+        for state in [lc::STOPPING, lc::LOADING, lc::RUNNING] {
+            lifecycle(&mut w, state);
+        }
+        for _ in 0..5 {
+            w.rec.step(&mut w.store, &mut w.sim);
+        }
+        assert_eq!(sets(&w), 2, "one resend");
+    }
+
+    /// Answer the command in flight for `opcode` with `NOT_READY`, and
+    /// count the commands written for it.
+    fn answer_not_ready(w: &mut World, op: u16) {
+        let c = w
+            .rec
+            .inflight()
+            .find(|c| c.opcode == op)
+            .cloned()
+            .expect("the command is in flight");
+        feed(
+            w,
+            Input::Result(CommandResult {
+                seq: c.seq,
+                epoch: c.epoch,
+                campaign: w.store.campaign().0,
+                entity: c.entity.0,
+                rev: c.rev,
+                object: 0,
+                cost_us: 0,
+                opcode: op,
+                code: rc::NOT_READY as u16,
+                message: String::new(),
+                value: Lv::Nil,
+            }),
+        );
+    }
+
+    fn count(w: &World, op: u16) -> usize {
+        w.store
+            .entries()
+            .iter()
+            .filter(|e| matches!(e, Entry::Command(c) if c.opcode == op))
+            .count()
+    }
+
+    #[test]
+    fn a_not_ready_spawn_is_sent_once_per_lifecycle_change() {
+        let mut w = World::new(1, 0, LostPolicy::Report);
+        w.settle().unwrap();
+        w.sim.load_mission();
+        for _ in 0..60 {
+            w.tick().unwrap();
+            if w.rec.inflight().any(|c| c.opcode == opcode::GROUP_SPAWN) {
+                break;
+            }
+        }
+        let spawns = count(&w, opcode::GROUP_SPAWN);
+        answer_not_ready(&mut w, opcode::GROUP_SPAWN);
+        for _ in 0..5 {
+            w.rec.step(&mut w.store, &mut w.sim);
+        }
+        assert_eq!(count(&w, opcode::GROUP_SPAWN), spawns, "held");
+        for state in [lc::STOPPING, lc::LOADING, lc::RUNNING] {
+            lifecycle(&mut w, state);
+        }
+        for _ in 0..5 {
+            w.rec.step(&mut w.store, &mut w.sim);
+        }
+        assert_eq!(count(&w, opcode::GROUP_SPAWN), spawns + 1, "one resend");
+    }
+
+    #[test]
+    fn a_not_ready_order_is_sent_once_per_lifecycle_change() {
+        use nanoprobe_sidecar::intents::{Intent, Waypoint};
+        let mut w = World::new(1, 0, LostPolicy::Report);
+        w.settle().unwrap();
+        let g = w.store.groups().next().unwrap().id;
+        let route = Intent::Route {
+            waypoints: vec![Waypoint { x: 1.0, z: 2.0 }],
+            speed: 10.0,
+            on_road: false,
+        };
+        w.store.set_order(g, route).unwrap();
+        w.rec.step(&mut w.store, &mut w.sim);
+        let orders = count(&w, opcode::GROUP_ORDER);
+        assert!(orders > 0);
+        answer_not_ready(&mut w, opcode::GROUP_ORDER);
+        for _ in 0..5 {
+            w.rec.step(&mut w.store, &mut w.sim);
+        }
+        assert_eq!(count(&w, opcode::GROUP_ORDER), orders, "held");
+        for state in [lc::STOPPING, lc::LOADING, lc::RUNNING] {
+            lifecycle(&mut w, state);
+        }
+        w.rec.step(&mut w.store, &mut w.sim);
+        assert_eq!(count(&w, opcode::GROUP_ORDER), orders + 1, "one resend");
+    }
+
+    #[test]
+    fn a_hello_lets_a_not_ready_revision_go_again() {
+        let mut w = world();
+        answer(&mut w, rc::NOT_READY);
+        w.rec.step(&mut w.store, &mut w.sim);
+        assert_eq!(sets(&w), 1);
+        let hello = Hello {
+            agent_boot: w.sim.agent_boot(),
+            sidecar_boot: 1,
+            campaign: w.store.campaign().0,
+            epoch: 1,
+            in_head: u64::MAX,
+            ..Hello::default()
+        };
+        feed(&mut w, Input::Hello(hello));
+        w.rec.step(&mut w.store, &mut w.sim);
+        assert_eq!(sets(&w), 2);
+    }
+
+    /// Read `n` FRAMEs of the running mission: no lifecycle change.
+    fn frames(w: &mut World, n: u64) {
+        let l = w.store.loaded().cloned().unwrap();
+        for _ in 0..n {
+            feed(
+                w,
+                Input::Frame(nanoprobe_transport::records::Frame {
+                    mission_gen: l.mission_gen,
+                    campaign: w.store.campaign().0,
+                    lifecycle: lc::RUNNING as _,
+                    ..Default::default()
+                }),
+            );
+        }
+    }
+
+    /// A NOT_READY in RUNNING that no LIFECYCLE follows is held for
+    /// `NOT_READY_HOLD_FRAMES` FRAMEs, then sent again.
+    #[test]
+    fn a_not_ready_without_a_lifecycle_change_is_sent_again_after_the_bound() {
+        use nanoprobe_sidecar::reconciler::NOT_READY_HOLD_FRAMES;
+        let mut w = world();
+        answer(&mut w, rc::NOT_READY);
+        frames(&mut w, NOT_READY_HOLD_FRAMES - 1);
+        w.rec.step(&mut w.store, &mut w.sim);
+        assert_eq!(sets(&w), 1, "held inside the bound");
+        frames(&mut w, 1);
+        w.rec.step(&mut w.store, &mut w.sim);
+        assert_eq!(sets(&w), 2, "sent again once the bound passes");
+        w.rec.step(&mut w.store, &mut w.sim);
+        assert_eq!(sets(&w), 2, "once, not every pass");
+    }
+
+    /// A capture and a destroy answered NOT_READY are each sent once until
+    /// the bound passes, a lifecycle change or a HELLO.
+    #[test]
+    fn a_not_ready_capture_and_destroy_are_held() {
+        use nanoprobe_sidecar::reconciler::NOT_READY_HOLD_FRAMES;
+        use nanoprobe_sidecar::store::Authority;
+        let mut w = World::new(0, 1, LostPolicy::Report);
+        let id = w.store.groups().next().unwrap().id;
+        w.settle().unwrap();
+        w.store.set_authority(id, Authority::Campaign).unwrap();
+        w.rec.step(&mut w.store, &mut w.sim);
+        let cap = count(&w, opcode::CAPTURE);
+        assert_eq!(cap, 1);
+        answer_not_ready(&mut w, opcode::CAPTURE);
+        for _ in 0..5 {
+            w.rec.step(&mut w.store, &mut w.sim);
+        }
+        assert_eq!(count(&w, opcode::CAPTURE), cap, "the capture is held");
+        frames(&mut w, NOT_READY_HOLD_FRAMES);
+        w.rec.step(&mut w.store, &mut w.sim);
+        assert_eq!(count(&w, opcode::CAPTURE), cap + 1, "sent after the bound");
+
+        // The capture settled: the destroy follows.
+        w.store.set_captured(id).unwrap();
+        answer_not_ready(&mut w, opcode::CAPTURE);
+        w.rec.step(&mut w.store, &mut w.sim);
+        let d = count(&w, opcode::STATIC_DESTROY);
+        assert_eq!(d, 1);
+        answer_not_ready(&mut w, opcode::STATIC_DESTROY);
+        for _ in 0..5 {
+            w.rec.step(&mut w.store, &mut w.sim);
+        }
+        assert_eq!(count(&w, opcode::STATIC_DESTROY), d, "the destroy is held");
+        for state in [lc::STOPPING, lc::LOADING, lc::RUNNING] {
+            lifecycle(&mut w, state);
+        }
+        w.rec.step(&mut w.store, &mut w.sim);
+        assert_eq!(count(&w, opcode::STATIC_DESTROY), d + 1, "one resend");
+    }
 }

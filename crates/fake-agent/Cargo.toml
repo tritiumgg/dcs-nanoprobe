@@ -37,3 +37,7 @@ path = "src/bin/link-probe.rs"
 [[bin]]
 name = "chaos-runner"
 path = "src/bin/chaos-runner.rs"
+
+[[bin]]
+name = "command-script"
+path = "src/bin/command-script.rs"
