@@ -19,7 +19,14 @@ pub trait Target: SimAdapter {
     /// Let about one frame pass. A real target waits and polls.
     fn advance(&mut self);
     /// Load the running mission again. Returns once the load was asked for.
+    /// Not called when [`Target::mission_path`] names a mission.
     fn reload(&mut self);
+    /// A mission file, as DCS opens it, that the suite loads with a
+    /// `MISSION_LOAD` of its own in place of [`Target::reload`]: a real
+    /// target has no other way to load one. `None` calls `reload`.
+    fn mission_path(&self) -> Option<String> {
+        None
+    }
     /// Drop the link and attach again as the same sidecar (spec/transport.md,
     /// "Detaching" and "Attaching").
     fn reattach(&mut self);
@@ -471,7 +478,16 @@ fn a_mission_load_forgets_revisions(s: &mut Session<'_>) -> R {
     expect(&s.call(h, body.clone())?, rc::APPLIED, "spawn")?;
     let old = s.mission_gen;
     let from = s.seen.len();
-    s.t.reload();
+    if let Some(path) = s.t.mission_path() {
+        let h = s.header(EntityId(0), 0);
+        expect(
+            &s.call(h, Body::MissionLoad { path })?,
+            rc::APPLIED,
+            "MISSION_LOAD",
+        )?;
+    } else {
+        s.t.reload();
+    }
     s.until(from, "the new generation running", |x| {
         x.iter()
             .any(|i| matches!(i, Input::Lifecycle(l) if l.mission_gen > old && u64::from(l.state) == lc::RUNNING))

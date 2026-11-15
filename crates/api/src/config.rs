@@ -34,6 +34,9 @@ pub struct Config {
     pub materialize_per_frame: usize,
     /// `[world] destroy_retries`.
     pub destroy_retries: u32,
+    /// `[world] on_lost`: the default policy for a lost group, of every
+    /// campaign without its own.
+    pub on_lost: nanoprobe_sidecar::store::LostPolicy,
     /// How often the driver reads the agent and steps the reconciler
     /// (`[agent] poll_ms` for a real agent; one fake frame for the fake).
     pub step: Duration,
@@ -88,6 +91,7 @@ impl Default for Config {
             position_period_min: Duration::from_millis(100),
             materialize_per_frame: 1,
             destroy_retries: 3,
+            on_lost: nanoprobe_sidecar::store::LostPolicy::Report,
             step: Duration::from_millis(2),
             store: None,
         }

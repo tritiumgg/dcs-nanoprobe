@@ -90,6 +90,16 @@ impl CampaignService for Campaigns {
         hashed.lease = None;
         let cfg = self.0.cfg.clone();
         if r.activate {
+            // No mission file: refused before anything is captured or
+            // created (spec/persistence.md, "Campaign operations").
+            let first = if r.first_theater.is_empty() {
+                r.theaters.first().cloned().unwrap_or_default()
+            } else {
+                r.first_theater.clone()
+            };
+            self.0
+                .lock()
+                .activation_check(r.idempotency.as_ref(), r.lease.as_ref(), 0, &first)?;
             self.0
                 .capture_live(r.idempotency.as_ref(), r.lease.as_ref(), 0)
                 .await;
@@ -127,6 +137,15 @@ impl CampaignService for Campaigns {
                             "name",
                         ));
                     }
+                    let first = if r.first_theater.is_empty() {
+                        r.theaters[0].clone()
+                    } else {
+                        r.first_theater.clone()
+                    };
+                    // An activation with no mission file creates nothing.
+                    if r.activate {
+                        g.mission_check(&first)?;
+                    }
                     let id = g.new_campaign_id();
                     g.add_campaign(
                         &cfg,
@@ -143,11 +162,7 @@ impl CampaignService for Campaigns {
                             outcome: None,
                             last_checkpoint: None,
                         },
-                        if r.first_theater.is_empty() {
-                            r.theaters[0].clone()
-                        } else {
-                            r.first_theater.clone()
-                        },
+                        first,
                     )?;
                     if r.activate {
                         g.activate(&cfg, id)?;
@@ -199,8 +214,23 @@ impl CampaignService for Campaigns {
         let mut hashed = r.clone();
         hashed.lease = None;
         let cfg = self.0.cfg.clone();
-        // A switch captures the campaign it suspends.
-        let switch = self.0.lock().active.is_some_and(|a| a != r.campaign_id);
+        // A switch captures the campaign it suspends; a target with no
+        // mission file is refused first, before anything is captured.
+        let switch = {
+            let mut g = self.0.lock();
+            let switch = g.active.is_some_and(|a| a != r.campaign_id);
+            if switch
+                && let Some(theater) = g.campaigns.get(&r.campaign_id).map(|s| s.theater.clone())
+            {
+                g.activation_check(
+                    r.idempotency.as_ref(),
+                    r.lease.as_ref(),
+                    r.campaign_id,
+                    &theater,
+                )?;
+            }
+            switch
+        };
         if switch {
             self.0
                 .capture_live(r.idempotency.as_ref(), r.lease.as_ref(), 0)

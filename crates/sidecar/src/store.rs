@@ -276,6 +276,16 @@ pub struct Loaded {
     pub theater: String,
 }
 
+/// An activation's mission load, owed until the agent answers it
+/// (spec/persistence.md, "Campaign operations").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwedLoad {
+    /// The mission file as DCS opens it.
+    pub path: String,
+    /// The `MISSION_LOAD`'s epoch and sequence number once sent.
+    pub cmd: Option<(u64, u64)>,
+}
+
 /// How a unit left DCS without a death fact.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LeftAs {
@@ -552,6 +562,7 @@ pub struct Store {
     owners: BTreeMap<(String, String), DesiredOwner>,
     stocks: BTreeMap<(String, String), DesiredStock>,
     rates: Option<Rates>,
+    owed_load: Option<OwedLoad>,
     countries: Option<BTreeMap<u32, u32>>,
     sample_time: f64,
     route_events: Vec<RouteEvent>,
@@ -670,6 +681,7 @@ impl Store {
             owners: BTreeMap::new(),
             stocks: BTreeMap::new(),
             rates: None,
+            owed_load: None,
             countries: None,
             sample_time: 0.0,
             route_events: Vec::new(),
@@ -904,6 +916,18 @@ impl Store {
     /// The sample rates the controller set, if it did.
     pub fn rates(&self) -> Option<Rates> {
         self.rates
+    }
+
+    /// The activation's mission load not yet answered (spec/persistence.md,
+    /// "Campaign operations").
+    pub fn owed_load(&self) -> Option<&OwedLoad> {
+        self.owed_load.as_ref()
+    }
+
+    /// Set or clear the owed mission load. It goes to disk with the next
+    /// commit, in `meta.world`.
+    pub fn set_owed_load(&mut self, owed: Option<OwedLoad>) {
+        self.owed_load = owed;
     }
 
     /// Set the sample rates the agent is told.

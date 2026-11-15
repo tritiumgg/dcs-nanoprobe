@@ -20,8 +20,8 @@ use nanoprobe_transport::records::Rates;
 
 use super::{
     Authority, CapturedMore, DesiredOwner, DesiredStock, Entry, Extension, Group, IdemRow,
-    Journalled, Kind, LeftAs, Loaded, LostPolicy, Outcome, Point, RouteEvent, Store, Unit,
-    UnitState, check_lv,
+    Journalled, Kind, LeftAs, Loaded, LostPolicy, Outcome, OwedLoad, Point, RouteEvent, Store,
+    Unit, UnitState, check_lv,
 };
 use crate::ids::{CampaignId, EntityId};
 use crate::intents::{Intent, Waypoint};
@@ -760,6 +760,7 @@ impl Disk {
             owners,
             stocks,
             rates,
+            owed_load,
             countries,
             sample_time,
             route_events,
@@ -900,6 +901,10 @@ impl Disk {
             ("owners", enc_owners(owners)),
             ("stocks", enc_stocks(stocks)),
             ("rates", rates.as_ref().map_or(Lv::Nil, enc_rates)),
+            (
+                "owed_load",
+                owed_load.as_ref().map_or(Lv::Nil, enc_owed_load),
+            ),
             (
                 "countries",
                 countries.as_ref().map_or(Lv::Nil, enc_countries),
@@ -1054,6 +1059,11 @@ fn load(path: &Path, conn: Connection, changes_keep: usize) -> Result<Store, Dis
         store.rates = match w.get("rates") {
             Lv::Nil => None,
             v => Some(dec_rates(v)?),
+        };
+        // A store written before the key has no owed load.
+        store.owed_load = match w.get("owed_load") {
+            Lv::Nil => None,
+            v => Some(dec_owed_load(v)?),
         };
         store.countries = match w.get("countries") {
             Lv::Nil => None,
@@ -1995,6 +2005,32 @@ fn dec_extension(v: &Lv) -> Result<Extension, DiskError> {
     })
 }
 
+fn enc_owed_load(v: &OwedLoad) -> Lv {
+    let OwedLoad { path, cmd } = v;
+    t(vec![
+        ("path", s(path)),
+        (
+            "cmd",
+            cmd.map_or(Lv::Nil, |(e, q)| {
+                list(vec![s(&e.to_string()), s(&q.to_string())])
+            }),
+        ),
+    ])
+}
+
+fn dec_owed_load(v: &Lv) -> Result<OwedLoad, DiskError> {
+    let r = Rd(v);
+    let cmd = match r.list("cmd")?.as_slice() {
+        [] => None,
+        [e, q] => Some((dec_u(e, "owed_load")?, dec_u(q, "owed_load")?)),
+        _ => return Err(DiskError::Corrupt("owed_load".into())),
+    };
+    Ok(OwedLoad {
+        path: r.s("path")?,
+        cmd,
+    })
+}
+
 fn enc_loaded(v: &Loaded) -> Lv {
     let Loaded {
         agent_boot,
@@ -2626,6 +2662,13 @@ mod tests {
                 encode(&enc_checkpoint(&checkpoint)),
             ),
             ("record".to_owned(), encode(&enc_record(&record()))),
+            (
+                "world.owed_load".to_owned(),
+                encode(&enc_owed_load(&OwedLoad {
+                    path: "Z:\\m\\Caucasus.miz".into(),
+                    cmd: Some((3, 7)),
+                })),
+            ),
         ];
         for (i, e) in s.entries().iter().enumerate() {
             rows.push((format!("entry.created.{i}"), encode(&enc_entry(e))));

@@ -42,8 +42,8 @@ pub struct Summary {
 
 /// Where the hello campaign runs: the theater, a start and an end.
 const THEATER: &str = "Caucasus";
-const START: (f64, f64) = (-300_000.0, 600_000.0);
-const END: (f64, f64) = (-299_000.0, 600_000.0);
+const START: (f64, f64) = (-290_000.0, 680_000.0);
+const END: (f64, f64) = (-289_000.0, 680_000.0);
 /// How close the lead must come to the end.
 const ARRIVED_M: f64 = 50.0;
 

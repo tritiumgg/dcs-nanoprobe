@@ -3,10 +3,11 @@
 //!
 //! The adapter speaks the agent's protocol. It writes commands to the inbound
 //! ring and reads the records the agent wrote, in ring order. `RealSim` (step
-//! S17) does that through the mapped file; `FakeSim` (crate
+//! [`real`]) does that through the mapped file; `FakeSim` (crate
 //! `nanoprobe-sim-fake`) models DCS and the agent; a recording replays what a
 //! real agent wrote ([`crate::replay`]).
 
+pub mod real;
 pub mod wire;
 
 /// One outbound record as the link read it.

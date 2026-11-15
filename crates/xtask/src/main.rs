@@ -23,6 +23,7 @@ mod proto;
 mod remote;
 mod routes;
 mod sampling;
+mod sidecar;
 mod soak;
 mod spec;
 mod ssh;
@@ -174,6 +175,12 @@ commands:
                             client_address and client_password_file; the password
                             goes to the client through SSH's standard input and is
                             never printed, logged or kept.
+  sidecar <name> [--part all|conformance|hello]
+                            The S17 live test on a docker-wine target: the sidecar in
+                            its own container in the game container's network
+                            namespace, the conformance suite through RealSim, and both
+                            hello campaigns against it; removes what it started.
+                            Refuses a server with players.
   hello [<name>]            Run the Rust hello campaign against the API server
                             over the fake sim: here, or built for the target and
                             run on its system (the SSH host of a docker-wine
@@ -233,6 +240,7 @@ fn main() -> ExitCode {
         ["catalogue", rest @ ..] => catalogue::command(&repository(), rest),
         ["sampling", rest @ ..] => sampling::command(&repository(), rest),
         ["commands", rest @ ..] => commands::command(&repository(), rest),
+        ["sidecar", rest @ ..] => sidecar::command(&repository(), rest),
         ["soak", name, rest @ ..] => soak::command(&repository(), name, rest),
         ["routes", name, rest @ ..] => routes::command(&repository(), name, rest),
         ["client", rest @ ..] => client::command(rest),

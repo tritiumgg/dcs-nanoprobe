@@ -1,0 +1,27 @@
+# sidecar.toml for the container in docker-compose.nanoprobe.yml. Every key and
+# its default is in spec/config.md; only the keys the container needs are here.
+
+[agent]
+# The mapped file on the shared memory-backed volume. The agent names the same
+# file in its agent.toml as `Z:\nanoprobe-shm\nanoprobe.map`.
+map_path = "/nanoprobe-shm/nanoprobe.map"
+# The agent's token, mounted read-only from the DCS profile's nanoprobe folder.
+token_path = "/etc/nanoprobe/agent-token"
+
+[api]
+# Loopback of the network namespace the sidecar shares with DCS: only processes
+# in the DCS container reach it. For a controller elsewhere, listen on the
+# container's address and name a tokens file, which any address but loopback
+# needs, and publish the port on the DCS service (docker-compose.nanoprobe.yml):
+#   listen = "0.0.0.0:47311"
+#   tokens_path = "/etc/nanoprobe/tokens.toml"
+listen = "127.0.0.1:47311"
+
+[store]
+dir = "/var/lib/nanoprobe/campaigns"
+
+[missions]
+# The mission folder: `<theater>.miz` for each theater a campaign uses. The
+# sidecar reads it through a read-only mount; DCS loads from it by this path.
+dir = "/missions"
+dcs_dir = '<Windows path of the DCS profile>\nanoprobe\missions'

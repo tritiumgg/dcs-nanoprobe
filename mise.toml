@@ -22,6 +22,15 @@ buf = "1.75.0"
 gitleaks = "8.30.1"
 gh = "2.97.0"
 
+# The static Linux sidecar for its container (`mise run sidecar-linux`): zig is
+# the C compiler for the bundled SQLite, through tools/zigcc-musl.sh.
+zig = "0.15.2"
+
+# The Python hello campaign (examples/hello-python). uv installs its pinned
+# dependencies into examples/hello-python/.venv from uv.lock.
+python = "3.12.13"
+uv = "0.12.17"
+
 # Cross-build of the agent DLL for x86_64-pc-windows-msvc on macOS and Linux.
 # cargo-xwin fetches the MSVC CRT and SDK; accept Microsoft's licence on its
 # first run. LLVM supplies clang, lld and llvm-dlltool, which turns
@@ -119,6 +128,19 @@ run = ["buf lint", "sh tools/protobreak.sh", "sh tools/protobreak-test.sh", "car
 description = "Run the Rust hello campaign against the API server over the fake sim"
 run = "cargo xtask hello"
 
+[tasks.hello-python-gen]
+description = "Generate the Python hello campaign's gRPC code from proto/ into examples/hello-python/gen"
+run = "sh examples/hello-python/generate.sh"
+
+[tasks.hello-python]
+description = "Run the Python hello campaign: mise run hello-python -- http://127.0.0.1:47311"
+depends = ["hello-python-gen"]
+run = "uv run --frozen --project examples/hello-python python examples/hello-python/hello.py"
+
+[tasks.hello-check]
+description = "Run the Python hello campaign against the fake sidecar on a free loopback port"
+run = "sh examples/hello-python/check.sh"
+
 [tasks.package]
 description = "Stage the Windows and Linux release archives in dist/ and check them"
 depends = ["dll"]
@@ -142,6 +164,10 @@ run = [
   "cargo clippy -p nanoprobe-agent --all-targets --no-default-features --features faults -- -D warnings",
   "sh tools/tmpleak-test.sh",
   "sh tools/tmpleak.sh",
+  # The Python hello against the fake sidecar. Its first run fetches the
+  # pinned wheels with uv; it goes before luatest.sh, whose sidecar test
+  # runs the Python hello in that environment.
+  "sh examples/hello-python/check.sh",
   "sh tools/luatest.sh",
   "buf lint",
   "sh tools/protobreak.sh",
@@ -149,3 +175,8 @@ run = [
   "cargo xtask proto --check",
   "sh tools/secretscan-test.sh",
 ]
+
+[tasks.sidecar-linux]
+description = "Build the sidecar as a static Linux program, for its container (deploy/)"
+env = { CC_x86_64_unknown_linux_musl = "{{config_root}}/tools/zigcc-musl.sh", AR_x86_64_unknown_linux_musl = "{{config_root}}/tools/zigar.sh" }
+run = "cargo build --release --target x86_64-unknown-linux-musl -p nanoprobe-api --bin nanoprobe-sidecar --target-dir target/linux"

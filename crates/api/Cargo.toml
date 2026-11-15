@@ -21,10 +21,10 @@ prost = "0.14.6"
 prost-types = "0.14.6"
 serde = { version = "1.0.229", features = ["derive"] }
 sha2 = "0.10"
-tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-stream = { version = "0.1.19", features = ["net"] }
 toml = "1.2.1"
-tonic = { version = "0.14.9", default-features = false, features = ["codegen", "router", "server", "transport"] }
+tonic = { version = "0.14.9", default-features = false, features = ["channel", "codegen", "router", "server", "transport"] }
 tonic-reflection = "0.14.9"
 
 [dev-dependencies]

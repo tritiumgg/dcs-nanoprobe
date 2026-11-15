@@ -23,3 +23,9 @@ CLAUDE.local.md
 /crates/transport/fuzz/target/
 /crates/transport/fuzz/corpus/
 /crates/transport/fuzz/artifacts/
+
+# The Python hello campaign's generated gRPC code and virtual environment.
+/examples/hello-python/gen/
+/examples/hello-python/.venv/
+__pycache__/
+/deploy/nanoprobe-sidecar
