@@ -13,7 +13,7 @@ publish = false
 workspace = true
 
 [dependencies]
-nanoprobe-sidecar = { path = "../sidecar" }
+nanoprobe-sidecar = { path = "../sidecar", features = ["disk"] }
 nanoprobe-transport = { path = "../transport" }
 
 [dev-dependencies]

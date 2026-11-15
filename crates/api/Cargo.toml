@@ -14,7 +14,7 @@ workspace = true
 
 [dependencies]
 nanoprobe-proto = { path = "../proto" }
-nanoprobe-sidecar = { path = "../sidecar" }
+nanoprobe-sidecar = { path = "../sidecar", features = ["disk"] }
 nanoprobe-transport = { path = "../transport" }
 getrandom = "0.3"
 prost = "0.14.6"
