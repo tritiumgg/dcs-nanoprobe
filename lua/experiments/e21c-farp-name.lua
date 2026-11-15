@@ -3,8 +3,9 @@
 -- Spawns a FARP named 'Bravo Test', one named 'np!k3F2A', and a second one named
 -- 'Bravo Test'; after each spawn reads Airbase.getByName, getName, getCallsign,
 -- getID, the world.getAirbases() entries near the FARP, and
--- StaticObject.getByName. The FARPs stay in the mission, so a screenshot can be
--- taken afterwards; the mission is thrown away by the runner.
+-- StaticObject.getByName. The script removes its objects at the end, for the host
+-- test; the live run recorded in docs/results ran without that, so a screenshot
+-- could be taken of the FARPs.
 -- Run with `cargo xtask eval <target> server`.
 -- states: server
 -- timeout: 60
@@ -261,5 +262,17 @@ if Unit.getByName('np.K3F1C') == nil then
   E.observe('6.position.np!K3F2B', ll(1000, 600), { info = true })
   E.observe('6.position.np#x9 / np.x9Z1', ll(1300, 0), { info = true })
   E.observe('6.position.np!X9z1', ll(1300, 300), { info = true })
+end
+
+-- Remove everything the probe spawned, so the host test finds nothing left.
+for _, name in ipairs({ 'np#k3F7', 'np#K3F7', 'np#q1', 'np#x9', 'np.g.m3k9x2a1.7' }) do
+  pcall(function()
+    Group.getByName(name):destroy()
+  end)
+end
+for _, name in ipairs({ 'Bravo Test', 'np!k3F2A', 'np!k3F2B', 'np!K3F2B', 'np!X9z1' }) do
+  pcall(function()
+    StaticObject.getByName(name):destroy()
+  end)
 end
 return 'done'
