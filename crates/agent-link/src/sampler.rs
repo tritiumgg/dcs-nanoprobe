@@ -586,6 +586,10 @@ pub struct Spend {
     pub tier_us: [f64; 8],
     /// Each tier's rows, in the same order.
     pub tier_rows: [u64; 8],
+    /// The pumps' batches of every tier, rows and births' and the
+    /// enumeration's steps, from plan to close: the work the pump bound
+    /// weighs against the calls ("The pump's worth").
+    pub pump_work_us: f64,
 }
 
 /// What the shim's pump learns at its start.
@@ -781,10 +785,12 @@ pub struct Sampler {
     urgent: VecDeque<u64>,
     /// Tiers a pump planned a batch of, in the pump running.
     planned: [bool; 8],
-    /// Tiers below the positions whose owed rows the last sampling pump
-    /// planned none of for lack of budget: they leave `pump_worth` until the
-    /// last pump is `PUMP_WAIT_S` old.
-    unaffordable: [bool; 8],
+    /// Tiers below the positions whose owed rows a sampling pump planned
+    /// none of for lack of budget, since a planned row of the tier last
+    /// cleared the mark. Each holds when the mark was first set: the tier
+    /// leaves `pump_worth` for `PUMP_WAIT_S` from then, and a later pump
+    /// does not restart it.
+    unaffordable: [Option<Instant>; 8],
     /// A test switches the starvation guard off.
     #[cfg(test)]
     no_guard: bool,
@@ -1101,7 +1107,7 @@ impl Sampler {
             empty_pumps: 0,
             urgent: VecDeque::new(),
             planned: [false; 8],
-            unaffordable: [false; 8],
+            unaffordable: [None; 8],
             #[cfg(test)]
             no_guard: false,
             #[cfg(test)]
@@ -2491,12 +2497,13 @@ impl Sampler {
             .last_pump
             .is_none_or(|t| now.saturating_duration_since(t).as_secs_f64() >= PUMP_WAIT_S);
         let mut owed = self.owed_cost(false);
-        // A tier the last pump could not afford a row of leaves the sum
-        // until the pump's wait is up.
+        // A tier a pump could not afford a row of leaves the sum for the
+        // pump's wait from when it was first marked. Pumps that come for
+        // other tiers more than once a second do not keep it out.
         if !waited {
             for tier in [Tier::Vitals, Tier::Ammo, Tier::Warehouses] {
                 let t = &self.tiers[tier.index()];
-                if self.unaffordable[tier.index()] {
+                if self.marked_out(tier, now) {
                     let c = if t.cost > 0.0 { t.cost } else { call };
                     owed -= t.credit.floor() * c;
                 }
@@ -2508,6 +2515,20 @@ impl Sampler {
         let b = &self.budget;
         let room = b.allowance - b.charge + CREDIT_CAP_US - call;
         waited || owed >= (3.0 * call).min(room).max(MIN_BUDGET_US)
+    }
+
+    /// Mark `tier` unaffordable at `now`, unless it is marked already: the
+    /// mark keeps the time it was first set (spec/sampling.md, "The pump's
+    /// worth").
+    fn mark_unaffordable(&mut self, tier: Tier, now: Instant) {
+        self.unaffordable[tier.index()].get_or_insert(now);
+    }
+
+    /// Whether `tier`'s mark keeps it out of the pump's worth at `now`: for
+    /// `PUMP_WAIT_S` from when it was first set.
+    fn marked_out(&self, tier: Tier, now: Instant) -> bool {
+        self.unaffordable[tier.index()]
+            .is_some_and(|at| now.saturating_duration_since(at).as_secs_f64() < PUMP_WAIT_S)
     }
 
     /// Sweep positions in the host's own state at `now`, between
@@ -2546,8 +2567,11 @@ impl Sampler {
         let owed = subs + t.credit.floor() as usize;
         // The pump for the subscribed rows read with their attitude runs
         // first: the sweep reads no unsubscribed position until it has. The
-        // savings stay as they are.
-        if self.sub_wanted() {
+        // savings stay as they are. Not while births or an enumeration that
+        // is due or running wait: they rank above the subscribed rows and
+        // take that pump's budget first, so the sweep would wait on them.
+        let maintenance = self.births > 0 || self.enum_due || self.enumeration.is_some();
+        if self.sub_wanted() && !maintenance {
             if owed > 0 {
                 self.sweep_waited(SweepWait::Subscribed);
             }
@@ -3208,7 +3232,7 @@ impl Sampler {
             // Timed from its last planned batch, or from its first owed row.
             let since = self.last_planned[tier.index()].or(t.owed_since);
             self.scale() >= 1.0
-                && self.unaffordable[tier.index()]
+                && self.unaffordable[tier.index()].is_some()
                 && !behind
                 && since.is_some_and(|s| {
                     // Vitals waits a period; a tier whose rows are few waits
@@ -3244,6 +3268,17 @@ impl Sampler {
             if !self.maintenance_may(tier) {
                 continue;
             }
+            // A pump not wanted for the subscribed rows read with their
+            // attitude reads none of them: they wait for a batch's worth, or
+            // for their oldest to pass its period, and their own pump.
+            if tier == Tier::Subscribed
+                && self.direct
+                && self.sub_attitude
+                && !self.sub_pump
+                && !self.sub_wanted()
+            {
+                continue;
+            }
             // The host sweeps these in its own state.
             if self.direct
                 && (tier == Tier::Positions || (tier == Tier::Subscribed && !self.sub_attitude))
@@ -3273,7 +3308,7 @@ impl Sampler {
                 self.batches += 1;
                 self.last_planned[tier.index()] = Some(now);
                 self.planned[tier.index()] = true;
-                self.unaffordable[tier.index()] = false;
+                self.unaffordable[tier.index()] = None;
                 if self.dirty && tier >= Tier::Subscribed {
                     // OBJECT records go before the samples of this frame.
                     link.flush();
@@ -3823,6 +3858,7 @@ impl Sampler {
             _ => None,
         };
         self.window.spend.tier_us[tier.index()] += elapsed;
+        self.window.spend.pump_work_us += elapsed;
         self.window.spend.tier_rows[tier.index()] += done as u64;
         let row_tier = !matches!(tier, Tier::Births | Tier::Enumeration);
         let per_row = match inner {
@@ -4441,7 +4477,7 @@ impl Sampler {
             for tier in [Tier::Vitals, Tier::Ammo, Tier::Warehouses] {
                 let i = tier.index();
                 if !self.planned[i] && self.tiers[i].credit >= 1.0 {
-                    self.unaffordable[i] = true;
+                    self.mark_unaffordable(tier, now);
                 }
             }
         }
@@ -4595,6 +4631,7 @@ impl Sampler {
             overrun_sum_us: std::mem::take(&mut self.overrun_sum_us),
             costs: self.tiers.map(|t| t.cost),
             xcall_us: self.xcall_us,
+            xcall_seen_us: self.xcall_seen,
             close_us: self.close_us,
             batch_us: self.batch_us,
             spend: self.window.spend,
@@ -4797,6 +4834,11 @@ pub struct Report {
     pub steps: [(f64, f64, f64); 2],
     /// The running estimate of the cross-state call, µs.
     pub xcall_us: f64,
+    /// The running average of the calls measured, µs: the first call
+    /// measured sets it, each later call weighs 0.1, each counts at most
+    /// 62.5 µs, with no decay between pumps. 0 before the first pump, when
+    /// `pump_worth` uses 20 µs. The call the pump bound uses.
+    pub xcall_seen_us: f64,
     /// The running estimate of closing a batch, µs.
     pub close_us: f64,
     /// The running estimate of a batch's fixed cost, µs.
