@@ -85,6 +85,7 @@ Every failed call returns a gRPC status whose details hold one `ErrorDetail`: a
 | `OUT_OF_RANGE` | `SEQUENCE_EXPIRED` | An event sequence number is older than the retained history |
 | `OUT_OF_RANGE` | `REVISION_EXPIRED` | A watch starts at a revision older than the changes the store keeps. The consumer lists again. |
 | `UNAVAILABLE` | none (`UNSPECIFIED`) | The server is stopping. A stream ends with it, and a changing call that arrives is refused with it; the client connects again and resumes from its last revision or sequence number |
+| `UNIMPLEMENTED` | `UNVERIFIED` | A call path not yet verified on DCS; permanent until a release verifies it. The detail's `field` names the field |
 | `UNIMPLEMENTED` | none (`UNSPECIFIED`) | The call is in the schema and this server does not build it yet. The detail's `field` names the method |
 | `INTERNAL` | `INTERNAL` | A fault in the sidecar |
 

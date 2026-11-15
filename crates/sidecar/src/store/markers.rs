@@ -325,6 +325,32 @@ impl Store {
         out
     }
 
+    /// Remove every marker of `GROUP` scope whose target is neither a group
+    /// of the store nor named by `adopted`: the group is not bound in this
+    /// scope. Each removal is journalled. Returns the IDs removed now.
+    pub fn remove_unbound_group_markers(&mut self, adopted: &[EntityId]) -> Vec<EntityId> {
+        let hit: Vec<EntityId> = self
+            .markers
+            .items
+            .values()
+            .filter(|m| {
+                let g = EntityId(m.target);
+                !m.removed
+                    && m.scope == scope::GROUP
+                    && !adopted.contains(&g)
+                    && !self.groups.contains_key(&g)
+            })
+            .map(|m| m.id)
+            .collect();
+        let mut out = Vec::new();
+        for id in hit {
+            if let Ok(v) = self.remove_marker(id) {
+                out.extend(v);
+            }
+        }
+        out
+    }
+
     /// The agent must apply a marker's spec again, as after its group was
     /// spawned again: one more spec revision, journalled. Returns the new
     /// revision, or `None` for a marker that is gone.
@@ -358,6 +384,16 @@ impl Store {
     /// removed, 0 for none.
     pub(super) fn extension_floor(&self, name: &str) -> u64 {
         self.markers.ext_floor.get(name).copied().unwrap_or(0)
+    }
+
+    /// The revision floors of every extension name removed.
+    pub(super) fn extension_floors(&self) -> &BTreeMap<String, u64> {
+        &self.markers.ext_floor
+    }
+
+    /// Set the revision floors read back from a store file.
+    pub(super) fn set_extension_floors(&mut self, floors: BTreeMap<String, u64>) {
+        self.markers.ext_floor = floors;
     }
 
     /// The extensions removed that the agent may still hold.

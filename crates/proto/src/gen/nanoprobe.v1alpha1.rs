@@ -372,6 +372,7 @@ pub enum ErrorReason {
     RevisionExpired = 24,
     OutcomeNotFound = 25,
     Internal = 26,
+    Unverified = 27,
 }
 impl ErrorReason {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -407,6 +408,7 @@ impl ErrorReason {
             Self::RevisionExpired => "ERROR_REASON_REVISION_EXPIRED",
             Self::OutcomeNotFound => "ERROR_REASON_OUTCOME_NOT_FOUND",
             Self::Internal => "ERROR_REASON_INTERNAL",
+            Self::Unverified => "ERROR_REASON_UNVERIFIED",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -439,6 +441,7 @@ impl ErrorReason {
             "ERROR_REASON_REVISION_EXPIRED" => Some(Self::RevisionExpired),
             "ERROR_REASON_OUTCOME_NOT_FOUND" => Some(Self::OutcomeNotFound),
             "ERROR_REASON_INTERNAL" => Some(Self::Internal),
+            "ERROR_REASON_UNVERIFIED" => Some(Self::Unverified),
             _ => None,
         }
     }
@@ -8033,21 +8036,24 @@ pub struct KickResponse {
 pub struct BanRequest {
     #[prost(message, optional, tag = "1")]
     pub write: ::core::option::Option<Write>,
-    /// How long; 0 for the DCS default.
+    /// How long, above 0. 0 (the DCS default) is refused with UNIMPLEMENTED and
+    /// reason UNVERIFIED until E34 verifies it.
     #[prost(double, tag = "4")]
     pub seconds: f64,
     /// Shown to the player.
     #[prost(string, tag = "5")]
     pub reason: ::prost::alloc::string::String,
-    /// One of a player key or a ucid, which is for a player the server never
-    /// saw.
+    /// One of a player key or a ucid. The API bans a connected player only; a
+    /// ban of a player with no connection is refused with UNIMPLEMENTED and
+    /// reason UNVERIFIED until E34 verifies it.
     #[prost(oneof = "ban_request::Target", tags = "2, 3")]
     pub target: ::core::option::Option<ban_request::Target>,
 }
 /// Nested message and enum types in `BanRequest`.
 pub mod ban_request {
-    /// One of a player key or a ucid, which is for a player the server never
-    /// saw.
+    /// One of a player key or a ucid. The API bans a connected player only; a
+    /// ban of a player with no connection is refused with UNIMPLEMENTED and
+    /// reason UNVERIFIED until E34 verifies it.
     #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
     pub enum Target {
         #[prost(string, tag = "2")]
@@ -8116,7 +8122,8 @@ pub struct MovePlayerRequest {
     pub player_key: ::prost::alloc::string::String,
     #[prost(enumeration = "Coalition", tag = "3")]
     pub coalition: i32,
-    /// The slot ID. Empty moves the player to spectators.
+    /// The slot ID. Empty moves the player to spectators; a slot ID is refused
+    /// with UNIMPLEMENTED and reason UNVERIFIED until E34 verifies it.
     #[prost(string, tag = "4")]
     pub slot: ::prost::alloc::string::String,
 }
@@ -8137,7 +8144,7 @@ pub mod moderation_service_client {
     use tonic::codegen::*;
     use tonic::codegen::http::Uri;
     /// Players are named by player key. The API never carries a ucid: a ucid
-    /// goes in only where an admin bans or unbans one the server never saw. Each
+    /// goes in only where an admin bans or unbans one. Each
     /// applied call is a ModerationEvent in the event stream, with the role of
     /// the token that made it. Every call needs a campaign to be active, since it
     /// reaches DCS through the active campaign's command stream.
@@ -8243,7 +8250,7 @@ pub mod moderation_service_client {
                 .insert(GrpcMethod::new("nanoprobe.v1alpha1.ModerationService", "Kick"));
             self.inner.unary(req, path, codec).await
         }
-        /// Ban a player by key, or a ucid never seen, for a time or the DCS default.
+        /// Ban a connected player, by key or ucid, for a time above 0 seconds.
         pub async fn ban(
             &mut self,
             request: impl tonic::IntoRequest<super::BanRequest>,
@@ -8314,7 +8321,8 @@ pub mod moderation_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        /// Move a connected player to a slot, or to spectators.
+        /// Move a connected player to spectators. A move into a slot is refused
+        /// with UNIMPLEMENTED and reason UNVERIFIED until E34 verifies it.
         pub async fn move_player(
             &mut self,
             request: impl tonic::IntoRequest<super::MovePlayerRequest>,
@@ -8361,7 +8369,7 @@ pub mod moderation_service_server {
             &self,
             request: tonic::Request<super::KickRequest>,
         ) -> std::result::Result<tonic::Response<super::KickResponse>, tonic::Status>;
-        /// Ban a player by key, or a ucid never seen, for a time or the DCS default.
+        /// Ban a connected player, by key or ucid, for a time above 0 seconds.
         async fn ban(
             &self,
             request: tonic::Request<super::BanRequest>,
@@ -8377,7 +8385,8 @@ pub mod moderation_service_server {
             tonic::Response<super::ListBansResponse>,
             tonic::Status,
         >;
-        /// Move a connected player to a slot, or to spectators.
+        /// Move a connected player to spectators. A move into a slot is refused
+        /// with UNIMPLEMENTED and reason UNVERIFIED until E34 verifies it.
         async fn move_player(
             &self,
             request: tonic::Request<super::MovePlayerRequest>,
@@ -8387,7 +8396,7 @@ pub mod moderation_service_server {
         >;
     }
     /// Players are named by player key. The API never carries a ucid: a ucid
-    /// goes in only where an admin bans or unbans one the server never saw. Each
+    /// goes in only where an admin bans or unbans one. Each
     /// applied call is a ModerationEvent in the event stream, with the role of
     /// the token that made it. Every call needs a campaign to be active, since it
     /// reaches DCS through the active campaign's command stream.

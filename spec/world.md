@@ -429,7 +429,7 @@ came from, and the same ucid has unrelated keys on servers with different secret
 
 The sidecar keeps the map from key to ucid in the server-scoped store, so the
 Moderation service can name a player by key. A raw ucid is accepted only as an admin's
-input, to ban or unban a ucid never seen. The API, the event stream, logs, metrics and
+input, to ban or unban a ucid. The API, the event stream, logs, metrics and
 bundles carry keys and never a ucid; a bundle redacts any text with a ucid's form, 32 hex
 digits.
 

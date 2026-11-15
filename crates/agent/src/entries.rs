@@ -2065,9 +2065,13 @@ unsafe fn work_player(state: *mut State) -> c_int {
     0
 }
 
-/// The entity a platform name (spec/world.md, "Names") ends in.
+/// The entity a group's platform name (spec/world.md, "Names") ends in. A
+/// unit or static name gives none.
 fn entity_of_name(name: &str) -> Option<u64> {
-    nanoprobe_transport::names::parse(name).map(|p| p.entity)
+    use nanoprobe_transport::names::Kind;
+    nanoprobe_transport::names::parse(name)
+        .filter(|p| p.kind == Kind::Group)
+        .map(|p| p.entity)
 }
 
 /// `menu(entity, target, scope)`: queue a `MENU` record for a selected item,
@@ -2415,8 +2419,10 @@ mod tests {
     #[test]
     fn a_platform_name_ends_in_its_entity() {
         assert_eq!(entity_of_name("np!enPb"), Some(37));
-        assert_eq!(entity_of_name("np.enPz"), Some(61));
-        assert_eq!(entity_of_name("np.enP10"), Some(62));
+        assert_eq!(entity_of_name("np!enPz"), Some(61));
+        assert_eq!(entity_of_name("np!enP10"), Some(62));
+        assert_eq!(entity_of_name("np.enPz"), None);
+        assert_eq!(entity_of_name("np#enPz"), None);
         assert_eq!(entity_of_name("np!enP"), None);
         assert_eq!(entity_of_name("xx!enPb"), None);
         assert_eq!(entity_of_name("np!enP0"), None);

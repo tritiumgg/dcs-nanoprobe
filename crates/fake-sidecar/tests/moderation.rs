@@ -10,6 +10,7 @@ use nanoprobe_api::auth::token_hash;
 use nanoprobe_api::config::Config;
 use nanoprobe_api::hub::Hub;
 use nanoprobe_fake_sidecar::{fake_config, in_process, start};
+use nanoprobe_proto::errors::reason;
 use nanoprobe_proto::v1alpha1::campaign_service_client::CampaignServiceClient;
 use nanoprobe_proto::v1alpha1::commands_service_client::CommandsServiceClient;
 use nanoprobe_proto::v1alpha1::events_service_client::EventsServiceClient;
@@ -18,7 +19,8 @@ use nanoprobe_proto::v1alpha1::moderation_service_client::ModerationServiceClien
 use nanoprobe_proto::v1alpha1::players_service_client::PlayersServiceClient;
 use nanoprobe_proto::v1alpha1::session_service_client::SessionServiceClient;
 use nanoprobe_proto::v1alpha1::{
-    self as pb, AcquireLeaseRequest, Coalition, CreateCampaignRequest, Idempotency, Lease, Write,
+    self as pb, AcquireLeaseRequest, Coalition, CreateCampaignRequest, ErrorReason, Idempotency,
+    Lease, Write,
 };
 use nanoprobe_sidecar::players::{Ctx, Keyring, Roster};
 use nanoprobe_sidecar::sim::RawRecord;
@@ -479,7 +481,8 @@ async fn the_moderation_service_works_end_to_end_without_a_ucid() {
         })
         .await
         .expect_err("slot move");
-    assert_eq!(e.code(), Code::FailedPrecondition);
+    assert_eq!(e.code(), Code::Unimplemented);
+    assert_eq!(reason(&e), ErrorReason::Unverified);
     assert!(e.message().contains("E34"), "{e}");
     assert_eq!(fake(&hub, |s| s.clients()[&2].slot.clone()), "");
     out += e.message();
@@ -584,16 +587,29 @@ async fn the_moderation_service_works_end_to_end_without_a_ucid() {
         })
         .await
         .expect_err("ban of an offline ucid");
-    assert_eq!(e.code(), Code::FailedPrecondition);
+    assert_eq!(e.code(), Code::Unimplemented);
+    assert_eq!(reason(&e), ErrorReason::Unverified);
     assert!(e.message().contains("E34"), "{e}");
     out += e.message();
     fake(&hub, |s| s.connect_client(5, UCID_D, "Di", 1));
     until(|| async { players_now(&ch, false).await.iter().any(|p| p.key == fresh) }).await;
+    // A ban of DCS's default length (seconds 0) is not verified either.
+    let e = m
+        .ban(pb::BanRequest {
+            write: write(&l, "ban-zero", c),
+            target: Some(pb::ban_request::Target::Ucid(UCID_D.into())),
+            seconds: 0.0,
+            reason: "known abuser".into(),
+        })
+        .await
+        .expect_err("ban of seconds 0");
+    assert_eq!(e.code(), Code::Unimplemented);
+    assert_eq!(reason(&e), ErrorReason::Unverified);
     let r = m
         .ban(pb::BanRequest {
             write: write(&l, "ban-new", c),
             target: Some(pb::ban_request::Target::Ucid(UCID_D.into())),
-            seconds: 0.0,
+            seconds: 60.0,
             reason: "known abuser".into(),
         })
         .await
@@ -629,7 +645,7 @@ async fn the_moderation_service_works_end_to_end_without_a_ucid() {
             .find(|b| b.player_key == fresh)
             .unwrap()
             .until
-            .is_none()
+            .is_some()
     );
 
     // Unban by key, and by a ucid that is not on the list (refused).

@@ -162,6 +162,8 @@ pub struct Disk {
     groups: BTreeMap<EntityId, Group>,
     units: BTreeMap<EntityId, Unit>,
     extensions: BTreeMap<String, Extension>,
+    /// The revision floors of removed extensions, as the file holds them.
+    floors: BTreeMap<String, u64>,
     journal_written: usize,
     world: Vec<u8>,
     record: CampaignRecord,
@@ -324,6 +326,7 @@ impl Store {
             groups: BTreeMap::new(),
             units: BTreeMap::new(),
             extensions: BTreeMap::new(),
+            floors: BTreeMap::new(),
             journal_written: 0,
             world: Vec::new(),
             record,
@@ -561,6 +564,19 @@ impl Disk {
                 changed_ext.push(name.clone());
             }
         }
+        // A removed extension keeps its row as a tombstone holding the
+        // highest revision it had, so a registration of the name after a
+        // reopen still gets a higher one.
+        let mut changed_floors = Vec::new();
+        for (name, rev) in store.extension_floors() {
+            if !extensions.contains_key(name) && self.floors.get(name) != Some(rev) {
+                tx.execute(
+                    "INSERT OR REPLACE INTO extension (name, body) VALUES (?1, ?2)",
+                    params![name, encode(&enc_tombstone(name, *rev))],
+                )?;
+                changed_floors.push((name.clone(), *rev));
+            }
+        }
         let first = self.journal_written;
         for (i, e) in journal.iter().enumerate().skip(first) {
             tx.execute(
@@ -613,9 +629,12 @@ impl Disk {
             self.units.remove(&id);
         }
         for name in changed_ext {
+            self.floors.remove(&name);
             self.extensions
                 .insert(name.clone(), extensions[&name].clone());
         }
+        self.extensions.retain(|n, _| extensions.contains_key(n));
+        self.floors.extend(changed_floors);
         self.journal_written = journal.len();
         self.world = world;
         self.record_written = true;
@@ -699,13 +718,19 @@ fn load(path: &Path, conn: Connection, changes_keep: usize) -> Result<Store, Dis
         }
     }
     let mut extensions = BTreeMap::new();
+    let mut floors = BTreeMap::new();
     {
         let mut st = conn.prepare("SELECT body FROM extension")?;
         let mut rows = st.query([])?;
         while let Some(row) = rows.next()? {
             let body: Vec<u8> = row.get(0)?;
-            let e = dec_extension(&decode(&body)?)?;
-            extensions.insert(e.name.clone(), e);
+            let lv = decode(&body)?;
+            let e = dec_extension(&lv)?;
+            if Rd(&lv).b("removed")? {
+                floors.insert(e.name, e.spec_rev);
+            } else {
+                extensions.insert(e.name.clone(), e);
+            }
         }
     }
     let mut journal = Vec::new();
@@ -774,6 +799,7 @@ fn load(path: &Path, conn: Connection, changes_keep: usize) -> Result<Store, Dis
     store.groups = groups.clone();
     store.units = units.clone();
     store.extensions = extensions.clone();
+    store.set_extension_floors(floors.clone());
     store.journal = journal;
     let journal_written = store.journal.len();
     store.disk = Slot(Some(Box::new(Disk {
@@ -782,6 +808,7 @@ fn load(path: &Path, conn: Connection, changes_keep: usize) -> Result<Store, Dis
         groups,
         units,
         extensions,
+        floors,
         journal_written,
         world,
         record,
@@ -1541,6 +1568,15 @@ fn enc_extension(v: &Extension) -> Lv {
     ])
 }
 
+/// The row of a removed extension: its name and the highest revision it had.
+fn enc_tombstone(name: &str, floor: u64) -> Lv {
+    t(vec![
+        ("name", s(name)),
+        ("spec_rev", u(floor)),
+        ("removed", b(true)),
+    ])
+}
+
 fn dec_extension(v: &Lv) -> Result<Extension, DiskError> {
     let r = Rd(v);
     Ok(Extension {
@@ -2193,6 +2229,28 @@ mod tests {
             Err(DiskError::Corrupt(m)) => assert!(m.contains("next EntityId"), "{m}"),
             r => panic!("{:?}", r.map(|_| ())),
         }
+    }
+
+    #[test]
+    fn a_removed_extension_stays_removed_and_keeps_its_revision_floor() {
+        let d = tempfile::tempdir().expect("dir");
+        let p = d.path().join("store.sqlite");
+        let mut s = Store::new(CampaignId(7), 10);
+        s.set_extension("keep", "return 0");
+        s.set_extension("gone", "return 1");
+        assert_eq!(s.set_extension("gone", "return 2"), 2);
+        s.save_as(&p, record()).expect("save");
+        assert!(s.remove_extension("gone"));
+        s.commit().expect("commit");
+        drop(s);
+        let mut s = Store::open(&p, 10).expect("open");
+        assert!(s.extension("gone").is_none());
+        assert!(s.extension("keep").is_some());
+        assert_eq!(s.set_extension("gone", "return 3"), 3);
+        s.commit().expect("commit");
+        drop(s);
+        let s = Store::open(&p, 10).expect("open");
+        assert_eq!(s.extension("gone").map(|e| e.spec_rev), Some(3));
     }
 
     #[test]

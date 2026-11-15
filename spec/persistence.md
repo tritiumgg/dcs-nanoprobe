@@ -34,6 +34,8 @@ author keeps state through capture and restore (spec/world.md).
 | `journal` | `seq INTEGER PRIMARY KEY`, `body BLOB` | One per journal entry, in order, from 1 |
 | `checkpoint` | `seq INTEGER PRIMARY KEY`, `body BLOB` | One per checkpoint, in order, from 1 |
 
+A removed extension keeps its `extension` row as a tombstone: `removed` is true, the body holds no source, and `spec_rev` is the highest revision the extension had. A registration of the name after a reopen gets a revision above it.
+
 Every `body` and every `meta` value is one `lv` value (spec/transport.md, "Encodings"):
 a table with string keys, except `schema`, which is a number. A `u64` (an `EntityId`,
 a revision, an epoch, an object ID, a time in milliseconds) is written as its decimal

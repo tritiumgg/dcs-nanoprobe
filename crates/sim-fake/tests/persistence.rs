@@ -319,6 +319,20 @@ fn a_store_reads_back_exactly_as_written() {
     }
 }
 
+#[test]
+fn a_removed_extension_is_absent_after_a_reopen() {
+    let d = temp();
+    let path = d.path().join("store.sqlite");
+    let mut w = World::new_late(3, 1, LostPolicy::Respawn, 0);
+    w.store.set_extension("probe", "return 1");
+    w.store.save_as(&path, record("a")).expect("save");
+    assert!(w.store.remove_extension("probe"));
+    w.store.commit().expect("commit");
+    let (_d, mut s) = read_back(&path);
+    assert!(s.extension("probe").is_none());
+    assert!(s.set_extension("probe", "return 1") > 1);
+}
+
 /// One seed of the deterministic simulation's late schedule, 300 operations
 /// then settling. With `file`, every sidecar restart reads its store back
 /// from the file and keeps nothing else, and writes happen only where the

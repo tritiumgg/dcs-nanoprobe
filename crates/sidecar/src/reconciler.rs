@@ -1387,6 +1387,9 @@ impl Reconciler {
         }
         self.counters.enumerations += 1;
         self.enumerated = true;
+        if seen == 0 {
+            self.adopt_orphans(store);
+        }
         // A drift destroy that reached its limit is tried again after each
         // enumeration that still finds the objects.
         self.drift_destroy_failures.clear();

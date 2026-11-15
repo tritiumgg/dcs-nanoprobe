@@ -81,8 +81,8 @@ fn target(
 /// The refusal for a path E34 did not verify on DCS.
 fn unverified(field: &str, what: &str) -> Status {
     status(
-        Code::FailedPrecondition,
-        ErrorReason::DcsNotReady,
+        Code::Unimplemented,
+        ErrorReason::Unverified,
         format!("{what} is not verified on DCS (E34) and is not offered"),
         0,
         field,
@@ -248,6 +248,12 @@ impl ModerationService for Moderation {
                     Some(pb::ban_request::Target::Ucid(u)) => target(g, None, Some(u))?,
                     None => target(g, None, None)?,
                 };
+                if r.seconds == 0.0 {
+                    return Err(unverified(
+                        "seconds",
+                        "a ban of DCS's default length (seconds 0)",
+                    ));
+                }
                 // A player who is connected is banned by connection, which
                 // also removes them; any other by ucid.
                 let conn = g.roster.conn_of(&key).unwrap_or(0);

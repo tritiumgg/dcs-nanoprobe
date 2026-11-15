@@ -57,7 +57,7 @@ keyboard.
 | Test | Result |
 |---|---|
 | Kick with a reason | Pass. The client saw reason `np-s16-kick`, code 104. |
-| Ban until unban | Pass. The client saw reason `np-s16-ban`, code 101. A rejoin was refused and no `CONNECT` record came. `BANS` listed the client among 1. After `UNBAN` the list no longer held it and the rejoin worked. |
+| Ban until unban | Pass. The client saw reason `np-s16-ban`, code 101. The rejoin failed and no `CONNECT` record came. `BANS` listed the client among 1. After `UNBAN` the list no longer held it and the rejoin worked. |
 | Slot move within E35's limit | Pass (see E35). |
 | Menu callback by a client | Inconclusive after 3 attempts (the third was granted over the cap by the coordinator). Waits for the owner. |
 | Menu callback through the server's `missionCommands.doAction(0)` | Pass. It returns a `MENU` record with the item's ID. |
@@ -88,7 +88,7 @@ unless stated.
   disconnect showed reason `np-s16-kick`, code 104 (`ERR_KICKED`). Run 1 showed the same.
   The same player rejoined as connection 2.
 - Ban: `BAN` for 180 s applied and a `DISCONNECT` record came. The client showed reason
-  `np-s16-ban`, code 101. A rejoin was refused and no `CONNECT` record came.
+  `np-s16-ban`, code 101. The rejoin failed and no `CONNECT` record came. The client's code on the refused join is not recorded.
 - Ban list: `BANS` listed the client among 1. `UNBAN` applied, `BANS` no longer listed the
   client, and the rejoin worked.
 - Move to spectators: `MODERATE SLOT` applied and a `SLOT` record showed side 0 and an empty
@@ -103,8 +103,11 @@ capability record in `hook.log`).
 
 Not run: a ban by ucid of a client that is not connected (`net.banlist_add_by_ucid`), a
 move into an aircraft slot, and a ban with DCS's default length (seconds 0). By E34's rule
-the API leaves the first two out: `Ban` of a player who is not connected and `MovePlayer`
-with a slot answer `FAILED_PRECONDITION`. The ban test used 180 s and an explicit unban.
+the API leaves all three out: `Ban` of a player who is not connected, `Ban` with seconds 0
+and `MovePlayer` with a slot answer `UNIMPLEMENTED` with reason `UNVERIFIED`. The ban test
+used 180 s and an explicit unban. The ban disconnect showed code 101. The refused rejoin was
+judged by the join failing and the server showing no `CONNECT` record; the client's own
+code on the refused join was not recorded.
 
 ### E35 slot gating
 
@@ -216,7 +219,7 @@ waits for the owner on a client with a person.
 - That `INITIATOR_MISSION_ID` on a player's `BIRTH` equals the slot ID is UNVERIFIED: the
   moderation runs did not record the field.
 - E34's ban by ucid of a client who is not connected, a move into an aircraft slot, and a
-  ban with DCS's default length were not run; the API refuses the first two until they are.
+  ban with DCS's default length were not run; the API refuses all three until they are.
 - E36 and the opt-in chat filter design are the owner's choice.
 - `PLAYERS` is not sent while no campaign is active.
 - `players.json` waits for S18 to wire the store directory.

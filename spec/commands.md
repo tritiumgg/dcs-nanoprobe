@@ -1057,7 +1057,9 @@ and no Lua error crosses a Rust frame that owns a value.
 table below says, and a ban survives a DCS restart (LIVE, E34,
 docs/results/2026-11-15-s16-players-moderation.md). `net.banlist_add_by_ucid`'s
 argument order is UNVERIFIED. The sidecar names a player to the agent by connection ID
-and ucid; the API names a player by player key (spec/world.md, "Players").
+and ucid; the API names a player by player key (spec/world.md, "Players"). The API
+refuses a ban of a player with no connection, a ban of seconds 0 and a move into a slot
+with `UNIMPLEMENTED` and reason `UNVERIFIED` until E34 verifies them.
 
 ### Layout: MODERATE
 

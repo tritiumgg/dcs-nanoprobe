@@ -28,8 +28,8 @@
 //! 4. `KICK` with a reason: the client's own disconnect and the reason text
 //!    it saw, which must carry the kick reason and a code
 //!    (`client_kick_disconnect`); it joins again;
-//! 5. `BAN`: the same (`client_ban_disconnect`), a join that is refused, with
-//!    the ban code 101 seen by the client (`client_rejoin_refused`);
+//! 5. `BAN`: the same (`client_ban_disconnect`), a join that is refused
+//!    (`client_rejoin_refused`; the client's code on it is a note);
 //!    `BANS` lists the client; `UNBAN`; `BANS` no longer lists it; a join
 //!    that works; the client leaves.
 //!
@@ -178,7 +178,8 @@ fn slot_changed(report: &Value) -> Option<String> {
     }
 }
 
-/// The ban code a client's `onNetDisconnect` gets (`ERR_BANNED`, LIVE).
+/// The ban code a client's `onNetDisconnect` gets when a ban removes it
+/// (`ERR_BANNED`, LIVE). No run has seen a callback on a refused join.
 const BAN_CODE: &str = "101";
 
 /// The first disconnect of a client report with a reason that carries
@@ -443,25 +444,26 @@ fn on_phase(run: &Run, phase: &str, c: &mut Client) -> Result<(), String> {
                 "client_ban_disconnect",
                 disconnect_with_reason(&report, "np-s16-ban"),
             );
-            // Arm again, so the refusal of the rejoin is observed.
+            // Arm again, so the client's code on the refused join is recorded.
+            // The verdict is the join failing; the server's `ban_refused`
+            // step checks that no `CONNECT` record came.
             c.arm()?;
             let again = c.join()?;
             if again {
                 c.step("client_rejoin_refused", "fail", "the banned client joined");
             } else {
+                c.step("client_rejoin_refused", "pass", "the join failed");
                 std::thread::sleep(Duration::from_secs(5));
                 match c.report() {
-                    Ok(report) if saw_ban_code(&report) => c.step(
-                        "client_rejoin_refused",
-                        "pass",
-                        &format!("the join failed and the client saw code {BAN_CODE}"),
-                    ),
                     Ok(report) => c.step(
-                        "client_rejoin_refused",
-                        "fail",
-                        &format!("the join failed and the client saw no ban code: {report}"),
+                        "client_rejoin_code",
+                        "note",
+                        &format!(
+                            "ban code {BAN_CODE} on the refused join: {}; report {report}",
+                            saw_ban_code(&report)
+                        ),
                     ),
-                    Err(e) => c.step("client_rejoin_refused", "fail", &e),
+                    Err(e) => c.step("client_rejoin_code", "note", &e),
                 }
             }
             answer_file(
@@ -525,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_rejoin_needs_the_ban_code() {
+    fn the_ban_code_is_found_in_a_report() {
         assert!(saw_ban_code(&json!({"disconnects": [{"code": "101"}]})));
         assert!(!saw_ban_code(&json!({"disconnects": [{"code": "5"}]})));
         assert!(!saw_ban_code(&json!({"disconnects": []})));

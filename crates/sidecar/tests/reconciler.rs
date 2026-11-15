@@ -1824,3 +1824,65 @@ fn markers_of_an_adopted_group_are_removed_when_a_mission_load_ends_the_adoption
     assert!(w.store.marker(child).unwrap().removed);
     assert!(!w.store.marker(other).unwrap().removed, "other scopes stay");
 }
+
+/// A rebuilt reconciler (a sidecar restart) removes the markers of an adopted
+/// group whose adoption did not survive, and keeps those of one the agent
+/// still binds.
+#[test]
+fn a_rebuilt_reconciler_removes_the_markers_of_an_adoption_that_ended() {
+    use nanoprobe_sidecar::ids::EntityId;
+    use nanoprobe_sidecar::players::Unmanaged;
+    use nanoprobe_sidecar::store::{MarkerSpec, scope};
+
+    for survives in [false, true] {
+        let mut w = World::new(1, 0, LostPolicy::Report);
+        w.settle().unwrap();
+        let object = w.sim.birth_client_unit_in("m1", 90_002, "F-16C_50");
+        w.settle().unwrap();
+        let (_unit, group) = w
+            .rec
+            .adopt(
+                &mut w.store,
+                &mut w.sim,
+                &Unmanaged {
+                    object,
+                    group: 90_002,
+                    entity: 0,
+                    group_entity: 0,
+                },
+            )
+            .expect("adopted");
+        let (menu, _) = w
+            .store
+            .put_marker(
+                EntityId(0),
+                scope::GROUP,
+                group,
+                MarkerSpec::MenuItem {
+                    parent: EntityId(0),
+                    submenu: true,
+                    text: "m".into(),
+                },
+            )
+            .unwrap();
+        w.tick().unwrap();
+        assert!(!w.store.marker(menu).unwrap().removed);
+
+        w.rec = nanoprobe_sidecar::reconciler::Reconciler::new(
+            nanoprobe_sidecar::reconciler::Config {
+                on_lost: LostPolicy::Report,
+                ..Default::default()
+            },
+            &w.store,
+        );
+        if !survives {
+            w.sim.load_mission();
+        }
+        w.settle().unwrap();
+        assert_eq!(
+            w.store.marker(menu).unwrap().removed,
+            !survives,
+            "survives {survives}"
+        );
+    }
+}

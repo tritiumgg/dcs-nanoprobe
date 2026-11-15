@@ -229,6 +229,20 @@ impl Reconciler {
         }
     }
 
+    /// After an enumeration of whole `OBJECT` records: remove the markers of
+    /// a group that is neither managed nor adopted. A rebuilt reconciler (a
+    /// sidecar restart, a campaign made active again) holds no adoption that
+    /// ended while it was away, and the records just read back every one
+    /// that survived.
+    pub(super) fn adopt_orphans(&mut self, store: &mut Store) {
+        if self.adopted.scope != scope_of(store) || self.adopted.scope.is_none() {
+            return;
+        }
+        let mut keep: Vec<EntityId> = self.adopted.groups.values().copied().collect();
+        keep.extend(self.adopted.rows.values().map(|b| b.group));
+        store.remove_unbound_group_markers(&keep);
+    }
+
     /// An `OBJECT_GONE` record: the row is no longer adopted.
     pub(super) fn adopt_gone(&mut self, object: u64) {
         self.adopted.rows.remove(&object);
