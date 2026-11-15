@@ -190,19 +190,28 @@ local function scenario(name, shim, body, extra_toml, hook_text)
   ctx.host = host
   ctx.out = out
   ctx.profile = profile
+  -- The shell opens `out` for the sidecar in the background job, after
+  -- os.execute returns. Removing it first keeps a stopped sidecar's lines,
+  -- its `end` line among them, from being read as the new one's.
+  local function fresh()
+    os.remove(out)
+  end
   ctx.probe = function()
+    fresh()
     assert(os.execute(string.format(
       '%s --map %s --port %d --token-file %s --seconds 60 > %s 2>&1 & echo $! > %s',
       S.quote(PROBE), S.quote(map), port, S.quote(profile .. 'nanoprobe/token'), S.quote(out),
       S.quote(pidfile))) == 0, 'could not start link-probe')
   end
-  -- `command-script` as the sidecar, for the script `text` (JSON).
-  ctx.script = function(text)
+  -- `command-script` as the sidecar, for the script `text` (JSON). It stays
+  -- attached for `linger_ms` (default 300) after its last RESULT.
+  ctx.script = function(text, linger_ms)
     S.write(profile .. 'script.json', text)
+    fresh()
     assert(os.execute(string.format(
-      '%s --map %s --port %d --token-file %s --script %s --seconds 60 > %s 2>&1 & echo $! > %s',
+      '%s --map %s --port %d --token-file %s --script %s --seconds 60 --linger-ms %d > %s 2>&1 & echo $! > %s',
       S.quote(COMMAND_SCRIPT), S.quote(map), port, S.quote(profile .. 'nanoprobe/token'),
-      S.quote(profile .. 'script.json'), S.quote(out), S.quote(pidfile))) == 0,
+      S.quote(profile .. 'script.json'), linger_ms or 300, S.quote(out), S.quote(pidfile))) == 0,
       'could not start command-script')
   end
   -- Whether the script's `end` line is in.
@@ -887,12 +896,10 @@ scenario('world-gone', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
     end
     return { name = name, units = list }
   end
-  local campaign, first = 7, true
+  local campaign = 7
   local function run(commands, what)
-    if not first then
-      ctx.stop()
-    end
-    first = false
+    -- The last script, or the sidecar `wait` left attached.
+    ctx.stop()
     for _, c in ipairs(commands) do
       c.gen, c.wait_result = gen, true
     end
@@ -900,13 +907,44 @@ scenario('world-gone', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
     finish(ctx, what)
     return ctx.events()
   end
-  ctx.run(0.5)
-  gen = host.states.server.__nanoprobe_shim.agent.status().gen
+  local shim = host.states.server.__nanoprobe_shim
+  local agent = shim.agent
+  -- Frames until `done` holds. A frame costs more CPU under load, so a wait
+  -- is for a state, never for a fixed time. A detached agent samples
+  -- nothing (spec/sampling.md), and a script's sidecar leaves 300 ms after
+  -- its last RESULT, so a wait on the sampler (`attached`) first starts a
+  -- sidecar that stays until the next `run`.
+  local function wait(what, done, attached)
+    if attached then
+      ctx.stop()
+      ctx.script('{"commands":[]}', 60000)
+    end
+    assert(ctx.run(30, function()
+      return (not attached or agent.status().attached) and done()
+    end), what .. ':\n' .. dump(ctx))
+  end
+  -- Whether the agent holds a row for each of `ids`: the shim keeps a slot
+  -- only for an object the agent took (lua/agent/shim.lua, `read`). The
+  -- agent writes OBJECT_GONE only for the rows it holds (spec/commands.md,
+  -- "Handler arguments"), so each destroy waits for its rows first.
+  local function held(ids)
+    for _, id in ipairs(ids) do
+      if not shim.T.slot_of[id] then
+        return false
+      end
+    end
+    return true
+  end
+  wait('the agent has no mission generation', function()
+    gen = agent.status().gen
+    return gen ~= nil and gen > 0
+  end)
   local G = 'np.g.7.1'
   run({ { op = 'GROUP_SPAWN', entity = 1, rev = 1, country = 2, category = 2, name = G,
     group = group(G, { 'np.u.7.2', 'np.u.7.3' }) } }, 'spawn')
-  -- Frames for the births to reach the agent's table.
-  ctx.run(1.0)
+  wait('the spawned units have no rows', function()
+    return held(units(G))
+  end, true)
   local old = units(G)
   local function check(events, ids, result_seq, what)
     local gone, position = {}, {}
@@ -927,14 +965,17 @@ scenario('world-gone', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   end
   check(run({ { op = 'GROUP_DESTROY', entity = 1 } }, 'destroy'), old, 1, 'GROUP_DESTROY')
   host:set_pause(false)
-  ctx.run(0.5)
+  wait('the group is still in the world after a resume', function()
+    return sim.groups[G] == nil
+  end)
   host:set_pause(true)
-  assert(sim.groups[G] == nil, 'the group is still in the world')
 
   -- A spawn under the name of a group the agent holds rows for.
   run({ { op = 'GROUP_SPAWN', entity = 1, rev = 2, country = 2, category = 2, name = G,
     group = group(G, { 'np.u.7.2', 'np.u.7.3' }) } }, 'respawn')
-  ctx.run(1.0)
+  wait('the respawned units have no rows', function()
+    return held(units(G))
+  end, true)
   local before = units(G)
   local events = run({ { op = 'GROUP_SPAWN', entity = 1, rev = 3, country = 2, category = 2, name = G,
     group = group(G, { 'np.u.7.4' }) } }, 'replace')
@@ -953,11 +994,15 @@ scenario('world-gone', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
     pending[id] = true
   end
   host:set_pause(false)
-  ctx.run(1.5)
+  wait('a replaced unit is still in the world after a resume', function()
+    for id in pairs(pending) do
+      if sim.units[id] then
+        return false
+      end
+    end
+    return true
+  end)
   host:set_pause(true)
-  for id in pairs(pending) do
-    assert(not sim.units[id], 'the replaced unit ' .. id .. ' is still in the world after a resume')
-  end
   local n = 0
   for _ in pairs(sim.groups) do
     n = n + 1
@@ -968,7 +1013,9 @@ scenario('world-gone', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   local S1 = 'np.s.7.9'
   run({ { op = 'STATIC_SPAWN', entity = 9, rev = 1, country = 2, name = S1,
     static = { name = S1, type = 'Barrier', x = 500, y = 600, heading = 0 } } }, 'static spawn')
-  ctx.run(1.0)
+  wait('the static has no row', function()
+    return held({ sim.statics[S1].id })
+  end, true)
   local old_static = sim.statics[S1].id
   events = run({ { op = 'STATIC_SPAWN', entity = 9, rev = 2, country = 2, name = S1,
     static = { name = S1, type = 'Barrier', x = 510, y = 600, heading = 0 } } }, 'static replace')
@@ -976,7 +1023,6 @@ scenario('world-gone', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   assert(sim.statics[S1].id ~= old_static, 'the replacing static kept the old ID')
   -- A destroyed ID is not found in the shim's table once a new unit reuses its
   -- slot: no existence check reports it alive, so the pending set drains.
-  local agent = host.states.server.__nanoprobe_shim.agent
   local alive, real = {}, agent.alive
   agent.alive = function(id, sure)
     if sure then
@@ -985,15 +1031,16 @@ scenario('world-gone', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
     return real(id, sure)
   end
   host:set_pause(false)
-  ctx.run(1.5)
+  wait('the pending-destroy set did not drain', function()
+    return agent.status().pending_destroy == 0
+  end, true)
   host:set_pause(true)
   agent.alive = real
   for _, id in ipairs(before) do
     assert(not alive[id], 'the replaced unit ' .. id .. ' was reported alive after its slot was reused')
   end
   assert(not alive[old_static], 'the replaced static ' .. old_static .. ' was reported alive')
-  -- The set has drained: after the last resume and run, nothing is pending
-  -- and nothing expired or overflowed.
+  -- The set has drained, and nothing expired or overflowed.
   local status = agent.status()
   assert(status.pending_destroy == 0 and status.pending_expired == 0 and status.pending_overflow == 0,
     'pending_destroy ' .. tostring(status.pending_destroy) .. ', pending_expired '
