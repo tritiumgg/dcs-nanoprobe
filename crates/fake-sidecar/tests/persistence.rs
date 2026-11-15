@@ -19,7 +19,7 @@ use nanoprobe_proto::v1alpha1::{
     ReadEventsRequest, UnitSpec, WorldFilter, Write, entity,
 };
 use nanoprobe_sidecar::ids::CampaignId;
-use nanoprobe_sidecar::store::{CampaignState, Entry, Store, record_of};
+use nanoprobe_sidecar::store::{CampaignState, Entry, Store, journal_of, record_of};
 use nanoprobe_transport::layout::opcode;
 use tonic::Code;
 use tonic::transport::{Channel, Endpoint};
@@ -288,10 +288,8 @@ async fn suspend_captures_the_live_groups_then_closes_the_store() {
     assert_eq!(r.state, CampaignState::Suspended);
     // The store journalled a CAPTURE of the group before it was closed.
     {
-        let copy = d.path().join("copy.sqlite");
-        nanoprobe_sidecar::store::backup_file(&store_path(d.path(), a), &copy).expect("copy");
-        let s = Store::open(&copy, 10).expect("open the copy");
-        let captured = s.entries().iter().any(|e| {
+        let journal = journal_of(&store_path(d.path(), a)).expect("journal");
+        let captured = journal.iter().any(|e| {
             matches!(e, Entry::Command(j) if u64::from(j.opcode) == opcode::CAPTURE && j.entity.0 == g)
         });
         assert!(captured, "a CAPTURE of group {g} was sent");
@@ -379,6 +377,8 @@ async fn the_timers_take_checkpoints_and_backups_and_keep_backup_keep() {
     })
     .await;
     let first = get(&ch, a).await.last_checkpoint.expect("checkpoint").taken;
+    // A checkpoint is skipped while nothing moves: change something.
+    put_group(&ch, &l, "g", a).await;
     eventually("a later checkpoint", || async {
         get(&ch, a).await.last_checkpoint.expect("cp").taken != first
     })

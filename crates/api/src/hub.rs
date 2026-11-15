@@ -254,6 +254,10 @@ impl SimAdapter for Tee<'_> {
         self.seen.extend(v.iter().cloned());
         v
     }
+
+    fn flush(&mut self) {
+        self.inner.flush();
+    }
 }
 
 impl Inner {
@@ -338,7 +342,7 @@ impl Inner {
                     inner: self.backend.sim(),
                     seen: Vec::new(),
                 };
-                rec.step(&mut slot.store, &mut tee);
+                rec.step_held(&mut slot.store, &mut tee);
                 // Route progress made from the samples just read.
                 let stamp = self.link.stamp();
                 for e in slot.store.take_route_events() {
@@ -422,6 +426,7 @@ impl Inner {
             }
         }
         self.timers(cfg);
+        self.settle(None);
     }
 
     /// What the roster and the moderation calls need after a step: the
@@ -655,15 +660,20 @@ impl Inner {
         }
     }
 
-    /// Write the store of the campaign a call acted on and of the active
-    /// one: an acknowledged change is on disk before the call answers.
-    fn commit_for_answer(&mut self, id: u64) {
-        self.commit(id);
+    /// End a step or a call: write the store of the campaign it acted on
+    /// and of the active one, then let the commands it sent through
+    /// (spec/persistence.md, "Writes"). An acknowledged change is on disk
+    /// before the call answers, and a command before it reaches DCS.
+    fn settle(&mut self, acted: Option<u64>) {
+        if let Some(id) = acted {
+            self.commit(id);
+        }
         if let Some(a) = self.active
-            && a != id
+            && Some(a) != acted
         {
             self.commit(a);
         }
+        self.backend.sim().flush();
     }
 
     /// The periods the sampling tiers achieve now, with the targets the
@@ -1154,7 +1164,12 @@ impl Hub {
             return Err(crate::services::stopping());
         }
         let inner: &mut Inner = &mut g;
-        catch_unwind(AssertUnwindSafe(|| f(inner))).unwrap_or_else(|_| {
+        catch_unwind(AssertUnwindSafe(|| {
+            let r = f(inner);
+            inner.settle(None);
+            r
+        }))
+        .unwrap_or_else(|_| {
             drop(g);
             self.poison();
             Err(status(
@@ -1349,7 +1364,7 @@ impl Hub {
                                 catch_unwind(AssertUnwindSafe(|| {
                                     let r = f(inner, c);
                                     if let Ok((_, acted)) = &r {
-                                        inner.commit_for_answer(*acted);
+                                        inner.settle(Some(*acted));
                                     }
                                     r
                                 }))
@@ -1532,21 +1547,25 @@ impl Hub {
                             .and_then(|c| {
                                 let start = start.take().expect("a call runs once");
                                 let inner: &mut Inner = &mut g;
-                                catch_unwind(AssertUnwindSafe(|| start(inner, c)))
-                                    .map_err(|_| {
-                                        self.poisoned
-                                            .store(true, std::sync::atomic::Ordering::SeqCst);
-                                        self.closing
-                                            .store(true, std::sync::atomic::Ordering::SeqCst);
-                                        status(
-                                            Code::Internal,
-                                            ErrorReason::Internal,
-                                            "the call failed inside the server, which stops",
-                                            0,
-                                            "",
-                                        )
-                                    })?
-                                    .map(|k| (k, c))
+                                catch_unwind(AssertUnwindSafe(|| {
+                                    let r = start(inner, c);
+                                    inner.settle(Some(c));
+                                    r
+                                }))
+                                .map_err(|_| {
+                                    self.poisoned
+                                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                                    self.closing
+                                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                                    status(
+                                        Code::Internal,
+                                        ErrorReason::Internal,
+                                        "the call failed inside the server, which stops",
+                                        0,
+                                        "",
+                                    )
+                                })?
+                                .map(|k| (k, c))
                             });
                         match result {
                             Ok(sent) => break sent,
@@ -1639,6 +1658,8 @@ mod tests {
         fn read(&mut self) -> Vec<RawRecord> {
             Vec::new()
         }
+
+        fn flush(&mut self) {}
     }
 
     impl Backend for Silent {

@@ -241,6 +241,10 @@ impl SimAdapter for Tap<'_> {
         }
         records
     }
+
+    fn flush(&mut self) {
+        self.sim.flush();
+    }
 }
 
 impl Log {
@@ -1458,6 +1462,7 @@ fn paused(c: &mut Ctx) -> Result<bool, String> {
     c.sim
         .send(op, &payload)
         .map_err(|_| "the link is not attached".to_string())?;
+    c.sim.flush();
     while !c.log.enums.iter().skip(runs_before).any(|e| e.ended) {
         c.check_deadline("the enumeration")?;
         c.read();
@@ -1532,6 +1537,7 @@ fn paused(c: &mut Ctx) -> Result<bool, String> {
     c.sim
         .send(op, &payload)
         .map_err(|_| "the link is not attached".to_string())?;
+    c.sim.flush();
     while !c
         .log
         .results

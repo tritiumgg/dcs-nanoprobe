@@ -23,7 +23,8 @@ mod disk;
 #[cfg(feature = "disk")]
 pub use disk::{
     CampaignRecord, CampaignState, Checkpoint, DiskError, MIGRATIONS, Migration, REVISION_RESERVE,
-    SCHEMA, TierPeriod, backup_file, checkpoint_of, ident_of, record_of, schema_of, state_of,
+    SCHEMA, TierPeriod, backup_file, check_lv, checkpoint_of, ident_of, journal_of, record_of,
+    schema_of, state_of,
 };
 
 /// Without the `disk` feature a store lives in memory only: its slot is
@@ -497,7 +498,17 @@ pub struct Store {
     loaded: Option<Loaded>,
     groups: BTreeMap<EntityId, Group>,
     units: BTreeMap<EntityId, Unit>,
+    /// Journal entries not yet written, or, for a store in memory or one
+    /// that keeps its journal, every entry.
     journal: Vec<Entry>,
+    /// Commands journalled with no outcome yet.
+    inflight: BTreeMap<(u64, u64), Journalled>,
+    /// The last agent record folded in: agent boot and record number.
+    last_record: Option<(u64, u64)>,
+    /// Keep written journal entries in memory, for tests that read them.
+    keep_journal: bool,
+    /// Idempotency rows to write with the next commit.
+    idempotency: Vec<IdemRow>,
     changes: VecDeque<(u64, EntityId)>,
     changes_keep: usize,
     grid: Grid,
@@ -576,6 +587,23 @@ pub enum StoreError {
     /// An attack order whose target is neither a group, a static nor a unit
     /// of this campaign. The API answers `INVALID_FIELD`.
     UnsupportedTarget(EntityId),
+    /// A Lua value the store cannot encode whole (spec/persistence.md,
+    /// "Encodings"). The API answers `INVALID_FIELD`.
+    TooLarge(String),
+}
+
+/// A changing call's answer, kept with its idempotency key in the store of
+/// the campaign it acted on (spec/persistence.md, "Idempotency keys").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IdemRow {
+    /// The key.
+    pub key: String,
+    /// When the call was answered, milliseconds since the Unix epoch.
+    pub at_ms: u64,
+    /// The digest of the method and request.
+    pub request_hash: Vec<u8>,
+    /// The encoded response.
+    pub response: Vec<u8>,
 }
 
 /// The default grid cell, in meters.
@@ -594,6 +622,10 @@ impl Store {
             groups: BTreeMap::new(),
             units: BTreeMap::new(),
             journal: Vec::new(),
+            inflight: BTreeMap::new(),
+            last_record: None,
+            keep_journal: true,
+            idempotency: Vec::new(),
             changes: VecDeque::new(),
             changes_keep,
             grid: Grid::new(GRID_CELL_M),
@@ -657,6 +689,7 @@ impl Store {
     /// Set one controller option of a group or static. A value the group
     /// already has changes nothing. Not spec: only the store revision moves.
     pub fn set_option(&mut self, id: EntityId, option: u32, value: Lv) -> Result<(), StoreError> {
+        check_lv(&value).map_err(StoreError::TooLarge)?;
         let g = self.group_mut(id)?;
         if g.options.get(&option) == Some(&value) {
             return Ok(());
@@ -909,33 +942,58 @@ impl Store {
         }
     }
 
-    /// Append an entry to the journal. A store on disk writes itself before
-    /// a command is sent, and when a result, a fact or a command epoch
-    /// arrives (spec/persistence.md, "Writes"). A loaded mission is written
-    /// with the transitions it causes, by the next write.
+    /// Append an entry to the journal. The driver writes it with the rest
+    /// of its step, before the step's commands reach DCS (spec/persistence.md,
+    /// "Writes").
     pub fn journal(&mut self, e: Entry) {
-        // A new entry kind that must survive a sidecar crash on its own
-        // belongs in this list.
-        let write = matches!(
-            e,
-            Entry::Command(_)
-                | Entry::Outcome { .. }
-                | Entry::Epoch(_)
-                | Entry::Death { .. }
-                | Entry::Left { .. }
-                | Entry::Revived { .. }
-                | Entry::StaleDeath { .. }
-                | Entry::ClassifierFault { .. }
-        );
-        self.journal.push(e);
-        if write && self.disk.0.is_some() {
-            self.commit_or_stop();
+        match &e {
+            Entry::Command(c) => {
+                self.inflight.insert((c.epoch, c.seq), c.clone());
+            }
+            Entry::Outcome { epoch, seq, .. } => {
+                self.inflight.remove(&(*epoch, *seq));
+            }
+            _ => {}
         }
+        self.journal.push(e);
     }
 
-    /// The journal, oldest first.
+    /// The journal entries held in memory, oldest first: every entry of a
+    /// store in memory or one that keeps its journal, otherwise those not
+    /// yet written.
     pub fn entries(&self) -> &[Entry] {
         &self.journal
+    }
+
+    /// Keep written journal entries in memory, for a test that reads them.
+    pub fn keep_journal(&mut self, keep: bool) {
+        self.keep_journal = keep;
+    }
+
+    /// The last agent record folded in, agent boot and record number.
+    pub fn last_record(&self) -> Option<(u64, u64)> {
+        self.last_record
+    }
+
+    /// Whether `r` is at or below the last agent record folded in: read
+    /// before a restart that came before the agent learned it was read
+    /// (spec/persistence.md, "A crash between the two commits").
+    pub fn folded(&self, r: &crate::sim::RawRecord) -> bool {
+        self.last_record
+            .is_some_and(|(boot, n)| r.agent_boot == boot && r.number <= n)
+    }
+
+    /// Note the agent record just folded in; written with the next commit.
+    pub fn set_last_record(&mut self, agent_boot: u64, number: u64) {
+        self.last_record = Some((agent_boot, number));
+    }
+
+    /// Keep a changing call's answer with the next commit. Nothing for a
+    /// store in memory, whose keys the API keeps.
+    pub fn put_idempotency(&mut self, row: IdemRow) {
+        if self.disk.0.is_some() {
+            self.idempotency.push(row);
+        }
     }
 
     fn allocate(&mut self) -> Result<EntityId, StoreError> {
@@ -974,6 +1032,10 @@ impl Store {
     }
 
     fn create(&mut self, kind: Kind, spec: NewGroup) -> Result<EntityId, StoreError> {
+        check_lv(&spec.extra).map_err(StoreError::TooLarge)?;
+        for u in &spec.units {
+            check_lv(&u.extra).map_err(StoreError::TooLarge)?;
+        }
         let id = self.allocate()?;
         let mut members = Vec::with_capacity(spec.units.len());
         for u in spec.units {
@@ -1161,6 +1223,7 @@ impl Store {
     /// Set the further keys of a group's table, or of a unit's or static's:
     /// a spec change at a new revision.
     pub fn set_extra(&mut self, id: EntityId, extra: Lv) -> Result<u64, StoreError> {
+        check_lv(&extra).map_err(StoreError::TooLarge)?;
         let group = match self.groups.get_mut(&id) {
             Some(g) if g.kind == Kind::Group => {
                 g.extra = extra;
@@ -1374,11 +1437,9 @@ impl Store {
     }
 
     /// Mark a unit missing or found. A dead unit stays as it is. A unit
-    /// that is found is no longer `removed` either. A store on disk writes
-    /// the change at once: a mark holds the member out of spawns, so a
-    /// sidecar that restarted without a new mark could respawn a dead member,
-    /// and one that restarted without a cleared mark could hold out a living
-    /// one.
+    /// that is found is no longer `removed` either. The mark is durable state:
+    /// the step's commit writes it before any command of the step reaches
+    /// DCS, since a mark holds the member out of spawns.
     pub fn set_missing(&mut self, unit: EntityId, missing: bool) {
         if let Some(u) = self.units.get_mut(&unit)
             && !u.dead
@@ -1390,9 +1451,6 @@ impl Store {
                 u.left_logged = false;
             }
             self.touch(unit);
-            if self.disk.0.is_some() {
-                self.commit_or_stop();
-            }
         }
     }
 
@@ -1625,6 +1683,12 @@ impl Store {
         if let Some(u) = self.units.get_mut(&unit)
             && !u.dead
         {
+            let mut more = more;
+            if check_lv(&more.ammo).is_err() {
+                // The agent caps what it sends; a value past the store's
+                // limits is dropped rather than stop the sidecar.
+                more.ammo = Lv::Nil;
+            }
             u.captured = more;
             if object != 0 {
                 u.object = object;
@@ -1633,9 +1697,16 @@ impl Store {
         }
     }
 
-    /// The command epoch, kept in the server-scoped store (spec/commands.md).
+    /// The command epoch: kept in the server store, not in this one
+    /// (spec/commands.md); the driver gives it to the store at each start.
     pub fn epoch(&self) -> u64 {
         self.epoch
+    }
+
+    /// Start from the epoch the server store holds: the next one is above
+    /// it. Not journalled.
+    pub fn seed_epoch(&mut self, epoch: u64) {
+        self.epoch = self.epoch.max(epoch);
     }
 
     /// Journal a new epoch.
@@ -1658,21 +1729,10 @@ impl Store {
         self.loaded = Some(loaded);
     }
 
-    /// Commands journalled with no outcome, in the order they were written.
+    /// Commands journalled with no outcome, by epoch and sequence number
+    /// (spec/persistence.md, `inflight`).
     pub fn unanswered(&self) -> Vec<Journalled> {
-        let mut open: BTreeMap<(u64, u64), Journalled> = BTreeMap::new();
-        for e in &self.journal {
-            match e {
-                Entry::Command(c) => {
-                    open.insert((c.epoch, c.seq), c.clone());
-                }
-                Entry::Outcome { epoch, seq, .. } => {
-                    open.remove(&(*epoch, *seq));
-                }
-                _ => {}
-            }
-        }
-        open.into_values().collect()
+        self.inflight.values().cloned().collect()
     }
 }
 

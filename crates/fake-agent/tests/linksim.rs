@@ -104,6 +104,7 @@ fn predictions_hold_across_wraps_and_a_restart_drops_the_unwritten() {
         let p = message(seq, 1, 520 + (seq as usize % 97));
         let want = sim.position_after(opcode::MESSAGE as u16, &p);
         let end = sim.send(opcode::MESSAGE as u16, &p).expect("attached");
+        sim.flush();
         assert_eq!(want, end);
         if seq % 200 == 0 {
             results(&mut sim, &mut got, seq as usize);
@@ -118,6 +119,7 @@ fn predictions_hold_across_wraps_and_a_restart_drops_the_unwritten() {
     for seq in 3001..=4000u64 {
         sim.send(opcode::MESSAGE as u16, &message(seq, 1, 600))
             .expect("attached");
+        sim.flush();
     }
     let left = sim.queued();
     let last = sim.last_numbers();
@@ -130,6 +132,7 @@ fn predictions_hold_across_wraps_and_a_restart_drops_the_unwritten() {
     for seq in 1..=50u64 {
         sim.send(opcode::MESSAGE as u16, &message(seq, 2, 64))
             .expect("attached");
+        sim.flush();
     }
     // Wait for the 50 epoch-2 results: they come after every written epoch-1
     // result, and more than `1000 - left` of those may have been written.

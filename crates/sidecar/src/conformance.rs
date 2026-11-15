@@ -112,6 +112,8 @@ impl Session<'_> {
         self.t
             .send(op, &payload)
             .map_err(|_| "the adapter is detached".to_owned())?;
+        // The checks speak to the agent directly: nothing to commit first.
+        self.t.flush();
         Ok(from)
     }
 
@@ -413,6 +415,7 @@ fn a_reattach_answers_what_was_taken(s: &mut Session<'_>) -> R {
         let pos =
             s.t.send(op, &payload)
                 .map_err(|_| "the adapter is detached".to_owned())?;
+        s.t.flush();
         sent.push((h.epoch, h.seq, pos));
     }
     s.pump();

@@ -259,6 +259,10 @@ impl SimAdapter for Logged<'_> {
         }
         rs
     }
+
+    fn flush(&mut self) {
+        self.sim.flush();
+    }
 }
 
 /// Check each command written in a step against the journal: it is there,
@@ -266,12 +270,12 @@ impl SimAdapter for Logged<'_> {
 /// as of that entry, and no unit of a spawn with an earlier death fact. That
 /// it was journalled before the write, and not after, is what
 /// [`Op::SidecarCrashInWrite`] checks.
-fn check_journal(store: &Store, sent: &[Command]) -> Result<(), Violation> {
+fn check_journal(store: &Store, scan: &Scan, sent: &[Command]) -> Result<(), Violation> {
     if sent.is_empty() {
         return Ok(());
     }
-    let mut state: std::collections::HashMap<EntityId, State> = std::collections::HashMap::new();
-    let mut dead: BTreeSet<EntityId> = BTreeSet::new();
+    let mut state = scan.base_state.clone();
+    let mut dead = scan.base_dead.clone();
     let mut at: std::collections::HashMap<(u64, u64), (State, BTreeSet<EntityId>, u64)> =
         std::collections::HashMap::new();
     for e in store.entries() {
@@ -423,6 +427,10 @@ struct Scan {
     commands: std::collections::HashMap<(u64, u64), Journalled>,
     boots: std::collections::HashMap<u64, u64>,
     dead: BTreeSet<EntityId>,
+    /// Each entity's lifecycle state and the dead units when this store
+    /// took over: an opened store's journal starts empty.
+    base_state: std::collections::HashMap<EntityId, State>,
+    base_dead: BTreeSet<EntityId>,
 }
 
 /// The sidecar and DCS, with faults.
@@ -565,7 +573,7 @@ impl World {
             Err(p) => std::panic::resume_unwind(p),
         };
         let sent = logged.sent;
-        check_journal(&self.store, &sent)?;
+        check_journal(&self.store, &self.scan, &sent)?;
         if crashed {
             self.restart_sidecar();
         }
@@ -717,6 +725,9 @@ impl World {
         self.sim.detach();
         self.sidecar_boot += 1;
         self.store = store;
+        // The checks read the journal from memory; an opened store starts
+        // with none.
+        self.store.keep_journal(true);
         self.scan = Scan {
             before: self.sim.ledger().taken.keys().copied().collect(),
             // Deaths the earlier store read; those still unread are this
@@ -727,6 +738,13 @@ impl World {
                 .reported_deaths
                 .difference(&self.sim.unread_deaths())
                 .copied()
+                .collect(),
+            base_state: self.store.groups().map(|g| (g.id, g.state)).collect(),
+            base_dead: self
+                .store
+                .groups()
+                .flat_map(|g| g.members.iter().copied())
+                .filter(|m| self.store.unit(*m).is_some_and(|u| u.dead))
                 .collect(),
             ..Scan::default()
         };

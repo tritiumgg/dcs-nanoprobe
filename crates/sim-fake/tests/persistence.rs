@@ -91,13 +91,14 @@ fn same_world(a: &Store, b: &Store) {
         a.revision(),
         b.revision()
     );
-    assert_eq!(a.epoch(), b.epoch());
     assert_eq!(a.loaded(), b.loaded());
     let ga: Vec<&Group> = a.groups().collect();
     let gb: Vec<&Group> = b.groups().collect();
     assert_eq!(ga, gb);
     assert_eq!(units(a), units(b));
-    assert_eq!(a.entries(), b.entries());
+    // The journal is written, never read back; what a restart reads of it
+    // is the commands in flight.
+    assert_eq!(a.unanswered(), b.unanswered());
     let ea: Vec<_> = a.extensions().collect();
     let eb: Vec<_> = b.extensions().collect();
     assert_eq!(ea, eb);
@@ -140,12 +141,19 @@ fn same_world(a: &Store, b: &Store) {
 
 /// GROUP_ORDER commands sent to a group that already held that order: the
 /// agent answers them `AT_REVISION`. DCS never applies one twice (the agent
+/// Every journal entry the sidecar wrote: from the file for a store on disk,
+/// which drops written entries from memory after a reopen, else from memory.
+fn journal(w: &World) -> Vec<nanoprobe_sidecar::store::Entry> {
+    match w.store.path() {
+        Some(p) => nanoprobe_sidecar::store::journal_of(p).expect("journal"),
+        None => w.store.entries().to_vec(),
+    }
+}
+
 /// keeps the applied revision), so this is the sidecar issuing it twice.
 fn orders_issued_twice(w: &World) -> Vec<(u64, u32, EntityId, u64)> {
-    let journalled: BTreeMap<(u64, u64, u64), _> = w
-        .store
-        .entries()
-        .iter()
+    let journalled: BTreeMap<(u64, u64, u64), _> = journal(w)
+        .into_iter()
         .filter_map(|e| match e {
             nanoprobe_sidecar::store::Entry::Command(j) => {
                 Some(((j.agent_boot, j.epoch, j.seq), j))
@@ -169,10 +177,8 @@ fn orders_issued_twice(w: &World) -> Vec<(u64, u32, EntityId, u64)> {
 /// GROUP_ORDER results the agent gave for commands in the journal: the
 /// order checks below look at these, so a test asserts there are some.
 fn order_results(w: &World) -> usize {
-    let journalled: BTreeSet<(u64, u64, u64)> = w
-        .store
-        .entries()
-        .iter()
+    let journalled: BTreeSet<(u64, u64, u64)> = journal(w)
+        .into_iter()
         .filter_map(|e| match e {
             nanoprobe_sidecar::store::Entry::Command(j) if j.opcode == opcode::GROUP_ORDER => {
                 Some((j.agent_boot, j.epoch, j.seq))
@@ -191,10 +197,8 @@ fn order_results(w: &World) -> usize {
 /// GROUP_ORDER commands DCS applied more than once for one order revision
 /// in one generation of one agent boot.
 fn orders_applied_twice(w: &World) -> Vec<(u64, u32, EntityId, u64)> {
-    let journalled: BTreeMap<(u64, u64, u64), _> = w
-        .store
-        .entries()
-        .iter()
+    let journalled: BTreeMap<(u64, u64, u64), _> = journal(w)
+        .into_iter()
         .filter_map(|e| match e {
             nanoprobe_sidecar::store::Entry::Command(j) => {
                 Some(((j.agent_boot, j.epoch, j.seq), j))
@@ -310,11 +314,12 @@ fn a_store_reads_back_exactly_as_written() {
             let op = s.op_late();
             w.apply(&op).expect("op");
             if i % 25 == 24 {
-                w.store.commit().expect("commit");
+                // A checkpoint writes the sampled state too.
+                w.store.checkpoint(1, Vec::new()).expect("checkpoint");
                 same(&w.store, &read_back(&path).1);
             }
         }
-        w.store.commit().expect("commit");
+        w.store.checkpoint(1, Vec::new()).expect("checkpoint");
         same(&w.store, &read_back(&path).1);
     }
 }

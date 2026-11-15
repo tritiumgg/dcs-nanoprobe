@@ -46,6 +46,9 @@ pub struct Commands(pub Arc<Hub>);
 pub(crate) fn store_error(e: StoreError) -> Status {
     match e {
         StoreError::NoSuchEntity(id) => not_found(id.0),
+        StoreError::TooLarge(why) => {
+            invalid("spec", format!("a Lua value cannot be stored: {why}"))
+        }
         StoreError::Exhausted => status(
             Code::Internal,
             ErrorReason::Internal,
