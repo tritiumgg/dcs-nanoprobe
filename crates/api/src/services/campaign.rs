@@ -331,6 +331,7 @@ impl CampaignService for Campaigns {
         // The copy runs on a worker thread, without the lock; the call
         // answers when it is done (spec/persistence.md, "Backups"). A call
         // whose key is answered skips it and gets the first answer.
+        let mut named = r.campaign_id;
         let taken = match self
             .0
             .backup_start(r.idempotency.as_ref(), r.lease.as_ref(), r.campaign_id)
@@ -338,6 +339,9 @@ impl CampaignService for Campaigns {
         {
             None => None,
             Some((files, id, revision)) => {
+                // The answer names the campaign copied, whatever is active
+                // by then.
+                named = id;
                 let at = wall_ms();
                 let b = tokio::task::spawn_blocking(move || {
                     files.backup(CampaignId(id), at, revision, BackupReason::Manual)
@@ -362,7 +366,7 @@ impl CampaignService for Campaigns {
                     method: "BackupCampaign",
                     key: r.idempotency.as_ref(),
                     lease: r.lease.as_ref(),
-                    campaign: r.campaign_id,
+                    campaign: named,
                     need: Need::Campaign,
                 },
                 &hashed,

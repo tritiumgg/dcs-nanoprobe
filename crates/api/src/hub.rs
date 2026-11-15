@@ -177,9 +177,12 @@ pub struct Inner {
     lock: Option<StoreLock>,
     /// `idempotency_keep_h`.
     idem_keep: Duration,
-    /// Fault injection for tests: the next settle panics after the events
-    /// commit and before the store commit, as a crash there would stop the
-    /// sidecar.
+    /// Stores to close at the end of the call that suspended or finished
+    /// them.
+    closing: Vec<(u64, CampaignState, Option<Vec<u8>>)>,
+    /// Fault injection for tests: the next driver step panics after its
+    /// events commit and before any store write, as a crash there would stop
+    /// the sidecar.
     #[doc(hidden)]
     pub crash_after_events: bool,
 }
@@ -355,9 +358,9 @@ impl Inner {
             Some(slot) if first.campaign != 0 => (first.campaign, &mut slot.events),
             _ => (0, &mut self.server_log),
         };
-        let source = (source.0 != 0).then_some(source);
-        if let Some((boot, n)) = source {
-            match log.has_source(boot, n) {
+        let source = (source.0 != 0).then(|| format!("{}:{}", source.0, source.1));
+        if let Some(s) = source.as_deref() {
+            match log.has_source(s) {
                 Ok(false) => {}
                 Ok(true) => return,
                 Err(e) => panic!("the event log could not be read, stopping: {e}"),
@@ -366,7 +369,7 @@ impl Inner {
         // Every event of one record goes to the same log: they share its
         // frame's campaign.
         for r in reads {
-            log.push_from(campaign, r.stamp, r.body, source);
+            log.push_from(campaign, r.stamp, r.body, source.clone());
         }
     }
 
@@ -397,7 +400,21 @@ impl Inner {
                 // Route progress made from the samples just read.
                 let stamp = self.link.stamp();
                 for e in slot.store.take_route_events() {
-                    slot.events.push(id, stamp, route_body(&e));
+                    // Keyed, so a sample read again after a crash between
+                    // the two commits does not log it twice.
+                    let source = format!(
+                        "route:{}:{}:{}",
+                        e.group.0,
+                        e.order_rev,
+                        e.index.map_or_else(|| "end".to_owned(), |i| i.to_string())
+                    );
+                    push_once(
+                        &mut slot.events,
+                        id,
+                        stamp.clone(),
+                        route_body(&e),
+                        Some(source),
+                    );
                 }
                 tee.seen
             }
@@ -477,6 +494,12 @@ impl Inner {
             if self.backend.sim().send(op, &payload).is_ok() {
                 self.clear_campaign = false;
             }
+        }
+        // The events go to disk before any store write of the step, the
+        // checkpoint included.
+        self.commit_events();
+        if std::mem::take(&mut self.crash_after_events) {
+            panic!("injected: a crash between the events commit and the store commit");
         }
         self.timers(cfg);
         self.settle(None);
@@ -567,8 +590,9 @@ impl Inner {
         }
     }
 
-    /// After the commit that wrote a key in a campaign's store: its row in
-    /// the server store's index.
+    /// A key's row in the server store's index, written before the commit
+    /// that writes the key in the campaign's store: an index row whose key
+    /// the store never got finds nothing, and the repeat runs as new.
     pub(crate) fn index(&mut self, key: &str, placed: Option<u64>) {
         let (Some(c), Some(server)) = (placed, self.server.as_ref()) else {
             return;
@@ -608,6 +632,10 @@ impl Inner {
         let d: idem::Digest32 = hash.as_slice().try_into().ok()?;
         let done = idem::decode_done(&response)?;
         let age = Duration::from_millis(wall_ms().saturating_sub(at_ms));
+        // A key past `idempotency_keep_h` is forgotten: the call runs as new.
+        if age >= self.idem_keep {
+            return None;
+        }
         Some((d, done, age))
     }
 
@@ -615,7 +643,12 @@ impl Inner {
     fn stored_key(&mut self, c: u64, key: &str) -> Option<(Vec<u8>, Vec<u8>, u64)> {
         let slot = self.campaigns.get(&c)?;
         if slot.meta.state == pb::CampaignState::Finished as i32 {
-            return None;
+            // A finished store is read without being opened.
+            let path = self.files.as_ref()?.store_path(CampaignId(c));
+            return match nanoprobe_sidecar::store::idempotency_of(&path, key) {
+                Ok(r) => r.map(|r| (r.request_hash, r.response, r.at_ms)),
+                Err(e) => panic!("the store of campaign {c} could not be read, stopping: {e}"),
+            };
         }
         self.open_store(c).ok()?;
         let row = match self.campaigns[&c].store.idempotency(key) {
@@ -842,8 +875,8 @@ impl Inner {
         // The events first, then the stores (spec/persistence.md, "A crash
         // between the two commits").
         self.commit_events();
-        if std::mem::take(&mut self.crash_after_events) {
-            panic!("injected: a crash between the events commit and the store commit");
+        for (id, state, outcome) in std::mem::take(&mut self.closing) {
+            self.close_store(id, state, outcome);
         }
         if let Some(a) = self.active {
             self.epoch_floor = self.epoch_floor.max(self.campaigns[&a].store.epoch());
@@ -1217,7 +1250,10 @@ impl Inner {
         } else {
             CampaignState::Suspended
         };
-        self.close_store(id, state, outcome.clone());
+        // Closed at the end of the call, so the call's key goes into the
+        // store in the closing transaction (spec/persistence.md,
+        // "Idempotency keys").
+        self.closing.push((id, state, outcome.clone()));
         if let Some(s) = self.campaigns.get_mut(&id) {
             s.meta.state = if finished {
                 pb::CampaignState::Finished as i32
@@ -1240,6 +1276,9 @@ impl Inner {
     /// it. A failure is returned; the rest are still closed.
     pub fn close_all(&mut self) -> Result<(), String> {
         self.collect_backup(true);
+        for (id, state, outcome) in std::mem::take(&mut self.closing) {
+            self.close_store(id, state, outcome);
+        }
         let mut errors = Vec::new();
         for slot in self.campaigns.values_mut() {
             if let Err(e) = slot.events.commit() {
@@ -1255,6 +1294,9 @@ impl Inner {
                 errors.push(format!("server store: {e}"));
             }
         }
+        // The next sidecar may take the store dir, even while handlers of
+        // this one still hold the hub.
+        self.lock = None;
         let ids: Vec<u64> = self.campaigns.keys().copied().collect();
         for id in ids {
             let achieved = self.achieved(id);
@@ -1299,6 +1341,24 @@ fn retain(l: &mut EventLog, campaign: u64, retention: Duration) -> Result<(), Di
         );
     }
     Ok(())
+}
+
+/// Append an event unless one made from the same `source` is in the log.
+fn push_once(
+    log: &mut EventLog,
+    campaign: u64,
+    stamp: pb::Stamp,
+    body: event::Body,
+    source: Option<String>,
+) {
+    if let Some(s) = source.as_deref() {
+        match log.has_source(s) {
+            Ok(false) => {}
+            Ok(true) => return,
+            Err(e) => panic!("the event log could not be read, stopping: {e}"),
+        }
+    }
+    log.push_from(campaign, stamp, body, source);
 }
 
 /// How often the event retention runs.
@@ -1458,6 +1518,7 @@ impl Hub {
                 lock: None,
                 idem_keep: cfg.idempotency_keep,
                 crash_after_events: false,
+                closing: Vec::new(),
             }),
             tick,
             settled: Notify::new(),
@@ -1604,6 +1665,10 @@ impl Hub {
                 let now = Instant::now();
                 let k = key.map(|k| k.key.as_str()).unwrap_or_default();
                 if k.is_empty() || g.idem.running(k) || g.idem.get(now, k).is_some() {
+                    return Ok(None);
+                }
+                // A key a store remembers from before a restart: a repeat.
+                if g.recall(k, campaign).is_some() {
                     return Ok(None);
                 }
                 g.leases
@@ -1771,8 +1836,8 @@ impl Hub {
                                             pending: None,
                                         };
                                         let placed = inner.remember(key, &d, &done);
-                                        inner.settle(Some(*acted));
                                         inner.index(key, placed);
+                                        inner.settle(Some(*acted));
                                     }
                                     r
                                 }))
@@ -1894,9 +1959,9 @@ pub fn settle(g: &mut Inner, key: &str, done: Done) -> Done {
     g.idem.update(key, settled.clone());
     if let Some(d) = g.idem.digest_of(key) {
         let placed = g.remember(key, &d, &settled);
+        g.index(key, placed);
         let c = settled.campaign;
         g.settle(Some(c));
-        g.index(key, placed);
     }
     settled
 }
@@ -1979,8 +2044,8 @@ impl Hub {
                                             pending: Some(Pending { cmd: *cmd, kind }),
                                         };
                                         let placed = inner.remember(key, &d, &done);
-                                        inner.settle(Some(c));
                                         inner.index(key, placed);
+                                        inner.settle(Some(c));
                                     } else {
                                         inner.settle(Some(c));
                                     }
@@ -2059,8 +2124,8 @@ impl Hub {
                         pending,
                     };
                     let placed = g.remember(key, &d, &done);
-                    g.settle(Some(c));
                     g.index(key, placed);
+                    g.settle(Some(c));
                     g.idem.finish(Instant::now(), key, done);
                     drop(g);
                     self.settled.notify_waiters();

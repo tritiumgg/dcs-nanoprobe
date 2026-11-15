@@ -94,7 +94,7 @@ impl EventLog {
         campaign: u64,
         stamp: pb::Stamp,
         body: event::Body,
-        source: Option<(u64, u64)>,
+        source: Option<String>,
     ) -> u64 {
         let sequence = self.next;
         let e = Event {
@@ -124,10 +124,10 @@ impl EventLog {
         self.push_from(campaign, stamp, body, None)
     }
 
-    /// Whether an event made from this agent record is in the log already.
-    pub fn has_source(&self, agent_boot: u64, number: u64) -> Result<bool, DiskError> {
+    /// Whether an event made from `source` is in the log already.
+    pub fn has_source(&self, source: &str) -> Result<bool, DiskError> {
         match self.file.as_ref() {
-            Some(f) => f.has_source(agent_boot, number),
+            Some(f) => f.has_source(source),
             None => Ok(false),
         }
     }

@@ -300,6 +300,26 @@ pub fn revision_of(path: &Path) -> Result<u64, DiskError> {
     Rd(&get_meta(&conn, "world")?).u("revision")
 }
 
+/// A key kept in the store file at `path`, read without opening the store:
+/// for a finished campaign, whose store is never opened again.
+pub fn idempotency_of(path: &Path, key: &str) -> Result<Option<IdemRow>, DiskError> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    Ok(conn
+        .query_row(
+            "SELECT key, at_ms, request_hash, response FROM idempotency WHERE key = ?1",
+            [key],
+            |r| {
+                Ok(IdemRow {
+                    key: r.get(0)?,
+                    at_ms: u64::try_from(r.get::<_, i64>(1)?).unwrap_or(0),
+                    request_hash: r.get(2)?,
+                    response: r.get(3)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
 /// Every journal entry in the store file at `path`, oldest first, read
 /// without opening the store. The sidecar never reads its journal back; this
 /// is for audits and tests.
@@ -550,6 +570,56 @@ impl Store {
         r
     }
 
+    /// Close the store in one transaction (spec/persistence.md, "Campaign
+    /// operations"): the final checkpoint, `record`, the keys staged with
+    /// [`Store::put_idempotency`], and the closed mark. On a failure the
+    /// store stays open. The caller then drops it.
+    pub fn close_with(
+        &mut self,
+        at_ms: u64,
+        achieved: Vec<TierPeriod>,
+        record: CampaignRecord,
+    ) -> Result<Checkpoint, DiskError> {
+        let revision = self.rev;
+        let model_time = self.sample_time;
+        let mission_gen = self.loaded.as_ref().map_or(0, |l| l.mission_gen);
+        let Some(mut d) = self.disk.0.take() else {
+            return Ok(Checkpoint {
+                seq: 0,
+                at_ms,
+                revision,
+                model_time,
+                mission_gen,
+                achieved,
+            });
+        };
+        let (old_record, old_open) = (d.record.clone(), d.open);
+        d.record = record;
+        d.record_written = false;
+        d.open = false;
+        let c = Checkpoint {
+            seq: d.last_checkpoint.as_ref().map_or(0, |c| c.seq) + 1,
+            at_ms,
+            revision,
+            model_time,
+            mission_gen,
+            achieved,
+        };
+        let r = d.write_with(self, Some(&c), false);
+        match r {
+            Ok(()) => d.last_checkpoint = Some(c.clone()),
+            Err(_) => {
+                d.record = old_record;
+                d.open = old_open;
+            }
+        }
+        self.disk.0 = Some(d);
+        r.map(|()| {
+            self.drain_journal();
+            c
+        })
+    }
+
     /// Close the store cleanly: write everything and mark it closed, so the
     /// next open keeps the revision. The caller then drops it.
     pub fn close(&mut self) -> Result<(), DiskError> {
@@ -707,7 +777,17 @@ impl Disk {
         let full = cp.is_some();
         let mut changed_groups = Vec::new();
         for (id, g) in groups {
-            if self.groups.get(id) != Some(g) {
+            let differs = match self.groups.get(id) {
+                None => true,
+                Some(w) if full => w != g,
+                // The lead position is sampled bookkeeping.
+                Some(w) => {
+                    let mut same = g.clone();
+                    same.last_lead = w.last_lead;
+                    *w != same
+                }
+            };
+            if differs {
                 put_entity(&tx, *id, "group", &enc_group(g))?;
                 changed_groups.push(*id);
             }

@@ -20,7 +20,7 @@ server folder `server`, and the lock file `lock`.
 | `<id>/backups/events.sqlite` | One copy of the event history, shared by every backup. |
 | `server/store.sqlite` | The server store (below). |
 | `server/events.sqlite` | The server event log: events recorded while no campaign is active. |
-| `server/backups/...` | The server store's backups, laid out as a campaign's. |
+| `server/backups/...` | The server store's backups, laid out as a campaign's. One is taken with each scheduled backup of the active campaign (reason `scheduled`) and before a migration (`pre_migration`), with the same retention. Its revision in `backup.txt` is the command epoch. |
 
 Every `.sqlite` file runs SQLite with `journal_mode = WAL` and `synchronous = NORMAL`: a
 transaction survives a crash of the sidecar process and of DCS. A power loss may lose
@@ -44,7 +44,8 @@ process, so a crash leaves no stale lock. Two sidecars never write one store dir
 
 ## Encodings
 
-Every `body` and every `meta` value is one `lv` value (spec/transport.md, "Encodings"):
+In a store file (a campaign's or the server's), every `body` and every `meta` value is
+one `lv` value (spec/transport.md, "Encodings"):
 a table with string keys, except `schema`, which is a number. A `u64` (an `EntityId`,
 a revision, an epoch, an object ID, a time in milliseconds) is written as its decimal
 text, because an `lv` number is a double. A list is a table with keys 1 to n. A
@@ -60,8 +61,9 @@ is refused (`INVALID_FIELD` for an API call). The transport codec's writer, whic
 writes nil there, is never used for the store. The encoding of every row kind and of
 an event body is pinned in `spec/persistence.golden`, which the tests check.
 
-An event `body` is the Protobuf encoding of the `Event` message of the package named in
-the events file's `meta` (`nanoprobe.v1alpha1`), as the Events service sends it.
+An events file's `meta` values are UTF-8 text. An event `body` is the Protobuf encoding
+of the `Event` message of the package named in the events file's `meta`
+(`nanoprobe.v1alpha1`), as the Events service sends it.
 
 ## The store file
 
@@ -320,16 +322,19 @@ campaign backup.
 
 A changing call's key (spec/errors.md, "Idempotency") is written with its change:
 
-- A call that resolved to a campaign writes its `idempotency` row in that campaign's
-  store, in the same transaction as the change. The server store's index row (`key`,
-  `at_ms`, `campaign`) is written after it.
+- A call that acted on a campaign writes its `idempotency` row in that campaign's
+  store, in the same transaction as the change; a call that suspends or finishes the
+  campaign writes it in the closing transaction. The server store's index row (`key`,
+  `at_ms`, `campaign`) is written before that transaction. An index row whose
+  campaign store never got the key finds nothing, and the repeat runs as a new call.
 - A call on no campaign writes its whole row in the server store.
 
-A repeat looks in the index, then in the named campaign's store. A crash between the
-campaign commit and the index write loses only the index row: the key is found again
-when the campaign's store is opened, at sidecar start for the active campaign, since
-the open copies its rows younger than `idempotency_keep_h` into the index. Rows older
-than `idempotency_keep_h` are deleted from both stores once an hour.
+A repeat looks in the index, then in that campaign's store; with no index row, in the
+store of the campaign the call names, or the active one. A finished campaign's store
+is read for it without being opened. When a campaign's store is opened, its rows
+younger than `idempotency_keep_h` are copied into the index. A stored key older than
+`idempotency_keep_h` is forgotten: the repeat runs as a new call. Rows older than
+`idempotency_keep_h` are deleted from every open store once an hour.
 
 ## Campaign operations
 

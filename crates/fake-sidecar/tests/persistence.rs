@@ -1,6 +1,7 @@
 //! The API over campaign stores on disk (spec/persistence.md): a sidecar
 //! restart, suspend with capture, finish, the checkpoint and backup timers,
-//! and the Events service over `history.log` with compaction.
+//! the Events service over `events.sqlite` with retention, the server
+//! store, idempotency across restarts, and a crash between the two commits.
 
 use std::path::Path;
 use std::time::Duration;
@@ -293,8 +294,15 @@ async fn suspend_captures_the_live_groups_then_closes_the_store() {
         .campaign
         .expect("campaign");
     assert_eq!(c.state, pb::CampaignState::Suspended as i32);
-    assert!(c.last_checkpoint.is_some(), "a final checkpoint");
     assert!(!hub.lock().campaigns[&a].opened, "the store is closed");
+    // The store closes when the call ends: its final checkpoint shows after.
+    let before = c.last_checkpoint.and_then(|x| x.taken);
+    let after = hub.lock().campaigns[&a]
+        .meta
+        .last_checkpoint
+        .clone()
+        .and_then(|x| x.taken);
+    assert!(after.is_some() && after != before, "a final checkpoint");
     let (_, _, r) = record_of(&store_path(d.path(), a)).expect("record");
     assert_eq!(r.state, CampaignState::Suspended);
     // The store journalled a CAPTURE of the group before it was closed.

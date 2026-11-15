@@ -3160,7 +3160,7 @@ pub mod campaign_service_client {
         /// campaign; stop the server; delete store.sqlite-wal and store.sqlite-shm
         /// in the campaign's folder if they are there; copy backups/<n>/store.sqlite
         /// over the folder's store.sqlite; start the server; activate the campaign.
-        /// history.log is not rolled back and keeps the events after the backup.
+        /// events.sqlite is not rolled back and keeps the events after the backup.
         pub async fn backup_campaign(
             &mut self,
             request: impl tonic::IntoRequest<super::BackupCampaignRequest>,
@@ -3307,7 +3307,7 @@ pub mod campaign_service_server {
         /// campaign; stop the server; delete store.sqlite-wal and store.sqlite-shm
         /// in the campaign's folder if they are there; copy backups/<n>/store.sqlite
         /// over the folder's store.sqlite; start the server; activate the campaign.
-        /// history.log is not rolled back and keeps the events after the backup.
+        /// events.sqlite is not rolled back and keeps the events after the backup.
         async fn backup_campaign(
             &self,
             request: tonic::Request<super::BackupCampaignRequest>,

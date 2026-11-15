@@ -183,12 +183,14 @@ impl ServerStore {
                 log: 0,
                 keep: usize::MAX,
             };
+            // The server store's revision is its command epoch.
+            let epoch = u_of(get_meta(&conn, "epoch")?, "epoch")?;
             let have = folder
                 .list()?
                 .last()
-                .is_some_and(|b| b.schema == found && b.revision == 0);
+                .is_some_and(|b| b.schema == found && b.revision == epoch);
             if !have {
-                folder.take(at_ms, found, 0, BackupReason::PreMigration)?;
+                folder.take(at_ms, found, epoch, BackupReason::PreMigration)?;
             }
             let tx = conn.transaction()?;
             for step in steps.iter().filter(|s| s.to > found) {

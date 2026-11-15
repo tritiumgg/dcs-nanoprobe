@@ -25,8 +25,10 @@ pub struct EventRow {
     pub seq: u64,
     /// Milliseconds since the Unix epoch.
     pub wall_ms: u64,
-    /// The agent record it was made from: agent boot and record number.
-    pub source: Option<(u64, u64)>,
+    /// What it was made from, unique in the file: `<agent boot>:<record
+    /// number>` for an agent record, `route:<group>:<order revision>:<index
+    /// or end>` for route progress; `None` for an event the sidecar made.
+    pub source: Option<String>,
     /// The Protobuf encoding of the event.
     pub body: Vec<u8>,
 }
@@ -55,16 +57,6 @@ pub struct EventFile {
     first: Option<u64>,
     next: u64,
     pending: Vec<EventRow>,
-}
-
-fn source_text(s: Option<(u64, u64)>) -> Option<String> {
-    s.map(|(boot, n)| format!("{boot}:{n}"))
-}
-
-fn source_of(t: Option<String>) -> Option<(u64, u64)> {
-    let t = t?;
-    let (a, b) = t.split_once(':')?;
-    Some((a.parse().ok()?, b.parse().ok()?))
 }
 
 fn connect(path: &Path) -> Result<Connection, DiskError> {
@@ -171,12 +163,7 @@ impl EventFile {
                 "INSERT INTO event (seq, wall_ms, source, body) VALUES (?1, ?2, ?3, ?4)",
             )?;
             for r in &self.pending {
-                st.execute(params![
-                    r.seq as i64,
-                    r.wall_ms as i64,
-                    source_text(r.source),
-                    r.body
-                ])?;
+                st.execute(params![r.seq as i64, r.wall_ms as i64, r.source, r.body])?;
             }
         }
         tx.commit()?;
@@ -185,14 +172,14 @@ impl EventFile {
         Ok(())
     }
 
-    /// Whether an event made from this agent record is in the file: a record
-    /// read again after a crash between the events commit and the store
-    /// commit (spec/persistence.md, "A crash between the two commits").
-    pub fn has_source(&self, agent_boot: u64, number: u64) -> Result<bool, DiskError> {
+    /// Whether an event made from `source` is in the file: a record read
+    /// again after a crash between the events commit and the store commit
+    /// (spec/persistence.md, "A crash between the two commits").
+    pub fn has_source(&self, source: &str) -> Result<bool, DiskError> {
         if self
             .pending
             .iter()
-            .any(|r| r.source == Some((agent_boot, number)))
+            .any(|r| r.source.as_deref() == Some(source))
         {
             return Ok(true);
         }
@@ -200,7 +187,7 @@ impl EventFile {
             .conn
             .query_row(
                 "SELECT 1 FROM event WHERE source = ?1",
-                [format!("{agent_boot}:{number}")],
+                [source],
                 |_| Ok(()),
             )
             .optional()?
@@ -221,7 +208,7 @@ impl EventFile {
                 Ok(EventRow {
                     seq: u64::try_from(r.get::<_, i64>(0)?).unwrap_or(0),
                     wall_ms: u64::try_from(r.get::<_, i64>(1)?).unwrap_or(0),
-                    source: source_of(r.get(2)?),
+                    source: r.get(2)?,
                     body: r.get(3)?,
                 })
             },
@@ -308,11 +295,11 @@ impl EventFile {
 mod tests {
     use super::*;
 
-    fn row(seq: u64, wall_ms: u64, source: Option<(u64, u64)>) -> EventRow {
+    fn row(seq: u64, wall_ms: u64, source: Option<&str>) -> EventRow {
         EventRow {
             seq,
             wall_ms,
-            source,
+            source: source.map(str::to_owned),
             body: vec![seq as u8],
         }
     }
@@ -323,15 +310,15 @@ mod tests {
         let p = d.path().join("events.sqlite");
         let mut f = EventFile::open(&p, 7).expect("open");
         assert_eq!(f.next_seq(), 1);
-        f.push(row(1, 10, Some((5, 100))));
+        f.push(row(1, 10, Some("5:100")));
         f.push(row(2, 11, None));
-        assert!(f.has_source(5, 100).expect("pending"));
+        assert!(f.has_source("5:100").expect("pending"));
         f.commit().expect("commit");
         drop(f);
         let f = EventFile::open(&p, 7).expect("reopen");
         assert_eq!((f.first_seq(), f.next_seq()), (Some(1), 3));
-        assert!(f.has_source(5, 100).expect("committed"));
-        assert!(!f.has_source(5, 101).expect("absent"));
+        assert!(f.has_source("5:100").expect("committed"));
+        assert!(!f.has_source("5:101").expect("absent"));
         assert_eq!(f.read_from(2, 10).expect("read"), vec![row(2, 11, None)]);
         // Another campaign's file is refused.
         assert!(matches!(EventFile::open(&p, 8), Err(DiskError::Corrupt(_))));

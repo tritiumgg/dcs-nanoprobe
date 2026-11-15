@@ -292,7 +292,6 @@ impl Campaigns {
         state: CampaignState,
         outcome: Option<Vec<u8>>,
     ) -> Result<(), DiskError> {
-        store.checkpoint(at_ms, achieved)?;
         let mut r = store
             .record()
             .cloned()
@@ -301,8 +300,7 @@ impl Campaigns {
         if outcome.is_some() {
             r.outcome = outcome;
         }
-        store.set_record(r)?;
-        store.close()
+        store.close_with(at_ms, achieved, r).map(|_| ())
     }
 
     /// Take a backup of a campaign's store through a connection of its own,

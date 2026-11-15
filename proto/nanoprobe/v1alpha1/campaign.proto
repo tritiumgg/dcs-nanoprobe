@@ -31,7 +31,7 @@ service CampaignService {
   // campaign; stop the server; delete store.sqlite-wal and store.sqlite-shm
   // in the campaign's folder if they are there; copy backups/<n>/store.sqlite
   // over the folder's store.sqlite; start the server; activate the campaign.
-  // history.log is not rolled back and keeps the events after the backup.
+  // events.sqlite is not rolled back and keeps the events after the backup.
   rpc BackupCampaign(BackupCampaignRequest) returns (BackupCampaignResponse);
   // The backups kept, oldest first. Needs no lease.
   rpc ListCampaignBackups(ListCampaignBackupsRequest) returns (ListCampaignBackupsResponse);
