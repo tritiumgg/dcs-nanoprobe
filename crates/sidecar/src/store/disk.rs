@@ -2506,6 +2506,146 @@ fn dec_route_event(v: &Lv) -> Result<RouteEvent, DiskError> {
 mod tests {
     use super::*;
 
+    /// The golden file of the store's row encodings (spec/persistence.md,
+    /// "Encodings"): `<name> <hex>` per line. Set `NANOPROBE_BLESS=1` to
+    /// write it after an intended change, with a new schema version.
+    const GOLDEN: &str = include_str!("../../../../spec/persistence.golden");
+
+    fn golden_rows() -> Vec<(String, Vec<u8>)> {
+        let mut s = Store::new(CampaignId(7), 10);
+        let g = s
+            .create_group(super::super::NewGroup {
+                theater: "Caucasus".into(),
+                country: 2,
+                category: 2,
+                coalition: 2,
+                units: vec![super::super::NewUnit::new(
+                    "M-113",
+                    UnitState {
+                        at: Point {
+                            x: 1.5,
+                            y: 0.0,
+                            z: -2.25,
+                        },
+                        heading: 0.5,
+                        life: 1.0,
+                        fuel: 0.75,
+                    },
+                )],
+                authority: Authority::Sim,
+                label: "g".into(),
+                extra: Lv::Table(vec![(Lv::String(b"k".to_vec()), Lv::Number(1.0))]),
+            })
+            .expect("group");
+        let m = s.group(g).expect("g").members[0];
+        let command = Entry::Command(Journalled {
+            agent_boot: 11,
+            epoch: 3,
+            seq: 4,
+            opcode: 16,
+            entity: g,
+            rev: 1,
+            mission_gen: 2,
+            position: 64,
+            units: vec![m],
+        });
+        let checkpoint = Checkpoint {
+            seq: 1,
+            at_ms: 1_700_000_000_000,
+            revision: 9,
+            model_time: 12.5,
+            mission_gen: 2,
+            achieved: vec![TierPeriod {
+                tier: "position".into(),
+                target_s: 1.0,
+                achieved_s: 1.25,
+            }],
+        };
+        let mut rows = vec![
+            (
+                "group".to_owned(),
+                encode(&enc_group(s.group(g).expect("g"))),
+            ),
+            ("unit".to_owned(), encode(&enc_unit(s.unit(m).expect("u")))),
+            ("entry.command".to_owned(), encode(&enc_entry(&command))),
+            (
+                "entry.death".to_owned(),
+                encode(&enc_entry(&Entry::Death { unit: m })),
+            ),
+            (
+                "checkpoint".to_owned(),
+                encode(&enc_checkpoint(&checkpoint)),
+            ),
+            ("record".to_owned(), encode(&enc_record(&record()))),
+        ];
+        for (i, e) in s.entries().iter().enumerate() {
+            rows.push((format!("entry.created.{i}"), encode(&enc_entry(e))));
+        }
+        rows
+    }
+
+    #[test]
+    fn store_rows_encode_as_the_golden_file_says() {
+        let text: String = golden_rows()
+            .iter()
+            .map(|(name, b)| {
+                let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+                format!("store.{name} {hex}\n")
+            })
+            .collect();
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../spec/persistence.golden");
+        if std::env::var_os("NANOPROBE_BLESS").is_some() {
+            let others: String = GOLDEN
+                .lines()
+                .filter(|l| !l.starts_with("store."))
+                .map(|l| format!("{l}\n"))
+                .collect();
+            std::fs::write(path, others + &text).expect("bless");
+            return;
+        }
+        let have: String = GOLDEN
+            .lines()
+            .filter(|l| l.starts_with("store."))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        assert_eq!(
+            have, text,
+            "the store's encoding changed; see spec/persistence.md"
+        );
+        // Every row decodes back.
+        for (name, b) in golden_rows() {
+            decode(&b).unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
+    }
+
+    #[test]
+    fn a_value_too_deep_or_too_wide_is_refused_not_written_as_nil() {
+        let mut deep = Lv::Number(1.0);
+        for _ in 0..nanoprobe_transport::codec::MAX_DEPTH {
+            deep = Lv::Table(vec![(Lv::Number(1.0), deep)]);
+        }
+        assert!(check_lv(&deep).is_ok(), "the codec's own depth fits");
+        deep = Lv::Table(vec![(Lv::Number(1.0), deep)]);
+        assert!(check_lv(&deep).is_err());
+        let d = tempfile::tempdir().expect("dir");
+        let mut s = Store::new(CampaignId(7), 10);
+        s.save_as(&d.path().join("store.sqlite"), record())
+            .expect("save");
+        let e = s
+            .create_group(super::super::NewGroup {
+                theater: "Caucasus".into(),
+                country: 2,
+                category: 2,
+                coalition: 2,
+                units: vec![super::super::NewUnit::new("M-113", UnitState::default())],
+                authority: Authority::Sim,
+                label: String::new(),
+                extra: deep,
+            })
+            .expect_err("too deep");
+        assert!(matches!(e, super::super::StoreError::TooLarge(_)));
+    }
+
     fn record() -> CampaignRecord {
         CampaignRecord {
             name: "a".into(),

@@ -795,3 +795,39 @@ async fn a_crash_between_the_two_commits_folds_and_logs_each_record_once() {
         .expect("dup");
     assert_eq!(dup, 0);
 }
+
+/// Activation suspends the active campaign before it opens the target: a
+/// target that cannot be opened leaves no campaign active.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_target_that_cannot_open_leaves_no_campaign_active() {
+    let d = tempfile::tempdir().expect("dir");
+    let server = start(cfg(d.path()), fake_config()).await.expect("server");
+    let ch = connect(&server).await;
+    let l = lease(&ch).await;
+    let a = create(&ch, &l, "a", true).await;
+    let b = create(&ch, &l, "b", false).await;
+    server.stop().await.expect("stop");
+    // b's store is damaged while no sidecar runs; listing reads only its
+    // record, so the damage shows at the open.
+    let c = rusqlite::Connection::open(store_path(d.path(), b)).expect("conn");
+    c.execute_batch("DELETE FROM meta WHERE key = 'world';")
+        .expect("damage");
+    drop(c);
+    let server = start(cfg(d.path()), fake_config()).await.expect("restart");
+    let ch = connect(&server).await;
+    let l = lease(&ch).await;
+    let e = CampaignServiceClient::new(ch.clone())
+        .activate_campaign(pb::ActivateCampaignRequest {
+            lease: Some(l.clone()),
+            campaign_id: b,
+            idempotency: key("to-b"),
+        })
+        .await
+        .expect_err("b cannot be opened");
+    assert_eq!(e.code(), Code::Internal, "{e:?}");
+    assert_eq!(server.hub.lock().active, None);
+    assert_eq!(get(&ch, a).await.state, pb::CampaignState::Suspended as i32);
+    let (_, _, r) = record_of(&store_path(d.path(), a)).expect("record");
+    assert_eq!(r.state, CampaignState::Suspended);
+    server.stop().await.expect("stop");
+}

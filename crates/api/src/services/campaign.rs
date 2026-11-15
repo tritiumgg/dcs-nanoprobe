@@ -150,7 +150,7 @@ impl CampaignService for Campaigns {
                         },
                     )?;
                     if r.activate {
-                        g.activate(&cfg, id);
+                        g.activate(&cfg, id)?;
                     }
                     Ok((
                         CreateCampaignResponse {
@@ -214,11 +214,11 @@ impl CampaignService for Campaigns {
                     key: r.idempotency.as_ref(),
                     lease: r.lease.as_ref(),
                     campaign: r.campaign_id,
-                    need: Need::Campaign,
+                    need: Need::Activate,
                 },
                 &hashed,
                 |g: &mut Inner, id| {
-                    g.activate(&cfg, id);
+                    g.activate(&cfg, id)?;
                     Ok((
                         ActivateCampaignResponse {
                             campaign: Some(shown(g, id)),

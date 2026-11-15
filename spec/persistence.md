@@ -58,7 +58,7 @@ The store encodes with a checked writer: a value nested deeper than the codec al
 or a table with more pairs than it allows is an error, and the change that carries it
 is refused (`INVALID_FIELD` for an API call). The transport codec's writer, which
 writes nil there, is never used for the store. The encoding of every row kind and of
-an event body is pinned by a golden test.
+an event body is pinned in `spec/persistence.golden`, which the tests check.
 
 An event `body` is the Protobuf encoding of the `Event` message of the package named in
 the events file's `meta` (`nanoprobe.v1alpha1`), as the Events service sends it.

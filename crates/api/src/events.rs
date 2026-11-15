@@ -727,6 +727,52 @@ pub fn passes(e: &Event, dcs_ids: &[u32], player_key: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// An event body as the events file keeps it, pinned in
+    /// spec/persistence.golden next to the store's rows.
+    #[test]
+    fn an_event_body_encodes_as_the_golden_file_says() {
+        const GOLDEN: &str = include_str!("../../../spec/persistence.golden");
+        let e = Event {
+            sequence: 3,
+            stamp: Some(pb::Stamp {
+                wall: Some(prost_types::Timestamp {
+                    seconds: 1_700_000_000,
+                    nanos: 5_000_000,
+                }),
+                model_time: 12.5,
+                mission_generation: 2,
+                frame: 77,
+            }),
+            body: Some(body(9)),
+            campaign_id: 7,
+        };
+        let hex: String = e
+            .encode_to_vec()
+            .iter()
+            .map(|x| format!("{x:02x}"))
+            .collect();
+        let line = format!("event.world {hex}\n");
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../spec/persistence.golden");
+        if std::env::var_os("NANOPROBE_BLESS").is_some() {
+            let others: String = GOLDEN
+                .lines()
+                .filter(|l| !l.starts_with("event."))
+                .map(|l| format!("{l}\n"))
+                .collect();
+            std::fs::write(path, others + &line).expect("bless");
+            return;
+        }
+        let have: String = GOLDEN
+            .lines()
+            .filter(|l| l.starts_with("event."))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        assert_eq!(
+            have, line,
+            "the event body changed; see spec/persistence.md"
+        );
+    }
+
     fn body(id: u32) -> event::Body {
         event::Body::World(WorldEvent {
             dcs_id: id,

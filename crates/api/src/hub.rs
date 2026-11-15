@@ -210,6 +210,10 @@ pub enum Need {
     Campaign,
     /// The active campaign: the call acts on DCS.
     Active,
+    /// A campaign to activate: as `Campaign`, but its store is not opened
+    /// here; the activation opens it after it suspends the active one
+    /// (spec/persistence.md, "Campaign operations").
+    Activate,
 }
 
 /// A changing call, as [`Hub::write`] runs it.
@@ -746,7 +750,7 @@ impl Inner {
                     "campaign_id",
                 ));
             }
-        } else {
+        } else if need != Need::Activate {
             self.open_store(id)?;
         }
         if need == Need::Active && self.active != Some(id) {
@@ -1154,9 +1158,9 @@ impl Inner {
 
     /// Make a campaign the active one, suspending the one before. The
     /// caller resolved `id`, which opened its store.
-    pub fn activate(&mut self, cfg: &Config, id: u64) {
+    pub fn activate(&mut self, cfg: &Config, id: u64) -> Result<(), Status> {
         if self.active == Some(id) {
-            return;
+            return Ok(());
         }
         if let Some(old) = self.active.take() {
             self.close_store(old, CampaignState::Suspended, None);
@@ -1164,6 +1168,12 @@ impl Inner {
                 s.meta.state = pb::CampaignState::Suspended as i32;
                 s.meta.loaded_theater.clear();
             }
+        }
+        // Opened after the suspend: if the open fails, no campaign is active.
+        if let Err(e) = self.open_store(id) {
+            self.send_no_campaign();
+            self.restart(cfg);
+            return Err(e);
         }
         self.set_state(id, CampaignState::Active);
         let mut theater = String::new();
@@ -1177,6 +1187,7 @@ impl Inner {
         // A campaign is restored on the path of a mission load: the
         // reconciler learns the loaded theater from the load's LIFECYCLE.
         self.backend.load_mission(&theater);
+        Ok(())
     }
 
     /// Suspend a campaign, or finish it with `outcome` (the encoded
