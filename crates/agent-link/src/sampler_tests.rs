@@ -152,6 +152,9 @@ struct World {
     /// Frames on which the sweep owed rows and read none, by why, in
     /// [`SweepWait`]'s order.
     waits: [u64; 5],
+    /// What a row of each tier costs inside the pump, µs, where it is not
+    /// [`cost`]'s default: a live cost.
+    tier_us: [Option<f64>; 8],
 }
 
 /// When the host's sweep read each object, and every gap between two reads
@@ -381,7 +384,7 @@ fn pump(s: &mut Sampler, rec: &mut Rec, w: &mut World, clock: &mut Clock) {
                         .object_at(slot)
                         .and_then(|o| w.objects.get(&o))
                         .map(|o| o.pos);
-                    let t = clock.add(cost(plan.tier));
+                    let t = clock.add(w.tier_us[plan.tier.index()].unwrap_or(cost(plan.tier)));
                     let st = s.position(slot, p, || t);
                     if plan.flag {
                         s.attitude(slot, [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
@@ -404,7 +407,7 @@ fn pump(s: &mut Sampler, rec: &mut Rec, w: &mut World, clock: &mut Clock) {
             }
             Tier::Vitals => {
                 for &slot in &slots {
-                    let t = clock.add(cost(plan.tier));
+                    let t = clock.add(w.tier_us[plan.tier.index()].unwrap_or(cost(plan.tier)));
                     if s.vitals(slot, Some(3.0), Some(1.0), || t) {
                         stop = true;
                         break;
@@ -4528,4 +4531,75 @@ fn host_time_of_the_attitude_case() {
         best * 1e3,
         best * 1e6 / 13_200.0
     );
+}
+
+/// The live tenth part at k = 1, by its live costs (LIVE, bundles of the
+/// enum-rank and maint-fix runs, 2026-11-15): twenty rows subscribed with
+/// their attitude at 32 µs a row, a 35 µs call, 100 frames a second.
+/// Returns the pumps a second, the vitals period as a rate, and the vitals
+/// rows read over two minutes.
+fn attitude_live(offset: f64) -> (f64, f64, u64) {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e4);
+    let mut w = world(1960, 40, 20);
+    w.sweep = Some((15.0, 1.0));
+    halt_four_in_five(&mut w);
+    w.batch_us = 8.0;
+    w.enum_step_us = Some(687.0);
+    w.close_us = 2.0;
+    w.tier_us[Tier::Subscribed.index()] = Some(32.0);
+    w.tier_us[Tier::Vitals.index()] = Some(1.3);
+    s.set_campaign(1);
+    for i in 1..=20u64 {
+        let o = w.objects.get_mut(&(1000 + i)).unwrap();
+        o.name = unit_name(i);
+    }
+    run_x(&mut s, &mut rec, &mut w, 1.0, 100.0, 190.0, 35.0, 3.0);
+    s.subscribe(1.0, true, &(1..=20).collect::<Vec<_>>());
+    rec.began += Duration::from_nanos(10_000_000);
+    run_x(
+        &mut s,
+        &mut rec,
+        &mut w,
+        60.0 + offset,
+        100.0,
+        190.0,
+        35.0,
+        3.0,
+    );
+    rec.began += Duration::from_nanos(10_000_000);
+    let (due, swept) = (s.vitals_due, s.vitals_swept);
+    let (mut pumps, mut share) = (0, 0.0);
+    for _ in 0..24 {
+        let r = run_x(&mut s, &mut rec, &mut w, 5.0, 100.0, 190.0, 35.0, 3.0);
+        rec.began += Duration::from_nanos(10_000_000);
+        pumps += r.pumps;
+        share += r.share / 24.0;
+    }
+    let read = s.vitals_swept - swept;
+    let rate = Rates::default().vitals_s * (s.vitals_due - due) / read.max(1) as f64;
+    eprintln!(
+        "live attitude costs, offset {offset} s: {:.2} pumps a second, vitals {rate:.2} s \
+         as a rate ({read} rows), share {share:.5}",
+        pumps as f64 / 120.0
+    );
+    (pumps as f64 / 120.0, rate, read)
+}
+
+/// The live tenth miss at k = 1 on the host: with the subscribed rows'
+/// live cost, every pump spends its budget on them, vitals stays marked
+/// unaffordable because a pump comes more often than once a second, and
+/// vitals reads no row. Ignored until the ruling on the fix.
+#[test]
+#[ignore = "reproduces the live tenth miss; waits on a ruling"]
+fn with_live_attitude_costs_vitals_keep_their_band_and_pumps_stay_under_5() {
+    for offset in BAND_OFFSETS_S {
+        let (pumps, rate, read) = attitude_live(offset);
+        assert!(read > 0, "offset {offset} s: vitals read no row");
+        assert!(
+            (4.5..=6.5).contains(&rate),
+            "offset {offset} s: vitals {rate} s"
+        );
+        assert!(pumps < 5.0, "offset {offset} s: {pumps} pumps a second");
+    }
 }
