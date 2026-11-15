@@ -89,7 +89,10 @@ docs/results/2026-11-13-e25-cpu-idle.md). No frame is skipped to repay it. The c
 The total agent time therefore differs from `overhead_share` × real time by at most the
 debt the cap forgave, the time the births' and the enumeration's balance forgave
 (`maintenance_forgiven_us`), and that balance, which lies between 250 µs and
-−`overhead_share` × 10⁶ µs and repays itself when below 0 ("Tiers"). No frame's slice is more than 250 µs, and
+−`L` and repays itself when below 0 ("Tiers"). The mean that
+`overhead_share` bounds is measured from real agent time, the `share` the `sampling` LOG
+reports, never from the balance or `D`: forgiving time changes only when births, the
+enumeration and the row tiers get their turn. No frame's slice is more than 250 µs, and
 with credit at most 150 µs a frame at the server's frame rate stays under 250 µs with its
 sweep, its pump, the closing and `finish`.
 
@@ -194,9 +197,12 @@ the row tiers' debt (`P` in "Slice"); at `k` = 1 a pump whose batches were all b
 the enumeration, and that made no existence checks, also pays its call and its closes from
 the balance. Their own time is never the row tiers' debt. Below a scale of 1 a batch also
 costs the balance the share of a whole batch the scale withholds (below), and that charge
-stops at −1,000 µs. Their own time may take the balance below −1,000 µs, down to the
-debt's bound, −`overhead_share` × 10⁶ µs (−3,000 µs at 0.3 %); past it the time is
-forgiven and counted (`maintenance_forgiven_us`), as for a stall inside a step. One dear
+stops at −1,000 µs. Their own time may take the balance below −1,000 µs, down to −`L`,
+the larger of the debt's cap, `overhead_share` × 10⁶ µs, and 1,000 µs (−3,000 µs at
+0.3 %); past it the time is
+forgiven and counted (`maintenance_forgiven_us`), as for a stall inside a step. With
+steps of 687 and 1,140 µs the balance forgives nothing; a nonzero value in a live run
+marks a DCS stall inside a step, and the live measure reports it with its window. One dear
 step, such as a `coalition.getGroups` of 687 or 1,140 µs (PRIOR, S10 and S11), therefore
 keeps births and the enumeration out until the balance has earned its time back, at most
 the bound over their share of a frame (about 2.5 s at 110 frames a second), and leaves the
@@ -470,7 +476,7 @@ message `sampling` and these `data` keys:
 | `sweep_overruns`, `sweep_overrun_us` | Sweeps in the window that ran past their budget by more than the rows between two clock reads cost, and the most a sweep ran past it |
 | `sweep_forced` | Sweeps in the window that read one row because their fixed part alone passed their budget ("The sweep"). They are in neither of the two counts above |
 | `sweep_wait_subscribed`, `sweep_wait_batch`, `sweep_wait_debt`, `sweep_wait_fund`, `sweep_wait_slice` | Sampling frames, not system-call frames, in the window on which the sweep in `frame` owed rows and read none, by why: the pump for the subscribed rows read with their attitude goes first; the budget paid for fewer rows than the sweep's minimum; the savings paid for a row but the slice, cut by the repayment of debt `r`, did not, and without `r` it would have; the savings did not yet pay for a row; the savings paid for a row but `S` − `F` did not, with no repayment to blame ("The sweep") |
-| `maintenance_us` | The births' and the enumeration's balance at the window's end, µs, from −`overhead_share` × 10⁶ to 250 ("Tiers") |
+| `maintenance_us` | The births' and the enumeration's balance at the window's end, µs, from −`L` to 250: `L` is the larger of `overhead_share` × 10⁶ and 1,000 ("Tiers") |
 | `maintenance_forgiven_us` | The births' and the enumeration's time in the window that passed their balance's bound, µs: forgiven, and not the row tiers' debt ("Tiers") |
 | `gone_dead`, `gone_removed`, `gone_missing` | Rows that left the table after an existence check, since the agent started, by the reason the reads gave (spec/records.md, "The object table") |
 | `classifier_anomalies`, `classifier_faults` | Since the agent started: `classifier_anomalies` counts existence checks whose reads gave no decision, including a death-event mark over a `MISSING` or anomalous result. `classifier_faults` counts rows that left as `REMOVED` and that a death event named, whether by a mark at the check or by a later event (spec/records.md, "Death events") |

@@ -759,8 +759,10 @@ pub struct Sampler {
     /// of a row tier; and what its balance paid of it so far, µs. A pump
     /// that only resolved births or read the enumeration is theirs whole.
     pump_call_us: f64,
-    /// The frame's commanded time when the pump was decided, µs.
+    /// The frame's commanded time when the pump was decided, and what
+    /// [`Sampler::excuse`] moved the decision past since, µs.
     decided_commanded: f64,
+    excused_us: f64,
     pump_rows: bool,
     pump_paid: f64,
     /// When the frame before this one began.
@@ -1080,6 +1082,7 @@ impl Sampler {
             maintenance_bound: -MAINTENANCE_FLOOR_US,
             pump_call_us: 0.0,
             decided_commanded: 0.0,
+            excused_us: 0.0,
             pump_rows: false,
             pump_paid: 0.0,
             last_began: None,
@@ -1206,6 +1209,7 @@ impl Sampler {
     pub fn excuse(&mut self, spent: Duration) {
         if let Some(d) = self.decided.as_mut() {
             *d += spent;
+            self.excused_us += spent.as_secs_f64() * 1e6;
         }
     }
 
@@ -2255,6 +2259,7 @@ impl Sampler {
         // The decision is timed from here, after any sweep.
         self.decided = Some(now);
         self.decided_commanded = self.budget.commanded_us;
+        self.excused_us = 0.0;
         let worth = !self.direct || self.pump_worth(now);
         // A pump wanted for the subscribed rows read with their attitude may
         // spend the sweep's savings on them: the reserve does not bind it.
@@ -2881,8 +2886,10 @@ impl Sampler {
             let whole = now.saturating_duration_since(d).as_secs_f64() * 1e6;
             // Commanded work between the decision and the pump is out of
             // the debt already (`end_frame`): the balance does not pay it.
-            self.pump_call_us =
-                (whole - (self.budget.commanded_us - self.decided_commanded)).max(0.0);
+            // What `excuse` moved the decision past is out of `whole`
+            // already, so only the rest comes off.
+            let commanded = self.budget.commanded_us - self.decided_commanded;
+            self.pump_call_us = (whole - (commanded - self.excused_us).max(0.0)).max(0.0);
             self.window.spend.xcall_us += whole;
             // The call's cost for `pump_worth`, which must not decay between
             // pumps: it decides how rare they are.

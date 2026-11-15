@@ -120,6 +120,9 @@ struct World {
     enum_step_alt: Option<f64>,
     /// Dear enumeration steps so far, for the alternation.
     enum_steps: u64,
+    /// A stall the next dear enumeration step takes on top of its cost, µs,
+    /// as a garbage collection or a Wine stall inside `coalition.getGroups`.
+    enum_stall: Option<f64>,
     /// Each enumeration's `ENUM_BEGIN` and `ENUM_END`, on the simulated
     /// clock.
     enum_spans: Vec<(Instant, Option<Instant>)>,
@@ -339,6 +342,9 @@ fn pump(s: &mut Sampler, rec: &mut Rec, w: &mut World, clock: &mut Clock) {
                         w.enum_steps += 1;
                         let alt = w.enum_steps.is_multiple_of(2);
                         clock.add(w.enum_step_alt.filter(|_| alt).unwrap_or(us));
+                        if let Some(stall) = w.enum_stall.take() {
+                            clock.add(stall);
+                        }
                     }
                     w.enum_at += 1;
                     // As the shim's `visit`: one call for a known object,
@@ -473,8 +479,10 @@ struct Run {
     /// past the budget by more than a clock interval.
     row_frames: u64,
     overrun_frames: u64,
-    /// Debt the cap forgave, µs, from the reports.
+    /// Debt the cap forgave, µs, and births' and the enumeration's time
+    /// their balance forgave, from the reports.
     forgiven_us: f64,
+    maintenance_forgiven_us: f64,
     /// From the reports: the host's sweeps, those their deadline stopped,
     /// and those that ran past their budget by more than the rows between
     /// two clock reads.
@@ -536,6 +544,7 @@ fn run_x(
     let mut next_syscall = 0.0;
     let (mut pumps, mut counted, mut longest_us, mut credit_after_pump) = (0, 0, 0.0f64, 0.0f64);
     let (mut row_frames, mut overrun_frames, mut forgiven_us) = (0, 0, 0.0);
+    let mut maintenance_forgiven_us = 0.0;
     let (mut sweeps, mut sweep_cut, mut sweep_overruns) = (0, 0, 0);
     let mut tier_rows = [0u64; 8];
     let mut empty_pumps = 0;
@@ -628,6 +637,7 @@ fn run_x(
             row_frames += r.row_frames;
             overrun_frames += r.overrun_frames;
             forgiven_us += r.forgiven_us;
+            maintenance_forgiven_us += r.maintenance_forgiven_us;
             sweeps += r.sweeps;
             sweep_cut += r.sweep_cut;
             sweep_overruns += r.sweep_overruns;
@@ -652,6 +662,7 @@ fn run_x(
         row_frames,
         overrun_frames,
         forgiven_us,
+        maintenance_forgiven_us,
         sweeps,
         sweep_cut,
         sweep_overruns,
@@ -1936,6 +1947,10 @@ fn every_tier_holds(cases: &[(Sweep, f64, f64, Option<f64>, bool)]) {
         }
         let pumps = r.pumps as f64 / 180.0;
         assert!(pumps < 5.0, "{case}: {pumps} pumps a second");
+        assert_eq!(
+            r.maintenance_forgiven_us, 0.0,
+            "{case}: the balance forgave time"
+        );
         assert!(r.share <= 0.003, "{case}: share {}", r.share);
         assert!(
             (0.75 * batch..=1.25 * batch).contains(&s.batch_us),
@@ -2135,6 +2150,7 @@ fn the_live_cost_storm_case_holds_every_tier_at_k_1() {
     assert!(r.pumps as f64 / 180.0 < 5.0, "{} pumps", r.pumps);
     assert!((15.0..=25.0).contains(&s.batch_us), "batch {}", s.batch_us);
     assert_eq!(r.forgiven_us, 0.0);
+    assert_eq!(r.maintenance_forgiven_us, 0.0, "the balance forgave time");
 }
 
 /// At 2,000 rows the slow sweep of life queues an existence check for each
@@ -3557,6 +3573,13 @@ struct RankRun {
     /// resolution, and the births still waiting at the end.
     births: Vec<f64>,
     waiting: usize,
+    /// Each resolved birth's spawn, s from the measure's start, and wait.
+    birth_log: Vec<(f64, f64)>,
+    /// The second in which the injected stall happened, if one was asked
+    /// for and a dear step took it.
+    stall_s: Option<f64>,
+    /// Births' and the enumeration's time their balance forgave, µs.
+    maintenance_forgiven_us: f64,
     /// Moving units the sweep never read in the measure.
     unread: usize,
     /// The longest a row read in the measure went unread at its end, s.
@@ -3578,7 +3601,7 @@ struct RankRun {
 /// position sweep. After the fill, `secs` seconds at scale `k`, in
 /// 1 s steps, each with its one system-call frame; five units are born
 /// every 5 s, some of them while an enumeration runs.
-fn enum_rank_run(k: f64, secs: f64, fps: f64) -> RankRun {
+fn enum_rank_run(k: f64, secs: f64, fps: f64, stall: bool) -> RankRun {
     let mut s = Sampler::new(Rates::default(), 0.07);
     let mut rec = Rec::new(0.003, 1e6 / fps);
     let mut w = world(1960, 40, 20);
@@ -3614,16 +3637,21 @@ fn enum_rank_run(k: f64, secs: f64, fps: f64) -> RankRun {
     w.reads = Some(Reads::default());
     w.enum_spans.clear();
     w.waits = [0; 5];
-    let start = rec.began + Duration::from_nanos(9_090_909);
+    let start = rec.began + Duration::from_secs_f64(1.0 / fps);
     let since = |t: Instant| t.saturating_duration_since(start).as_secs_f64();
     let mut waiting: Vec<(u64, f64)> = Vec::new();
-    let mut births = Vec::new();
+    let (mut births, mut birth_log) = (Vec::new(), Vec::new());
     let mut next = 50_000u64;
-    let (mut share, mut forgiven_us) = (0.0, 0.0);
+    let (mut share, mut forgiven_us, mut maintenance_forgiven_us) = (0.0, 0.0, 0.0);
+    let mut stall_s = None;
     let steps = secs as usize;
     for i in 0..steps {
         rec.began += Duration::from_secs_f64(1.0 / fps);
         let at = i as f64;
+        // The stall goes into the first dear step from 10 s on.
+        if stall && i == 10 {
+            w.enum_stall = Some(30_000.0);
+        }
         if i % 5 == 2 {
             for _ in 0..5 {
                 next += 1;
@@ -3632,14 +3660,20 @@ fn enum_rank_run(k: f64, secs: f64, fps: f64) -> RankRun {
                 waiting.push((next, at));
             }
         }
+        let armed = w.enum_stall.is_some();
         let r = run_x(&mut s, &mut rec, &mut w, 1.0, fps, 165.0, 23.0, 3.0);
+        if armed && w.enum_stall.is_none() {
+            stall_s = Some(at);
+        }
         share += r.share / steps as f64;
         forgiven_us += r.forgiven_us;
+        maintenance_forgiven_us += r.maintenance_forgiven_us;
         let now = at + 1.0;
         waiting.retain(|&(object, born)| {
             let done = s.slot_of(object).is_some();
             if done {
                 births.push(now - born);
+                birth_log.push((born, now - born));
             }
             !done
         });
@@ -3685,6 +3719,9 @@ fn enum_rank_run(k: f64, secs: f64, fps: f64) -> RankRun {
             .collect(),
         births,
         waiting: waiting.len(),
+        birth_log,
+        stall_s,
+        maintenance_forgiven_us,
         unread,
         open_max,
         secs,
@@ -3755,8 +3792,18 @@ fn rank_failures(r: &RankRun) -> Vec<String> {
             r.frames
         ));
     }
-    if r.share > 0.003 {
-        bad.push(format!("share {}", r.share));
+    // The owner's mean is real agent time; a stall the balance forgave is
+    // DCS's time inside a step, so it is left out of the mean here.
+    let mean = r.share - r.maintenance_forgiven_us / (r.secs * 1e6);
+    if mean > 0.003 {
+        bad.push(format!("share {mean} without forgiven time"));
+    }
+    // With the LIVE costs and no stall the balance forgives nothing.
+    if r.stall_s.is_none() && r.maintenance_forgiven_us != 0.0 {
+        bad.push(format!(
+            "the balance forgave {} µs with no stall",
+            r.maintenance_forgiven_us
+        ));
     }
     if r.forgiven_us != 0.0 {
         bad.push(format!("forgiven {} µs", r.forgiven_us));
@@ -3775,7 +3822,7 @@ fn rank_failures(r: &RankRun) -> Vec<String> {
 fn positions_keep_their_period_while_a_2000_object_enumeration_runs() {
     let mut bad = Vec::new();
     for fps in [110.0, 56.0, 25.0] {
-        let r = enum_rank_run(1.0, 180.0, fps);
+        let r = enum_rank_run(1.0, 180.0, fps, false);
         let worst = r.births.iter().copied().fold(0.0f64, f64::max);
         eprintln!(
             "{fps} fps: windows {:?}\nspans {:?}\nwaits {:?}; worst birth {worst:.1} s",
@@ -3863,6 +3910,16 @@ fn every_sweep_wait_is_recorded_and_counted() {
             s.budget.debt = 1000.0;
         }),
     ];
+    // A slice held under a row by its cap reads as the savings: they stop at
+    // what a frame can reach, which the same cap bounds.
+    let (why, _) = frame(&|s| {
+        owed(s);
+        s.sweep_row_us = 25.0;
+        s.sweep_fund = 100.0;
+        s.budget.debt = 1000.0;
+        s.close_us = 230.0;
+    });
+    assert_eq!(why, Some(SweepWait::Fund), "capped slice");
     for (want, set) in cases {
         let (why, counts) = frame(set);
         assert_eq!(why, Some(want));
@@ -3935,4 +3992,111 @@ fn the_balance_pays_its_own_time_past_the_floor_and_down_to_its_bound() {
     s.pay_maintenance(30_000.0, 30_000.0);
     assert_eq!(s.maintenance_us, -3000.0);
     assert_eq!(s.window.maintenance_forgiven_us, 27_000.0);
+    // Under an `overhead_share` of 0.1 % the bound is the floor's 1,000 µs.
+    rec.share = 0.0005;
+    s.slice(&rec, end);
+    s.maintenance_us = 0.0;
+    s.pay_maintenance(5_000.0, 5_000.0);
+    assert_eq!(s.maintenance_us, -1000.0);
+}
+
+/// A maintenance-only pump's call is charged to the balance without the
+/// commanded work inside it, once: work the driver also excused out of the
+/// call is not taken off twice, and work it only counted as commanded, as
+/// a settled handler, is taken off.
+#[test]
+fn commanded_work_inside_a_maintenance_pump_call_is_left_out_once() {
+    let call = |excused: bool| {
+        let (mut s, mut rec, _w) = table(50);
+        let t = rec.began + Duration::from_secs(10);
+        rec.began = t;
+        rec.syscall = false;
+        s.slice(&rec, t);
+        s.gate(&rec, t);
+        // 23 µs of call and 40 µs of a handler before the pump.
+        let handler = Duration::from_micros(40);
+        s.excuse_commanded(handler);
+        if excused {
+            s.excuse(handler);
+        }
+        s.begin(&rec, t + Duration::from_micros(63));
+        s.pump_call_us
+    };
+    assert!((call(true) - 23.0).abs() < 1e-6, "{}", call(true));
+    assert!((call(false) - 23.0).abs() < 1e-6, "{}", call(false));
+}
+
+/// At a scale below 1 the gate weighs the births' step when births wait,
+/// even while an enumeration runs (spec/faults.md): with births cheap and
+/// the enumeration dear, a pump that the budget pays only for a birth is
+/// worth its call.
+#[cfg(feature = "faults")]
+#[test]
+fn below_scale_one_the_gate_weighs_the_births_step_first() {
+    let gate = |births: usize| {
+        let (mut s, mut rec, _w) = table(50);
+        let t = rec.began + Duration::from_secs(10);
+        rec.began = t;
+        rec.syscall = false;
+        s.set_direct(false);
+        s.set_scale(0.1).unwrap();
+        s.enumeration = Some(1);
+        s.set_pending(births, 0);
+        s.maintenance_us = 250.0;
+        s.tiers[Tier::Births.index()].cost = 1.0;
+        s.tiers[Tier::Enumeration.index()].cost = 1000.0;
+        (s.xcall_us, s.batch_us, s.close_us, s.close_dev_us) = (0.0, 0.0, 0.0, 0.0);
+        s.budget.debt = 100.0;
+        s.slice(&rec, t);
+        s.gate(&rec, t)
+    };
+    assert!(gate(5), "births wait: the birth's step is weighed");
+    assert!(!gate(0), "no birth: the enumeration's step is weighed");
+}
+
+/// A 30 ms stall inside one `coalition.getGroups` step during an
+/// enumeration, at k = 1 with the LIVE costs (coordinator's condition on the
+/// balance's bound): the balance stops at its bound, one second's budget, and
+/// forgives the rest; births resume within the time the balance takes to
+/// earn that bound back, about 2.4 s at 110 fps (3,000 µs at
+/// 0.5 × (27.3 − 1.5 − 3) µs a frame), so no birth born from 5 s before the
+/// stall to 10 s after it waits over 4 s (the bound, the run's 1 s steps and
+/// half a second); positions keep their ceiling and median.
+#[test]
+fn a_stall_inside_an_enumeration_step_is_forgiven_and_births_resume() {
+    let mut bad = Vec::new();
+    for fps in [110.0, 56.0, 25.0] {
+        let r = enum_rank_run(1.0, 120.0, fps, true);
+        let Some(at) = r.stall_s else {
+            panic!(
+                "{fps} fps: no dear step took the stall; spans {:?}",
+                r.spans
+            );
+        };
+        let near = r
+            .birth_log
+            .iter()
+            .filter(|(born, _)| (at - 5.0..=at + 10.0).contains(born))
+            .map(|&(_, wait)| wait)
+            .fold(0.0f64, f64::max);
+        eprintln!(
+            "{fps} fps: stall at {at} s, forgave {:.0} µs, worst birth near it {near} s",
+            r.maintenance_forgiven_us
+        );
+        if !(26_000.0..=30_000.0).contains(&r.maintenance_forgiven_us) {
+            bad.push(format!(
+                "{fps} fps: the balance forgave {} µs",
+                r.maintenance_forgiven_us
+            ));
+        }
+        if near > 4.0 {
+            bad.push(format!("{fps} fps: a birth near the stall waited {near} s"));
+        }
+        bad.extend(
+            rank_failures(&r)
+                .into_iter()
+                .map(|b| format!("{fps} fps: {b}")),
+        );
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
 }

@@ -506,11 +506,19 @@ fn quantile(hist: &[Value], q: f64) -> Option<f64> {
 /// The agent's time over real time across a span of `sampling` reports,
 /// fixed before the run by a line mark (S10 ruling: total agent time over
 /// total real time, not a mean of the windows). Passes when the mean is
-/// within `overhead_share` and no debt was forgiven in the span.
+/// within `overhead_share` and no debt was forgiven in the span. Time the
+/// births' and the enumeration's balance forgave is reported beside it with
+/// its windows, not judged: it marks a DCS stall inside one of their steps.
 pub(crate) fn span(reports: &[Value]) -> (bool, Value) {
     let (mut agent, mut real, mut forgiven, mut events) = (0.0, 0.0, 0.0, 0.0);
     let mut windows = Vec::new();
-    for r in reports {
+    let (mut stalls, mut stall_us) = (Vec::new(), 0.0);
+    for (i, r) in reports.iter().enumerate() {
+        let lost = r["maintenance_forgiven_us"].as_f64().unwrap_or(0.0);
+        if lost > 0.0 {
+            stall_us += lost;
+            stalls.push(json!({"window": i, "maintenance_forgiven_us": lost}));
+        }
         let share = r["share"].as_f64().unwrap_or(0.0);
         let w = r["window_s"].as_f64().unwrap_or(10.0);
         agent += share * w;
@@ -540,6 +548,7 @@ pub(crate) fn span(reports: &[Value]) -> (bool, Value) {
         json!({
             "mean": mean, "max_window": max, "real_s": real, "agent_us": agent * 1e6,
             "events_us": events, "forgiven_us": forgiven,
+            "maintenance_forgiven_us": stall_us, "maintenance_forgiven_windows": stalls,
             "debt_start_us": d(reports.first()), "debt_end_us": d(reports.last()),
             "windows": windows,
         }),
@@ -1305,6 +1314,19 @@ fn part_tenth(run: &Run, name: &str, shell: &[u8], probe: &Path) -> Result<Value
         "no debt forgiven",
         max("forgiven_us") == 0.0,
         format!("max {}", max("forgiven_us")),
+    );
+    // Reported, not judged: a nonzero value is a DCS stall inside a birth or
+    // enumeration step, past the balance's bound (spec/sampling.md, "Tiers").
+    check(
+        "births' and enumeration time forgiven (a DCS stall), reported",
+        true,
+        format!(
+            "{} µs in {} windows",
+            sum("maintenance_forgiven_us"),
+            reps.iter()
+                .filter(|r| r["maintenance_forgiven_us"].as_f64().unwrap_or(0.0) > 0.0)
+                .count()
+        ),
     );
     check(
         "debt bounded",
