@@ -5,6 +5,7 @@ folder `lfs.writedir()` returns. Nothing goes into the DCS install.
 
 ```
 <profile>/Scripts/Hooks/nanoprobe-hook.lua   loader; the same file in every version
+<profile>/Config/autoexec.cfg                one block merged in by install
 <profile>/nanoprobe/manifest.txt             which version is active
 <profile>/nanoprobe/install.txt              folders the install created
 <profile>/nanoprobe/running.txt              the build the running hook loaded
@@ -46,10 +47,103 @@ previous=<build>
   of a DLL that is still loaded stays after shim reloads of later deploys. Deploying the active
   version again changes nothing.
 - **Rollback** swaps `active` and `previous`. It refuses when there is no `previous`.
-- **Undeploy** removes the loader, the `nanoprobe` folder, and each folder listed in
-  `install.txt`, deepest first, if it is empty. `install.txt` lists, one per line and
-  relative to `<profile>`, the folders on the loader's path that did not exist before
-  the first deploy. After undeploy the profile is as it was before the first deploy.
+- **Undeploy** removes the `autoexec.cfg` block (below), the loader, the `nanoprobe`
+  folder, and each folder listed in `install.txt`, deepest first, if it is empty.
+  `install.txt` lists, one per line and relative to `<profile>`, the folders on the
+  loader's path that did not exist before the first deploy, and `Config` when install
+  created it. After undeploy the profile is as it was before the first deploy.
+- **Install**, the release's `nanoprobe install`, is deploy, then the token (as
+  "Development only" describes for deploy), then the `autoexec.cfg` merge. Running it
+  again with the same release changes nothing. **Uninstall** is undeploy.
+
+## autoexec.cfg
+
+DCS runs `<profile>/Config/autoexec.cfg` at start in its `config` state, as plain Lua
+(ED-CODE). Its `net.allow_unsafe_api` and `net.allow_dostring_in` keys gate
+`net.dostring_in` (LIVE, docs/results/2026-11-11-first-dll-and-spikes.md, E2). Install
+appends one block that adds `userhooks` to the first and `server` to the second when
+the file runs, and keeps every name earlier lines put there:
+
+```lua
+-- nanoprobe: begin. `nanoprobe uninstall` removes this block.
+do
+  local function allow(list, name)
+    if type(list) ~= 'table' then list = {} end
+    for i = 1, #list do
+      if list[i] == name then return list end
+    end
+    list[#list + 1] = name
+    return list
+  end
+  net.allow_unsafe_api = allow(net.allow_unsafe_api, 'userhooks')
+  net.allow_dostring_in = allow(net.allow_dostring_in, 'server')
+end
+-- nanoprobe: end
+```
+
+With the keys set, the hook reaches `server` and the sandboxed mission environment does
+not (LIVE, E2, with the two keys assigned as plain lists). That the block's form has the
+same effect is UNVERIFIED until the release's acceptance run.
+
+The begin line carries `[new file]` when install created the file, and `[added line
+break]` when install added a line break before the block because the file did not end
+with one. Uninstall removes the block, the line break it added, and the file if it
+created it and nothing else is left. Every other byte of the file stays as it was. An
+edited block, or a begin line without an end line, is refused by both and left for the
+user. The tools handle the file's bytes only to find and cut the block. `doctor` reports
+the block, and each later assignment to either key that drops the name the platform
+needs or that it cannot read, by line number and key, and nothing else from the file.
+
+## Release
+
+A release is two archives, the agent's PDB (`nanoprobe-<version>-agent.pdb`, which
+symbolizes its crash records and is not installed), and `SHA256SUMS` over the three,
+built by `mise run package` (`tools/stage-release.sh`). Each archive holds one folder,
+`nanoprobe-<version>-<platform>/`:
+
+```
+nanoprobe[.exe]                 doctor, install, uninstall, inspect, top, watch
+install.cmd, uninstall.cmd      Windows only
+LICENSE
+payload/nanoprobe-hook.lua      the loader
+payload/nanoprobe_agent.dll     the agent DLL
+payload/lua/hook.lua, log.lua, shim.lua
+```
+
+The platforms are `windows-x86_64` (a zip) and `linux-x86_64` (a tar.gz with a static
+`nanoprobe`). The payload is the same in both: a Linux server runs DCS under Wine.
+`nanoprobe install` reads `payload/` beside the program. It installs into the one DCS
+profile it finds, or the one `--profile` names: a folder named `DCS` or `DCS.<branch>`
+in `%USERPROFILE%\Saved Games` on Windows, or in `<prefix>/drive_c/users/*/Saved Games`
+for a Wine prefix (`--wine-prefix`, `WINEPREFIX`, or `~/.wine`). On Linux and macOS,
+install and uninstall run as the user who owns the profile folder and refuse to run as
+another: DCS runs as that user and must read what install writes. On Windows the
+folder's access list decides.
+
+## Doctor
+
+`nanoprobe doctor` checks an install from outside DCS and writes nothing. It prints one
+line per check, marked `ok`, `fail` or `note`, and exits 0 when nothing failed, 1 when a
+check failed, and 2 when it has no profile to check: none found, or, without
+`--profile`, none that holds the loader. Without `--profile`
+it checks every profile found, as install finds them, that holds the loader.
+
+| Check | Fails when | A note when |
+|---|---|---|
+| Loader | it is missing | it differs from this release's |
+| Kill switch | `nanoprobe/disable` exists | |
+| Manifest and active version | no `active`; `SHA256SUMS` missing; a file missing, changed or unlisted; the folder's build does not match its `SHA256SUMS` | `previous` is not installed |
+| Token and `agent.toml` | the token is missing or empty, or (Linux, macOS) owned by another user than the profile; `agent.toml` does not parse | |
+| `Logs/dcs.log`, newest start | the newest start has no platform line and began after the loader was written; a platform `ERROR` line | no log; a newest start from before the install; the hook runs another build than `active` |
+| `logs/hook.log` and `logs/shim.log`, newest start | an `error` record; a `capabilities` record with a name absent; no `hook loaded` record of the newest session and no `hook.log.1` | no shim record yet in that start; the start record rotated out; the newest start ran no hook, and the logs are not checked |
+| `autoexec.cfg` | the block is edited or cut short; an assignment after the block, or anywhere without one, sets a list that lacks the needed name | no block; a value doctor cannot read |
+
+The newest start is the part of `dcs.log` after its last `=== Log opened UTC <time>`
+line, which also says when it began (the log's modification time when there is no such
+line). Its `session <id> build <build>` line names the hook's `hook loaded` record of that
+session in `hook.log`; doctor reads the hook's records from there and the shim's from that
+record's `wall` on, across each log and its `.1`. Without a `dcs.log` it reads them from
+the last `hook loaded` record.
 
 ## Agent
 

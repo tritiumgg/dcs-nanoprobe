@@ -1,6 +1,6 @@
 [package]
 name = "nanoprobe-cli"
-description = "The nanoprobe command: inspect the transport file and watch it live with top."
+description = "The nanoprobe command: install, check and inspect nanoprobe."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,7 +17,13 @@ name = "nanoprobe"
 path = "src/main.rs"
 
 [dependencies]
+nanoprobe-agent-link = { path = "../agent-link" }
+nanoprobe-install = { path = "../install" }
 nanoprobe-proto = { path = "../proto" }
 nanoprobe-transport = { path = "../transport" }
+serde_json = "1.0.154"
 tokio = { version = "1.54.1", features = ["rt"] }
 tonic = { version = "0.14.9", default-features = false, features = ["channel", "codegen", "transport"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.191"

@@ -115,6 +115,11 @@ run = ["buf lint", "sh tools/protobreak.sh", "sh tools/protobreak-test.sh", "car
 description = "Run the Rust hello campaign against the API server over the fake sim"
 run = "cargo xtask hello"
 
+[tasks.package]
+description = "Stage the Windows and Linux release archives in dist/ and check them"
+depends = ["dll"]
+run = ["sh tools/stage-release.sh", "sh tools/stage-release-test.sh"]
+
 [tasks.secrets]
 description = "Check that the pre-commit hook blocks a planted secret"
 run = "sh tools/secretscan-test.sh"

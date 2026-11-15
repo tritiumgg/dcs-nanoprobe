@@ -1,0 +1,23 @@
+# Deploy, rollback and undeploy as spec/install.md lays them out, and the
+# autoexec.cfg merge. The released `nanoprobe install` and the development
+# tooling's `cargo xtask deploy` both use it.
+
+[package]
+name = "nanoprobe-install"
+description = "Install, update and remove nanoprobe in a DCS Saved Games profile."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+nanoprobe-agent-link = { path = "../agent-link" }
+getrandom = "0.3"
+sha2 = "0.10"
+toml = "1.2.1"

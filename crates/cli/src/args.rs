@@ -8,6 +8,9 @@ Usage:
   nanoprobe inspect <map-file> [--records N]
   nanoprobe top <map-file> [--interval-ms MS] [--once]
   nanoprobe watch world|events [--addr URL] [--campaign ID] [--since N]
+  nanoprobe doctor [--profile DIR | --wine-prefix DIR]
+  nanoprobe install [--profile DIR | --wine-prefix DIR] [--payload DIR]
+  nanoprobe uninstall [--profile DIR | --wine-prefix DIR]
 
 inspect  Print the status block, the metrics and the unread records of both
          rings. --records N lists at most N records per ring (default 50).
@@ -23,9 +26,24 @@ watch    Print a sidecar's world changes or events as they arrive, one
          from the listed revision) or after event sequence N (events, default:
          the oldest kept).
 
+doctor     Check an install from outside DCS: the files, the token and
+           settings, the platform's lines in Logs/dcs.log, the DCS names the
+           hook and the shim found, and the net.* keys in
+           Config/autoexec.cfg. Writes nothing. Without --profile it checks
+           every DCS Saved Games profile that holds nanoprobe: under
+           USERPROFILE on Windows, and in the Wine prefix (--wine-prefix,
+           WINEPREFIX, or ~/.wine). Exit 1 when a check fails, 2 when no
+           installed profile is found.
+install    Install the release into one DCS Saved Games profile: the loader,
+           the agent and its Lua, a handshake token, and a block in
+           Config/autoexec.cfg that lets the hook reach the server state.
+           Nothing goes into the DCS install. --payload DIR names the
+           release's payload folder (default: payload/ beside this program).
+uninstall  Remove everything install added, the autoexec.cfg block included.
+
 inspect and top open the file read-only.
-Exit codes: 0 success, 2 usage error, 1 the file cannot be opened or the
-stream fails.
+Exit codes: 0 success, 2 usage error, 1 the file cannot be opened, the
+stream fails, a doctor check fails, or install or uninstall fails.
 ";
 
 /// Records listed per ring when `--records` is absent.
@@ -56,6 +74,12 @@ pub enum Command {
     },
     /// `nanoprobe watch`.
     Watch(crate::watch::Options),
+    /// `nanoprobe doctor`.
+    Doctor(crate::setup::Options),
+    /// `nanoprobe install`.
+    Install(crate::setup::Options),
+    /// `nanoprobe uninstall`.
+    Uninstall(crate::setup::Options),
 }
 
 /// Parse the arguments after the program name. The error is a one-line message.
@@ -69,6 +93,14 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     }
     if sub == "watch" {
         return crate::watch::parse(&args[1..]).map(Command::Watch);
+    }
+    let setup =
+        |f: fn(crate::setup::Options) -> Command| crate::setup::parse(sub, &args[1..]).map(f);
+    match sub.as_str() {
+        "doctor" => return setup(Command::Doctor),
+        "install" => return setup(Command::Install),
+        "uninstall" => return setup(Command::Uninstall),
+        _ => {}
     }
     if sub != "inspect" && sub != "top" {
         return Err(format!("unknown subcommand `{sub}`"));
