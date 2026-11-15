@@ -79,7 +79,7 @@ stream_buffer = 1024        # messages a stream may fall behind before it is end
 result_wait_s = 10          # how long an effect or a query call waits for its result
 
 [store]
-dir = "campaigns"           # one SQLite file per campaign, and the server-scoped store
+dir = "campaigns"           # one folder per campaign (spec/persistence.md), and the server-scoped store
 enabled = true              # false: the author stores state through capture and restore
 checkpoint_s = 5            # positions, fuel and life
 backup_interval_h = 24      # consistent copies of the active store
