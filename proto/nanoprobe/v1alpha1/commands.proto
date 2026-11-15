@@ -21,6 +21,10 @@ service CommandsService {
   rpc SetLostPolicy(SetLostPolicyRequest) returns (SetLostPolicyResponse);
   rpc SetAirbaseOwner(SetAirbaseOwnerRequest) returns (SetAirbaseOwnerResponse);
   rpc SetWarehouseStock(SetWarehouseStockRequest) returns (SetWarehouseStockResponse);
+  // Add to or take from a warehouse's stock now. An effect: applied at most
+  // once, never sent again. Once applied, it adds its amounts to the count
+  // the controller set for each item it names, at least 0.
+  rpc AdjustWarehouseStock(AdjustWarehouseStockRequest) returns (AdjustWarehouseStockResponse);
   // Read an entity's full state from DCS. With persistence off this and
   // PutGroup are the author's capture and restore: the captured units go back
   // as a spec.
@@ -92,8 +96,8 @@ message RouteOrder {
 }
 
 message AttackOrder {
-  // The group to attack. A unit or a static as the target is not supported
-  // yet (step S15).
+  // The group, unit or static to attack. A unit's group, or a static, that
+  // gets new DCS object IDs gets the attack compiled again.
   uint64 target_id = 1;
 }
 
@@ -230,12 +234,34 @@ message SetWarehouseStockRequest {
   Write write = 1;
   string theater = 2;
   string airbase = 3;
-  // Items to set, by name. An item not named keeps its count.
+  // Deprecated: use `weapon`. An alias for it; a name in both takes the
+  // count in `weapon`.
   map<string, double> stock = 4;
+  // Aircraft to set, by DCS type name.
+  map<string, double> aircraft = 5;
+  // Liquids to set, by number: 0 jet fuel, 1 gasoline, 2 MW-50, 3 diesel.
+  map<uint32, double> liquids = 6;
+  // Weapons to set, by DCS name. An item not named keeps its count.
+  map<string, double> weapon = 7;
 }
 
 message SetWarehouseStockResponse {
   uint64 revision = 1;
+}
+
+message AdjustWarehouseStockRequest {
+  Write write = 1;
+  string theater = 2;
+  string airbase = 3;
+  // Amounts to add, by weapon name. A negative amount takes away.
+  map<string, double> weapon = 4;
+  map<string, double> aircraft = 5;
+  // By liquid number, as in SetWarehouseStockRequest.
+  map<uint32, double> liquids = 6;
+}
+
+message AdjustWarehouseStockResponse {
+  CommandResult result = 1;
 }
 
 message CaptureRequest {
@@ -278,6 +304,52 @@ message Damage {
   double life_percent = 2;
 }
 
+// Whom a sound or a picture reaches.
+enum EffectScope {
+  EFFECT_SCOPE_UNSPECIFIED = 0;
+  // Everyone. `target` is ignored.
+  EFFECT_SCOPE_ALL = 1;
+  // `target` is the DCS coalition number.
+  EFFECT_SCOPE_COALITION = 2;
+  // `target` is the EntityId of a live group.
+  EFFECT_SCOPE_GROUP = 3;
+  // `target` is the EntityId of a live unit.
+  EFFECT_SCOPE_UNIT = 4;
+  // `target` is the DCS country number.
+  EFFECT_SCOPE_COUNTRY = 5;
+}
+
+// Play a sound file that is in the mission. DCS takes any file name without
+// an error, so an applied outcome says only that DCS took the call.
+message Sound {
+  EffectScope scope = 1;
+  uint64 target = 2;
+  // The sound file's name in the mission.
+  string file = 3;
+}
+
+// Show a picture. Its numbers are the Mission Editor's values for the same
+// fields. An applied outcome says only that DCS took the call.
+message Picture {
+  EffectScope scope = 1;
+  uint64 target = 2;
+  // The picture's resource key in the mission, or its file name. Letters,
+  // digits, space and `_.-/()+,#`, at most 255 bytes.
+  string file = 3;
+  // How long the picture stays, 0 to 86400; 0 until PictureStop.
+  double seconds = 4;
+  // Clear the view first.
+  bool clear_view = 5;
+  // The picture's size, in `size_units`, at least 0.0001, at most 10000.
+  double size = 6;
+  uint32 horizontal = 7;
+  uint32 vertical = 8;
+  uint32 size_units = 9;
+}
+
+// Take every picture off screen.
+message PictureStop {}
+
 message Effect {
   oneof effect {
     Explosion explosion = 1;
@@ -285,6 +357,9 @@ message Effect {
     Flare flare = 3;
     Illumination illumination = 4;
     Damage damage = 5;
+    Sound sound = 6;
+    Picture picture = 7;
+    PictureStop picture_stop = 8;
   }
 }
 

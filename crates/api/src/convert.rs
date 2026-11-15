@@ -133,20 +133,50 @@ fn unit(u: &Unit, theater: &str) -> pb::Unit {
         position: Some(position(theater, u.state.at)),
         attitude: Some(pb::Attitude {
             heading: u.state.heading,
-            pitch: 0.0,
-            roll: 0.0,
+            pitch: u.captured.pitch,
+            roll: u.captured.roll,
         }),
+        life_max: (u.captured.life0 > 0.0).then_some(u.captured.life0),
         life: life(u),
         fuel: sampled(u.state.fuel, u),
         ..pb::Unit::default()
     }
 }
 
+/// The API coalition of a DCS coalition number (0 neutral, 1 red, 2 blue).
+pub fn coalition_of_dcs(c: u32) -> pb::Coalition {
+    match c {
+        0 => pb::Coalition::Neutral,
+        1 => pb::Coalition::Red,
+        2 => pb::Coalition::Blue,
+        _ => pb::Coalition::Unspecified,
+    }
+}
+
+/// The DCS coalition number of an API coalition, `None` for unspecified or
+/// a value the API does not define.
+pub fn dcs_coalition(c: i32) -> Option<u32> {
+    match pb::Coalition::try_from(c) {
+        Ok(pb::Coalition::Neutral) => Some(0),
+        Ok(pb::Coalition::Red) => Some(1),
+        Ok(pb::Coalition::Blue) => Some(2),
+        _ => None,
+    }
+}
+
+/// The coalition of a group or static: from the `OBJECT` records of its
+/// objects while DCS holds them, else from the country map the agent gave
+/// (spec/commands.md, `COUNTRIES`), else unspecified.
+fn coalition(store: &Store, g: &Group) -> i32 {
+    let materialized = matches!(g.state, State::Live | State::Dematerializing);
+    let dcs = g
+        .observed_coalition
+        .filter(|_| materialized)
+        .or_else(|| store.country_coalition(g.country));
+    dcs.map_or(pb::Coalition::Unspecified, coalition_of_dcs) as i32
+}
+
 /// The API entity of a store group or static.
-///
-/// The store's coalition is not shown: the API takes no coalition in a spec
-/// (DCS takes it from the country), so until the agent reports it the
-/// coalition is unspecified.
 pub fn entity(store: &Store, g: &Group) -> pb::Entity {
     let kind = match g.kind {
         Kind::Group => entity::Kind::Group(pb::Group {
@@ -154,7 +184,7 @@ pub fn entity(store: &Store, g: &Group) -> pb::Entity {
             label: g.label.clone(),
             managed: true,
             state: state(g.state) as i32,
-            coalition: pb::Coalition::Unspecified as i32,
+            coalition: coalition(store, g),
             country: g.country,
             category: category(g.category) as i32,
             units: g
@@ -178,7 +208,7 @@ pub fn entity(store: &Store, g: &Group) -> pb::Entity {
                 label: g.label.clone(),
                 managed: true,
                 r#type: u.map(|u| u.type_name.clone()).unwrap_or_default(),
-                coalition: pb::Coalition::Unspecified as i32,
+                coalition: coalition(store, g),
                 country: g.country,
                 alive: u.is_some_and(|u| !u.dead),
                 position: u.map(|u| position(&g.theater, u.state.at)),
@@ -267,21 +297,22 @@ impl Filter {
     }
 
     /// Whether a store group or static passes the kind and coalition parts
-    /// of the filter, which do not change while the entity exists.
-    pub fn kind_passes(&self, g: &Group) -> bool {
+    /// of the filter. The coalition is the one [`entity`] reports, so an
+    /// entity whose coalition is unspecified passes no coalition filter.
+    pub fn kind_passes(&self, store: &Store, g: &Group) -> bool {
         let kind_ok = match g.kind {
             Kind::Group => self.groups,
             Kind::Static => self.statics,
         };
-        // Coalitions are not known to the API yet (see [`entity`]); a
-        // filter that names any passes nothing it cannot place.
-        kind_ok && self.coalitions.is_empty()
+        kind_ok
+            && !g.removed
+            && (self.coalitions.is_empty() || self.coalitions.contains(&coalition(store, g)))
     }
 
     /// Whether a store group or static passes: its kind and coalition, and
     /// a live member inside the area.
     pub fn passes(&self, store: &Store, g: &Group) -> bool {
-        if !self.kind_passes(g) {
+        if !self.kind_passes(store, g) {
             return false;
         }
         match &self.area {
@@ -401,17 +432,11 @@ pub fn intent(
         }
         order::Intent::Attack(a) => {
             let target = EntityId(a.target_id);
-            let f = format!("{field}.attack.target_id");
-            match store.group(target) {
-                Some(g) if g.kind == Kind::Group => Intent::Attack { target },
-                Some(_) => {
-                    return Err(invalid(&f, "attacking a static is not built yet"));
-                }
-                None if store.unit(target).is_some() => {
-                    return Err(invalid(&f, "attacking a unit is not built yet"));
-                }
-                None => return Err(not_found(a.target_id)),
+            // A group, a static, or a unit of a group; not a removed one.
+            if !store.attackable(target) {
+                return Err(not_found(a.target_id));
             }
+            Intent::Attack { target }
         }
         order::Intent::Hold(_) => Intent::Hold,
         order::Intent::Orbit(o) => {
@@ -537,13 +562,67 @@ mod tests {
         assert_eq!(field_of(&e), "order.orbit.speed");
         let attack = |t: EntityId| order(order::Intent::Attack(pb::AttackOrder { target_id: t.0 }));
         assert!(intent(Some(&attack(g)), "Caucasus", "order", &s).is_ok());
+        // A static and a unit are targets too.
         for t in [st, u] {
-            let e = intent(Some(&attack(t)), "Caucasus", "order", &s).expect_err("kind");
-            assert_eq!(e.code(), Code::InvalidArgument);
+            assert!(matches!(
+                intent(Some(&attack(t)), "Caucasus", "order", &s),
+                Ok(Intent::Attack { target }) if target == t
+            ));
         }
         let e = intent(Some(&attack(EntityId(999))), "Caucasus", "order", &s).expect_err("none");
         assert_eq!(e.code(), Code::NotFound);
+        // A removed group, a removed static and a unit of a removed group.
+        let mut s = s;
+        s.remove_entity(g).expect("remove g");
+        s.remove_entity(st).expect("remove st");
+        for t in [g, st, u] {
+            let e = intent(Some(&attack(t)), "Caucasus", "order", &s).expect_err("removed");
+            assert_eq!(e.code(), Code::NotFound);
+        }
         assert!(intent(None, "Caucasus", "order", &s).is_err());
+    }
+
+    #[test]
+    fn a_coalition_comes_from_objects_while_materialized_and_from_the_country_map_otherwise() {
+        let (mut s, g, _, _) = store();
+        let country = s.group(g).expect("g").country;
+        let of = |s: &Store| {
+            let e = entity(s, s.group(g).expect("g"));
+            let Some(entity::Kind::Group(pg)) = e.kind else {
+                panic!("group")
+            };
+            pg.coalition
+        };
+        assert_eq!(of(&s), pb::Coalition::Unspecified as i32);
+        s.set_countries(Some([(country, 1)].into_iter().collect()));
+        assert_eq!(of(&s), pb::Coalition::Red as i32);
+        // The state is not live: the objects' coalition is not used.
+        s.observe_coalition(g, 2);
+        assert_eq!(of(&s), pb::Coalition::Red as i32);
+        s.set_countries(Some(Default::default()));
+        assert_eq!(of(&s), pb::Coalition::Unspecified as i32);
+    }
+
+    #[test]
+    fn a_coalition_filter_uses_the_coalition_the_entity_reports() {
+        let (mut s, g, _, _) = store();
+        let country = s.group(g).expect("g").country;
+        let filter = |c: pb::Coalition| {
+            Filter::new(
+                Some(&WorldFilter {
+                    coalitions: vec![c as i32],
+                    ..WorldFilter::default()
+                }),
+                false,
+            )
+            .expect("filter")
+        };
+        let grp = |s: &Store| s.group(g).expect("g").clone();
+        // Unspecified until the country map arrives.
+        assert!(!filter(pb::Coalition::Red).passes(&s, &grp(&s)));
+        s.set_countries(Some([(country, 1)].into_iter().collect()));
+        assert!(filter(pb::Coalition::Red).passes(&s, &grp(&s)));
+        assert!(!filter(pb::Coalition::Blue).passes(&s, &grp(&s)));
     }
 
     #[test]
@@ -607,7 +686,7 @@ mod tests {
             },
         );
         assert!(!f.passes(&s, s.group(g).expect("g")));
-        assert!(f.kind_passes(s.group(g).expect("g")));
+        assert!(f.kind_passes(&s, s.group(g).expect("g")));
         assert!(Filter::new(None, true).is_err());
     }
 }

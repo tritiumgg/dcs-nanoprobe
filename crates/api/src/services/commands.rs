@@ -11,26 +11,33 @@ use std::time::Instant;
 use nanoprobe_proto::errors::status;
 use nanoprobe_proto::v1alpha1::commands_service_server::CommandsService;
 use nanoprobe_proto::v1alpha1::{
-    self as pb, CaptureRequest, CaptureResponse, DematerializeRequest, DematerializeResponse,
-    DoEffectRequest, DoEffectResponse, ErrorReason, GetOutcomeRequest, GetOutcomeResponse,
-    GroupCategory, MaterializeRequest, MaterializeResponse, PutGroupRequest, PutGroupResponse,
-    PutStaticRequest, PutStaticResponse, RemoveEntityRequest, RemoveEntityResponse,
-    SetAirbaseOwnerRequest, SetAirbaseOwnerResponse, SetLostPolicyRequest, SetLostPolicyResponse,
-    SetOptionsRequest, SetOptionsResponse, SetOrderRequest, SetOrderResponse,
-    SetSampleRatesRequest, SetSampleRatesResponse, SetWarehouseStockRequest,
-    SetWarehouseStockResponse, Write,
+    self as pb, AdjustWarehouseStockRequest, AdjustWarehouseStockResponse, CaptureRequest,
+    CaptureResponse, DematerializeRequest, DematerializeResponse, DoEffectRequest,
+    DoEffectResponse, ErrorReason, GetOutcomeRequest, GetOutcomeResponse, GroupCategory,
+    MaterializeRequest, MaterializeResponse, PutGroupRequest, PutGroupResponse, PutStaticRequest,
+    PutStaticResponse, RemoveEntityRequest, RemoveEntityResponse, SetAirbaseOwnerRequest,
+    SetAirbaseOwnerResponse, SetLostPolicyRequest, SetLostPolicyResponse, SetOptionsRequest,
+    SetOptionsResponse, SetOrderRequest, SetOrderResponse, SetSampleRatesRequest,
+    SetSampleRatesResponse, SetWarehouseStockRequest, SetWarehouseStockResponse, Write,
 };
 use nanoprobe_sidecar::ids::EntityId;
+use nanoprobe_sidecar::reconciler::EffectResult;
+use nanoprobe_sidecar::sim::wire::Body;
+use nanoprobe_sidecar::stock::{Item, Stock};
 use nanoprobe_sidecar::store::{
-    Authority, Kind, LostPolicy, NewGroup, NewUnit, Point, Store, StoreError, UnitState,
+    Authority, Kind, LostPolicy, NewGroup, NewUnit, Outcome, Point, Store, StoreError, UnitState,
 };
+use nanoprobe_transport::records::Rates;
 use prost::Message;
 use tonic::{Code, Request, Response, Status};
 
 use crate::auth::{Access, require};
-use crate::convert::{dcs_category, finite, intent, invalid, not_built, not_found};
-use crate::hub::{Call, Hub, Inner, Need, Slot};
-use crate::lua::extra_to_lua;
+use crate::convert::{
+    dcs_category, dcs_coalition, entity, finite, intent, invalid, not_built, not_found,
+};
+use crate::hub::{Call, Hub, Inner, Need, Slot, settle};
+use crate::idem::EffectKind;
+use crate::lua::{extra_to_lua, to_lua};
 use nanoprobe_transport::codec::{Lv, Writer};
 
 /// The service.
@@ -49,7 +56,7 @@ fn store_error(e: StoreError) -> Status {
         StoreError::UnsupportedTarget(id) => status(
             Code::InvalidArgument,
             ErrorReason::InvalidField,
-            format!("attacking {id}, which is not a group, is not built yet"),
+            format!("{id} is not a group, a unit or a static of the campaign"),
             id.0,
             "order.attack.target_id",
         ),
@@ -444,7 +451,11 @@ fn set_order(g: &mut Inner, c: u64, r: &SetOrderRequest) -> Result<SetOrderRespo
     let limit = g.backend.max_command();
     let slot = g.campaigns.get_mut(&c).expect("resolved campaign");
     let id = EntityId(r.group_id);
-    let grp = slot.store.group(id).ok_or_else(|| not_found(r.group_id))?;
+    let grp = slot
+        .store
+        .group(id)
+        .filter(|g| !g.removed)
+        .ok_or_else(|| not_found(r.group_id))?;
     if grp.kind != Kind::Group {
         return Err(invalid("group_id", "only a group takes an order"));
     }
@@ -458,6 +469,436 @@ fn set_order(g: &mut Inner, c: u64, r: &SetOrderRequest) -> Result<SetOrderRespo
     })
 }
 
+fn set_options(g: &mut Inner, c: u64, r: &SetOptionsRequest) -> Result<SetOptionsResponse, Status> {
+    let limit = g.backend.max_command();
+    let slot = g.campaigns.get_mut(&c).expect("resolved campaign");
+    let id = EntityId(r.group_id);
+    match slot.store.group(id).filter(|g| !g.removed) {
+        Some(x) if x.kind == Kind::Group => {}
+        Some(_) => return Err(invalid("group_id", "only a group has controller options")),
+        None => return Err(not_found(r.group_id)),
+    }
+    if r.options.is_empty() {
+        return Err(invalid("options", "name at least one option"));
+    }
+    let mut values = Vec::with_capacity(r.options.len());
+    for (option, v) in &r.options {
+        let value = to_lua(v);
+        fits(
+            OVERHEAD + lv_len(&value),
+            limit,
+            &format!("options[{option}]"),
+        )?;
+        values.push((*option, value));
+    }
+    for (option, value) in values {
+        slot.store
+            .set_option(id, option, value)
+            .map_err(store_error)?;
+    }
+    Ok(SetOptionsResponse {
+        revision: slot.store.revision(),
+    })
+}
+
+fn remove_entity(
+    g: &mut Inner,
+    c: u64,
+    r: &RemoveEntityRequest,
+) -> Result<RemoveEntityResponse, Status> {
+    let slot = g.campaigns.get_mut(&c).expect("resolved campaign");
+    let id = EntityId(r.entity_id);
+    if slot.store.group(id).is_none() {
+        // A mark, drawing or menu item has no entry here yet.
+        return Err(if slot.store.unit(id).is_some() {
+            invalid("entity_id", "a unit leaves with its group")
+        } else {
+            not_found(r.entity_id)
+        });
+    }
+    slot.store.remove_entity(id).map_err(store_error)?;
+    Ok(RemoveEntityResponse {
+        revision: slot.store.revision(),
+    })
+}
+
+/// The theater of a warehouse or airbase call, one the campaign uses.
+fn base_theater(slot: &Slot, theater: &str, airbase: &str) -> Result<(), Status> {
+    if airbase.is_empty() {
+        return Err(invalid("airbase", "an airbase name is required"));
+    }
+    if !slot.meta.theaters.iter().any(|t| t == theater) {
+        return Err(invalid(
+            "theater",
+            format!("the campaign does not use the theater `{theater}`"),
+        ));
+    }
+    Ok(())
+}
+
+/// A stock from the three maps of a warehouse call. `signed` lets amounts
+/// be negative, as an adjustment's are.
+fn stock_of(
+    weapon: &std::collections::BTreeMap<String, f64>,
+    aircraft: &std::collections::BTreeMap<String, f64>,
+    liquids: &std::collections::BTreeMap<u32, f64>,
+    signed: bool,
+) -> Result<Stock, Status> {
+    let mut s = Stock::default();
+    let mut put = |item: Item, v: f64, field: String| {
+        if !v.is_finite() || (!signed && v < 0.0) {
+            return Err(invalid(
+                &field,
+                if signed {
+                    "an amount is finite"
+                } else {
+                    "a count is finite and 0 or more"
+                },
+            ));
+        }
+        s.set(item, v);
+        Ok(())
+    };
+    for (k, v) in weapon {
+        put(Item::Weapon(k.clone()), *v, format!("weapon[{k}]"))?;
+    }
+    for (k, v) in aircraft {
+        put(Item::Aircraft(k.clone()), *v, format!("aircraft[{k}]"))?;
+    }
+    for (k, v) in liquids {
+        put(Item::Liquid(*k), *v, format!("liquids[{k}]"))?;
+    }
+    if s.is_empty() {
+        return Err(invalid("stock", "name at least one item"));
+    }
+    Ok(s)
+}
+
+fn set_airbase_owner(
+    g: &mut Inner,
+    c: u64,
+    r: &SetAirbaseOwnerRequest,
+) -> Result<SetAirbaseOwnerResponse, Status> {
+    let slot = g.campaigns.get_mut(&c).expect("resolved campaign");
+    base_theater(slot, &r.theater, &r.airbase)?;
+    let owner =
+        dcs_coalition(r.owner).ok_or_else(|| invalid("owner", "a coalition is required"))?;
+    slot.store.set_airbase_owner(&r.theater, &r.airbase, owner);
+    Ok(SetAirbaseOwnerResponse {
+        revision: slot.store.revision(),
+    })
+}
+
+fn set_warehouse_stock(
+    g: &mut Inner,
+    c: u64,
+    r: &SetWarehouseStockRequest,
+) -> Result<SetWarehouseStockResponse, Status> {
+    let limit = g.backend.max_command();
+    let slot = g.campaigns.get_mut(&c).expect("resolved campaign");
+    base_theater(slot, &r.theater, &r.airbase)?;
+    // `stock` is the deprecated alias of `weapon`; `weapon` wins.
+    let mut weapons = r.stock.clone();
+    weapons.extend(r.weapon.clone());
+    let stock = stock_of(&weapons, &r.aircraft, &r.liquids, false)?;
+    fits(
+        OVERHEAD + lv_len(&stock.to_lv()) + r.airbase.len(),
+        limit,
+        "stock",
+    )?;
+    slot.store.set_stock(&r.theater, &r.airbase, &stock);
+    Ok(SetWarehouseStockResponse {
+        revision: slot.store.revision(),
+    })
+}
+
+fn set_sample_rates(
+    g: &mut Inner,
+    c: u64,
+    r: &SetSampleRatesRequest,
+) -> Result<SetSampleRatesResponse, Status> {
+    let slot = g.campaigns.get_mut(&c).expect("resolved campaign");
+    for (v, f) in [
+        (r.position_period, "position_period"),
+        (r.vitals_period, "vitals_period"),
+        (r.ammo_period, "ammo_period"),
+        (r.warehouse_period, "warehouse_period"),
+        (r.enumeration_period, "enumeration_period"),
+    ] {
+        if !(v.is_finite() && v >= 0.0) {
+            return Err(invalid(f, "a period is finite and 0 or more"));
+        }
+    }
+    slot.store.set_rates(Rates {
+        position_s: r.position_period,
+        vitals_s: r.vitals_period,
+        ammo_s: r.ammo_period,
+        warehouse_s: r.warehouse_period,
+        enumeration_s: r.enumeration_period,
+    });
+    Ok(SetSampleRatesResponse {})
+}
+
+/// The API's command result of an effect's or a query's end: none is
+/// `pending`.
+fn command_result(r: Option<&EffectResult>) -> pb::CommandResult {
+    let Some(r) = r else {
+        return pb::CommandResult {
+            outcome: pb::Outcome::Pending as i32,
+            ..pb::CommandResult::default()
+        };
+    };
+    let outcome = match r.outcome {
+        Outcome::Applied => pb::Outcome::Applied,
+        Outcome::Refused => pb::Outcome::Refused,
+        Outcome::Rejected => pb::Outcome::Rejected,
+        Outcome::Unknown => pb::Outcome::Unknown,
+        Outcome::NotSent => pb::Outcome::NotSent,
+    };
+    pb::CommandResult {
+        outcome: outcome as i32,
+        message: r
+            .result
+            .as_ref()
+            .map(|x| x.message.clone())
+            .unwrap_or_default(),
+        cost_us: r.result.as_ref().map_or(0, |x| x.cost_us),
+        applied: None,
+        // The numbers are the agent's codes plus one.
+        code: r.result.as_ref().map_or(0, |x| i32::from(x.code) + 1),
+    }
+}
+
+/// The encoded response of an effect or a query call from its result, none
+/// being `pending`. A capture's entity is the store's after it took what DCS
+/// read.
+pub fn effect_response(
+    g: &mut Inner,
+    c: u64,
+    kind: EffectKind,
+    result: Option<&EffectResult>,
+) -> Vec<u8> {
+    let result_pb = Some(command_result(result));
+    match kind {
+        EffectKind::Adjust => AdjustWarehouseStockResponse { result: result_pb }.encode_to_vec(),
+        EffectKind::Damage => DoEffectResponse { result: result_pb }.encode_to_vec(),
+        EffectKind::Capture(id) => {
+            let applied = result.is_some_and(|r| r.outcome == Outcome::Applied);
+            let entity = applied
+                .then(|| {
+                    let store = &g.campaigns.get(&c)?.store;
+                    store.group(EntityId(id)).map(|grp| entity(store, grp))
+                })
+                .flatten();
+            CaptureResponse {
+                result: result_pb,
+                entity,
+            }
+            .encode_to_vec()
+        }
+    }
+}
+
+/// The error for a command that cannot be sent now.
+fn dcs_not_ready() -> Status {
+    status(
+        Code::Unavailable,
+        ErrorReason::DcsNotReady,
+        "DCS is not attached, or no mission of the campaign runs",
+        0,
+        "",
+    )
+}
+
+fn adjust_start(
+    g: &mut Inner,
+    c: u64,
+    r: &AdjustWarehouseStockRequest,
+) -> Result<(u64, u64), Status> {
+    let limit = g.backend.max_command();
+    let slot = g.campaigns.get(&c).expect("resolved campaign");
+    base_theater(slot, &r.theater, &r.airbase)?;
+    let delta = stock_of(&r.weapon, &r.aircraft, &r.liquids, true)?;
+    fits(
+        OVERHEAD + lv_len(&delta.to_lv()) + r.airbase.len(),
+        limit,
+        "delta",
+    )?;
+    if let Some(l) = slot.store.loaded()
+        && !l.theater.is_empty()
+        && l.theater != r.theater
+    {
+        return Err(status(
+            Code::FailedPrecondition,
+            ErrorReason::TheaterNotLoaded,
+            format!("`{}` is loaded, not `{}`", l.theater, r.theater),
+            0,
+            "theater",
+        ));
+    }
+    g.with_rec(c, |rec, store, sim| {
+        rec.adjust_warehouse(store, sim, &r.airbase, &delta)
+    })
+    .flatten()
+    .ok_or_else(dcs_not_ready)
+}
+
+/// What the effect sends, for the effects `DoEffect` builds.
+fn effect_start(g: &mut Inner, c: u64, e: &pb::effect::Effect) -> Result<(u64, u64), Status> {
+    match e {
+        pb::effect::Effect::Damage(d) => damage_start(g, c, d),
+        pb::effect::Effect::Sound(s) => sound_start(g, c, s),
+        pb::effect::Effect::Picture(p) => picture_start(g, c, p),
+        pb::effect::Effect::PictureStop(_) => g
+            .with_rec(c, |rec, store, sim| rec.picture_stop(store, sim))
+            .flatten()
+            .ok_or_else(dcs_not_ready),
+        _ => Err(not_built("DoEffect for this effect")),
+    }
+}
+
+/// The scope code of a sound or picture, with the target checked: a group
+/// or a unit of the campaign that DCS holds, or a number that fits a DCS
+/// coalition or country number.
+fn scope_of(g: &mut Inner, c: u64, scope: i32, target: u64, field: &str) -> Result<u32, Status> {
+    let code = match pb::EffectScope::try_from(scope) {
+        Ok(pb::EffectScope::All) => 1,
+        Ok(pb::EffectScope::Coalition) => 2,
+        Ok(pb::EffectScope::Group) => 3,
+        Ok(pb::EffectScope::Unit) => 4,
+        Ok(pb::EffectScope::Country) => 5,
+        _ => return Err(invalid(&format!("{field}.scope"), "a scope is required")),
+    };
+    match code {
+        2 | 5 if target > u64::from(u32::MAX) => Err(invalid(
+            &format!("{field}.target"),
+            "a coalition or country number fits 32 bits",
+        )),
+        3 | 4 => {
+            let id = EntityId(target);
+            let slot = g.campaigns.get(&c).expect("resolved campaign");
+            let known = if code == 3 {
+                slot.store.group(id).is_some_and(|x| !x.removed)
+            } else {
+                slot.store.unit(id).is_some()
+            };
+            if !known {
+                return Err(not_found(target));
+            }
+            let bound = g
+                .with_rec(c, |rec, _, _| rec.is_bound(id))
+                .ok_or_else(dcs_not_ready)?;
+            if !bound {
+                return Err(status(
+                    Code::FailedPrecondition,
+                    ErrorReason::EntityNotFound,
+                    format!("DCS holds no object of entity {target}"),
+                    target,
+                    &format!("{field}.target"),
+                ));
+            }
+            Ok(code)
+        }
+        _ => Ok(code),
+    }
+}
+
+fn sound_start(g: &mut Inner, c: u64, s: &pb::Sound) -> Result<(u64, u64), Status> {
+    let scope = scope_of(g, c, s.scope, s.target, "effect.sound")?;
+    if s.file.is_empty() {
+        return Err(invalid("effect.sound.file", "a file name is required"));
+    }
+    g.with_rec(c, |rec, store, sim| {
+        rec.sound(store, sim, scope, s.target, &s.file)
+    })
+    .flatten()
+    .ok_or_else(dcs_not_ready)
+}
+
+fn picture_start(g: &mut Inner, c: u64, p: &pb::Picture) -> Result<(u64, u64), Status> {
+    if !(p.seconds.is_finite() && (0.0..=86_400.0).contains(&p.seconds)) {
+        return Err(invalid("effect.picture.seconds", "finite, 0 to 86400"));
+    }
+    if !(p.size.is_finite() && (0.0001..=10_000.0).contains(&p.size)) {
+        return Err(invalid("effect.picture.size", "finite, 0.0001 to 10000"));
+    }
+    if !nanoprobe_transport::picture_file_ok(&p.file) {
+        return Err(invalid(
+            "effect.picture.file",
+            "1 to 255 bytes of letters, digits, space and _.-/()+,#",
+        ));
+    }
+    let scope = scope_of(g, c, p.scope, p.target, "effect.picture")?;
+    let body = Body::Picture {
+        scope,
+        target: p.target,
+        clear_view: u32::from(p.clear_view),
+        seconds: p.seconds,
+        size: p.size,
+        horizontal: p.horizontal,
+        vertical: p.vertical,
+        size_units: p.size_units,
+        file: p.file.clone(),
+    };
+    g.with_rec(c, |rec, store, sim| rec.picture(store, sim, body))
+        .flatten()
+        .ok_or_else(dcs_not_ready)
+}
+
+fn damage_start(g: &mut Inner, c: u64, d: &pb::Damage) -> Result<(u64, u64), Status> {
+    if !(d.life_percent.is_finite() && (0.0..=100.0).contains(&d.life_percent)) {
+        return Err(invalid(
+            "effect.damage.life_percent",
+            "a life is a percentage, 0 to 100",
+        ));
+    }
+    let unit = EntityId(d.unit_id);
+    let slot = g.campaigns.get(&c).expect("resolved campaign");
+    if slot.store.unit(unit).is_none() {
+        return Err(not_found(d.unit_id));
+    }
+    let bound = g
+        .with_rec(c, |rec, _, _| rec.is_bound(unit))
+        .ok_or_else(dcs_not_ready)?;
+    if !bound {
+        return Err(status(
+            Code::FailedPrecondition,
+            ErrorReason::EntityNotFound,
+            format!("DCS holds no object of unit {}", d.unit_id),
+            d.unit_id,
+            "effect.damage.unit_id",
+        ));
+    }
+    g.with_rec(c, |rec, store, sim| {
+        rec.damage(store, sim, unit, d.life_percent)
+    })
+    .flatten()
+    .ok_or_else(dcs_not_ready)
+}
+
+fn capture_start(g: &mut Inner, c: u64, r: &CaptureRequest) -> Result<(u64, u64), Status> {
+    let id = EntityId(r.entity_id);
+    let slot = g.campaigns.get(&c).expect("resolved campaign");
+    if slot.store.group(id).filter(|g| !g.removed).is_none() {
+        return Err(not_found(r.entity_id));
+    }
+    let bound = g
+        .with_rec(c, |rec, _, _| rec.is_bound(id))
+        .ok_or_else(dcs_not_ready)?;
+    if !bound {
+        return Err(status(
+            Code::FailedPrecondition,
+            ErrorReason::EntityNotFound,
+            format!("DCS holds no object of entity {}", r.entity_id),
+            r.entity_id,
+            "entity_id",
+        ));
+    }
+    g.with_rec(c, |rec, store, sim| rec.capture(store, sim, id))
+        .flatten()
+        .ok_or_else(dcs_not_ready)
+}
+
 fn authority(g: &mut Inner, c: u64, ids: &[u64], a: Authority) -> Result<u64, Status> {
     if ids.is_empty() {
         return Err(invalid("entity_ids", "name at least one group or static"));
@@ -467,7 +908,7 @@ fn authority(g: &mut Inner, c: u64, ids: &[u64], a: Authority) -> Result<u64, St
         (g.link.frame_campaign == c && !g.link.theater.is_empty()).then(|| g.link.theater.clone());
     let slot = g.campaigns.get_mut(&c).expect("resolved campaign");
     for i in ids {
-        let Some(grp) = slot.store.group(EntityId(*i)) else {
+        let Some(grp) = slot.store.group(EntityId(*i)).filter(|g| !g.removed) else {
             return Err(not_found(*i));
         };
         if a == Authority::Sim
@@ -550,9 +991,9 @@ impl CommandsService for Commands {
 
     async fn set_options(
         &self,
-        _req: Request<SetOptionsRequest>,
+        req: Request<SetOptionsRequest>,
     ) -> Result<Response<SetOptionsResponse>, Status> {
-        Err(not_built("SetOptions"))
+        changing!(self, req, "SetOptions", Need::Campaign, set_options)
     }
 
     async fn materialize(
@@ -589,9 +1030,9 @@ impl CommandsService for Commands {
 
     async fn remove_entity(
         &self,
-        _req: Request<RemoveEntityRequest>,
+        req: Request<RemoveEntityRequest>,
     ) -> Result<Response<RemoveEntityResponse>, Status> {
-        Err(not_built("RemoveEntity"))
+        changing!(self, req, "RemoveEntity", Need::Campaign, remove_entity)
     }
 
     async fn set_lost_policy(
@@ -610,37 +1051,132 @@ impl CommandsService for Commands {
 
     async fn set_airbase_owner(
         &self,
-        _req: Request<SetAirbaseOwnerRequest>,
+        req: Request<SetAirbaseOwnerRequest>,
     ) -> Result<Response<SetAirbaseOwnerResponse>, Status> {
-        Err(not_built("SetAirbaseOwner"))
+        changing!(
+            self,
+            req,
+            "SetAirbaseOwner",
+            Need::Campaign,
+            set_airbase_owner
+        )
     }
 
     async fn set_warehouse_stock(
         &self,
-        _req: Request<SetWarehouseStockRequest>,
+        req: Request<SetWarehouseStockRequest>,
     ) -> Result<Response<SetWarehouseStockResponse>, Status> {
-        Err(not_built("SetWarehouseStock"))
+        changing!(
+            self,
+            req,
+            "SetWarehouseStock",
+            Need::Campaign,
+            set_warehouse_stock
+        )
+    }
+
+    async fn adjust_warehouse_stock(
+        &self,
+        req: Request<AdjustWarehouseStockRequest>,
+    ) -> Result<Response<AdjustWarehouseStockResponse>, Status> {
+        require(&req, Access::Controller)?;
+        let r = req.into_inner();
+        let mut hashed = r.clone();
+        hashed.write = unleased(&r.write);
+        let w = r.write.clone().unwrap_or_default();
+        let resp = self
+            .0
+            .effect(
+                Call {
+                    method: "AdjustWarehouseStock",
+                    key: w.idempotency.as_ref(),
+                    lease: w.lease.as_ref(),
+                    campaign: w.campaign_id,
+                    need: Need::Active,
+                },
+                &hashed,
+                EffectKind::Adjust,
+                |g: &mut Inner, c| adjust_start(g, c, &r),
+            )
+            .await?;
+        Ok(Response::new(resp))
     }
 
     async fn capture(
         &self,
-        _req: Request<CaptureRequest>,
+        req: Request<CaptureRequest>,
     ) -> Result<Response<CaptureResponse>, Status> {
-        Err(not_built("Capture"))
+        require(&req, Access::Controller)?;
+        let r = req.into_inner();
+        let mut hashed = r.clone();
+        hashed.write = unleased(&r.write);
+        let w = r.write.clone().unwrap_or_default();
+        let resp = self
+            .0
+            .effect(
+                Call {
+                    method: "Capture",
+                    key: w.idempotency.as_ref(),
+                    lease: w.lease.as_ref(),
+                    campaign: w.campaign_id,
+                    need: Need::Active,
+                },
+                &hashed,
+                EffectKind::Capture(r.entity_id),
+                |g: &mut Inner, c| capture_start(g, c, &r),
+            )
+            .await?;
+        Ok(Response::new(resp))
     }
 
     async fn do_effect(
         &self,
-        _req: Request<DoEffectRequest>,
+        req: Request<DoEffectRequest>,
     ) -> Result<Response<DoEffectResponse>, Status> {
-        Err(not_built("DoEffect"))
+        require(&req, Access::Controller)?;
+        let r = req.into_inner();
+        let effect = match r.effect.as_ref().and_then(|e| e.effect.as_ref()) {
+            Some(
+                e @ (pb::effect::Effect::Damage(_)
+                | pb::effect::Effect::Sound(_)
+                | pb::effect::Effect::Picture(_)
+                | pb::effect::Effect::PictureStop(_)),
+            ) => e.clone(),
+            Some(_) => return Err(not_built("DoEffect for this effect")),
+            None => return Err(invalid("effect", "an effect is required")),
+        };
+        let mut hashed = r.clone();
+        hashed.write = unleased(&r.write);
+        let w = r.write.clone().unwrap_or_default();
+        let resp = self
+            .0
+            .effect(
+                Call {
+                    method: "DoEffect",
+                    key: w.idempotency.as_ref(),
+                    lease: w.lease.as_ref(),
+                    campaign: w.campaign_id,
+                    need: Need::Active,
+                },
+                &hashed,
+                EffectKind::Damage,
+                |g: &mut Inner, c| effect_start(g, c, &effect),
+            )
+            .await?;
+        Ok(Response::new(resp))
     }
 
     async fn set_sample_rates(
         &self,
-        _req: Request<SetSampleRatesRequest>,
+        req: Request<SetSampleRatesRequest>,
     ) -> Result<Response<SetSampleRatesResponse>, Status> {
-        Err(not_built("SetSampleRates"))
+        changing!(
+            self,
+            req,
+            "SetSampleRates",
+            Need::Campaign,
+            set_sample_rates
+        )
     }
 
     async fn get_outcome(
@@ -652,7 +1188,8 @@ impl CommandsService for Commands {
         if key.is_empty() {
             return Err(invalid("idempotency_key", "a key is required"));
         }
-        let done = self.0.lock().idem.get(Instant::now(), key).ok_or_else(|| {
+        let mut g = self.0.lock();
+        let done = g.idem.get(Instant::now(), key).ok_or_else(|| {
             status(
                 Code::NotFound,
                 ErrorReason::OutcomeNotFound,
@@ -661,13 +1198,32 @@ impl CommandsService for Commands {
                 "idempotency_key",
             )
         })?;
-        // Only effects and queries have a command outcome, and none is built
-        // yet. A set-state call's outcome is its entity's revisions in the
-        // World service.
+        // A pending effect or query settles here once its result is in.
+        let done = settle(&mut g, key, done);
+        let (result, entity) = match done.method {
+            "AdjustWarehouseStock" => (
+                AdjustWarehouseStockResponse::decode(done.response.as_slice())
+                    .ok()
+                    .and_then(|r| r.result),
+                None,
+            ),
+            "DoEffect" => (
+                DoEffectResponse::decode(done.response.as_slice())
+                    .ok()
+                    .and_then(|r| r.result),
+                None,
+            ),
+            "Capture" => match CaptureResponse::decode(done.response.as_slice()) {
+                Ok(r) => (r.result, r.entity),
+                Err(_) => (None, None),
+            },
+            // A set-state call has no outcome of its own.
+            _ => (None, None),
+        };
         Ok(Response::new(GetOutcomeResponse {
-            result: None,
+            result,
             value: None,
-            entity: None,
+            entity,
             campaign_id: done.campaign,
         }))
     }

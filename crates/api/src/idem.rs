@@ -36,6 +36,29 @@ pub struct Done {
     pub response: Vec<u8>,
     /// The campaign the call resolved to, 0 for none.
     pub campaign: u64,
+    /// For an effect or a query that returned `pending`: the command to read
+    /// the result of, and what to build from it.
+    pub pending: Option<Pending>,
+}
+
+/// What an effect or a query call returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EffectKind {
+    /// `AdjustWarehouseStock`.
+    Adjust,
+    /// `DoEffect`, whatever the effect.
+    Damage,
+    /// `Capture` of the entity.
+    Capture(u64),
+}
+
+/// A command whose result the call did not wait for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pending {
+    /// The command's epoch and sequence number.
+    pub cmd: (u64, u64),
+    /// What to build.
+    pub kind: EffectKind,
 }
 
 /// What a call with a key should do.
@@ -123,6 +146,14 @@ impl Idem {
         }
     }
 
+    /// Replace the remembered response of a finished call: a pending effect
+    /// that has its result now.
+    pub fn update(&mut self, key: &str, done: Done) {
+        if let Some(Slot::Done(_, d, _)) = self.slots.get_mut(key) {
+            *d = done;
+        }
+    }
+
     /// A finished call by its key, for `GetOutcome`.
     pub fn get(&mut self, now: Instant, key: &str) -> Option<Done> {
         self.expire(now);
@@ -161,6 +192,7 @@ mod tests {
             method: "PutGroup",
             response: vec![n],
             campaign: 1,
+            pending: None,
         }
     }
 
@@ -233,7 +265,7 @@ mod tests {
                             None => { model.insert(k, (r, None)); Begin::Run }
                             Some((r0, _)) if *r0 != r => Begin::Mismatch,
                             Some((_, None)) => Begin::Wait,
-                            Some((_, Some((_, n)))) => Begin::Done(Done { method: "M", response: vec![*n], campaign: 0 }),
+                            Some((_, Some((_, n)))) => Begin::Done(Done { method: "M", response: vec![*n], campaign: 0, pending: None }),
                         };
                         prop_assert_eq!(got, want);
                     }
@@ -241,7 +273,7 @@ mod tests {
                         if let Some((_, f @ None)) = model.get_mut(&k) {
                             next = next.wrapping_add(1);
                             *f = Some((now, next));
-                            i.finish(now, &k.to_string(), Done { method: "M", response: vec![next], campaign: 0 });
+                            i.finish(now, &k.to_string(), Done { method: "M", response: vec![next], campaign: 0, pending: None });
                         }
                     }
                     Op::Fail(k) => {

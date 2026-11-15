@@ -14,18 +14,19 @@ use std::time::{Duration, Instant, SystemTime};
 use nanoprobe_proto::errors::status;
 use nanoprobe_proto::v1alpha1::{self as pb, ErrorReason, Health, event};
 use nanoprobe_sidecar::ids::CampaignId;
-use nanoprobe_sidecar::reconciler::{Config as RecConfig, Reconciler};
+use nanoprobe_sidecar::reconciler::{Config as RecConfig, EffectResult, Reconciler};
 use nanoprobe_sidecar::sim::wire::{Body, Command, Input};
 use nanoprobe_sidecar::sim::{Detached, RawRecord, SimAdapter};
-use nanoprobe_sidecar::store::{LostPolicy, Store};
+use nanoprobe_sidecar::store::{LostPolicy, Outcome, Store};
 use nanoprobe_transport::records::CommandHeader;
 use prost::Message;
 use tokio::sync::{Notify, watch};
 use tonic::{Code, Status};
 
 use crate::config::Config;
-use crate::events::{EventLog, Link, Read};
+use crate::events::{EventLog, Link, Read, route_body};
 use crate::idem::{self, Begin, Done, Idem};
+use crate::idem::{EffectKind, Pending};
 use crate::lease::{LeaseError, Leases};
 
 /// What the server drives: DCS with the agent in it, real or fake.
@@ -226,6 +227,21 @@ impl Inner {
         self.backend.attach(self.sidecar_boot);
     }
 
+    /// Run `f` with the active campaign's reconciler, its store and the
+    /// adapter, when `campaign` is the active one and a reconciler exists.
+    pub fn with_rec<T>(
+        &mut self,
+        campaign: u64,
+        f: impl FnOnce(&mut Reconciler, &mut Store, &mut dyn SimAdapter) -> T,
+    ) -> Option<T> {
+        if self.active != Some(campaign) {
+            return None;
+        }
+        let rec = self.rec.as_mut()?;
+        let slot = self.campaigns.get_mut(&campaign)?;
+        Some(f(rec, &mut slot.store, self.backend.sim()))
+    }
+
     /// Put an event read from the agent in its log: the campaign of the
     /// frame it was made in when the server holds that campaign, otherwise
     /// the server log.
@@ -263,6 +279,11 @@ impl Inner {
                     seen: Vec::new(),
                 };
                 rec.step(&mut slot.store, &mut tee);
+                // Route progress made from the samples just read.
+                let stamp = self.link.stamp();
+                for e in slot.store.take_route_events() {
+                    slot.events.push(id, stamp, route_body(&e));
+                }
                 tee.seen
             }
             _ => self.backend.sim().read(),
@@ -626,6 +647,7 @@ impl Hub {
                                         method,
                                         response: r.encode_to_vec(),
                                         campaign: c,
+                                        pending: None,
                                     },
                                 );
                                 drop(g);
@@ -674,6 +696,196 @@ impl Hub {
             }
             settled.await;
         }
+    }
+}
+
+/// The encoded response of an effect or a query call, from its result;
+/// none is `pending`.
+pub fn effect_response(
+    g: &mut Inner,
+    campaign: u64,
+    kind: EffectKind,
+    result: Option<&EffectResult>,
+) -> Vec<u8> {
+    crate::services::commands::effect_response(g, campaign, kind, result)
+}
+
+/// A remembered call whose effect or query was pending, with its result if
+/// the reconciler has it now: the final response, remembered in place of
+/// the pending one. Any other call is returned as it is.
+pub fn settle(g: &mut Inner, key: &str, done: Done) -> Done {
+    let Some(p) = done.pending else {
+        return done;
+    };
+    let Some(rec) = g.rec.as_ref() else {
+        return done;
+    };
+    let r = match rec.effect_result(p.cmd) {
+        Some(r) => r.clone(),
+        // No result, and the command is not in flight either: the result
+        // left the reconciler (it kept only the newest ones, or a new
+        // reconciler replaced it) and will not come back. The agent may have
+        // taken the command, so the outcome is `unknown` (spec/errors.md).
+        None if !rec.inflight().any(|j| (j.epoch, j.seq) == p.cmd) => EffectResult {
+            outcome: Outcome::Unknown,
+            result: None,
+        },
+        None => return done,
+    };
+    let settled = Done {
+        response: effect_response(g, done.campaign, p.kind, Some(&r)),
+        pending: None,
+        ..done
+    };
+    g.idem.update(key, settled.clone());
+    settled
+}
+
+impl Hub {
+    /// Run an effect or a query under its idempotency key (spec/errors.md).
+    ///
+    /// `start` runs under the lock like a [`Hub::write`] call: it sends the
+    /// command and returns its (epoch, seq). The call then waits, without
+    /// the lock, for the agent's result up to `cfg.result_wait`. The response
+    /// is built from the result by [`effect_response`], or from none when the
+    /// time ran out (the outcome `pending`). The response is remembered under
+    /// the key; a pending one is settled later by a repeat of the call or by
+    /// `GetOutcome` ([`settle`]).
+    pub async fn effect<R, S>(
+        &self,
+        call: Call<'_>,
+        hashed: &impl Message,
+        kind: EffectKind,
+        start: S,
+    ) -> Result<R, Status>
+    where
+        R: Message + Default,
+        S: FnOnce(&mut Inner, u64) -> Result<(u64, u64), Status>,
+    {
+        let Call {
+            method,
+            key,
+            lease,
+            campaign,
+            need,
+        } = call;
+        if self.closing() {
+            return Err(crate::services::stopping());
+        }
+        let key = key.map(|k| k.key.as_str()).unwrap_or_default();
+        if key.is_empty() {
+            return Err(crate::convert::invalid(
+                "idempotency.key",
+                "every changing call carries an idempotency key",
+            ));
+        }
+        let d = idem::digest(method, &hashed.encode_to_vec());
+        let mut start = Some(start);
+        let sent = loop {
+            let settled = self.settled.notified();
+            tokio::pin!(settled);
+            settled.as_mut().enable();
+            {
+                let mut g = self.lock();
+                if self.closing() {
+                    return Err(crate::services::stopping());
+                }
+                let now = Instant::now();
+                match g.idem.begin(now, key, d) {
+                    Begin::Run => {
+                        let result = g
+                            .leases
+                            .check(now, lease.map(|l| (l.epoch, l.lease_id.as_str())))
+                            .map_err(lease_status)
+                            .and_then(|()| g.resolve(campaign, need))
+                            .and_then(|c| {
+                                let start = start.take().expect("a call runs once");
+                                let inner: &mut Inner = &mut g;
+                                catch_unwind(AssertUnwindSafe(|| start(inner, c)))
+                                    .map_err(|_| {
+                                        self.poisoned
+                                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                                        self.closing
+                                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                                        status(
+                                            Code::Internal,
+                                            ErrorReason::Internal,
+                                            "the call failed inside the server, which stops",
+                                            0,
+                                            "",
+                                        )
+                                    })?
+                                    .map(|k| (k, c))
+                            });
+                        match result {
+                            Ok(sent) => break sent,
+                            Err(e) => {
+                                if !self.poisoned.load(std::sync::atomic::Ordering::SeqCst) {
+                                    g.idem.fail(key);
+                                }
+                                drop(g);
+                                self.settled.notify_waiters();
+                                return Err(e);
+                            }
+                        }
+                    }
+                    Begin::Done(done) => {
+                        let done = settle(&mut g, key, done);
+                        return R::decode(done.response.as_slice()).map_err(|e| {
+                            status(
+                                Code::Internal,
+                                ErrorReason::Internal,
+                                format!("a remembered response does not decode: {e}"),
+                                0,
+                                "",
+                            )
+                        });
+                    }
+                    Begin::Mismatch => {
+                        return Err(status(
+                            Code::InvalidArgument,
+                            ErrorReason::IdempotencyMismatch,
+                            "the idempotency key was used with another request",
+                            0,
+                            "idempotency.key",
+                        ));
+                    }
+                    Begin::Wait => {}
+                }
+            }
+            settled.await;
+        };
+        let (cmd, c) = sent;
+        // The command is sent: wait for the driver to read its result.
+        let mut ticks = self.tick();
+        let deadline = tokio::time::Instant::now() + self.cfg.result_wait;
+        let result = loop {
+            {
+                let mut g = self.lock();
+                let found = g.rec.as_ref().and_then(|r| r.effect_result(cmd)).cloned();
+                let timed_out = tokio::time::Instant::now() >= deadline;
+                if found.is_some() || timed_out || self.closing() {
+                    let pending = found.is_none().then_some(Pending { cmd, kind });
+                    let response = effect_response(&mut g, c, kind, found.as_ref());
+                    let r = R::decode(response.as_slice()).unwrap_or_default();
+                    g.idem.finish(
+                        Instant::now(),
+                        key,
+                        Done {
+                            method,
+                            response,
+                            campaign: c,
+                            pending,
+                        },
+                    );
+                    drop(g);
+                    self.settled.notify_waiters();
+                    break r;
+                }
+            }
+            let _ = tokio::time::timeout_at(deadline, ticks.changed()).await;
+        };
+        Ok(result)
     }
 }
 

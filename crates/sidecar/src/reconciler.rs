@@ -22,16 +22,19 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use nanoprobe_transport::codec::Lv;
 use nanoprobe_transport::layout::{gap_class, kind, lifecycle as lc, result as rc};
-use nanoprobe_transport::records::{CommandHeader, CommandResult, Hello};
+use nanoprobe_transport::records::{
+    Airbase, CommandHeader, CommandResult, Hello, Rates, Warehouse,
+};
 
 use crate::ids::{self, CampaignId, EntityId, NameKind};
-use crate::intents::{self, Compiled, Intent};
+use crate::intents::{self, Compiled, Intent, Target};
 use crate::lifecycle::{State, Trigger};
 use crate::sim::wire::{Body, Command, Input, Object, ObjectGone, Seen, gone_reason, lv, opcode};
 use crate::sim::{RawRecord, SimAdapter};
+use crate::stock::{Item, Stock};
 use crate::store::{
-    Authority, Entry, Journalled, Kind, LeftAs, Loaded, LostPolicy, Outcome, Point, Store,
-    UnitState,
+    Authority, CapturedMore, Entry, Journalled, Kind, LeftAs, Loaded, LostPolicy, Outcome, Point,
+    Store, UnitState,
 };
 
 /// A `NOT_READY` hold: the revision, the lifecycle change count and the FRAME
@@ -52,6 +55,12 @@ const HOLD_SPAWN: u8 = 0;
 const HOLD_ORDER: u8 = 1;
 const HOLD_DESTROY: u8 = 2;
 const HOLD_CAPTURE: u8 = 3;
+const HOLD_OPTION: u8 = 4;
+const HOLD_BASES: u8 = 5;
+const HOLD_COUNTRIES: u8 = 6;
+
+/// Results of effects and queries kept for the API to read.
+const EFFECT_RESULTS_KEPT: usize = 1024;
 
 /// The reconciler's settings (spec/config.md, `[world]`).
 #[derive(Clone, Copy, Debug)]
@@ -123,6 +132,9 @@ pub struct Counters {
     /// `ENUMERATE` commands sent because the reconciler asked for whole
     /// `OBJECT` records (a `SEEN` of an object it could not resolve).
     pub enumerate_requests: u64,
+    /// `OBJECT` records whose coalition differs from the one the country map
+    /// gives for the object's country (spec/commands.md, `COUNTRIES`).
+    pub coalition_disagreements: u64,
 }
 
 impl Counters {
@@ -146,7 +158,25 @@ impl Counters {
         self.revivals += o.revivals;
         self.respawns_held += o.respawns_held;
         self.enumerate_requests += o.enumerate_requests;
+        self.coalition_disagreements += o.coalition_disagreements;
     }
+}
+
+/// What the latest samples say about one airbase and its warehouse.
+#[derive(Clone, Debug, Default)]
+struct BaseSeen {
+    coalition: Option<u32>,
+    stock: Option<Stock>,
+}
+
+/// How an effect or a query the API sent ended, kept for the API to read.
+#[derive(Clone, Debug)]
+pub struct EffectResult {
+    /// The outcome (spec/errors.md).
+    pub outcome: Outcome,
+    /// The agent's result, absent when it was lost or the agent never took
+    /// the command.
+    pub result: Option<CommandResult>,
 }
 
 /// One row of the binding mirror: a DCS object of the loaded mission and the
@@ -237,6 +267,40 @@ pub struct Reconciler {
     /// A spawn the agent rejected with a code that a resend cannot fix, by
     /// spec revision and generation; not sent again until either changes.
     spawn_rejected: HashMap<EntityId, (u64, u32)>,
+    /// The spec revision the latest applied spawn of each entity carried, in
+    /// the loaded generation. A live entity whose store `spec_rev` is ahead
+    /// of it is spawned again, in place (spec/world.md, "Revisions").
+    spawn_applied: HashMap<EntityId, u64>,
+    /// The controller options the current spawn of each group applied.
+    option_held: HashMap<EntityId, BTreeMap<u32, Lv>>,
+    /// An option value DCS refused, by group and option; not sent again until
+    /// the value changes or the group is spawned again.
+    option_refused: HashMap<(EntityId, u32), Lv>,
+    /// The group, option and value each `GROUP_OPTION` in flight names.
+    opt_sent: HashMap<(u64, u64), (EntityId, u32, Lv)>,
+    /// What the latest samples say, by airbase name, in the loaded
+    /// generation.
+    bases: BTreeMap<String, BaseSeen>,
+    /// The desired-owner revision sent per airbase in this generation.
+    owner_sent: HashMap<String, u64>,
+    /// The desired-stock revision sent per airbase in this generation.
+    stock_sent: HashMap<String, u64>,
+    /// The airbase each `AIRBASE_OWNER` (true) or `WAREHOUSE_SET` (false) in
+    /// flight names.
+    base_sent: HashMap<(u64, u64), (bool, String, u32, Stock)>,
+    /// Owners per airbase that `AIRBASE_OWNER` commands applied since the
+    /// airbase's last sample. A sample showing one is our effect, not a fact.
+    own_owner: HashMap<String, Vec<u32>>,
+    /// The same for the stocks `WAREHOUSE_SET` commands applied.
+    own_stock: HashMap<String, Vec<Stock>>,
+    /// The airbase and delta of each `WAREHOUSE_ADJUST` in flight.
+    adjust_sent: HashMap<(u64, u64), (String, Stock)>,
+    /// The rates last written since the last `HELLO`.
+    rates_sent: Option<Rates>,
+    /// The agent's `COUNTRIES` answer for this generation is in the store.
+    countries_held: bool,
+    /// Results of effects and queries, by (epoch, seq), for the API.
+    effects: BTreeMap<(u64, u64), EffectResult>,
     /// `CAMPAIGN` was written since the last `HELLO`.
     campaign_sent: bool,
     /// A full enumeration was used since this reconciler started, since the
@@ -301,6 +365,20 @@ impl Reconciler {
             ext_sent: HashMap::new(),
             drift_destroy_failures: HashMap::new(),
             spawn_rejected: HashMap::new(),
+            spawn_applied: HashMap::new(),
+            option_held: HashMap::new(),
+            option_refused: HashMap::new(),
+            opt_sent: HashMap::new(),
+            bases: BTreeMap::new(),
+            owner_sent: HashMap::new(),
+            stock_sent: HashMap::new(),
+            base_sent: HashMap::new(),
+            own_owner: HashMap::new(),
+            own_stock: HashMap::new(),
+            adjust_sent: HashMap::new(),
+            rates_sent: None,
+            countries_held: false,
+            effects: BTreeMap::new(),
             campaign_sent: false,
             enumerated: false,
             held: BTreeSet::new(),
@@ -381,6 +459,7 @@ impl Reconciler {
             Input::Frame(f) => {
                 self.frames_read += 1;
                 self.stamp = (r.agent_boot, f.mission_gen, f.campaign);
+                store.set_sample_time(f.model_time);
                 if f.replay == 0 {
                     if r.agent_boot == self.agent_boot || self.agent_boot == 0 {
                         if self.lifecycle != f.lifecycle {
@@ -391,7 +470,11 @@ impl Reconciler {
                     self.seen_mission(store, r.agent_boot, f.mission_gen, None);
                 }
             }
-            Input::Hello(h) => self.hello(store, r.agent_boot, &h, r.resync),
+            Input::Hello(h) => {
+                // The samples before a HELLO make no segment with those after.
+                store.break_samples();
+                self.hello(store, r.agent_boot, &h, r.resync)
+            }
             Input::Lifecycle(l) => {
                 self.lifecycle_changes += 1;
                 if r.agent_boot == self.agent_boot || self.agent_boot == 0 {
@@ -469,6 +552,16 @@ impl Reconciler {
                     }
                 }
             }
+            Input::Airbase(a) => {
+                if self.current(store, r.agent_boot) {
+                    self.airbase_sample(store, &a);
+                }
+            }
+            Input::Warehouse(w) => {
+                if self.current(store, r.agent_boot) {
+                    self.warehouse_sample(store, &w);
+                }
+            }
             Input::Event(_) => self.counters.events += 1,
             Input::Other(_) => self.counters.other += 1,
         }
@@ -523,7 +616,9 @@ impl Reconciler {
         self.unresolved.clear();
         self.order_held.clear();
         self.order_refused.clear();
+        self.forget_generation(store);
         self.spawn_rejected.clear();
+        self.spawn_applied.clear();
         self.drift_destroy_failures.clear();
         self.held.clear();
         self.run = None;
@@ -579,14 +674,42 @@ impl Reconciler {
             self.order_refused.clear();
             self.ext_held.clear();
             self.ext_refused.clear();
+            self.forget_generation(store);
             self.run = None;
         }
+        self.rates_sent = None;
         self.ext_not_ready.clear();
         self.cmd_not_ready.clear();
         self.agent_boot = agent_boot;
         self.attached = true;
         self.campaign_sent = false;
         self.enumerated = false;
+    }
+
+    /// What belongs to one mission generation and one agent: applied
+    /// options, airbase and warehouse samples and what was sent for them,
+    /// and the country map.
+    fn forget_generation(&mut self, store: &mut Store) {
+        self.option_held.clear();
+        self.option_refused.clear();
+        self.opt_sent.clear();
+        self.bases.clear();
+        self.owner_sent.clear();
+        self.stock_sent.clear();
+        self.base_sent.clear();
+        self.own_owner.clear();
+        self.own_stock.clear();
+        self.adjust_sent.clear();
+        self.countries_held = false;
+        store.set_countries(None);
+    }
+
+    /// A group's spawn is new, or the group is gone: its options are
+    /// applied no more.
+    fn forget_options(&mut self, id: EntityId) {
+        self.option_held.remove(&id);
+        self.option_refused.retain(|(e, _), _| *e != id);
+        self.opt_sent.retain(|_, (e, _, _)| *e != id);
     }
 
     fn resolve(
@@ -602,13 +725,57 @@ impl Reconciler {
             seq: c.seq,
             outcome,
         });
+        if matches!(
+            c.opcode,
+            opcode::EXTENSION_INVOKE
+                | opcode::WAREHOUSE_ADJUST
+                | opcode::DAMAGE
+                | opcode::SOUND
+                | opcode::PICTURE
+                | opcode::PICTURE_STOP
+                | opcode::CAPTURE
+        ) {
+            self.effects.insert(
+                (c.epoch, c.seq),
+                EffectResult {
+                    outcome,
+                    result: res.cloned(),
+                },
+            );
+            while self.effects.len() > EFFECT_RESULTS_KEPT {
+                self.effects.pop_first();
+            }
+        }
         match c.opcode {
             opcode::EXTENSION_SET => {
                 self.extension_resolved(c, outcome, res);
                 return;
             }
+            opcode::WAREHOUSE_ADJUST => {
+                // Applied, the adjustment is a change of the desired counts:
+                // it does not wait for a sample (LIVE, E6: clamped at 0).
+                if let Some((airbase, delta)) = self.adjust_sent.remove(&(c.epoch, c.seq))
+                    && outcome == Outcome::Applied
+                    && let Some(theater) = store.loaded().map(|l| l.theater.clone())
+                {
+                    store.adjust_desired_stock(&theater, &airbase, &delta);
+                }
+                return;
+            }
             // An effect: reported, never sent again.
-            opcode::EXTENSION_INVOKE => return,
+            opcode::EXTENSION_INVOKE
+            | opcode::DAMAGE
+            | opcode::SOUND
+            | opcode::PICTURE
+            | opcode::PICTURE_STOP => return,
+            opcode::AIRBASE_OWNER | opcode::WAREHOUSE_SET => {
+                self.base_resolved(c, outcome, res);
+                return;
+            }
+            opcode::COUNTRIES => {
+                self.countries_resolved(store, c, outcome, res);
+                return;
+            }
             _ => {}
         }
         let Some(g) = store.group(c.entity) else {
@@ -633,9 +800,16 @@ impl Reconciler {
         }
         match c.opcode {
             opcode::GROUP_SPAWN | opcode::STATIC_SPAWN => {
-                if !gen_now || state != State::Materializing || c.rev != spec_rev {
+                if !gen_now {
                     return;
                 }
+                // A live entity whose spec changed is spawned again in place
+                // and stays live: the spawn replaces the group in DCS.
+                let again = match state {
+                    State::Materializing if c.rev == spec_rev => false,
+                    State::Live => true,
+                    _ => return,
+                };
                 match outcome {
                     Outcome::Applied => {
                         // The group may be new, even when the answer is
@@ -643,8 +817,11 @@ impl Reconciler {
                         // lost: a new group has no task, and an order refused
                         // for the old one may suit it. Sending the order again
                         // costs at most an AT_REVISION.
+                        let at = self.spawn_applied.entry(id).or_default();
+                        *at = (*at).max(c.rev);
                         self.order_held.remove(&id);
                         self.order_refused.remove(&id);
+                        self.forget_options(id);
                         // Spawned again in the same generation, the entity
                         // has new DCS object IDs: an attack order on it is
                         // compiled again at a new revision. After a
@@ -657,7 +834,9 @@ impl Reconciler {
                                 .groups()
                                 .filter(|a| {
                                     a.order_sent_in == Some((c.agent_boot, c.mission_gen, a.order_rev))
-                                        && matches!(a.order, Some(Intent::Attack { target }) if target == id)
+                                        && matches!(a.order, Some(Intent::Attack { target })
+                                            if target == id
+                                                || store.unit(target).is_some_and(|u| u.group == id))
                                 })
                                 .map(|a| a.id)
                                 .collect();
@@ -665,27 +844,36 @@ impl Reconciler {
                                 store.bump_order(a).expect("group");
                             }
                         }
-                        store
-                            .transition(id, Trigger::SpawnApplied)
-                            .expect("materializing");
+                        if !again {
+                            store
+                                .transition(id, Trigger::SpawnApplied)
+                                .expect("materializing");
+                        }
                         if store.all_dead(id) {
                             store.transition(id, Trigger::AllDead).expect("live");
                         }
                     }
                     Outcome::Refused => {
                         let msg = res.map(|r| r.message.clone()).unwrap_or_default();
-                        store
-                            .transition(id, Trigger::SpawnRefused)
-                            .expect("materializing");
+                        if again {
+                            // Not retried at this revision.
+                            self.spawn_rejected.insert(id, (c.rev, c.mission_gen));
+                        } else {
+                            store
+                                .transition(id, Trigger::SpawnRefused)
+                                .expect("materializing");
+                        }
                         store.set_error(id, msg).expect("group");
                     }
                     Outcome::Unknown => {
                         store
                             .spawn_unknown(id, c.agent_boot, c.mission_gen)
                             .expect("group");
-                        store
-                            .transition(id, Trigger::SpawnUnknown)
-                            .expect("materializing");
+                        if !again {
+                            store
+                                .transition(id, Trigger::SpawnUnknown)
+                                .expect("materializing");
+                        }
                     }
                     Outcome::Rejected => {
                         if let Some(r) = res {
@@ -699,6 +887,7 @@ impl Reconciler {
                     Outcome::NotSent => {}
                 }
             }
+            opcode::GROUP_OPTION => self.option_resolved(c, gen_now, outcome, code),
             opcode::GROUP_ORDER => {
                 if !gen_now {
                     return;
@@ -718,6 +907,15 @@ impl Reconciler {
                 }
             }
             opcode::GROUP_CAPTURE_DESTROY | opcode::CAPTURE => {
+                if gen_now
+                    && state != State::Dematerializing
+                    && c.opcode == opcode::CAPTURE
+                    && code == Some(rc::APPLIED)
+                    && let Some(r) = res
+                {
+                    // A client's capture: the store takes what DCS read.
+                    self.take_capture(store, id, &r.value);
+                }
                 if !gen_now || state != State::Dematerializing {
                     return;
                 }
@@ -741,6 +939,7 @@ impl Reconciler {
                 store.set_captured(id).expect("group");
                 if c.opcode == opcode::GROUP_CAPTURE_DESTROY && code == Some(rc::APPLIED) {
                     self.order_held.remove(&id);
+                    self.forget_options(id);
                     unbind_group(&mut self.binding, id);
                     store
                         .transition(id, Trigger::CaptureDone)
@@ -767,6 +966,7 @@ impl Reconciler {
             // The agent sets the applied revisions of what it
             // destroyed to 0 (spec/commands.md).
             self.order_held.remove(&id);
+            self.forget_options(id);
             unbind_group(&mut self.binding, id);
             self.drift_destroy_failures.remove(&id);
             if state == State::Dematerializing && captured {
@@ -798,9 +998,9 @@ impl Reconciler {
         }
     }
 
-    /// Read a captured state: a list of tables with `name`, `x`, `y`, `z`,
-    /// `heading`, `life` and `fuel` (spec/commands.md,
-    /// `GROUP_CAPTURE_DESTROY`; the shape is fixed in step S15).
+    /// Read a captured state: a list of tables with the keys of
+    /// spec/commands.md, `GROUP_CAPTURE_DESTROY`. A read that raised leaves
+    /// its key out, and the unit keeps what the store had for it.
     fn take_capture(&mut self, store: &mut Store, group: EntityId, value: &Lv) {
         let campaign = store.campaign();
         for item in lv::items(value) {
@@ -811,19 +1011,31 @@ impl Reconciler {
             if p.campaign != campaign || store.unit(p.entity).is_none_or(|u| u.group != group) {
                 continue;
             }
-            let num = |k| lv::num_at(item, k).unwrap_or(0.0);
+            let u = store.unit(p.entity).expect("unit");
+            let (prev, prev_more) = (u.state, u.captured.clone());
+            let num = |k: &str, d: f64| lv::num_at(item, k).unwrap_or(d);
             store.observe_capture(
                 p.entity,
                 UnitState {
                     at: Point {
-                        x: num("x"),
-                        y: num("y"),
-                        z: num("z"),
+                        x: num("x", prev.at.x),
+                        y: num("y", prev.at.y),
+                        z: num("z", prev.at.z),
                     },
-                    heading: num("heading"),
-                    life: num("life") as f32,
-                    fuel: num("fuel") as f32,
+                    heading: num("heading", prev.heading),
+                    life: num("life", f64::from(prev.life)) as f32,
+                    fuel: num("fuel", f64::from(prev.fuel)) as f32,
                 },
+            );
+            store.observe_capture_more(
+                p.entity,
+                CapturedMore {
+                    life0: num("life0", prev_more.life0),
+                    pitch: num("pitch", prev_more.pitch),
+                    roll: num("roll", prev_more.roll),
+                    ammo: lv::get(item, "ammo").cloned().unwrap_or(prev_more.ammo),
+                },
+                num("id", 0.0) as u64,
             );
         }
     }
@@ -932,6 +1144,12 @@ impl Reconciler {
         }
         store.set_missing(row.unit, false);
         store.set_object(row.unit, o.object);
+        store.observe_coalition(row.group, o.coalition);
+        if let Some(c) = store.country_coalition(o.country)
+            && c != o.coalition
+        {
+            self.counters.coalition_disagreements += 1;
+        }
         self.unresolved.remove(&o.object);
         self.binding.insert(o.object, row);
     }
@@ -1142,6 +1360,7 @@ impl Reconciler {
                     // An order refused while DCS held no group (a revived
                     // member brings one back) may be taken now.
                     self.order_refused.remove(&id);
+                    self.option_refused.retain(|(e, _), _| *e != id);
                     store.transition(id, Trigger::EnumFound).expect("lost");
                 }
                 State::Dead if found.contains(&id) => self.counters.after_dead += 1,
@@ -1356,6 +1575,14 @@ impl Reconciler {
         if !self.extensions(store, sim) {
             return;
         }
+        if let Some(r) = store.rates()
+            && self.rates_sent != Some(r)
+        {
+            if !self.send(store, sim, EntityId(0), 0, Body::Rates(r)) {
+                return;
+            }
+            self.rates_sent = Some(r);
+        }
         let loaded = store.loaded().expect("ready").clone();
         self.held
             .retain(|id| store.group(*id).is_some_and(|g| g.state == State::Lost));
@@ -1423,7 +1650,30 @@ impl Reconciler {
                         store.transition(id, Trigger::Dematerialize).expect("live");
                         self.dematerialize(store, sim, id);
                     } else {
-                        self.order(store, sim, id, &bound);
+                        // A live entity whose spec is ahead of its applied
+                        // spawn is spawned again in place. Its order and
+                        // options wait for that spawn: it replaces the group.
+                        let applied = *self.spawn_applied.entry(id).or_insert(g.spec_rev);
+                        let in_flight = self.inflight_for(
+                            store,
+                            id,
+                            &[opcode::GROUP_SPAWN, opcode::STATIC_SPAWN],
+                        );
+                        let behind = applied < g.spec_rev;
+                        let blocked = self.spawn_rejected.get(&id)
+                            == Some(&(g.spec_rev, loaded.mission_gen))
+                            || self.is_held(self.cmd_not_ready.get(&(id, HOLD_SPAWN)), g.spec_rev);
+                        let mut sent = false;
+                        if behind && !in_flight && !blocked && here && spawns > 0 {
+                            sent = self.spawn(store, sim, id);
+                            if sent {
+                                spawns -= 1;
+                            }
+                        }
+                        if !sent && !in_flight && !(behind && !blocked && here) {
+                            self.order(store, sim, id, &bound);
+                            self.options(store, sim, id);
+                        }
                     }
                 }
                 State::Dematerializing => {
@@ -1473,6 +1723,18 @@ impl Reconciler {
                 State::Dead | State::Unspawnable => {}
             }
         }
+        if !self.attached {
+            return;
+        }
+        // After every spawn and order: the map only informs the API.
+        if !self.countries_held
+            && !self.inflight_for(store, EntityId(0), &[opcode::COUNTRIES])
+            && !self.is_held(self.cmd_not_ready.get(&(EntityId(0), HOLD_COUNTRIES)), 0)
+            && !self.send(store, sim, EntityId(0), 0, Body::Countries)
+        {
+            return;
+        }
+        self.bases_plan(store, sim);
     }
 
     fn destroy(&mut self, store: &mut Store, sim: &mut dyn SimAdapter, id: EntityId) {
@@ -1569,6 +1831,425 @@ impl Reconciler {
         self.send(store, sim, id, g.spec_rev, body)
     }
 
+    /// Send each controller option the group's current spawn has not
+    /// applied, after its order. An option DCS refused at this value is not
+    /// sent again until the value changes or the group is spawned again.
+    fn options(&mut self, store: &mut Store, sim: &mut dyn SimAdapter, id: EntityId) {
+        let g = store.group(id).expect("group");
+        if g.kind != Kind::Group
+            || g.options.is_empty()
+            || self.inflight_for(store, id, &[opcode::GROUP_OPTION])
+            || self.is_held(self.cmd_not_ready.get(&(id, HOLD_OPTION)), 0)
+        {
+            return;
+        }
+        let held = self.option_held.get(&id);
+        let todo: Vec<(u32, Lv)> = g
+            .options
+            .iter()
+            .filter(|(k, v)| {
+                held.and_then(|h| h.get(*k)) != Some(*v)
+                    && self.option_refused.get(&(id, **k)) != Some(*v)
+            })
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+        for (option, value) in todo {
+            let key = (self.epoch, self.next_seq);
+            let body = Body::GroupOption {
+                option,
+                value: value.clone(),
+            };
+            if !self.send(store, sim, id, 0, body) {
+                return;
+            }
+            self.opt_sent.insert(key, (id, option, value));
+        }
+    }
+
+    fn option_resolved(
+        &mut self,
+        c: &Journalled,
+        gen_now: bool,
+        outcome: Outcome,
+        code: Option<u64>,
+    ) {
+        let Some((id, option, value)) = self.opt_sent.remove(&(c.epoch, c.seq)) else {
+            return;
+        };
+        if !gen_now || c.agent_boot != self.agent_boot {
+            return;
+        }
+        match outcome {
+            Outcome::Applied => {
+                self.option_held
+                    .entry(id)
+                    .or_default()
+                    .insert(option, value);
+            }
+            Outcome::Refused => {
+                self.option_refused.insert((id, option), value);
+            }
+            Outcome::Rejected if code == Some(rc::NOT_READY) => {
+                self.hold_not_ready(id, HOLD_OPTION, 0);
+            }
+            _ => {}
+        }
+    }
+
+    /// A base command of the kind (`owner`: `AIRBASE_OWNER`, else
+    /// `WAREHOUSE_SET`) for the airbase is in flight. A sample then may show
+    /// that command taking effect, so it is not a fact about the base.
+    fn base_unresolved(&self, owner: bool, airbase: &str) -> bool {
+        self.base_sent
+            .values()
+            .any(|(o, name, ..)| *o == owner && name == airbase)
+    }
+
+    /// An in-flight `WAREHOUSE_SET` or `WAREHOUSE_ADJUST` for the airbase
+    /// names the item.
+    fn item_unresolved(&self, airbase: &str, item: &Item) -> bool {
+        self.base_sent
+            .values()
+            .any(|(o, name, _, diff)| !*o && name == airbase && diff.get(item).is_some())
+            || self
+                .adjust_sent
+                .values()
+                .any(|(name, delta)| name == airbase && delta.get(item).is_some())
+    }
+
+    /// `AIRBASE`: the owner of an airbase. An owner that changes from the
+    /// one last seen is DCS's doing (a capture) or our own command taking
+    /// effect. It replaces the desired owner only when the last sample
+    /// matched the desired owner: the controller's value was then in effect
+    /// and DCS moved away from it. A sample that changes while the desired
+    /// owner is still unsent is not a fact about our value, so it is kept.
+    fn airbase_sample(&mut self, store: &mut Store, a: &Airbase) {
+        let theater = store
+            .loaded()
+            .map(|l| l.theater.clone())
+            .unwrap_or_default();
+        let unresolved = self.base_unresolved(true, &a.airbase);
+        let seen = self.bases.entry(a.airbase.clone()).or_default();
+        let prev = seen.coalition.replace(a.coalition);
+        let own = self.own_owner.remove(&a.airbase).unwrap_or_default();
+        let desired = store
+            .desired_owner(&theater, &a.airbase)
+            .map(|d| d.coalition);
+        if !unresolved
+            && !own.contains(&a.coalition)
+            && prev.is_some_and(|p| p != a.coalition)
+            && prev == desired
+        {
+            store.observe_airbase_owner(&theater, &a.airbase, a.coalition);
+        }
+    }
+
+    /// `WAREHOUSE`: the stock of an airbase. A count that changes from the
+    /// one last seen replaces the desired count of an item the controller
+    /// set, only when the last sample matched that desired count: DCS used
+    /// it, or an adjustment changed it, after our value took effect. A
+    /// change while the desired count is still unsent is kept.
+    fn warehouse_sample(&mut self, store: &mut Store, w: &Warehouse) {
+        let theater = store
+            .loaded()
+            .map(|l| l.theater.clone())
+            .unwrap_or_default();
+        let stock = Stock::from_lv(&w.stock);
+        let seen = self.bases.entry(w.airbase.clone()).or_default();
+        let prev = seen.stock.replace(stock.clone());
+        let own = self.own_stock.remove(&w.airbase).unwrap_or_default();
+        if let Some(prev) = prev {
+            for (item, count) in stock.items() {
+                if self.item_unresolved(&w.airbase, &item) {
+                    continue;
+                }
+                let desired = store
+                    .desired_stock(&theater, &w.airbase)
+                    .and_then(|d| d.stock.get(&item));
+                let ours = own.iter().any(|o| o.get(&item) == Some(count));
+                if !ours && prev.get(&item) != Some(count) && prev.get(&item) == desired {
+                    store.observe_stock_item(&theater, &w.airbase, &item, count);
+                }
+            }
+        }
+    }
+
+    /// Send an owner or a stock the latest sample does not show, once per
+    /// desired revision and mission generation.
+    fn bases_plan(&mut self, store: &mut Store, sim: &mut dyn SimAdapter) {
+        if self.is_held(self.cmd_not_ready.get(&(EntityId(0), HOLD_BASES)), 0) {
+            return;
+        }
+        let theater = store.loaded().expect("ready").theater.clone();
+        let owners: Vec<(String, u32, u64)> = store
+            .desired_owners()
+            .filter(|((t, _), _)| *t == theater)
+            .map(|((_, a), d)| (a.clone(), d.coalition, d.rev))
+            .collect();
+        for (airbase, coalition, rev) in owners {
+            let differs = self
+                .bases
+                .get(&airbase)
+                .and_then(|b| b.coalition)
+                .is_some_and(|c| c != coalition);
+            if !differs || self.owner_sent.get(&airbase) == Some(&rev) {
+                continue;
+            }
+            let key = (self.epoch, self.next_seq);
+            let body = Body::AirbaseOwner {
+                coalition,
+                airbase: airbase.clone(),
+            };
+            if !self.send(store, sim, EntityId(0), 0, body) {
+                return;
+            }
+            self.owner_sent.insert(airbase.clone(), rev);
+            self.base_sent
+                .insert(key, (true, airbase, coalition, Stock::default()));
+        }
+        let stocks: Vec<(String, Stock, u64)> = store
+            .desired_stocks()
+            .filter(|((t, _), _)| *t == theater)
+            .map(|((_, a), d)| (a.clone(), d.stock.clone(), d.rev))
+            .collect();
+        for (airbase, desired, rev) in stocks {
+            let Some(seen) = self.bases.get(&airbase).and_then(|b| b.stock.as_ref()) else {
+                continue;
+            };
+            let mut diff = Stock::default();
+            for (item, count) in desired.items() {
+                if seen.get(&item) != Some(count) {
+                    diff.set(item, count);
+                }
+            }
+            if diff.is_empty() || self.stock_sent.get(&airbase) == Some(&rev) {
+                continue;
+            }
+            let key = (self.epoch, self.next_seq);
+            let body = Body::WarehouseSet {
+                airbase: airbase.clone(),
+                stock: diff.to_lv(),
+            };
+            if !self.send(store, sim, EntityId(0), 0, body) {
+                return;
+            }
+            self.stock_sent.insert(airbase.clone(), rev);
+            self.base_sent.insert(key, (false, airbase, 0, diff));
+        }
+    }
+
+    /// An `AIRBASE_OWNER` or `WAREHOUSE_SET` resolved. Applied or refused,
+    /// it is not sent again at this revision; a command the agent did not
+    /// take, or whose answer was lost, is derived again.
+    fn base_resolved(&mut self, c: &Journalled, outcome: Outcome, res: Option<&CommandResult>) {
+        let Some((owner, name, coalition, stock)) = self.base_sent.remove(&(c.epoch, c.seq)) else {
+            return;
+        };
+        if outcome == Outcome::Applied {
+            if owner {
+                self.own_owner
+                    .entry(name.clone())
+                    .or_default()
+                    .push(coalition);
+            } else {
+                self.own_stock.entry(name.clone()).or_default().push(stock);
+            }
+        }
+        let code = res.map(|r| r.code);
+        let again = match outcome {
+            Outcome::Unknown | Outcome::NotSent => true,
+            Outcome::Rejected => code.is_some_and(rejected_for_now),
+            _ => false,
+        };
+        if again {
+            if owner {
+                self.owner_sent.remove(&name);
+            } else {
+                self.stock_sent.remove(&name);
+            }
+        }
+        if outcome == Outcome::Rejected && code.map(u64::from) == Some(rc::NOT_READY) {
+            self.hold_not_ready(EntityId(0), HOLD_BASES, 0);
+        }
+    }
+
+    /// A `COUNTRIES` resolved: an applied answer gives the map. Any other
+    /// outcome leaves the reconciler without one, and the query is sent
+    /// again after a hold.
+    fn countries_resolved(
+        &mut self,
+        store: &mut Store,
+        c: &Journalled,
+        outcome: Outcome,
+        res: Option<&CommandResult>,
+    ) {
+        let gen_now = c.agent_boot == self.agent_boot
+            && store
+                .loaded()
+                .is_some_and(|l| l.agent_boot == c.agent_boot && l.mission_gen == c.mission_gen);
+        if !gen_now {
+            return;
+        }
+        match res {
+            Some(r) if outcome == Outcome::Applied && u64::from(r.code) == rc::APPLIED => {
+                let mut map = BTreeMap::new();
+                if let Lv::Table(pairs) = &r.value {
+                    for (k, v) in pairs {
+                        if let (Lv::Number(k), Lv::Number(v)) = (k, v)
+                            && *k >= 0.0
+                            && *v >= 0.0
+                        {
+                            map.insert(*k as u32, *v as u32);
+                        }
+                    }
+                }
+                store.set_countries(Some(map));
+                self.countries_held = true;
+            }
+            _ => self.hold_not_ready(EntityId(0), HOLD_COUNTRIES, 0),
+        }
+    }
+
+    fn effect_ready(&self, store: &Store) -> bool {
+        self.ready(store) && self.attached && self.campaign_sent
+    }
+
+    /// Add to or take from a warehouse's stock: a `WAREHOUSE_ADJUST`, an
+    /// effect, never sent again. Returns the command's (epoch, seq), whose
+    /// result [`Reconciler::effect_result`] gives, or None when nothing can
+    /// be sent now.
+    pub fn adjust_warehouse(
+        &mut self,
+        store: &mut Store,
+        sim: &mut dyn SimAdapter,
+        airbase: &str,
+        delta: &Stock,
+    ) -> Option<(u64, u64)> {
+        if !self.effect_ready(store) {
+            return None;
+        }
+        let key = (self.epoch, self.next_seq);
+        let body = Body::WarehouseAdjust {
+            airbase: airbase.to_owned(),
+            delta: delta.to_lv(),
+        };
+        let sent = self.send(store, sim, EntityId(0), 0, body);
+        if sent {
+            self.adjust_sent
+                .insert(key, (airbase.to_owned(), delta.clone()));
+        }
+        sent.then_some(key)
+    }
+
+    /// Set a bound unit's life, as a percentage of its initial life: a
+    /// `DAMAGE`, an effect. None when nothing can be sent now or DCS holds
+    /// no object of the unit.
+    pub fn damage(
+        &mut self,
+        store: &mut Store,
+        sim: &mut dyn SimAdapter,
+        unit: EntityId,
+        life_percent: f64,
+    ) -> Option<(u64, u64)> {
+        if !self.effect_ready(store) || !self.is_bound(unit) {
+            return None;
+        }
+        let key = (self.epoch, self.next_seq);
+        self.send(store, sim, unit, 0, Body::Damage { life_percent })
+            .then_some(key)
+    }
+
+    /// Play a sound file: a `SOUND`, an effect, never sent again. A `GROUP`
+    /// or `UNIT` scope needs DCS to hold an object of the target (None
+    /// otherwise), as does any call when nothing can be sent now.
+    pub fn sound(
+        &mut self,
+        store: &mut Store,
+        sim: &mut dyn SimAdapter,
+        scope: u32,
+        target: u64,
+        file: &str,
+    ) -> Option<(u64, u64)> {
+        if !self.effect_ready(store) || !self.scope_bound(scope, target) {
+            return None;
+        }
+        let key = (self.epoch, self.next_seq);
+        let body = Body::Sound {
+            scope,
+            target,
+            file: file.to_owned(),
+        };
+        self.send(store, sim, EntityId(0), 0, body).then_some(key)
+    }
+
+    /// Show a picture: a `PICTURE`, an effect, never sent again. None as for
+    /// [`Reconciler::sound`].
+    pub fn picture(
+        &mut self,
+        store: &mut Store,
+        sim: &mut dyn SimAdapter,
+        body: Body,
+    ) -> Option<(u64, u64)> {
+        let Body::Picture { scope, target, .. } = &body else {
+            return None;
+        };
+        if !self.effect_ready(store) || !self.scope_bound(*scope, *target) {
+            return None;
+        }
+        let key = (self.epoch, self.next_seq);
+        self.send(store, sim, EntityId(0), 0, body).then_some(key)
+    }
+
+    /// Take every picture off screen: a `PICTURE_STOP`, an effect.
+    pub fn picture_stop(
+        &mut self,
+        store: &mut Store,
+        sim: &mut dyn SimAdapter,
+    ) -> Option<(u64, u64)> {
+        if !self.effect_ready(store) {
+            return None;
+        }
+        let key = (self.epoch, self.next_seq);
+        self.send(store, sim, EntityId(0), 0, Body::PictureStop)
+            .then_some(key)
+    }
+
+    /// Whether a scope's target is something DCS can be asked about: any
+    /// scope but `GROUP` and `UNIT`, or an entity DCS holds an object of.
+    fn scope_bound(&self, scope: u32, target: u64) -> bool {
+        !matches!(scope, 3 | 4) || self.is_bound(EntityId(target))
+    }
+
+    /// Read a live group's or static's state from DCS: a `CAPTURE`, a query.
+    /// The store takes what DCS reads when the result arrives. None when
+    /// nothing can be sent now.
+    pub fn capture(
+        &mut self,
+        store: &mut Store,
+        sim: &mut dyn SimAdapter,
+        entity: EntityId,
+    ) -> Option<(u64, u64)> {
+        if !self.effect_ready(store) {
+            return None;
+        }
+        let key = (self.epoch, self.next_seq);
+        self.send(store, sim, entity, 0, Body::Capture)
+            .then_some(key)
+    }
+
+    /// Whether DCS holds an object of the unit, group or static.
+    pub fn is_bound(&self, entity: EntityId) -> bool {
+        self.binding
+            .values()
+            .any(|r| r.unit == entity || r.group == entity)
+    }
+
+    /// How an effect or a query this reconciler sent ended, by the
+    /// (epoch, seq) the call returned; None while it is unanswered.
+    pub fn effect_result(&self, key: (u64, u64)) -> Option<&EffectResult> {
+        self.effects.get(&key)
+    }
+
     fn order(
         &mut self,
         store: &mut Store,
@@ -1581,7 +2262,17 @@ impl Reconciler {
         if g.kind != Kind::Group || self.inflight_for(store, id, &[opcode::GROUP_ORDER]) {
             return;
         }
-        let target_now = |t: EntityId| bound.get(&t).copied().filter(|v| *v != 0);
+        let binding = &self.binding;
+        let object_of = |e: EntityId| binding.iter().find(|(_, r)| r.unit == e).map(|(o, _)| *o);
+        let target_now = |t: EntityId| match store.group(t) {
+            Some(x) if x.kind == Kind::Group => bound
+                .get(&t)
+                .copied()
+                .filter(|v| *v != 0)
+                .map(Target::Group),
+            Some(_) => object_of(t).map(Target::Static),
+            None => object_of(t).map(Target::Unit),
+        };
         let rev = g.order_rev;
         let held = self.order_held.get(&id).copied().unwrap_or(0);
         if held >= rev

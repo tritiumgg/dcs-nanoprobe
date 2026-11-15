@@ -314,6 +314,8 @@ fn check_journal(store: &Store, sent: &[Command]) -> Result<(), Violation> {
             )));
         }
         let want = match cmd.body {
+            // A live entity whose spec changed is spawned again in place.
+            Body::GroupSpawn { .. } | Body::StaticSpawn { .. } if *s == State::Live => None,
             Body::GroupSpawn { .. } | Body::StaticSpawn { .. } => Some(State::Materializing),
             Body::GroupCaptureDestroy | Body::Capture => Some(State::Dematerializing),
             Body::GroupOrder(_) => Some(State::Live),
@@ -743,10 +745,10 @@ impl World {
 
     fn check_safety(&mut self) -> Result<(), Violation> {
         let l = self.sim.ledger();
-        if l.replacements != 0 {
+        if l.replacements != l.in_place {
             return Err(Violation(format!(
                 "{} spawns replaced a group DCS held",
-                l.replacements
+                l.replacements - l.in_place
             )));
         }
         for g in self.store.groups() {
@@ -975,7 +977,9 @@ impl World {
                             progress: g.progress,
                         };
                         let compiled = intents::compile(order, status, |t| {
-                            self.sim.attack_of(campaign, t.0).map(|(gid, _)| gid)
+                            self.sim
+                                .attack_of(campaign, t.0)
+                                .map(|(gid, _)| intents::Target::Group(gid))
                         });
                         let needed = matches!(compiled, Compiled::Task(_));
                         if needed && self.sim.applied_order(g.id.0) != g.order_rev {

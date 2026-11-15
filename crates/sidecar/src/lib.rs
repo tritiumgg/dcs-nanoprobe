@@ -10,4 +10,5 @@ pub mod mirror;
 pub mod reconciler;
 pub mod replay;
 pub mod sim;
+pub mod stock;
 pub mod store;

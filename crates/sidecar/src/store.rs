@@ -9,11 +9,13 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use nanoprobe_transport::codec::Lv;
+use nanoprobe_transport::records::Rates;
 
 use crate::grid::Grid;
 use crate::ids::{CampaignId, EntityId, MAX_ID};
 use crate::intents::{self, Intent};
 use crate::lifecycle::{self, State, Trigger};
+use crate::stock::{Item, Stock};
 
 /// Who simulates a managed entity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -69,6 +71,32 @@ pub struct UnitState {
     pub fuel: f32,
 }
 
+/// The keys of a capture that `UnitState` does not hold
+/// (spec/commands.md, `GROUP_CAPTURE_DESTROY`). A read that raised leaves its
+/// key out, which here is 0 or nil.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CapturedMore {
+    /// `getLife0()`, or 0 when not read.
+    pub life0: f64,
+    /// Pitch, radians.
+    pub pitch: f64,
+    /// Roll, radians.
+    pub roll: f64,
+    /// `getAmmo()` as DCS returns it, or nil.
+    pub ammo: Lv,
+}
+
+impl Default for CapturedMore {
+    fn default() -> CapturedMore {
+        CapturedMore {
+            life0: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
+            ammo: Lv::Nil,
+        }
+    }
+}
+
 /// A unit, or the one member of a static.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Unit {
@@ -100,6 +128,9 @@ pub struct Unit {
     pub label: String,
     /// DCS skill, empty for the default. Spec.
     pub skill: String,
+    /// What the last capture read besides the state: initial life, attitude
+    /// and ammunition. Absent keys stay 0 and nil.
+    pub captured: CapturedMore,
     /// Further keys of the DCS unit or static table: payload, livery,
     /// callsign and so on (spec/world.md, "Lua tables in the API"). Spec.
     pub extra: Lv,
@@ -132,12 +163,25 @@ pub struct Group {
     pub components: BTreeMap<String, Vec<u8>>,
     /// Revision of the spec.
     pub spec_rev: u64,
+    /// The coalition its `OBJECT` records last gave, DCS numbering: 0 neutral,
+    /// 1 red, 2 blue. `None` until an object of it is seen.
+    pub observed_coalition: Option<u32>,
+    /// The controller removed it: it is under campaign authority, so DCS
+    /// holds none of it, and the API no longer lists it. Its ID is never
+    /// reused.
+    pub removed: bool,
+    /// Controller options by DCS option ID. Not spec: a change moves only
+    /// the store revision (spec/world.md, "Revisions").
+    pub options: BTreeMap<u32, Lv>,
     /// The order, if any.
     pub order: Option<Intent>,
     /// Revision of the order, 0 for none.
     pub order_rev: u64,
     /// Progress of the order (intents::progress).
     pub progress: usize,
+    /// The last sample of the lead unit made under this order: the unit, its
+    /// `x` and `z`, and the model time. Makes the segment to the next sample.
+    pub last_lead: Option<(EntityId, f64, f64, f64)>,
     /// Lifecycle state.
     pub state: State,
     /// Who simulates it.
@@ -214,6 +258,42 @@ pub enum Entry {
         /// The new revision.
         rev: u64,
     },
+    /// The controller removed a group or static.
+    Removed {
+        /// The entity.
+        entity: EntityId,
+    },
+    /// A controller option of a group was set.
+    Option {
+        /// The group.
+        entity: EntityId,
+        /// The DCS option ID.
+        option: u32,
+    },
+    /// The desired owner of an airbase was set by the controller, or
+    /// replaced by a capture DCS made.
+    AirbaseOwner {
+        /// The theater.
+        theater: String,
+        /// The airbase's DCS name.
+        airbase: String,
+        /// The desired owner.
+        coalition: u32,
+        /// The desired state's revision: moves when the controller sets it.
+        rev: u64,
+    },
+    /// The desired counts of a warehouse changed: the controller set items,
+    /// or DCS changed an item the controller had set.
+    Warehouse {
+        /// The theater.
+        theater: String,
+        /// The airbase's DCS name.
+        airbase: String,
+        /// The desired state's revision: moves when the controller sets it.
+        rev: u64,
+    },
+    /// The desired sample rates were set.
+    SampleRates(Rates),
     /// An order was set.
     Order {
         /// The group.
@@ -390,6 +470,52 @@ pub struct Store {
     changes_keep: usize,
     grid: Grid,
     extensions: BTreeMap<String, Extension>,
+    owners: BTreeMap<(String, String), DesiredOwner>,
+    stocks: BTreeMap<(String, String), DesiredStock>,
+    rates: Option<Rates>,
+    countries: Option<BTreeMap<u32, u32>>,
+    sample_time: f64,
+    route_events: Vec<RouteEvent>,
+}
+
+/// A route event: a waypoint of a group's order reached, or the route done.
+/// The store queues them and the API puts them in the campaign's event log,
+/// so each is written once: progress is kept in the store, never goes back,
+/// and an event is made only when it advances.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RouteEvent {
+    /// The group.
+    pub group: EntityId,
+    /// The order revision.
+    pub order_rev: u64,
+    /// The waypoint's index in the order, from 0; `None` for the route being
+    /// complete.
+    pub index: Option<usize>,
+    /// Model time of the sample that showed it.
+    pub model_time: f64,
+    /// Whether the position was observed. Always true: only samples move
+    /// progress, and the controller cannot write a position that does.
+    pub observed: bool,
+}
+
+/// The owner the controller wants an airbase to have.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DesiredOwner {
+    /// DCS coalition number.
+    pub coalition: u32,
+    /// One more at each controller set. A DCS capture that replaces the
+    /// owner leaves it, so the reconciler sends a set once per revision and
+    /// mission generation.
+    pub rev: u64,
+}
+
+/// The counts the controller wants in a warehouse: only items it set.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DesiredStock {
+    /// The counts.
+    pub stock: Stock,
+    /// One more at each controller set.
+    pub rev: u64,
 }
 
 /// A registered Lua extension the campaign wants in DCS (spec/world.md,
@@ -413,9 +539,8 @@ pub enum StoreError {
     NoTransition(EntityId, State, Trigger),
     /// No more `EntityId`s below 2^53.
     Exhausted,
-    /// An attack order whose target is not a group of this campaign: a unit
-    /// or a static as the target is step S15's. The API answers
-    /// `INVALID_FIELD`.
+    /// An attack order whose target is neither a group, a static nor a unit
+    /// of this campaign. The API answers `INVALID_FIELD`.
     UnsupportedTarget(EntityId),
 }
 
@@ -439,7 +564,240 @@ impl Store {
             changes_keep,
             grid: Grid::new(GRID_CELL_M),
             extensions: BTreeMap::new(),
+            owners: BTreeMap::new(),
+            stocks: BTreeMap::new(),
+            rates: None,
+            countries: None,
+            sample_time: 0.0,
+            route_events: Vec::new(),
         }
+    }
+
+    /// The coalition each DCS country has in the loaded mission, once the
+    /// agent answered `COUNTRIES`: country number to DCS coalition number.
+    pub fn countries(&self) -> Option<&BTreeMap<u32, u32>> {
+        self.countries.as_ref()
+    }
+
+    /// The DCS coalition of a country, if the map holds it.
+    pub fn country_coalition(&self, country: u32) -> Option<u32> {
+        self.countries.as_ref()?.get(&country).copied()
+    }
+
+    /// Keep the agent's country map, or forget it with `None`. Observed, not
+    /// desired state: it adds no journal entry. A group that is not in DCS
+    /// takes its coalition from this map, so a changed map touches every
+    /// visible group: the store revision moves and a world watch sends the
+    /// new coalition.
+    pub fn set_countries(&mut self, map: Option<BTreeMap<u32, u32>>) {
+        if self.countries == map {
+            return;
+        }
+        self.countries = map;
+        let ids: Vec<EntityId> = self
+            .groups
+            .values()
+            .filter(|g| !g.removed)
+            .map(|g| g.id)
+            .collect();
+        for id in ids {
+            self.touch(id);
+        }
+    }
+
+    /// An `OBJECT` of the group or static gave its coalition. Returns whether
+    /// it changed.
+    pub fn observe_coalition(&mut self, id: EntityId, coalition: u32) -> bool {
+        match self.groups.get_mut(&id) {
+            Some(g) if g.observed_coalition != Some(coalition) => {
+                g.observed_coalition = Some(coalition);
+                self.touch(id);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Set one controller option of a group or static. A value the group
+    /// already has changes nothing. Not spec: only the store revision moves.
+    pub fn set_option(&mut self, id: EntityId, option: u32, value: Lv) -> Result<(), StoreError> {
+        let g = self.group_mut(id)?;
+        if g.options.get(&option) == Some(&value) {
+            return Ok(());
+        }
+        g.options.insert(option, value);
+        self.journal(Entry::Option { entity: id, option });
+        self.touch(id);
+        Ok(())
+    }
+
+    /// Remove a group or static: it goes to campaign authority, so the
+    /// reconciler takes it out of DCS, and it is hidden from the API. A
+    /// removed entity stays in the store, so its ID is never reused and its
+    /// objects in DCS are still destroyed as drift.
+    pub fn remove_entity(&mut self, id: EntityId) -> Result<(), StoreError> {
+        if self.group_mut(id)?.removed {
+            return Ok(());
+        }
+        self.set_authority(id, Authority::Campaign)?;
+        self.group_mut(id)?.removed = true;
+        self.journal(Entry::Removed { entity: id });
+        self.touch(id);
+        Ok(())
+    }
+
+    /// The owner the controller wants for an airbase, if it set one.
+    pub fn desired_owner(&self, theater: &str, airbase: &str) -> Option<&DesiredOwner> {
+        self.owners.get(&(theater.to_owned(), airbase.to_owned()))
+    }
+
+    /// Every desired owner, by theater and airbase name.
+    pub fn desired_owners(&self) -> impl Iterator<Item = (&(String, String), &DesiredOwner)> {
+        self.owners.iter()
+    }
+
+    /// The controller wants an airbase to belong to a coalition. Returns the
+    /// desired state's revision.
+    pub fn set_airbase_owner(&mut self, theater: &str, airbase: &str, coalition: u32) -> u64 {
+        let key = (theater.to_owned(), airbase.to_owned());
+        let rev = self.owners.get(&key).map_or(1, |o| o.rev + 1);
+        self.owners.insert(key, DesiredOwner { coalition, rev });
+        self.journal(Entry::AirbaseOwner {
+            theater: theater.to_owned(),
+            airbase: airbase.to_owned(),
+            coalition,
+            rev,
+        });
+        self.touch(EntityId(0));
+        rev
+    }
+
+    /// DCS changed the owner of an airbase the controller set: a capture is a
+    /// fact and replaces the desired owner, at the same revision. Returns
+    /// whether anything changed.
+    pub fn observe_airbase_owner(&mut self, theater: &str, airbase: &str, coalition: u32) -> bool {
+        let key = (theater.to_owned(), airbase.to_owned());
+        let Some(o) = self.owners.get_mut(&key) else {
+            return false;
+        };
+        if o.coalition == coalition {
+            return false;
+        }
+        o.coalition = coalition;
+        let rev = o.rev;
+        self.journal(Entry::AirbaseOwner {
+            theater: theater.to_owned(),
+            airbase: airbase.to_owned(),
+            coalition,
+            rev,
+        });
+        self.touch(EntityId(0));
+        true
+    }
+
+    /// The counts the controller wants in a warehouse, if it set any.
+    pub fn desired_stock(&self, theater: &str, airbase: &str) -> Option<&DesiredStock> {
+        self.stocks.get(&(theater.to_owned(), airbase.to_owned()))
+    }
+
+    /// Every desired warehouse, by theater and airbase name.
+    pub fn desired_stocks(&self) -> impl Iterator<Item = (&(String, String), &DesiredStock)> {
+        self.stocks.iter()
+    }
+
+    /// The controller wants these counts in a warehouse; items it does not
+    /// name keep what was desired. Returns the desired state's revision.
+    pub fn set_stock(&mut self, theater: &str, airbase: &str, stock: &Stock) -> u64 {
+        let key = (theater.to_owned(), airbase.to_owned());
+        let d = self.stocks.entry(key).or_insert(DesiredStock {
+            stock: Stock::default(),
+            rev: 0,
+        });
+        d.stock.merge(stock);
+        d.rev += 1;
+        let rev = d.rev;
+        self.journal(Entry::Warehouse {
+            theater: theater.to_owned(),
+            airbase: airbase.to_owned(),
+            rev,
+        });
+        self.touch(EntityId(0));
+        rev
+    }
+
+    /// DCS changed the count of an item the controller set: the count it has
+    /// replaces the desired one, at the same revision. An item the controller
+    /// did not set is left alone. Returns whether anything changed.
+    pub fn observe_stock_item(
+        &mut self,
+        theater: &str,
+        airbase: &str,
+        item: &Item,
+        count: f64,
+    ) -> bool {
+        let key = (theater.to_owned(), airbase.to_owned());
+        let Some(d) = self.stocks.get_mut(&key) else {
+            return false;
+        };
+        match d.stock.get(item) {
+            Some(c) if c != count => {}
+            _ => return false,
+        }
+        d.stock.set(item.clone(), count);
+        let rev = d.rev;
+        self.journal(Entry::Warehouse {
+            theater: theater.to_owned(),
+            airbase: airbase.to_owned(),
+            rev,
+        });
+        self.touch(EntityId(0));
+        true
+    }
+
+    /// An applied `WAREHOUSE_ADJUST` changed the stock: add its delta to the
+    /// desired count of each item that has one, clamped at 0 (LIVE, E6).
+    /// Returns whether anything changed.
+    pub fn adjust_desired_stock(&mut self, theater: &str, airbase: &str, delta: &Stock) -> bool {
+        let key = (theater.to_owned(), airbase.to_owned());
+        let Some(d) = self.stocks.get_mut(&key) else {
+            return false;
+        };
+        let mut changed = false;
+        for (item, by) in delta.items() {
+            if let Some(c) = d.stock.get(&item) {
+                let n = (c + by).max(0.0);
+                if n != c {
+                    d.stock.set(item, n);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            return false;
+        }
+        let rev = d.rev;
+        self.journal(Entry::Warehouse {
+            theater: theater.to_owned(),
+            airbase: airbase.to_owned(),
+            rev,
+        });
+        self.touch(EntityId(0));
+        true
+    }
+
+    /// The sample rates the controller set, if it did.
+    pub fn rates(&self) -> Option<Rates> {
+        self.rates
+    }
+
+    /// Set the sample rates the agent is told.
+    pub fn set_rates(&mut self, rates: Rates) {
+        if self.rates == Some(rates) {
+            return;
+        }
+        self.rates = Some(rates);
+        self.journal(Entry::SampleRates(rates));
+        self.touch(EntityId(0));
     }
 
     /// Register an extension, or change its source: a new spec revision,
@@ -557,6 +915,7 @@ impl Store {
                     object: 0,
                     label: u.label,
                     skill: u.skill,
+                    captured: CapturedMore::default(),
                     extra: u.extra,
                 },
             );
@@ -577,9 +936,13 @@ impl Store {
                 extra: spec.extra,
                 components: BTreeMap::new(),
                 spec_rev: 1,
+                observed_coalition: None,
+                removed: false,
+                options: BTreeMap::new(),
                 order: None,
                 order_rev: 0,
                 progress: 0,
+                last_lead: None,
                 state: State::Virtual,
                 authority: spec.authority,
                 on_lost: None,
@@ -610,6 +973,13 @@ impl Store {
         self.units.get(&id)
     }
 
+    /// Whether an attack order may name the entity: a group or static that
+    /// is not removed, or a unit of one.
+    pub fn attackable(&self, id: EntityId) -> bool {
+        let owner = self.units.get(&id).map_or(id, |u| u.group);
+        self.groups.get(&owner).is_some_and(|g| !g.removed)
+    }
+
     /// The grid of unit positions.
     pub fn grid(&self) -> &Grid {
         &self.grid
@@ -621,11 +991,10 @@ impl Store {
 
     /// Give a group an order, at a new revision. Its progress starts over.
     pub fn set_order(&mut self, id: EntityId, intent: Intent) -> Result<u64, StoreError> {
+        // A group, a static or a unit of a group may be attacked, unless
+        // its group was removed.
         if let Intent::Attack { target } = &intent
-            && self
-                .groups
-                .get(target)
-                .is_none_or(|t| t.kind != Kind::Group)
+            && !self.attackable(*target)
         {
             return Err(StoreError::UnsupportedTarget(*target));
         }
@@ -633,6 +1002,7 @@ impl Store {
         g.order_rev += 1;
         g.order = Some(intent);
         g.progress = 0;
+        g.last_lead = None;
         let rev = g.order_rev;
         self.journal(Entry::Order { entity: id, rev });
         self.touch(id);
@@ -904,6 +1274,10 @@ impl Store {
         u.missing = false;
         u.removed = false;
         u.left_logged = false;
+        let gid = u.group;
+        if let Some(g) = self.groups.get_mut(&gid) {
+            g.last_lead = None;
+        }
         self.grid.remove(unit);
         self.journal(Entry::Death { unit });
         self.touch(unit);
@@ -1015,6 +1389,7 @@ impl Store {
     /// Clear every unit's marks of the mission generation: missing, removed
     /// and the DCS object ID. A new mission generation.
     pub fn clear_missing(&mut self) {
+        self.break_samples();
         let marked: Vec<EntityId> = self
             .units
             .values()
@@ -1034,8 +1409,28 @@ impl Store {
         }
     }
 
+    /// Set the model time of the position samples that follow: the last
+    /// `FRAME`'s.
+    pub fn set_sample_time(&mut self, t: f64) {
+        self.sample_time = t;
+    }
+
+    /// Forget the last samples of every group's lead unit: no segment is made
+    /// across a new mission, a `HELLO` or another break in the samples.
+    pub fn break_samples(&mut self) {
+        for g in self.groups.values_mut() {
+            g.last_lead = None;
+        }
+    }
+
+    /// Route events made since the last call, oldest first.
+    pub fn take_route_events(&mut self) -> Vec<RouteEvent> {
+        std::mem::take(&mut self.route_events)
+    }
+
     /// A sampled position. Updates the grid and the group's order progress
-    /// when the unit is its lead.
+    /// when the unit is its lead. The lead is the first member that is not
+    /// dead.
     pub fn observe_position(&mut self, unit: EntityId, at: Point) {
         let Some(u) = self.units.get_mut(&unit) else {
             return;
@@ -1054,9 +1449,44 @@ impl Store {
         if lead == Some(unit)
             && let Some(order) = &g.order
         {
-            let p = intents::progress(order, g.progress, at.x, at.z);
-            if p != g.progress {
-                self.groups.get_mut(&gid).expect("group").progress = p;
+            let t = self.sample_time;
+            // The previous sample makes a segment only if it is the same
+            // unit's, earlier and not too long ago.
+            let from = g
+                .last_lead
+                .filter(|(who, _, _, pt)| {
+                    *who == unit && *pt <= t && t - *pt <= intents::SEGMENT_MAX_S
+                })
+                .map(|(_, x, z, _)| (x, z));
+            let earlier = g.progress;
+            let p = intents::progress(order, earlier, from, at.x, at.z);
+            let len = match order {
+                Intent::Route { waypoints, .. } => waypoints.len(),
+                _ => 0,
+            };
+            let rev = g.order_rev;
+            let g = self.groups.get_mut(&gid).expect("group");
+            g.last_lead = (len > 0).then_some((unit, at.x, at.z, t));
+            if p != earlier {
+                g.progress = p;
+                for index in earlier..p {
+                    self.route_events.push(RouteEvent {
+                        group: gid,
+                        order_rev: rev,
+                        index: Some(index),
+                        model_time: t,
+                        observed: true,
+                    });
+                }
+                if p == len {
+                    self.route_events.push(RouteEvent {
+                        group: gid,
+                        order_rev: rev,
+                        index: None,
+                        model_time: t,
+                        observed: true,
+                    });
+                }
                 self.touch(gid);
             }
         }
@@ -1082,6 +1512,20 @@ impl Store {
             u.state = state;
             let theater = self.groups[&u.group].theater.clone();
             self.grid.set(unit, &theater, state.at.x, state.at.z);
+            self.touch(unit);
+        }
+    }
+
+    /// The rest of a capture: initial life, attitude, ammunition, and the DCS
+    /// object ID the unit has now (0 leaves it as it was).
+    pub fn observe_capture_more(&mut self, unit: EntityId, more: CapturedMore, object: u64) {
+        if let Some(u) = self.units.get_mut(&unit)
+            && !u.dead
+        {
+            u.captured = more;
+            if object != 0 {
+                u.object = object;
+            }
             self.touch(unit);
         }
     }
@@ -1303,22 +1747,32 @@ mod tests {
     }
 
     #[test]
-    fn an_attack_order_on_a_unit_or_a_static_is_refused() {
+    fn an_attack_order_names_a_group_a_unit_or_a_static() {
         let mut s = Store::new(CampaignId(1), 100);
         let a = s.create_group(spec(2)).unwrap();
         let b = s.create_group(spec(1)).unwrap();
         let unit = s.group(b).unwrap().members[0];
         let st = s.create_static(spec(1)).unwrap();
         let rev = s.group(a).unwrap().order_rev;
-        for target in [unit, st, EntityId(999)] {
+        let target = EntityId(999);
+        assert_eq!(
+            s.set_order(a, Intent::Attack { target }),
+            Err(StoreError::UnsupportedTarget(target))
+        );
+        assert_eq!(s.group(a).unwrap().order_rev, rev, "nothing changed");
+        assert!(s.group(a).unwrap().order.is_none());
+        for target in [b, unit, st] {
+            assert!(s.set_order(a, Intent::Attack { target }).is_ok());
+        }
+        // A removed group, a removed static and a unit of a removed group.
+        s.remove_entity(b).unwrap();
+        s.remove_entity(st).unwrap();
+        for target in [b, unit, st] {
             assert_eq!(
                 s.set_order(a, Intent::Attack { target }),
                 Err(StoreError::UnsupportedTarget(target))
             );
         }
-        assert_eq!(s.group(a).unwrap().order_rev, rev, "nothing changed");
-        assert!(s.group(a).unwrap().order.is_none());
-        assert!(s.set_order(a, Intent::Attack { target: b }).is_ok());
     }
 
     #[test]
@@ -1355,5 +1809,192 @@ mod tests {
             },
         );
         assert_eq!(s.group(a).unwrap().progress, 1);
+    }
+
+    #[test]
+    fn route_events_are_made_once_per_waypoint_and_a_segment_counts() {
+        let mut s = Store::new(CampaignId(1), 10);
+        let a = s.create_group(spec(1)).unwrap();
+        let wps = vec![
+            crate::intents::Waypoint { x: 1_000.0, z: 0.0 },
+            crate::intents::Waypoint { x: 2_000.0, z: 0.0 },
+        ];
+        let rev = s
+            .set_order(
+                a,
+                Intent::Route {
+                    waypoints: wps,
+                    speed: 5.0,
+                    on_road: false,
+                },
+            )
+            .unwrap();
+        let lead = s.group(a).unwrap().members[0];
+        let at = |x: f64| Point { x, y: 0.0, z: 0.0 };
+        s.set_sample_time(10.0);
+        s.observe_position(lead, at(500.0));
+        assert!(s.take_route_events().is_empty());
+        // 500 m to 2,500 m in 20 s: both waypoints lie on the segment.
+        s.set_sample_time(30.0);
+        s.observe_position(lead, at(2_500.0));
+        let ev = s.take_route_events();
+        let idx: Vec<_> = ev.iter().map(|e| e.index).collect();
+        assert_eq!(idx, vec![Some(0), Some(1), None]);
+        assert!(
+            ev.iter()
+                .all(|e| e.order_rev == rev && e.model_time == 30.0)
+        );
+        // Nothing again, and no segment across a long gap.
+        s.set_sample_time(40.0);
+        s.observe_position(lead, at(3_000.0));
+        assert!(s.take_route_events().is_empty());
+        let rev2 = s
+            .set_order(
+                a,
+                Intent::Route {
+                    waypoints: vec![crate::intents::Waypoint { x: 4_000.0, z: 0.0 }],
+                    speed: 5.0,
+                    on_road: false,
+                },
+            )
+            .unwrap();
+        s.set_sample_time(50.0);
+        s.observe_position(lead, at(3_500.0));
+        s.set_sample_time(200.0);
+        s.observe_position(lead, at(4_500.0));
+        assert!(
+            s.take_route_events().is_empty(),
+            "a long gap makes no segment"
+        );
+        s.set_sample_time(210.0);
+        s.observe_position(lead, at(4_020.0));
+        let ev = s.take_route_events();
+        assert_eq!(ev.len(), 2);
+        assert!(ev.iter().all(|e| e.order_rev == rev2));
+    }
+
+    /// A route whose waypoint lies on the segment across a break in the
+    /// samples: the break makes no segment, so no event.
+    #[test]
+    fn no_route_event_comes_from_a_segment_across_a_break() {
+        let route = |x: f64| Intent::Route {
+            waypoints: vec![crate::intents::Waypoint { x, z: 0.0 }],
+            speed: 5.0,
+            on_road: false,
+        };
+        let at = |x: f64| Point { x, y: 0.0, z: 0.0 };
+        let setup = |far: f64| {
+            let mut s = Store::new(CampaignId(1), 10);
+            let a = s.create_group(spec(2)).unwrap();
+            s.set_order(a, route(far)).unwrap();
+            let [lead, second] = s.group(a).unwrap().members[..] else {
+                panic!()
+            };
+            s.set_sample_time(10.0);
+            s.observe_position(lead, at(500.0));
+            s.observe_position(second, at(500.0));
+            (s, a, lead, second)
+        };
+
+        // set_order between two samples.
+        let (mut s, a, lead, _) = setup(9_000.0);
+        s.set_order(a, route(1_000.0)).unwrap();
+        s.set_sample_time(20.0);
+        s.observe_position(lead, at(1_500.0));
+        assert!(s.take_route_events().is_empty(), "set_order");
+        assert_eq!(s.group(a).unwrap().progress, 0);
+
+        // break_samples (a HELLO) between two samples.
+        let (mut s, a, lead, _) = setup(1_000.0);
+        s.break_samples();
+        s.set_sample_time(20.0);
+        s.observe_position(lead, at(1_500.0));
+        assert!(s.take_route_events().is_empty(), "break_samples");
+        assert_eq!(s.group(a).unwrap().progress, 0);
+
+        // The lead dies between a sample of the old lead and one of the new.
+        let (mut s, a, lead, second) = setup(1_000.0);
+        s.death(lead).unwrap();
+        s.set_sample_time(20.0);
+        s.observe_position(second, at(1_500.0));
+        assert!(s.take_route_events().is_empty(), "the lead's death");
+        assert_eq!(s.group(a).unwrap().progress, 0);
+    }
+
+    #[test]
+    fn options_move_only_the_store_revision() {
+        let mut s = Store::new(CampaignId(1), 100);
+        let g = s.create_group(spec(1)).unwrap();
+        let (spec_rev, rev) = (s.group(g).unwrap().spec_rev, s.revision());
+        s.set_option(g, 3, Lv::Number(2.0)).unwrap();
+        assert_eq!(s.group(g).unwrap().spec_rev, spec_rev);
+        assert_eq!(s.revision(), rev + 1);
+        // The same value again changes nothing.
+        s.set_option(g, 3, Lv::Number(2.0)).unwrap();
+        assert_eq!(s.revision(), rev + 1);
+        s.set_option(g, 3, Lv::Number(1.0)).unwrap();
+        assert_eq!(s.group(g).unwrap().options[&3], Lv::Number(1.0));
+        assert_eq!(
+            s.entries()
+                .iter()
+                .filter(|e| matches!(e, Entry::Option { .. }))
+                .count(),
+            2
+        );
+        assert!(s.set_option(EntityId(99), 1, Lv::Nil).is_err());
+    }
+
+    #[test]
+    fn desired_owners_and_stock_hold_only_what_the_controller_set() {
+        let mut s = Store::new(CampaignId(1), 100);
+        assert!(s.desired_owner("Caucasus", "Batumi").is_none());
+        // A fact about an airbase nobody set is not kept.
+        assert!(!s.observe_airbase_owner("Caucasus", "Batumi", 1));
+        assert_eq!(s.set_airbase_owner("Caucasus", "Batumi", 2), 1);
+        assert_eq!(s.set_airbase_owner("Caucasus", "Batumi", 2), 2);
+        assert!(s.observe_airbase_owner("Caucasus", "Batumi", 1));
+        let o = s.desired_owner("Caucasus", "Batumi").unwrap();
+        assert_eq!((o.coalition, o.rev), (1, 2), "a capture keeps the revision");
+        assert!(s.desired_owner("Afghanistan", "Batumi").is_none());
+
+        let mut st = Stock::default();
+        st.set(Item::Weapon("AIM-9X".into()), 4.0);
+        assert_eq!(s.set_stock("Caucasus", "Batumi", &st), 1);
+        let mut more = Stock::default();
+        more.set(Item::Liquid(0), 9.0);
+        assert_eq!(s.set_stock("Caucasus", "Batumi", &more), 2);
+        let d = s.desired_stock("Caucasus", "Batumi").unwrap();
+        assert_eq!(
+            d.stock.items().len(),
+            2,
+            "the second set kept the first's item"
+        );
+        // DCS used two missiles; an item nobody set is not kept.
+        assert!(s.observe_stock_item("Caucasus", "Batumi", &Item::Weapon("AIM-9X".into()), 2.0));
+        assert!(!s.observe_stock_item("Caucasus", "Batumi", &Item::Weapon("AIM-9X".into()), 2.0));
+        assert!(!s.observe_stock_item("Caucasus", "Batumi", &Item::Weapon("X".into()), 1.0));
+        let d = s.desired_stock("Caucasus", "Batumi").unwrap();
+        assert_eq!(d.stock.get(&Item::Weapon("AIM-9X".into())), Some(2.0));
+        assert_eq!(d.rev, 2);
+    }
+
+    #[test]
+    fn rates_are_kept_and_journalled_once_per_change() {
+        let mut s = Store::new(CampaignId(1), 100);
+        assert!(s.rates().is_none());
+        let r = Rates {
+            position_s: 2.0,
+            ..Rates::default()
+        };
+        s.set_rates(r);
+        s.set_rates(r);
+        assert_eq!(s.rates(), Some(r));
+        assert_eq!(
+            s.entries()
+                .iter()
+                .filter(|e| matches!(e, Entry::SampleRates(_)))
+                .count(),
+            1
+        );
     }
 }
