@@ -466,7 +466,10 @@ async fn compaction_at_open_keeps_the_newest_event_and_ids_skip_unreadable_folde
     let ch = connect(&server).await;
     let l = lease(&ch).await;
     let a = create(&ch, &l, "a", true).await;
-    publish(&server.hub, 3);
+    publish(&server.hub, 2);
+    // Retention counts back from the newest event's time.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    publish(&server.hub, 1);
     // Suspend, so no event arrives between the stop and the next start.
     CampaignServiceClient::new(ch.clone())
         .suspend_campaign(pb::SuspendCampaignRequest {
@@ -488,7 +491,7 @@ async fn compaction_at_open_keeps_the_newest_event_and_ids_skip_unreadable_folde
     tokio::time::sleep(Duration::from_millis(5)).await;
     let mut c = cfg(d.path());
     if let Some(sf) = c.store.as_mut() {
-        sf.event_retention = Duration::from_millis(1);
+        sf.event_retention = Duration::from_millis(20);
     }
     let server = start(c, fake_config()).await.expect("restart");
     let ch = connect(&server).await;

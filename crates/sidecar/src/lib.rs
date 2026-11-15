@@ -3,8 +3,8 @@
 #[cfg(feature = "disk")]
 pub mod campaigns;
 pub mod conformance;
+pub mod eventfile;
 pub mod grid;
-pub mod history;
 pub mod ids;
 pub mod intents;
 pub mod lifecycle;

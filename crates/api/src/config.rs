@@ -60,6 +60,8 @@ pub struct StoreFiles {
     pub backup_keep: usize,
     /// `[store] event_retention_days`; zero keeps every event.
     pub event_retention: Duration,
+    /// `[store] server_log_days`.
+    pub server_log_retention: Duration,
 }
 
 impl StoreFiles {
@@ -71,6 +73,7 @@ impl StoreFiles {
             backup_interval: Duration::from_secs(24 * 3600),
             backup_keep: 7,
             event_retention: Duration::ZERO,
+            server_log_retention: Duration::from_secs(30 * 24 * 3600),
         }
     }
 }

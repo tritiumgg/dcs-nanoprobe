@@ -4,23 +4,23 @@
 //! Each campaign has a log numbered from 1, and so does the server log, which
 //! holds events recorded while no campaign is active. A log is never
 //! conflated: a consumer reads every event in order from a sequence number,
-//! and a lost span is an explicit `Gap`. A campaign's log on disk is backed
-//! by its `history.log` (spec/persistence.md, "Event history"): an event is
-//! appended and flushed before it is published. Every log keeps the newest
-//! `events_keep` in memory for the Events service.
+//! and a lost span is an explicit `Gap`. A log on disk is backed by an
+//! events file (spec/persistence.md, "Event history"): the driver commits
+//! the events of a step before it publishes them. A log keeps its newest
+//! events in memory and reads older ones from the file.
 
 use std::collections::VecDeque;
-use std::io;
 use std::time::{Duration, SystemTime};
 
 use nanoprobe_proto::v1alpha1::{
     self as pb, AuthorEvent, Event, Gap as PbGap, LifecycleEvent, MenuAttribution, MenuEvent,
     PlayerEvent, PlayerEventKind, SimState, WorldEvent, event,
 };
-use nanoprobe_sidecar::history::History;
+use nanoprobe_sidecar::eventfile::{EventFile, EventRow, Retained};
 use nanoprobe_sidecar::players::{LaunchRule, Note, Roster};
 use nanoprobe_sidecar::sim::RawRecord;
 use nanoprobe_sidecar::sim::wire::Input;
+use nanoprobe_sidecar::store::DiskError;
 use nanoprobe_transport::layout::{gap_class, lifecycle as lc};
 use nanoprobe_transport::records;
 
@@ -28,13 +28,33 @@ use prost::Message;
 
 use crate::lua::from_lua;
 
+/// The most events a log on disk keeps in memory.
+pub const DISK_WINDOW: usize = 10_000;
+
 /// One numbered log.
 #[derive(Debug)]
 pub struct EventLog {
     keep: usize,
     next: u64,
     events: VecDeque<Event>,
-    history: Option<History>,
+    file: Option<EventFile>,
+}
+
+fn wall_ms_of(e: &Event) -> u64 {
+    e.stamp
+        .as_ref()
+        .and_then(|s| s.wall)
+        .map_or_else(now_ms, |t| {
+            u64::try_from(t.seconds)
+                .unwrap_or(0)
+                .saturating_mul(1000)
+                .saturating_add(u64::try_from(t.nanos / 1_000_000).unwrap_or(0))
+        })
+}
+
+fn decode(r: &EventRow) -> Result<Event, DiskError> {
+    Event::decode(r.body.as_slice())
+        .map_err(|e| DiskError::Corrupt(format!("event {} does not decode: {e}", r.seq)))
 }
 
 impl EventLog {
@@ -44,40 +64,38 @@ impl EventLog {
             keep: keep.max(1),
             next: 1,
             events: VecDeque::new(),
-            history: None,
+            file: None,
         }
     }
 
-    /// A log backed by `history`, keeping its newest `keep` events in
-    /// memory. A record whose body does not decode as an event is an error.
-    pub fn open(history: History, keep: usize) -> io::Result<EventLog> {
-        let keep = keep.max(1);
+    /// A log backed by `file`, keeping its newest `keep` events, at most
+    /// [`DISK_WINDOW`], in memory.
+    pub fn open(file: EventFile, keep: usize) -> Result<EventLog, DiskError> {
+        let keep = keep.clamp(1, DISK_WINDOW);
+        let next = file.next_seq();
+        let from = next.saturating_sub(keep as u64).max(1);
         let mut events = VecDeque::new();
-        for r in history.read_from(0)? {
-            let e = Event::decode(r.body.as_slice()).map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("history: event {} does not decode: {e}", r.seq),
-                )
-            })?;
-            events.push_back(e);
-            if events.len() > keep {
-                events.pop_front();
-            }
+        for r in file.read_from(from, keep)? {
+            events.push_back(decode(&r)?);
         }
         Ok(EventLog {
             keep,
-            next: history.next_seq(),
+            next,
             events,
-            history: Some(history),
+            file: Some(file),
         })
     }
 
-    /// Append an event, numbering it. Returns its sequence number. A log on
-    /// disk appends and flushes the event's record first; a failure stops
-    /// the sidecar through its panic path (spec/persistence.md, "Event
-    /// history").
-    pub fn push(&mut self, campaign: u64, stamp: pb::Stamp, body: event::Body) -> u64 {
+    /// Append an event, numbering it, made from the agent record `source` if
+    /// any. Returns its sequence number. A log on disk writes it at the next
+    /// [`EventLog::commit`], before it is published.
+    pub fn push_from(
+        &mut self,
+        campaign: u64,
+        stamp: pb::Stamp,
+        body: event::Body,
+        source: Option<(u64, u64)>,
+    ) -> u64 {
         let sequence = self.next;
         let e = Event {
             sequence,
@@ -85,23 +103,13 @@ impl EventLog {
             body: Some(body),
             campaign_id: campaign,
         };
-        if let Some(h) = self.history.as_mut() {
-            let wall_ms = e
-                .stamp
-                .as_ref()
-                .and_then(|s| s.wall)
-                .map_or_else(now_ms, |t| {
-                    u64::try_from(t.seconds)
-                        .unwrap_or(0)
-                        .saturating_mul(1000)
-                        .saturating_add(u64::try_from(t.nanos / 1_000_000).unwrap_or(0))
-                });
-            if let Err(err) = h
-                .append(sequence, wall_ms, &e.encode_to_vec())
-                .and_then(|()| h.flush())
-            {
-                panic!("the event history could not be written, stopping: {err}");
-            }
+        if let Some(f) = self.file.as_mut() {
+            f.push(EventRow {
+                seq: sequence,
+                wall_ms: wall_ms_of(&e),
+                source,
+                body: e.encode_to_vec(),
+            });
         }
         self.next += 1;
         self.events.push_back(e);
@@ -111,6 +119,44 @@ impl EventLog {
         sequence
     }
 
+    /// [`EventLog::push_from`] for an event the sidecar made.
+    pub fn push(&mut self, campaign: u64, stamp: pb::Stamp, body: event::Body) -> u64 {
+        self.push_from(campaign, stamp, body, None)
+    }
+
+    /// Whether an event made from this agent record is in the log already.
+    pub fn has_source(&self, agent_boot: u64, number: u64) -> Result<bool, DiskError> {
+        match self.file.as_ref() {
+            Some(f) => f.has_source(agent_boot, number),
+            None => Ok(false),
+        }
+    }
+
+    /// Write the events appended since the last commit.
+    pub fn commit(&mut self) -> Result<(), DiskError> {
+        match self.file.as_mut() {
+            Some(f) => f.commit(),
+            None => Ok(()),
+        }
+    }
+
+    /// Apply the retention to the file (spec/persistence.md, "Event
+    /// history"), then drop from memory what it deleted.
+    pub fn retain(&mut self, retention: Duration, now_ms: u64) -> Result<Retained, DiskError> {
+        let Some(f) = self.file.as_mut() else {
+            return Ok(Retained::Kept);
+        };
+        let r = f.retain(
+            u64::try_from(retention.as_millis()).unwrap_or(u64::MAX),
+            now_ms,
+        )?;
+        let first = self.first();
+        while self.events.front().is_some_and(|e| e.sequence < first) {
+            self.events.pop_front();
+        }
+        Ok(r)
+    }
+
     /// The newest sequence number, 0 for none yet.
     pub fn last(&self) -> u64 {
         self.next - 1
@@ -118,7 +164,10 @@ impl EventLog {
 
     /// The oldest sequence number kept, or the next one when empty.
     pub fn first(&self) -> u64 {
-        self.events.front().map_or(self.next, |e| e.sequence)
+        match self.file.as_ref() {
+            Some(f) => f.first_seq().unwrap_or(self.next),
+            None => self.events.front().map_or(self.next, |e| e.sequence),
+        }
     }
 
     /// Whether a reader that has every event up to `after` can go on from
@@ -128,11 +177,40 @@ impl EventLog {
         after <= self.last() && after + 1 >= self.first()
     }
 
-    /// Up to `limit` events after `after`, in order.
-    pub fn after(&self, after: u64, limit: usize) -> impl Iterator<Item = &Event> {
-        let first = self.first();
-        let skip = usize::try_from((after + 1).saturating_sub(first)).unwrap_or(usize::MAX);
-        self.events.iter().skip(skip).take(limit)
+    /// Up to `limit` events after `after`, in order: from memory, or from
+    /// the file for those older than memory holds. A read of the file that
+    /// fails returns what memory holds from there.
+    pub fn after(&self, after: u64, limit: usize) -> Vec<Event> {
+        let mem_first = self.events.front().map_or(self.next, |e| e.sequence);
+        let mut out = Vec::new();
+        if after + 1 < mem_first
+            && let Some(f) = self.file.as_ref()
+        {
+            let want = usize::try_from(mem_first - (after + 1)).unwrap_or(usize::MAX);
+            if let Ok(rows) = f.read_from(after + 1, want.min(limit)) {
+                for r in rows {
+                    match decode(&r) {
+                        Ok(e) => out.push(e),
+                        Err(_) => return out,
+                    }
+                }
+            }
+            if out.len() < want.min(limit) {
+                // The file lost rows the reader needs: stop, and let the
+                // reader find the gap.
+                return out;
+            }
+        }
+        let from = out.last().map_or(after, |e| e.sequence);
+        let skip = usize::try_from((from + 1).saturating_sub(mem_first)).unwrap_or(usize::MAX);
+        out.extend(
+            self.events
+                .iter()
+                .skip(skip)
+                .take(limit.saturating_sub(out.len()))
+                .cloned(),
+        );
+        out
     }
 }
 
@@ -671,9 +749,9 @@ mod tests {
         // A reader ahead of the log is not covered: it would skip events.
         assert!(!l.covers(6));
         assert!(!EventLog::new(3).covers(1));
-        let seqs: Vec<u64> = l.after(3, 10).map(|e| e.sequence).collect();
+        let seqs: Vec<u64> = l.after(3, 10).iter().map(|e| e.sequence).collect();
         assert_eq!(seqs, vec![4, 5]);
-        let seqs: Vec<u64> = l.after(0, 2).map(|e| e.sequence).collect();
+        let seqs: Vec<u64> = l.after(0, 2).iter().map(|e| e.sequence).collect();
         assert_eq!(seqs, vec![3, 4]);
     }
 
@@ -789,6 +867,7 @@ mod tests {
         l.push(0, pb::Stamp::default(), event::Body::Gap(PbGap::default()));
         let got: Vec<u64> = l
             .after(0, 10)
+            .iter()
             .filter(|e| passes(e, &[1], ""))
             .map(|e| e.sequence)
             .collect();

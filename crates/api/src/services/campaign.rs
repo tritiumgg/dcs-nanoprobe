@@ -328,6 +328,33 @@ impl CampaignService for Campaigns {
         let r = req.into_inner();
         let mut hashed = r.clone();
         hashed.lease = None;
+        // The copy runs on a worker thread, without the lock; the call
+        // answers when it is done (spec/persistence.md, "Backups"). A call
+        // whose key is answered skips it and gets the first answer.
+        let taken = match self
+            .0
+            .backup_start(r.idempotency.as_ref(), r.lease.as_ref(), r.campaign_id)
+            .await?
+        {
+            None => None,
+            Some((files, id, revision)) => {
+                let at = wall_ms();
+                let b = tokio::task::spawn_blocking(move || {
+                    files.backup(CampaignId(id), at, revision, BackupReason::Manual)
+                })
+                .await;
+                self.0.lock().backing_up.remove(&id);
+                Some(match b {
+                    Ok(b) => b.map_err(|e| disk_status(id, &e)),
+                    Err(_) => Err(disk_status(
+                        id,
+                        &nanoprobe_sidecar::store::DiskError::Corrupt(
+                            "the backup worker panicked".into(),
+                        ),
+                    )),
+                })
+            }
+        };
         let resp = self
             .0
             .write(
@@ -340,11 +367,16 @@ impl CampaignService for Campaigns {
                 },
                 &hashed,
                 |g: &mut Inner, id| {
-                    let files = g.files().cloned().ok_or_else(in_memory)?;
-                    let slot = g.campaigns.get_mut(&id).expect("resolved campaign");
-                    let b = files
-                        .backup(&mut slot.store, wall_ms(), BackupReason::Manual)
-                        .map_err(|e| disk_status(id, &e))?;
+                    g.files().ok_or_else(in_memory)?;
+                    let b = taken.ok_or_else(|| {
+                        status(
+                            Code::Aborted,
+                            ErrorReason::Unspecified,
+                            "the backup was not taken; call again",
+                            0,
+                            "",
+                        )
+                    })??;
                     Ok((
                         BackupCampaignResponse {
                             backup: Some(backup_pb(&b)),

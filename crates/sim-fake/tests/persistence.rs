@@ -908,11 +908,17 @@ fn a_stored_campaign_migrates_from_one_schema_version_to_the_next() {
         .iter()
         .filter(|b| b.reason == BackupReason::PreMigration)
         .collect();
-    assert_eq!(migration.len(), 2, "one before each attempt");
+    // The failed attempt left the store as it was: the second attempt found
+    // a backup of that same schema and revision and took none.
+    assert_eq!(
+        migration.len(),
+        1,
+        "one backup of the state before migration"
+    );
     let copy: PathBuf = c
         .folder(id)
         .join("backups")
-        .join(migration[1].number.to_string())
+        .join(migration[0].number.to_string())
         .join("store.sqlite");
     assert_eq!(schema_of(&copy).expect("schema"), 1, "the backup is at N");
 
@@ -927,19 +933,27 @@ fn a_stored_campaign_migrates_from_one_schema_version_to_the_next() {
     assert_eq!(c.backups(id).expect("backups").len(), n);
 }
 
-/// Backups keep the newest `backup_keep`, number up without reuse, and
-/// share one history copy that grows by what the history gained.
+/// Backups keep the newest `backup_keep` scheduled and manual ones, number up
+/// without reuse, and share one events copy that grows by what the events
+/// gained. The newest pre-migration backup of each schema version is kept
+/// apart.
 #[test]
-fn backups_are_pruned_numbered_up_and_share_the_history() {
+fn backups_are_pruned_numbered_up_and_share_the_events() {
+    use nanoprobe_sidecar::eventfile::EventRow;
     let d = temp();
     let c = Campaigns::new(d.path(), 10_000, 2).expect("campaigns");
     let id = CampaignId(CAMPAIGN);
-    let mut s = c.create(id, record("a")).expect("create");
-    let mut h = c.history(id).expect("history");
+    let s = c.create(id, record("a")).expect("create");
+    let mut h = c.events(id).expect("events");
     for i in 1..=5u64 {
-        h.append(i, i, &[i as u8; 64]).expect("append");
-        h.flush().expect("flush");
-        c.backup(&mut s, i * 1_000, BackupReason::Manual)
+        h.push(EventRow {
+            seq: i,
+            wall_ms: i,
+            source: None,
+            body: vec![i as u8; 64],
+        });
+        h.commit().expect("commit");
+        c.backup(id, i * 1_000, s.revision(), BackupReason::Manual)
             .expect("backup");
     }
     let kept: Vec<u32> = c
@@ -949,12 +963,60 @@ fn backups_are_pruned_numbered_up_and_share_the_history() {
         .map(|b| b.number)
         .collect();
     assert_eq!(kept, vec![4, 5]);
-    let copy = std::fs::read(c.folder(id).join("backups/history.log")).expect("copy");
-    let orig = std::fs::read(c.folder(id).join("history.log")).expect("history");
-    assert_eq!(copy, orig);
-    c.backup(&mut s, 9_000, BackupReason::Scheduled)
+    let copy = nanoprobe_sidecar::eventfile::EventFile::open(
+        &c.folder(id).join("backups/events.sqlite"),
+        id.0,
+    )
+    .expect("copy");
+    assert_eq!(
+        copy.read_from(0, 10).expect("read"),
+        h.read_from(0, 10).expect("read")
+    );
+    c.backup(id, 9_000, s.revision(), BackupReason::Scheduled)
         .expect("backup");
     assert_eq!(c.backups(id).expect("backups").last().expect("b").number, 6);
+}
+
+/// A pre-migration backup is kept outside `backup_keep`, only the newest of
+/// its schema version, and is skipped when the newest backup already holds
+/// the same schema and revision.
+#[test]
+fn pre_migration_backups_are_kept_apart_and_not_repeated() {
+    fn step(tx: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS later (x);")
+    }
+    let d = temp();
+    let c = Campaigns::new(d.path(), 10_000, 1).expect("campaigns");
+    let id = CampaignId(CAMPAIGN);
+    let mut s = c.create(id, record("a")).expect("create");
+    s.close().expect("close");
+    drop(s);
+    // Version 1 opened by a sidecar that knows version 2: a backup first.
+    let steps = [nanoprobe_sidecar::store::Migration { to: 2, run: step }];
+    let backup_file = |n: u32| c.folder(id).join(format!("backups/{n}/backup.txt"));
+    let mut s = c.open_with(id, 1, &steps).expect("migrate");
+    assert!(backup_file(1).exists());
+    // Scheduled backups beyond backup_keep never evict it.
+    for i in 0..3 {
+        c.backup(id, 10 + i, s.revision(), BackupReason::Scheduled)
+            .expect("backup");
+    }
+    let reasons: Vec<BackupReason> = c
+        .backups(id)
+        .expect("backups")
+        .iter()
+        .map(|b| b.reason)
+        .collect();
+    assert_eq!(
+        reasons,
+        vec![BackupReason::PreMigration, BackupReason::Scheduled]
+    );
+    s.close().expect("close");
+    drop(s);
+    // The file is at version 2 now: reopening it at version 2 takes none.
+    let n = c.backups(id).expect("backups").len();
+    drop(c.open_with(id, 2, &steps).expect("open"));
+    assert_eq!(c.backups(id).expect("backups").len(), n);
 }
 
 /// What one write costs with 2,000 units, every one moved since the last:
@@ -980,20 +1042,21 @@ fn the_cost_of_a_write_with_two_thousand_units() {
                 },
             );
         }
-        let t = Instant::now();
-        s.commit().expect("commit");
-        moved.push(t.elapsed());
+        // A step's commit writes no sampled state.
         let t = Instant::now();
         s.commit().expect("commit");
         idle.push(t.elapsed());
+        let t = Instant::now();
+        s.checkpoint(round as u64, Vec::new()).expect("checkpoint");
+        moved.push(t.elapsed());
     }
     moved.sort();
     idle.sort();
     println!(
-        "write with {} units: all moved median {:?}, nothing changed median {:?}",
+        "write with {} units, all moved: a step's commit median {:?}, a checkpoint median {:?}",
         ids.len(),
-        moved[5],
-        idle[5]
+        idle[5],
+        moved[5]
     );
 }
 

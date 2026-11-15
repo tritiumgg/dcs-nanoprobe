@@ -24,7 +24,7 @@ mod disk;
 pub use disk::{
     CampaignRecord, CampaignState, Checkpoint, DiskError, MIGRATIONS, Migration, REVISION_RESERVE,
     SCHEMA, TierPeriod, backup_file, check_lv, checkpoint_of, ident_of, journal_of, record_of,
-    schema_of, state_of,
+    revision_of, schema_of, state_of,
 };
 
 /// Without the `disk` feature a store lives in memory only: its slot is

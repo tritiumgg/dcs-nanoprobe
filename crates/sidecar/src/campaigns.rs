@@ -5,11 +5,11 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::history::History;
+use crate::eventfile::EventFile;
 use crate::ids::CampaignId;
 use crate::store::{
     CampaignRecord, CampaignState, DiskError, MIGRATIONS, Migration, SCHEMA, Store, TierPeriod,
-    backup_file, ident_of, record_of, state_of,
+    backup_file, ident_of, record_of, revision_of, state_of,
 };
 
 /// Why a backup was taken.
@@ -54,6 +54,8 @@ pub struct Backup {
     pub size: u64,
     /// The store's schema version.
     pub schema: u32,
+    /// The store revision it holds.
+    pub revision: u64,
     /// Why it was taken.
     pub reason: BackupReason,
 }
@@ -70,7 +72,7 @@ pub struct Campaigns {
 }
 
 const STORE: &str = "store.sqlite";
-const HISTORY: &str = "history.log";
+const EVENTS: &str = "events.sqlite";
 const BACKUPS: &str = "backups";
 const INFO: &str = "backup.txt";
 
@@ -102,7 +104,7 @@ impl Campaigns {
     }
 
     /// Create a campaign: its folder, its store with the record and an empty
-    /// world, and its empty history. A failure leaves no folder behind.
+    /// world, and its empty events file. A failure leaves no folder behind.
     pub fn create(&self, id: CampaignId, record: CampaignRecord) -> Result<Store, DiskError> {
         let folder = self.folder(id);
         if folder.exists() {
@@ -110,7 +112,7 @@ impl Campaigns {
         }
         let made = (|| {
             fs::create_dir_all(folder.join(BACKUPS))?;
-            History::open(&folder.join(HISTORY))?;
+            EventFile::open(&folder.join(EVENTS), id.0)?;
             Store::create_on_disk(&folder.join(STORE), id, record, self.changes_keep)
         })();
         if made.is_err() {
@@ -184,24 +186,34 @@ impl Campaigns {
             return Err(DiskError::Finished(id));
         }
         if found < known {
-            self.take_backup(id, at_ms, found, BackupReason::PreMigration, |dest| {
-                backup_file(&path, dest)
-            })?;
+            // A backup of this very state is enough (spec/persistence.md).
+            let revision = revision_of(&path)?;
+            let have = self
+                .backups(id)?
+                .last()
+                .is_some_and(|b| b.schema == found && b.revision == revision);
+            if !have {
+                self.take_backup(id, at_ms, found, revision, BackupReason::PreMigration)?;
+            }
         }
         Store::open_with(&path, self.changes_keep, steps)
     }
 
-    /// The campaign's history.
-    pub fn history(&self, id: CampaignId) -> io::Result<History> {
-        History::open(&self.folder(id).join(HISTORY))
+    /// The campaign's events file.
+    pub fn events_path(&self, id: CampaignId) -> PathBuf {
+        self.folder(id).join(EVENTS)
     }
 
-    /// Activate `id`: open its store and check it may be activated, then
-    /// suspend the active campaign in `active`, then mark `id` active. The
-    /// caller then loads its mission and the reconciler restores it
-    /// (spec/persistence.md, "Restore"). When the target cannot be opened or
-    /// is finished, the active campaign stays in `active`. A failure in or
-    /// after the suspend of the active campaign leaves `active` empty; the
+    /// Open the campaign's events file.
+    pub fn events(&self, id: CampaignId) -> Result<EventFile, DiskError> {
+        EventFile::open(&self.events_path(id), id.0)
+    }
+
+    /// Activate `id`: refuse a missing or finished campaign, suspend the
+    /// active campaign in `active`, then open `id` and mark it active
+    /// (spec/persistence.md, "Campaign operations"). The caller then loads
+    /// its mission and the reconciler restores it. A refusal leaves `active`
+    /// as it was; a failure in or after the suspend leaves it empty, and the
     /// caller reports it.
     pub fn activate(
         &self,
@@ -213,12 +225,17 @@ impl Campaigns {
         if active.as_ref().is_some_and(|cur| cur.campaign() == id) {
             return Ok(());
         }
-        // A finished store is refused by the open, before any migration.
-        let mut s = self.open(id, at_ms)?;
-        let mut r = s
-            .record()
-            .cloned()
-            .ok_or_else(|| DiskError::Corrupt("no campaign record".into()))?;
+        let path = self.store_path(id);
+        let (found, _) = ident_of(&path)?;
+        if found != id {
+            return Err(DiskError::Corrupt(format!(
+                "folder {} holds campaign {}",
+                id.0, found.0
+            )));
+        }
+        if state_of(&path)? == CampaignState::Finished {
+            return Err(DiskError::Finished(id));
+        }
         if let Some(cur) = active.as_mut() {
             let suspended = self.suspend(cur, at_ms, achieved);
             // From here the old store is closed or half-closed: it leaves
@@ -226,6 +243,11 @@ impl Campaigns {
             *active = None;
             suspended?;
         }
+        let mut s = self.open(id, at_ms)?;
+        let mut r = s
+            .record()
+            .cloned()
+            .ok_or_else(|| DiskError::Corrupt("no campaign record".into()))?;
         r.state = CampaignState::Active;
         s.set_record(r)?;
         *active = Some(s);
@@ -282,45 +304,44 @@ impl Campaigns {
         store.close()
     }
 
-    /// Take a backup of an open store, extend the history copy, and keep the
-    /// newest `backup_keep` backups.
+    /// Take a backup of a campaign's store through a connection of its own,
+    /// so it may run on a worker thread while the driver goes on writing
+    /// (spec/persistence.md, "Backups"). The caller committed the store and
+    /// its events first, and passes the revision it holds. Then the events
+    /// copy is extended and old backups pruned.
     pub fn backup(
         &self,
-        store: &mut Store,
+        id: CampaignId,
         at_ms: u64,
+        revision: u64,
         reason: BackupReason,
     ) -> Result<Backup, DiskError> {
-        let id = store.campaign();
-        self.take_backup(id, at_ms, SCHEMA, reason, |dest| store.backup_to(dest))
+        self.take_backup(id, at_ms, SCHEMA, revision, reason)
     }
 
-    /// Make backup folder `n`: `copy` writes the store copy, then the info
-    /// file marks it complete. A failure removes the folder. Then the history
-    /// copy is extended and old backups pruned.
+    /// Make backup folder `n`: a consistent copy of the store, then the info
+    /// file that marks it complete. A failure removes the folder. Then the
+    /// events copy is extended and old backups pruned.
     fn take_backup(
         &self,
         id: CampaignId,
         at_ms: u64,
         schema: u32,
+        revision: u64,
         reason: BackupReason,
-        copy: impl FnOnce(&Path) -> Result<(), DiskError>,
     ) -> Result<Backup, DiskError> {
-        // The history first: a history that cannot be read fails the backup
-        // before any folder is made.
-        let mut h = self.history(id)?;
-        h.flush()?;
         let number = self.next_backup(id)?;
         let dir = self.folder(id).join(BACKUPS).join(number.to_string());
         let made = (|| {
             fs::create_dir_all(&dir)?;
-            copy(&dir.join(STORE))?;
+            backup_file(&self.store_path(id), &dir.join(STORE))?;
             // VACUUM INTO does not flush the copy: flush it before the
             // marker that says it is complete, then the marker.
             fs::File::open(dir.join(STORE))?.sync_all()?;
             let mut info = fs::File::create(dir.join(INFO))?;
             io::Write::write_all(
                 &mut info,
-                format!("{at_ms} {schema} {}\n", reason.name()).as_bytes(),
+                format!("{at_ms} {schema} {revision} {}\n", reason.name()).as_bytes(),
             )?;
             info.sync_all()?;
             Ok::<u64, DiskError>(fs::metadata(dir.join(STORE))?.len())
@@ -332,13 +353,18 @@ impl Campaigns {
                 return Err(e);
             }
         };
-        h.copy_into(&self.folder(id).join(BACKUPS).join(HISTORY))?;
+        EventFile::copy_into(
+            &self.events_path(id),
+            &self.folder(id).join(BACKUPS).join(EVENTS),
+            id.0,
+        )?;
         self.prune(id, number)?;
         Ok(Backup {
             number,
             at_ms,
             size,
             schema,
+            revision,
             reason,
         })
     }
@@ -377,17 +403,29 @@ impl Campaigns {
         Ok(out)
     }
 
-    /// Keep the newest `backup_keep` complete backups; remove the older
-    /// ones, and every incomplete folder older than backup `newest`.
+    /// Keep the newest `backup_keep` scheduled and manual backups and the
+    /// newest pre-migration backup of each schema version; remove the
+    /// others, and every incomplete folder older than backup `newest`.
     fn prune(&self, id: CampaignId, newest: u32) -> Result<(), DiskError> {
         let complete = self.backups(id)?;
         let mut gone: Vec<u32> = Vec::new();
-        if complete.len() > self.backup_keep {
+        let (pre, kept): (Vec<&Backup>, Vec<&Backup>) = complete
+            .iter()
+            .partition(|b| b.reason == BackupReason::PreMigration);
+        if kept.len() > self.backup_keep {
             gone.extend(
-                complete[..complete.len() - self.backup_keep]
+                kept[..kept.len() - self.backup_keep]
                     .iter()
                     .map(|b| b.number),
             );
+        }
+        for b in &pre {
+            if pre
+                .iter()
+                .any(|o| o.schema == b.schema && o.number > b.number)
+            {
+                gone.push(b.number);
+            }
         }
         let complete: Vec<u32> = complete.iter().map(|b| b.number).collect();
         gone.extend(
@@ -420,12 +458,17 @@ impl Campaigns {
                 continue;
             };
             let mut w = info.split_whitespace();
-            let (Some(at), Some(schema), Some(reason)) = (w.next(), w.next(), w.next()) else {
+            let (Some(at), Some(schema), Some(revision), Some(reason)) =
+                (w.next(), w.next(), w.next(), w.next())
+            else {
                 continue;
             };
-            let (Ok(at_ms), Ok(schema), Some(reason)) =
-                (at.parse(), schema.parse(), BackupReason::parse(reason))
-            else {
+            let (Ok(at_ms), Ok(schema), Ok(revision), Some(reason)) = (
+                at.parse(),
+                schema.parse(),
+                revision.parse(),
+                BackupReason::parse(reason),
+            ) else {
                 continue;
             };
             let Ok(meta) = fs::metadata(e.path().join(STORE)) else {
@@ -436,6 +479,7 @@ impl Campaigns {
                 at_ms,
                 size: meta.len(),
                 schema,
+                revision,
                 reason,
             });
         }
@@ -539,20 +583,24 @@ mod tests {
     #[test]
     fn a_failed_create_or_backup_leaves_no_folder() {
         let (_d, c) = campaigns();
-        let mut s = c
+        let s = c
             .create(CampaignId(1), record(CampaignState::Active))
             .expect("create");
-        let err = c.take_backup(CampaignId(1), 1, SCHEMA, BackupReason::Manual, |_| {
-            Err(DiskError::Corrupt("injected".into()))
-        });
+        // A store that cannot be copied fails the backup.
+        let moved = c.folder(CampaignId(1)).join("moved.sqlite");
+        fs::rename(c.store_path(CampaignId(1)), &moved).expect("move");
+        let err = c.take_backup(CampaignId(1), 1, SCHEMA, 0, BackupReason::Manual);
         assert!(err.is_err());
+        fs::rename(&moved, c.store_path(CampaignId(1))).expect("move back");
         assert_eq!(
             c.numbered(CampaignId(1)).expect("numbered"),
             Vec::<u32>::new()
         );
         // A folder left without its marker is removed at the next backup.
         fs::create_dir_all(c.folder(CampaignId(1)).join(BACKUPS).join("2")).expect("dir");
-        let b = c.backup(&mut s, 2, BackupReason::Manual).expect("backup");
+        let b = c
+            .backup(CampaignId(1), 2, s.revision(), BackupReason::Manual)
+            .expect("backup");
         assert_eq!(b.number, 3);
         assert_eq!(c.numbered(CampaignId(1)).expect("numbered"), vec![3]);
         assert!(b.size > 0);

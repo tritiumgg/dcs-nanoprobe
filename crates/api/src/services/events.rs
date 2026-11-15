@@ -93,18 +93,36 @@ fn refused(l: &EventLog, after: u64) -> Status {
     }
 }
 
-fn page(l: &EventLog, after: u64, f: &EventFilter, limit: usize) -> (Vec<Event>, u64) {
+/// Events a page reads from the log at a time.
+const CHUNK: usize = 512;
+
+/// Up to `limit` events after `after` that pass the filter, the sequence
+/// number of the last event looked at, and whether more passing events
+/// follow.
+fn scan(l: &EventLog, after: u64, f: &EventFilter, limit: usize) -> (Vec<Event>, u64, bool) {
     let mut out = Vec::new();
     let mut last = after;
-    for e in l.after(after, usize::MAX) {
-        if out.len() == limit {
-            break;
+    loop {
+        let chunk = l.after(last, CHUNK);
+        if chunk.is_empty() {
+            return (out, last, false);
         }
-        last = e.sequence;
-        if passes(e, &f.dcs_ids, &f.player_key) {
-            out.push(e.clone());
+        for e in chunk {
+            if !passes(&e, &f.dcs_ids, &f.player_key) {
+                last = e.sequence;
+                continue;
+            }
+            if out.len() == limit {
+                return (out, last, true);
+            }
+            last = e.sequence;
+            out.push(e);
         }
     }
+}
+
+fn page(l: &EventLog, after: u64, f: &EventFilter, limit: usize) -> (Vec<Event>, u64) {
+    let (out, last, _) = scan(l, after, f, limit);
     (out, last)
 }
 
@@ -236,18 +254,7 @@ impl EventsService for Events {
             return Err(refused(l, r.after_sequence));
         }
         let after = r.after_sequence.max(l.first().saturating_sub(1));
-        let mut events = Vec::new();
-        let mut more = false;
-        for e in l.after(after, usize::MAX) {
-            if !passes(e, &f.dcs_ids, &f.player_key) {
-                continue;
-            }
-            if events.len() == limit {
-                more = true;
-                break;
-            }
-            events.push(e.clone());
-        }
+        let (events, _, more) = scan(l, after, &f, limit);
         Ok(Response::new(ReadEventsResponse { events, more }))
     }
 }

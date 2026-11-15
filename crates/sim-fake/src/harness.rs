@@ -724,7 +724,11 @@ impl World {
         self.recording.batches.push(Batch::SidecarRestart);
         self.sim.detach();
         self.sidecar_boot += 1;
+        // The command epoch lives in the server store, which outlives this
+        // campaign store (spec/commands.md).
+        let epoch = self.store.epoch();
         self.store = store;
+        self.store.seed_epoch(epoch);
         // The checks read the journal from memory; an opened store starts
         // with none.
         self.store.keep_journal(true);
@@ -739,6 +743,13 @@ impl World {
                 .difference(&self.sim.unread_deaths())
                 .copied()
                 .collect(),
+            // The commands in flight: their outcomes may come after this.
+            commands: self
+                .store
+                .unanswered()
+                .into_iter()
+                .map(|c| ((c.epoch, c.seq), c))
+                .collect(),
             base_state: self.store.groups().map(|g| (g.id, g.state)).collect(),
             base_dead: self
                 .store
@@ -750,6 +761,17 @@ impl World {
         };
         self.rec = Reconciler::new(self.rec_cfg, &self.store);
         self.sim.attach(self.sidecar_boot);
+    }
+
+    /// Every journal entry: those in the file of a store on disk, whose
+    /// memory starts empty at each reopen, and those in memory.
+    fn journal(&self) -> Vec<Entry> {
+        let mut all = match self.store.path() {
+            Some(p) => nanoprobe_sidecar::store::journal_of(p).unwrap_or_default(),
+            None => Vec::new(),
+        };
+        all.extend(self.store.entries().iter().cloned());
+        all
     }
 
     fn restart_sidecar(&mut self) {
@@ -1036,7 +1058,7 @@ impl World {
                         State::Dead => {
                             g.members.iter().all(|m| ledger.deaths.contains(&(campaign, m.0)))
                                 || (policy(g) == LostPolicy::Dead
-                                    && self.store.entries().iter().any(|e| {
+                                    && self.journal().iter().any(|e| {
                                         matches!(e, Entry::Transition { entity, from: State::Lost, to: State::Dead, .. }
                                             if *entity == g.id)
                                     }))

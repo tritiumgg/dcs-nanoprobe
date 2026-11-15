@@ -292,6 +292,13 @@ pub fn checkpoint_of(path: &Path) -> Result<Option<Checkpoint>, DiskError> {
     }
 }
 
+/// The store revision in the store file at `path`, read without opening the
+/// store.
+pub fn revision_of(path: &Path) -> Result<u64, DiskError> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    Rd(&get_meta(&conn, "world")?).u("revision")
+}
+
 /// Every journal entry in the store file at `path`, oldest first, read
 /// without opening the store. The sidecar never reads its journal back; this
 /// is for audits and tests.
@@ -337,7 +344,11 @@ fn read_schema(conn: &Connection) -> Result<u32, DiskError> {
 /// Copy the store file at `path` to `dest` consistently, with SQLite's
 /// `VACUUM INTO`, whether or not a store has it open.
 pub fn backup_file(path: &Path, dest: &Path) -> Result<(), DiskError> {
-    let conn = Connection::open(path)?;
+    // Never create: a missing store is an error, not an empty backup.
+    let conn = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
     vacuum_into(&conn, dest)
 }
 
