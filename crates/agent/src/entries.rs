@@ -21,6 +21,7 @@ use nanoprobe_transport::layout::result;
 use nanoprobe_transport::log::{Level, Value};
 use nanoprobe_transport::map::MappedFile;
 use nanoprobe_transport::mem::Memory;
+use nanoprobe_transport::records::{ExtensionStats, Menu, Player};
 
 use crate::lua::{self, State};
 use crate::{driver, platform, state};
@@ -145,6 +146,11 @@ entries! {
     lifecycle => work_lifecycle;
     log => work_log, hot;
     event => work_event, hot;
+    player => work_player;
+    menu => work_menu, hot;
+    emit => work_emit, hot;
+    extension => work_extension, hot;
+    extension_budget => work_extension_budget, hot;
     thread => work_thread, hot;
     clock => work_clock, hot;
     qpc_cost => work_qpc_cost;
@@ -2007,4 +2013,405 @@ unsafe fn work_suspect(state: *mut State) -> c_int {
         None => driver::suspect_next(),
     }
     0
+}
+
+/// The argument at `index` as an unsigned 32-bit number: 0 when it is absent,
+/// not a number, negative or not finite, and the nearest bound otherwise.
+unsafe fn arg_u32(state: *mut State, index: c_int) -> u32 {
+    // SAFETY: as for `arg_num`.
+    let n = unsafe { arg_num(state, index, 0.0) };
+    if n.is_finite() {
+        n.clamp(0.0, f64::from(u32::MAX)) as u32
+    } else {
+        0
+    }
+}
+
+/// The argument at `index` as an unsigned 64-bit count: 0 when it is absent,
+/// not a number, negative or not finite.
+unsafe fn arg_count(state: *mut State, index: c_int) -> u64 {
+    // SAFETY: as for `arg_num`.
+    let n = unsafe { arg_num(state, index, 0.0) };
+    if n.is_finite() { n.max(0.0) as u64 } else { 0 }
+}
+
+/// The argument at `index` as text, empty when it is not a string or a number.
+unsafe fn arg_text(state: *mut State, index: c_int) -> String {
+    // SAFETY: as for `arg_num`.
+    unsafe { lua::to_string(state, index) }.unwrap_or_default()
+}
+
+/// `player(event, id, side, seat, client, name, slot, text)`: queue a
+/// `PLAYER` record from a hook callback (spec/records.md, "Layout: PLAYER").
+/// An `event` outside the `player_event` codes 1 to 5 writes nothing. Never
+/// raises.
+unsafe fn work_player(state: *mut State) -> c_int {
+    // SAFETY: a live state; every read is of an argument and never raises.
+    let record = unsafe {
+        Player {
+            event: arg_u32(state, 1),
+            player: arg_u32(state, 2),
+            side: arg_u32(state, 3),
+            seat: arg_u32(state, 4),
+            client: arg_text(state, 5),
+            name: arg_text(state, 6),
+            slot: arg_text(state, 7),
+            text: arg_text(state, 8),
+        }
+    };
+    if (1..=5).contains(&record.event) {
+        driver::player(&record);
+    }
+    0
+}
+
+/// The entity a platform name (spec/world.md, "Names") ends in, from its last
+/// base 36 part.
+fn entity_of_name(name: &str) -> Option<u64> {
+    let mut parts = name.split('.');
+    (parts.next()? == "np").then_some(())?;
+    parts.next()?;
+    parts.next()?;
+    let entity = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    u64::from_str_radix(entity, 36).ok()
+}
+
+/// `menu(entity, target, scope)`: queue a `MENU` record for a selected item,
+/// with player 0 (spec/records.md, "Layout: MENU"). `entity` is the item's
+/// `EntityId` as decimal text. `target` is a coalition number, a group's
+/// platform name, or nothing; the record holds the number or the group's
+/// `EntityId`, and 0 for nothing. Never raises.
+unsafe fn work_menu(state: *mut State) -> c_int {
+    // SAFETY: a live state; every read is of an argument and never raises.
+    let (entity, target, scope) = unsafe {
+        let entity = arg_text(state, 1).parse::<u64>().ok();
+        let target = if lua::lua_type(state, 2) == lua::TNUMBER {
+            arg_id(state, 2).unwrap_or(0)
+        } else {
+            entity_of_name(&arg_text(state, 2)).unwrap_or(0)
+        };
+        (entity, target, arg_u32(state, 3))
+    };
+    if let Some(entity) = entity {
+        driver::menu(&Menu {
+            entity,
+            target,
+            scope,
+            player: 0,
+        });
+    }
+    0
+}
+
+/// `extension(name, calls, total_us, max_us, rev, skipped, stopped)`: write
+/// one `EXTENSION` record in this frame. The agent's own applied revision of
+/// the extension replaces `rev`. `stopped` is a boolean or a number. Returns
+/// whether the record was written. Never raises.
+unsafe fn work_extension(state: *mut State) -> c_int {
+    // SAFETY: a live state; every read is of an argument and never raises.
+    let stats = unsafe {
+        ExtensionStats {
+            name: arg_text(state, 1),
+            calls: arg_count(state, 2),
+            total_us: arg_count(state, 3),
+            max_us: arg_count(state, 4),
+            rev: arg_count(state, 5),
+            events_skipped: arg_count(state, 6),
+            stopped: u32::from(match lua::lua_type(state, 7) {
+                lua::TBOOLEAN => lua::lua_toboolean(state, 7) != 0,
+                lua::TNUMBER => arg_u32(state, 7) != 0,
+                _ => false,
+            }),
+        }
+    };
+    let written = driver::extension(stats);
+    // SAFETY: a live state with a free slot.
+    unsafe { push_bool(state, written) }
+}
+
+/// `extension_budget([spent_us[, active]])`: charge `spent_us` microseconds
+/// of extension hook time to the frame's commanded work. A boolean `active`
+/// says whether an extension has work for the next pump: the agent then asks
+/// for a pump on every frame of a running mission. Returns the microseconds
+/// of the budget left, the active campaign as decimal text, whether raw Lua
+/// is on, and the lifecycle code (3 running, 4 paused). Never raises.
+unsafe fn work_extension_budget(state: *mut State) -> c_int {
+    // SAFETY: a live state; reading an argument never raises.
+    let (spent, active) = unsafe {
+        let active =
+            (lua::lua_type(state, 2) == lua::TBOOLEAN).then(|| lua::lua_toboolean(state, 2) != 0);
+        (arg_num(state, 1, 0.0), active)
+    };
+    let budget = driver::extension_budget(spent, active);
+    // SAFETY: a live state with four free slots.
+    unsafe {
+        lua::lua_pushnumber(state, budget.left_us);
+        lua::push_str(state, &budget.campaign);
+        lua::lua_pushboolean(state, c_int::from(budget.raw_lua));
+        lua::lua_pushnumber(state, f64::from(budget.lifecycle));
+    }
+    4
+}
+
+/// What `emit` read from its arguments, for [`work_emit`]: the object IDs and
+/// the payload, or the reason it refuses.
+static EMIT: Mutex<Option<EmitArgs>> = Mutex::new(None);
+
+/// The object IDs and the payload of an `emit`, or the reason it refuses.
+type EmitArgs = Result<(Vec<u64>, Lv), &'static str>;
+
+/// `emit(name, payload, objects)`: queue an `AUTHOR_EVENT` record
+/// (spec/commands.md, "emit"). Returns true, or false and a reason: `name`,
+/// `too_large`, `too_deep`, `objects` or `disabled`. The arguments are read
+/// under `lua_pcall` with raw table access only. Never raises.
+unsafe fn work_emit(state: *mut State) -> c_int {
+    // SAFETY: a live state from the entry.
+    let outcome = unsafe { emit_outcome(state) };
+    // SAFETY: a live state with two free slots.
+    unsafe {
+        lua::lua_settop(state, 0);
+        match outcome {
+            Ok(()) => push_bool(state, true),
+            Err(reason) => {
+                lua::lua_pushboolean(state, 0);
+                lua::push_str(state, reason);
+                2
+            }
+        }
+    }
+}
+
+/// Run `emit`: the checks in the order of the spec's reasons, then the read,
+/// then the record.
+unsafe fn emit_outcome(state: *mut State) -> Result<(), &'static str> {
+    if !driver::raw_lua() {
+        return Err("disabled");
+    }
+    // SAFETY: a live state; reading a value never raises.
+    let name = match unsafe { scalar(state, 1) } {
+        Lv::String(s) if (1..=driver::EMIT_NAME_MAX).contains(&s.len()) => {
+            String::from_utf8_lossy(&s).into_owned()
+        }
+        _ => return Err("name"),
+    };
+    *EMIT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    // SAFETY: a live state; the closure runs under `lua_pcall` on copies of
+    // the payload and the objects, and the stack has the free slots Lua
+    // guarantees a C function.
+    let failed = unsafe {
+        lua::lua_settop(state, 3);
+        lua::lua_pushcclosure(state, read_emit, 0);
+        lua::lua_pushvalue(state, 2);
+        lua::lua_pushvalue(state, 3);
+        let status = lua::lua_pcall(state, 2, 0, 0);
+        lua::lua_settop(state, 0);
+        status != 0
+    };
+    let read = EMIT.lock().unwrap_or_else(|e| e.into_inner()).take();
+    match read {
+        Some(Ok((objects, payload))) if !failed => driver::emit(&name, &objects, payload),
+        Some(Err(reason)) => Err(reason),
+        _ => Err("too_large"),
+    }
+}
+
+/// Read `emit`'s payload (argument 1) and objects (argument 2) into [`EMIT`].
+/// Called only under `lua_pcall`. The two calls that can allocate in Lua, the
+/// stack grow and the push of the key `id_`, come first, before this
+/// function owns a value; the raw reads after them allocate nothing in Lua,
+/// so no raise crosses a frame that owns a value.
+#[inline(never)]
+unsafe extern "C" fn read_emit(state: *mut State) -> c_int {
+    // SAFETY: a live state. 3 slots per table level for 16 levels, and the
+    // arguments.
+    if unsafe { lua::lua_checkstack(state, 80) } == 0 {
+        *EMIT.lock().unwrap_or_else(|e| e.into_inner()) = Some(Err("too_large"));
+        return 0;
+    }
+    // SAFETY: as above; the key sits at index 3 for the reads below.
+    unsafe { lua::push_str(state, "id_") };
+    // SAFETY: the reads below are raw and allocate nothing in Lua.
+    let read = unsafe {
+        read_objects(state, 2, 3).and_then(|objects| {
+            let mut rs = EmitRead {
+                bytes: 0,
+                path: Vec::new(),
+            };
+            read_payload(state, 1, 0, &mut rs).map(|payload| (objects, payload))
+        })
+    };
+    *EMIT.lock().unwrap_or_else(|e| e.into_inner()) = Some(read);
+    0
+}
+
+/// The object IDs of `emit`'s `objects` at `index`: nothing, or an array of
+/// at most 16 entries, each a unit object or the number in its `id_`. `key`
+/// is the index of the string `id_`.
+unsafe fn read_objects(
+    state: *mut State,
+    index: c_int,
+    key: c_int,
+) -> Result<Vec<u64>, &'static str> {
+    // SAFETY: a live state with the stack grown by the caller; `lua_type`,
+    // `lua_objlen`, `lua_next` and the raw reads never raise.
+    unsafe {
+        match lua::lua_type(state, index) {
+            lua::TNIL | lua::TNONE => return Ok(Vec::new()),
+            lua::TTABLE => {}
+            _ => return Err("objects"),
+        }
+        let len = lua::lua_objlen(state, index);
+        if len > driver::EMIT_OBJECTS_MAX {
+            return Err("objects");
+        }
+        // An array: the table holds no key past its length.
+        let mut pairs = 0;
+        lua::lua_pushnil(state);
+        while lua::lua_next(state, index) != 0 {
+            pairs += 1;
+            lua::lua_settop(state, -2);
+            if pairs > len {
+                lua::lua_settop(state, -2);
+                return Err("objects");
+            }
+        }
+        let mut out = Vec::with_capacity(len);
+        for i in 1..=len {
+            lua::lua_rawgeti(state, index, i as c_int);
+            let id = match lua::lua_type(state, -1) {
+                lua::TNUMBER => arg_id(state, -1),
+                lua::TTABLE => {
+                    lua::lua_pushvalue(state, key);
+                    lua::lua_rawget(state, -2);
+                    let id = arg_id(state, -1);
+                    lua::lua_settop(state, -2);
+                    id
+                }
+                _ => None,
+            };
+            lua::lua_settop(state, -2);
+            match id {
+                Some(id) => out.push(id),
+                None => return Err("objects"),
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// What [`read_payload`] has read: the bytes the value encodes to so far, and
+/// the tables on its path.
+struct EmitRead {
+    bytes: usize,
+    path: Vec<*const core::ffi::c_void>,
+}
+
+impl EmitRead {
+    /// Count `n` more encoded bytes; false past the payload limit.
+    fn take(&mut self, n: usize) -> Result<(), &'static str> {
+        self.bytes = self.bytes.saturating_add(n);
+        if self.bytes > driver::EMIT_PAYLOAD_MAX {
+            Err("too_large")
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// The value at `index` as an `lv`, read with raw access: a table by its
+/// pairs, a function, userdata or thread by its type name. Tables nest 16
+/// deep at most, as the codec carries them: a deeper table, or one inside
+/// itself, is `too_deep`. A value that encodes to more than 16 KiB is
+/// `too_large`, and the read stops there. Keys that are not strings, numbers
+/// or booleans are left out.
+///
+/// # Safety
+///
+/// A live state with the stack grown for 16 levels, under `lua_pcall`. The
+/// reads call no metamethod and allocate nothing in Lua.
+unsafe fn read_payload(
+    state: *mut State,
+    index: c_int,
+    depth: usize,
+    rs: &mut EmitRead,
+) -> Result<Lv, &'static str> {
+    // SAFETY: the caller's contract.
+    unsafe {
+        if lua::lua_type(state, index) != lua::TTABLE {
+            let v = scalar(state, index);
+            let n = match &v {
+                Lv::Nil | Lv::Bool(_) => 1,
+                Lv::Number(_) => 9,
+                Lv::String(s) => 5 + s.len(),
+                Lv::Other(name) => 3 + name.len(),
+                Lv::Table(_) => unreachable!("a table is read below"),
+            };
+            rs.take(n)?;
+            return Ok(v);
+        }
+        if depth >= nanoprobe_transport::codec::MAX_DEPTH {
+            return Err("too_deep");
+        }
+        rs.take(5)?;
+        let base = lua::lua_gettop(state);
+        let at = if index < 0 { base + index + 1 } else { index };
+        let id = lua::lua_topointer(state, at);
+        if rs.path.contains(&id) {
+            return Err("too_deep");
+        }
+        rs.path.push(id);
+        let mut pairs = Vec::new();
+        lua::lua_pushnil(state);
+        while lua::lua_next(state, at) != 0 {
+            let top = lua::lua_gettop(state);
+            let key = match lua::lua_type(state, top - 1) {
+                lua::TSTRING | lua::TNUMBER | lua::TBOOLEAN => Some(scalar(state, top - 1)),
+                _ => None,
+            };
+            if let Some(key) = key {
+                let before = rs.bytes;
+                let kn = match &key {
+                    Lv::Bool(_) => 1,
+                    Lv::Number(_) => 9,
+                    Lv::String(s) => 5 + s.len(),
+                    _ => 0,
+                };
+                if let Err(e) = rs.take(kn) {
+                    lua::lua_settop(state, base);
+                    return Err(e);
+                }
+                match read_payload(state, top, depth + 1, rs) {
+                    Ok(v) => pairs.push((key, v)),
+                    Err(e) => {
+                        lua::lua_settop(state, base);
+                        return Err(e);
+                    }
+                }
+                debug_assert!(rs.bytes >= before);
+            }
+            lua::lua_settop(state, top - 1);
+        }
+        lua::lua_settop(state, base);
+        rs.path.pop();
+        Ok(Lv::Table(pairs))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_platform_name_ends_in_its_entity() {
+        assert_eq!(entity_of_name("np.g.1z.11"), Some(37));
+        assert_eq!(entity_of_name("np.u.0.zz"), Some(35 * 36 + 35));
+        assert_eq!(entity_of_name("np.g.1z"), None);
+        assert_eq!(entity_of_name("np.g.1z.11.1"), None);
+        assert_eq!(entity_of_name("xx.g.1.1"), None);
+        assert_eq!(entity_of_name("np.g.1.-"), None);
+        assert_eq!(entity_of_name(""), None);
+    }
 }

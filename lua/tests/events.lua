@@ -40,6 +40,25 @@ for name, list in section('Allow-lists'):gmatch('\n| (S_EVENT_[%u_]+) | ([^|]-) 
 end
 assert(#spec_order > 0, 'spec/records.md lists no allow-list')
 
+-- The spec's sentence on the type fields: INITIATOR_TYPE on every event type
+-- whose row lists INITIATOR_CATEGORY, TARGET_TYPE on every one that lists
+-- TARGET_CATEGORY, and INITIATOR_MISSION_ID on a birth only.
+for name, fields in pairs(spec_allow) do
+  local out = {}
+  for _, field in ipairs(fields) do
+    out[#out + 1] = field
+    if field == 'INITIATOR_CATEGORY' then
+      out[#out + 1] = 'INITIATOR_TYPE'
+    elseif field == 'TARGET_CATEGORY' then
+      out[#out + 1] = 'TARGET_TYPE'
+    end
+  end
+  if name == 'S_EVENT_BIRTH' then
+    out[#out + 1] = 'INITIATOR_MISSION_ID'
+  end
+  spec_allow[name] = out
+end
+
 ---------------------------------------------------------------------------
 -- The shim, loaded into the mock's server state with a stub agent.
 
@@ -55,7 +74,7 @@ host:load_mission('events')
 
 local calls = {}
 local agent = {
-  abi = '9',
+  abi = '10',
   status = function()
     return { gen = 1 }
   end,
@@ -83,7 +102,9 @@ for name, f in pairs(shim.FIELDS) do
   assert(s.code == f[1], name .. ': the shim has code ' .. f[1] .. ', the spec ' .. s.code)
   assert(s.value == f[4], name .. ': the shim takes a ' .. f[4] .. ', the spec a ' .. s.value)
   local from = '`event.' .. f[2] .. (f[3] and ('.' .. f[3]) or '') .. '`'
-  assert(s.from == from, name .. ': the shim reads ' .. from .. ', the spec ' .. s.from)
+  -- The spec may add a condition after the source, as `, on a birth only`.
+  assert(s.from == from or s.from:sub(1, #from + 2) == from .. ', ',
+    name .. ': the shim reads ' .. from .. ', the spec ' .. s.from)
 end
 
 local shim_count = 0
@@ -131,7 +152,7 @@ local function good(f)
   if f[3] == 'id_' then
     return object(1000 + f[1])
   elseif f[3] ~= nil then
-    return { [f[3]] = f[1] + 0.5 }
+    return { [f[3]] = f[4] == 'number' and f[1] + 0.5 or ('text ' .. f[1]) }
   elseif f[4] == 'number' then
     return f[1] + 0.25
   end
@@ -183,9 +204,10 @@ for name, list in pairs(shim.ALLOW) do
   for _, field in ipairs(list) do
     local f = shim.FIELDS[field]
     local v = good(f)
-    if f[2] == 'pos' then
-      event.pos = event.pos or {}
-      event.pos[f[3]] = f[1] + 0.5
+    if f[3] ~= nil and f[3] ~= 'id_' then
+      -- Fields that share a container, as the category and the type do.
+      event[f[2]] = event[f[2]] or {}
+      event[f[2]][f[3]] = v[f[3]]
     else
       event[f[2]] = v
     end
@@ -197,8 +219,9 @@ for name, list in pairs(shim.ALLOW) do
     name .. ': forwarded ' .. table.concat(order, ',') .. ' of ' .. table.concat(list, ','))
   for _, field in ipairs(list) do
     local f = shim.FIELDS[field]
-    local want = f[3] == 'id_' and 1000 + f[1] or (f[3] and f[1] + 0.5) or (f[4] == 'number' and f[1] + 0.25)
-      or ('text ' .. f[1])
+    local want = f[3] == 'id_' and 1000 + f[1]
+      or (f[3] and (f[4] == 'number' and f[1] + 0.5 or ('text ' .. f[1])))
+      or (f[4] == 'number' and f[1] + 0.25) or ('text ' .. f[1])
     assert(got[f[1]] == want, name .. '.' .. field .. ' is ' .. tostring(got[f[1]]))
   end
 

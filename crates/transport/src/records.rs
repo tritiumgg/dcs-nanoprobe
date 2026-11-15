@@ -957,6 +957,185 @@ impl Airbase {
     }
 }
 
+/// `AUTHOR_EVENT`: an event from `emit` or an extension.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AuthorEvent {
+    /// DCS object IDs of the units the event is about.
+    pub objects: Vec<u64>,
+    /// The event's name.
+    pub name: String,
+    /// The author's value.
+    pub payload: Lv,
+}
+
+impl AuthorEvent {
+    /// The payload.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u32(self.objects.len() as u32).pad(4);
+        self.objects.iter().for_each(|v| _ = w.u64(*v));
+        w.str(&self.name).lv(&self.payload);
+        w.finish()
+    }
+
+    /// Decode a payload.
+    pub fn decode(b: &[u8]) -> Result<AuthorEvent, DecodeError> {
+        let mut r = Reader::new(b);
+        let n = r.u32()?;
+        r.skip(4)?;
+        let objects = u64_column(columns(&mut r, n, 8)?);
+        Ok(AuthorEvent {
+            objects,
+            name: r.str()?.to_owned(),
+            payload: r.lv()?,
+        })
+    }
+}
+
+/// `PLAYER`: a player connected, left, changed slot, chatted or was renamed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Player {
+    /// A `player_event` code.
+    pub event: u32,
+    /// The ID DCS gives the connection.
+    pub player: u32,
+    /// DCS coalition number.
+    pub side: u32,
+    /// The seat in a multi-crew aircraft, 0 for the first or when DCS gives none.
+    pub seat: u32,
+    /// The ID DCS gives the client.
+    pub client: String,
+    /// The player's name.
+    pub name: String,
+    /// The slot ID.
+    pub slot: String,
+    /// The chat text, for `CHAT`.
+    pub text: String,
+}
+
+impl Player {
+    /// The payload.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u32(self.event)
+            .u32(self.player)
+            .u32(self.side)
+            .u32(self.seat)
+            .str(&self.client)
+            .str(&self.name)
+            .str(&self.slot)
+            .str(&self.text);
+        w.finish()
+    }
+
+    /// Decode a payload.
+    pub fn decode(b: &[u8]) -> Result<Player, DecodeError> {
+        let mut r = Reader::new(b);
+        Ok(Player {
+            event: r.u32()?,
+            player: r.u32()?,
+            side: r.u32()?,
+            seat: r.u32()?,
+            client: r.str()?.to_owned(),
+            name: r.str()?.to_owned(),
+            slot: r.str()?.to_owned(),
+            text: r.str()?.to_owned(),
+        })
+    }
+}
+
+/// `MENU`: a player selected a menu item.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Menu {
+    /// The menu item's `EntityId`.
+    pub entity: u64,
+    /// What the item was added for, by `scope`: 0, a coalition number or a group `EntityId`.
+    pub target: u64,
+    /// The item's `scope` code.
+    pub scope: u32,
+    /// The connection ID of the player who selected it, 0 when DCS does not say.
+    pub player: u32,
+}
+
+impl Menu {
+    /// The payload.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u64(self.entity)
+            .u64(self.target)
+            .u32(self.scope)
+            .u32(self.player);
+        w.finish()
+    }
+
+    /// Decode a payload.
+    pub fn decode(b: &[u8]) -> Result<Menu, DecodeError> {
+        let mut r = Reader::new(b);
+        Ok(Menu {
+            entity: r.u64()?,
+            target: r.u64()?,
+            scope: r.u32()?,
+            player: r.u32()?,
+        })
+    }
+}
+
+/// `EXTENSION`: one registered extension's run time.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExtensionStats {
+    /// Hook calls since the extension was installed in this mission.
+    pub calls: u64,
+    /// Time in those runs, microseconds.
+    pub total_us: u64,
+    /// The longest run, microseconds.
+    pub max_us: u64,
+    /// The extension's applied revision.
+    pub rev: u64,
+    /// Events its `on_event` queue dropped.
+    pub events_skipped: u64,
+    /// 1 when its hooks are stopped after errors.
+    pub stopped: u32,
+    /// The extension's name.
+    pub name: String,
+}
+
+impl ExtensionStats {
+    /// The payload.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u64(self.calls)
+            .u64(self.total_us)
+            .u64(self.max_us)
+            .u64(self.rev)
+            .u64(self.events_skipped)
+            .u32(self.stopped)
+            .pad(4)
+            .str(&self.name);
+        w.finish()
+    }
+
+    /// Decode a payload.
+    pub fn decode(b: &[u8]) -> Result<ExtensionStats, DecodeError> {
+        let mut r = Reader::new(b);
+        let calls = r.u64()?;
+        let total_us = r.u64()?;
+        let max_us = r.u64()?;
+        let rev = r.u64()?;
+        let events_skipped = r.u64()?;
+        let stopped = r.u32()?;
+        r.skip(4)?;
+        Ok(ExtensionStats {
+            calls,
+            total_us,
+            max_us,
+            rev,
+            events_skipped,
+            stopped,
+            name: r.str()?.to_owned(),
+        })
+    }
+}
+
 /// `RATES` command: the bytes after the command header.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Rates {
@@ -1600,6 +1779,113 @@ mod tests {
         assert_eq!(Airbase::decode(&b), Ok(a));
         truncations_fail(&b, Airbase::decode);
         assert_eq!(Airbase::default().encode().len(), fixed("AIRBASE") + 2);
+    }
+
+    #[test]
+    fn player_facing_records_follow_their_golden_layouts() {
+        let m = Menu {
+            entity: 1,
+            target: 2,
+            scope: 3,
+            player: 4,
+        };
+        at_golden_offsets(
+            "MENU",
+            &m.encode(),
+            &[("entity", 1), ("target", 2), ("scope", 3), ("player", 4)],
+        );
+        assert_eq!(m.encode().len(), fixed("MENU"));
+        let b = m.encode();
+        assert_eq!(Menu::decode(&b), Ok(m));
+        truncations_fail(&b, Menu::decode);
+
+        let p = Player {
+            event: 1,
+            player: 2,
+            side: 3,
+            seat: 4,
+            client: "c".into(),
+            name: "n".into(),
+            slot: "s".into(),
+            text: "hello".into(),
+        };
+        at_golden_offsets(
+            "PLAYER",
+            &p.encode(),
+            &[("event", 1), ("player", 2), ("side", 3), ("seat", 4)],
+        );
+        let b = p.encode();
+        assert_eq!(b.len(), fixed("PLAYER") + 4 * 2 + 1 + 1 + 1 + 5);
+        assert_eq!(Player::decode(&b), Ok(p));
+        truncations_fail(&b, Player::decode);
+        let names: Vec<_> = golden::layout("PLAYER")
+            .unwrap()
+            .variable
+            .iter()
+            .map(|v| v.name)
+            .collect();
+        assert_eq!(names, ["client", "name", "slot", "text"]);
+
+        let e = ExtensionStats {
+            calls: 1,
+            total_us: 2,
+            max_us: 3,
+            rev: 4,
+            events_skipped: 5,
+            stopped: 1,
+            name: "count".into(),
+        };
+        at_golden_offsets(
+            "EXTENSION",
+            &e.encode(),
+            &[
+                ("calls", 1),
+                ("total_us", 2),
+                ("max_us", 3),
+                ("rev", 4),
+                ("events_skipped", 5),
+                ("stopped", 1),
+            ],
+        );
+        let b = e.encode();
+        assert_eq!(b.len(), fixed("EXTENSION") + 2 + 5);
+        assert_eq!(ExtensionStats::decode(&b), Ok(e));
+        truncations_fail(&b, ExtensionStats::decode);
+
+        let a = AuthorEvent {
+            objects: vec![7, 8],
+            name: "tick".into(),
+            payload: Lv::Number(2.0),
+        };
+        let b = a.encode();
+        assert_eq!(&b[..4], &2u32.to_le_bytes());
+        assert_eq!(&b[4..8], &[0; 4]);
+        assert_eq!(&b[8..16], &7u64.to_le_bytes());
+        assert_eq!(AuthorEvent::decode(&b), Ok(a));
+        truncations_fail(&b, AuthorEvent::decode);
+        let empty = AuthorEvent {
+            objects: vec![],
+            name: String::new(),
+            payload: Lv::Nil,
+        };
+        assert_eq!(empty.encode().len(), fixed("AUTHOR_EVENT") + 3);
+        let names: Vec<_> = golden::layout("AUTHOR_EVENT")
+            .unwrap()
+            .variable
+            .iter()
+            .map(|v| (v.ty, v.name))
+            .collect();
+        assert_eq!(
+            names,
+            [("u64[n]", "object"), ("str", "name"), ("lv", "payload")]
+        );
+    }
+
+    #[test]
+    fn an_author_event_object_count_past_the_payload_fails() {
+        let mut w = Writer::new();
+        w.u32(u32::MAX).pad(4).u64(1);
+        assert!(AuthorEvent::decode(&w.finish()).is_err());
     }
 
     #[test]

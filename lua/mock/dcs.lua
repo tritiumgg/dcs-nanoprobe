@@ -96,6 +96,16 @@ function M.new(o)
     timer_errors = {},
     -- Each path given to net.load_mission, in order.
     loads = {},
+    chats = {},
+    -- The connected players by connection ID, as net.get_player_info gives
+    -- them (a server player is always ID 1), the ban list, each moderation
+    -- call in order, and per-call switches: `net_raises[name]` makes the call
+    -- raise and `net_returns[name]` is what it returns.
+    players = { [1] = { ucid = 'server-ucid', name = 'server', side = 0, slot = '', ping = 0 } },
+    bans = {},
+    moderation = {},
+    net_raises = {},
+    net_returns = {},
     pending_load = nil,
     timers = {},
     next_timer = 1,
@@ -380,6 +390,21 @@ function M.new(o)
       host.callbacks[#host.callbacks + 1] = callbacks
     end,
   })
+  -- One moderation call: recorded, then raising or returning what the test
+  -- set, else run and returning nothing, as the DCS calls return (UNVERIFIED).
+  local function moderate(name, args, run)
+    host.moderation[#host.moderation + 1] = { call = name, args = args }
+    local raises = host.net_raises[name]
+    if raises then
+      error(type(raises) == 'string' and raises or ('mock: net.' .. name .. ' raises'), 3)
+    end
+    local forced = host.net_returns[name]
+    if forced ~= nil then
+      return forced
+    end
+    run()
+  end
+
   hook.net = namespace('hook', 'net', {
     dostring_in = dostring_in,
     -- The load happens at the start of the next frame, not inside the call.
@@ -396,6 +421,124 @@ function M.new(o)
     end,
     log = function(message)
       hook.log.write('NET', hook.log.INFO, message)
+    end,
+    -- Each chat call, in order, as { call, text, all } or { call, text,
+    -- player }. A test sets `host.chat_raises` to make one raise.
+    send_chat = function(text, all)
+      if type(text) ~= 'string' or type(all) ~= 'boolean' then
+        error('mock: net.send_chat takes a string and a boolean', 2)
+      end
+      if host.chat_raises then
+        error('mock: net.send_chat raises', 2)
+      end
+      host.chats[#host.chats + 1] = { call = 'send_chat', text = text, all = all }
+    end,
+    send_chat_to = function(text, player)
+      if type(text) ~= 'string' or type(player) ~= 'number' then
+        error('mock: net.send_chat_to takes a string and a connection ID', 2)
+      end
+      if host.chat_raises then
+        error('mock: net.send_chat_to raises', 2)
+      end
+      host.chats[#host.chats + 1] = { call = 'send_chat_to', text = text, player = player }
+    end,
+    -- Players and moderation. A call is recorded in `host.moderation` as its
+    -- name and arguments before it checks anything else.
+    get_player_list = function()
+      local ids = {}
+      for id in pairs(host.players) do
+        ids[#ids + 1] = id
+      end
+      table.sort(ids)
+      return ids
+    end,
+    get_player_info = function(id, attribute)
+      if type(id) ~= 'number' or (attribute ~= nil and type(attribute) ~= 'string') then
+        error('mock: net.get_player_info takes a connection ID and an optional name', 2)
+      end
+      local p = host.players[id]
+      if p == nil then
+        return nil
+      end
+      if attribute ~= nil then
+        return p[attribute]
+      end
+      local copy = { id = id }
+      for k, v in pairs(p) do
+        copy[k] = v
+      end
+      return copy
+    end,
+    kick = function(id, reason)
+      return moderate('kick', { id, reason }, function()
+        if type(id) ~= 'number' or type(reason) ~= 'string' then
+          error('mock: net.kick takes a connection ID and a string', 3)
+        end
+        host.players[id] = nil
+        host:callback('onPlayerDisconnect', id, 0)
+      end)
+    end,
+    banlist_add = function(id, seconds, reason)
+      return moderate('banlist_add', { id, seconds, reason }, function()
+        if type(id) ~= 'number' or type(seconds) ~= 'number' or type(reason) ~= 'string' then
+          error('mock: net.banlist_add takes a connection ID, seconds and a string', 3)
+        end
+        local p = host.players[id]
+        if not p then
+          error('mock: net.banlist_add of a player who is not connected', 3)
+        end
+        host.bans[#host.bans + 1] = { ucid = p.ucid, name = p.name, reason = reason, ipaddr = p.ipaddr or '10.0.0.9',
+          banned_until = seconds == 0 and 4102444800 or host.real + seconds }
+      end)
+    end,
+    banlist_add_by_ucid = function(ucid, seconds, reason)
+      return moderate('banlist_add_by_ucid', { ucid, seconds, reason }, function()
+        if type(ucid) ~= 'string' or type(seconds) ~= 'number' or type(reason) ~= 'string' then
+          error('mock: net.banlist_add_by_ucid takes a ucid, seconds and a string', 3)
+        end
+        host.bans[#host.bans + 1] = { ucid = ucid, name = '', reason = reason, ipaddr = '10.0.0.9',
+          banned_until = seconds == 0 and 4102444800 or host.real + seconds }
+      end)
+    end,
+    banlist_remove = function(ucid)
+      return moderate('banlist_remove', { ucid }, function()
+        if type(ucid) ~= 'string' then
+          error('mock: net.banlist_remove takes a ucid', 3)
+        end
+        for i = #host.bans, 1, -1 do
+          if host.bans[i].ucid == ucid then
+            table.remove(host.bans, i)
+          end
+        end
+      end)
+    end,
+    banlist_get = function()
+      host.moderation[#host.moderation + 1] = { call = 'banlist_get' }
+      if host.net_raises.banlist_get then
+        error('mock: net.banlist_get raises', 2)
+      end
+      local list = {}
+      for i, entry in ipairs(host.bans) do
+        local copy = {}
+        for k, v in pairs(entry) do
+          copy[k] = v
+        end
+        list[i] = copy
+      end
+      return list
+    end,
+    force_player_slot = function(id, side, slot)
+      return moderate('force_player_slot', { id, side, slot }, function()
+        if type(id) ~= 'number' or type(side) ~= 'number' or type(slot) ~= 'string' then
+          error('mock: net.force_player_slot takes a connection ID, a side and a slot string', 3)
+        end
+        local p = host.players[id]
+        if not p then
+          error('mock: net.force_player_slot of a player who is not connected', 3)
+        end
+        p.side, p.slot = side, slot
+        host:callback('onPlayerChangeSlot', id)
+      end)
     end,
   })
 
@@ -558,6 +701,48 @@ function M.new(o)
         fn(...)
       end
     end
+  end
+
+  -- The values each registered callback returned, one table of results per
+  -- callback that has `name`, in registration order.
+  function host:callback_values(name, ...)
+    local out = {}
+    for _, callbacks in ipairs(self.callbacks) do
+      local fn = callbacks[name]
+      if fn then
+        out[#out + 1] = { fn(...) }
+      end
+    end
+    return out
+  end
+
+  -- A player connects: `info` holds ucid, name, side and slot. Then
+  -- onPlayerConnect(id).
+  function host:connect(id, info)
+    self.players[id] = {
+      ucid = info.ucid, name = info.name, side = info.side or 0, slot = info.slot or '',
+      ping = 20, ipaddr = info.ipaddr or '10.0.0.7:10308',
+    }
+    self:callback('onPlayerConnect', id)
+  end
+
+  -- A player changes slot: onPlayerChangeSlot(id) after the info changed.
+  function host:change_slot(id, side, slot)
+    self.players[id].side, self.players[id].slot = side, slot
+    self:callback('onPlayerChangeSlot', id)
+  end
+
+  -- A player chats. Returns what each onPlayerTrySendChat returned, so a test
+  -- can check none returned a value.
+  function host:chat(id, message, all)
+    return self:callback_values('onPlayerTrySendChat', id, message, all ~= false)
+  end
+
+  -- A player leaves. The mock removes the player before the callback, so
+  -- code that relies on net.get_player_info there fails.
+  function host:disconnect(id, code)
+    self.players[id] = nil
+    self:callback('onPlayerDisconnect', id, code or 0)
   end
 
   -- Load a mission. `name` is a mission name or the path of a .miz.
