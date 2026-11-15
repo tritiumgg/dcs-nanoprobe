@@ -235,8 +235,9 @@ message is read only when it is a string.
 The agent decodes the payload into one table and passes it to the handler. A payload
 that does not decode is answered `BAD_PAYLOAD` in Rust, and no handler runs. An opcode
 whose Entity column names a kind also gets `name`, the entity's platform name
-(spec/world.md, "Names") built from the header's `campaign` and `entity`: `np.g.` for a
-group, `np.s.` for a static, `np.u.` for a unit. `CAPTURE` gets both `name` (the group
+(spec/world.md, "Names") built from the header's `campaign` and `entity`: `np!` for a
+group, `np#` for a static, `np.` for a unit. A header whose `entity` is 0 or above 2^53 - 1 gives no
+name, and the command is answered `BAD_PAYLOAD`. `CAPTURE` gets both `name` (the group
 form) and `static_name`, because its entity is a group or a static.
 
 | Opcode | Fields |
@@ -259,7 +260,7 @@ form) and `static_name`, because its entity is a group or a static.
 | `EXTENSION_INVOKE` | `name`, `args` |
 
 For `SOUND` and `PICTURE`, `name` is present for the scope `GROUP` or `UNIT` only: the
-platform name built from the header's `campaign` and the `target` (`np.g.` or `np.u.`),
+platform name built from the header's `campaign` and the `target` (`np!` or `np.`),
 empty with campaign 0. `PICTURE`'s hook handler builds Lua source, so the agent formats
 its numbers as text, as for `DAMAGE`, and a `file` that is empty, longer than 255 bytes or
 holds a character outside letters, digits, space and `_.-/()+,#` is `BAD_PAYLOAD`. So are

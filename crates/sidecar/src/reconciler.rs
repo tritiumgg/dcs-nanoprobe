@@ -301,6 +301,8 @@ pub struct Reconciler {
     countries_held: bool,
     /// Results of effects and queries, by (epoch, seq), for the API.
     effects: BTreeMap<(u64, u64), EffectResult>,
+    /// The restore burst is on (spec/persistence.md, "Restore burst").
+    burst: bool,
     /// `CAMPAIGN` was written since the last `HELLO`.
     campaign_sent: bool,
     /// A full enumeration was used since this reconciler started, since the
@@ -380,6 +382,7 @@ impl Reconciler {
             countries_held: false,
             effects: BTreeMap::new(),
             campaign_sent: false,
+            burst: false,
             enumerated: false,
             held: BTreeSet::new(),
             counters: Counters::default(),
@@ -622,7 +625,9 @@ impl Reconciler {
         self.drift_destroy_failures.clear();
         self.held.clear();
         self.run = None;
-        store.clear_missing();
+        // A load leaves PAUSED, which ends the burst in the agent.
+        self.burst = false;
+        store.new_generation();
         let ids: Vec<EntityId> = store.groups().map(|g| g.id).collect();
         for id in ids {
             let g = store.group(id).expect("group");
@@ -1008,7 +1013,9 @@ impl Reconciler {
                 continue;
             };
             let Some(p) = ids::parse(&name) else { continue };
-            if p.campaign != campaign || store.unit(p.entity).is_none_or(|u| u.group != group) {
+            if !ids::of_campaign(&p, campaign)
+                || store.unit(p.entity).is_none_or(|u| u.group != group)
+            {
                 continue;
             }
             let u = store.unit(p.entity).expect("unit");
@@ -1069,7 +1076,7 @@ impl Reconciler {
         let campaign = store.campaign();
         let named = ids::parse(&o.name);
         if let Some(n) = named
-            && n.campaign != campaign
+            && !ids::of_campaign(&n, campaign)
         {
             self.counters.foreign += 1;
             return None;
@@ -1554,6 +1561,36 @@ impl Reconciler {
         self.send(store, sim, EntityId(0), 0, body).then_some(key)
     }
 
+    /// Turn the restore burst on while paused with more groups waiting to
+    /// materialize than one frame's share, and off once none waits or the
+    /// state leaves PAUSED (spec/persistence.md, "Restore burst"). False
+    /// when the link dropped.
+    fn restore_burst(
+        &mut self,
+        store: &mut Store,
+        sim: &mut dyn SimAdapter,
+        loaded: &Loaded,
+    ) -> bool {
+        let paused = u64::from(self.lifecycle) == lc::PAUSED;
+        let waiting = store
+            .groups()
+            .filter(|g| {
+                g.state == State::Materializing
+                    && g.theater == loaded.theater
+                    && g.authority == Authority::Sim
+            })
+            .count();
+        let want =
+            paused && (waiting > self.cfg.materialize_per_frame || (self.burst && waiting > 0));
+        if want != self.burst {
+            if !self.send(store, sim, EntityId(0), 0, Body::Burst(want)) {
+                return false;
+            }
+            self.burst = want;
+        }
+        true
+    }
+
     fn plan(&mut self, store: &mut Store, sim: &mut dyn SimAdapter) {
         if !self.ready(store) {
             return;
@@ -1593,7 +1630,14 @@ impl Reconciler {
                 *e = row.dcs_group;
             }
         }
-        let mut spawns = self.cfg.materialize_per_frame;
+        if !self.restore_burst(store, sim, &loaded) {
+            return;
+        }
+        let mut spawns = if self.burst {
+            usize::MAX
+        } else {
+            self.cfg.materialize_per_frame
+        };
         let ids: Vec<EntityId> = store.groups().map(|g| g.id).collect();
         for id in ids {
             if !self.attached {
@@ -1777,6 +1821,18 @@ impl Reconciler {
             .collect();
         if living.is_empty() {
             store.transition(id, Trigger::AllDead).expect("not final");
+            return false;
+        }
+        // A member that left DCS with no death fact is never spawned again:
+        // it may be dead (spec/persistence.md, "Restore").
+        let living: Vec<&crate::store::Unit> = living
+            .into_iter()
+            .filter(|u| !u.missing && !u.removed)
+            .collect();
+        if living.is_empty() {
+            store
+                .transition(id, Trigger::HeldOut)
+                .expect("materializing");
             return false;
         }
         let body = match g.kind {
@@ -2285,7 +2341,7 @@ impl Reconciler {
             .members
             .iter()
             .map(|m| store.unit(*m).expect("unit"))
-            .find(|u| !u.dead);
+            .find(|u| !u.dead && !store.held(u.id));
         let status = intents::Status {
             at: lead.map(|u| (u.state.at.x, u.state.at.z)),
             progress: g.progress,
@@ -2334,7 +2390,7 @@ fn unit_names(group: &Lv, campaign: CampaignId, key: &str) -> Vec<EntityId> {
                 .into_iter()
                 .filter_map(|t| lv::str_at(t, "name"))
                 .filter_map(|n| ids::parse(&n))
-                .filter(|p| p.campaign == campaign)
+                .filter(|p| ids::of_campaign(p, campaign))
                 .map(|p| p.entity)
                 .collect()
         })
@@ -2386,13 +2442,13 @@ mod tests {
 
     #[test]
     fn further_keys_join_a_table_and_never_replace_the_platform_s() {
-        let base = lv::obj(vec![("name", lv::s("np.u.1.2")), ("type", lv::s("M-113"))]);
+        let base = lv::obj(vec![("name", lv::s("np.blp2")), ("type", lv::s("M-113"))]);
         let extra = lv::obj(vec![
             ("name", lv::s("mine")),
             ("livery_id", lv::s("desert")),
         ]);
         let t = with_extra(base.clone(), &extra);
-        assert_eq!(lv::str_at(&t, "name").as_deref(), Some("np.u.1.2"));
+        assert_eq!(lv::str_at(&t, "name").as_deref(), Some("np.blp2"));
         assert_eq!(lv::str_at(&t, "livery_id").as_deref(), Some("desert"));
         assert_eq!(with_extra(base.clone(), &Lv::Nil), base);
         assert_eq!(with_extra(base.clone(), &Lv::Number(1.0)), base);

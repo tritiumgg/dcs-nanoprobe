@@ -449,10 +449,11 @@ fn ten_unit_store() -> nanoprobe_sidecar::store::Store {
 
 /// One member killed, the other nine removed by script (`REMOVED` or
 /// `MISSING`), the respawn policy: nothing is spawned and the group stays
-/// `lost` and reported. A mission load then materializes the nine and never
-/// the dead one.
+/// `lost` and reported. A mission load does not re-create the nine either:
+/// the sidecar cannot tell their removal from a death whose event is late
+/// (spec/persistence.md, "Restore").
 #[test]
-fn nine_removed_after_one_kill_are_held_then_materialize_after_a_reload_without_the_dead() {
+fn nine_removed_after_one_kill_stay_held_after_a_reload() {
     for removed in [true, false] {
         let mut w = world(0, 0, LostPolicy::Respawn);
         w.sidecar_of(ten_unit_store());
@@ -477,10 +478,9 @@ fn nine_removed_after_one_kill_are_held_then_materialize_after_a_reload_without_
 
         w.apply(&Op::LoadMission).unwrap();
         w.settle().unwrap();
-        assert_eq!(state(&w, id), State::Live);
-        let spawn = w.sim.ledger().spawns.last().unwrap().clone();
-        assert_eq!(spawn.4.len(), 9, "removed {removed}");
-        assert!(!spawn.4.contains(&units[0].1), "the dead one never spawns");
+        assert_eq!(state(&w, id), State::Lost, "removed {removed}");
+        assert_eq!(spawns(&w, id), 1, "nothing is spawned, removed {removed}");
+        assert!(w.store.gate_shut(id));
     }
 }
 
@@ -683,9 +683,10 @@ fn a_death_stamped_with_another_campaign_is_dropped() {
 }
 
 /// A mission load clears the agent's memory of rows that left: no late death
-/// is written, and the group materializes again.
+/// is written. The members that left keep their marks, so the reload does
+/// not re-create them (the open item of the late-death ruling).
 #[test]
-fn a_reload_forgets_the_late_death() {
+fn a_reload_with_a_death_pending_does_not_recreate_the_dead() {
     let mut w = world(1, 0, LostPolicy::Respawn);
     w.settle().unwrap();
     let id = first_group(&w);
@@ -695,16 +696,16 @@ fn a_reload_forgets_the_late_death() {
     w.apply(&Op::LoadMission).unwrap();
     assert_eq!(w.sim.late_pending(), 0);
     w.settle().unwrap();
-    assert_eq!(state(&w, id), State::Live);
-    assert_eq!(spawns(&w, id), 2);
+    assert_eq!(state(&w, id), State::Lost);
+    assert_eq!(spawns(&w, id), 1);
     assert_eq!(entries(&w, |e| matches!(e, Entry::Death { .. })), 0);
-    assert!(!w.store.gate_shut(id), "the marks are of one generation");
+    assert!(w.store.gate_shut(id), "the marks outlive the generation");
 }
 
-/// A group lost and held in one generation is spawned again by the mission
-/// load that follows, as spec/world.md says.
+/// A group lost and held in one generation stays lost through the mission
+/// load that follows.
 #[test]
-fn a_held_group_materializes_after_a_mission_load() {
+fn a_held_group_stays_lost_after_a_mission_load() {
     let mut w = world(1, 0, LostPolicy::Respawn);
     w.settle().unwrap();
     let id = first_group(&w);
@@ -715,7 +716,7 @@ fn a_held_group_materializes_after_a_mission_load() {
     assert_eq!(state(&w, id), State::Lost);
     w.apply(&Op::LoadMission).unwrap();
     w.settle().unwrap();
-    assert_eq!(state(&w, id), State::Live);
+    assert_eq!(state(&w, id), State::Lost);
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -849,5 +850,69 @@ fn a_miss_found_alive_before_the_end_keeps_the_group_live_and_bound() {
         assert_eq!(u.object, *o);
     }
     assert_eq!(entries(&w, |e| matches!(e, Entry::Left { .. })), 0);
+    w.settle().unwrap();
+}
+
+/// An enumeration misses every unit of a group and holds its `ENUM_END`
+/// while the misses are checked over frames. One missed unit dies, with its
+/// death event, during the hold: it leaves as `DEAD`, its miss is dropped,
+/// and the end that follows removes nothing else. The group stays `live` and
+/// bound, the others alive (spec/records.md, "Layout: ENUM_END").
+#[test]
+fn a_death_while_enum_end_is_held_is_dead_and_the_rest_stay_live() {
+    let mut w = World::with_config(
+        1,
+        0,
+        LostPolicy::Respawn,
+        Config {
+            event_queue: 10_000,
+            enum_end_hold: 20,
+            ..Config::default()
+        },
+    );
+    w.settle().unwrap();
+    let id = first_group(&w);
+    let units = units_of(&w, id);
+    assert!(units.len() >= 2, "{units:?}");
+    for (o, _) in &units {
+        w.sim.hide_from_enumeration(*o);
+    }
+    let mut frames = 0;
+    while !w.sim.enum_end_held() {
+        w.tick().unwrap();
+        frames += 1;
+        assert!(frames < 400, "no enumeration held its end");
+    }
+    let before = w.rec.counters();
+    w.sim.kill(units[0].0);
+    // The first held slice took one of the hold's 20 frames. The other 19
+    // follow, and the end is written in the frame after them.
+    let mut frames = 0;
+    while w.sim.enum_end_held() {
+        w.tick().unwrap();
+        frames += 1;
+        assert!(frames <= 21, "the end stayed held");
+    }
+    assert_eq!(frames, 20, "the end was held {frames} frames");
+    ticks(&mut w, 5);
+    // The sidecar used the held enumeration; it did not discard it.
+    let after = w.rec.counters();
+    assert!(after.enumerations > before.enumerations);
+    assert_eq!(after.enumerations_discarded, before.enumerations_discarded);
+    let dead = w.store.unit(EntityId(units[0].1)).unwrap();
+    assert!(dead.dead, "the unit that died during the hold");
+    assert!(!dead.missing);
+    for (o, e) in &units[1..] {
+        let u = w.store.unit(EntityId(*e)).unwrap();
+        assert!(!u.dead && !u.missing, "object {o}");
+        assert_eq!(u.object, *o);
+    }
+    assert_eq!(state(&w, id), State::Live);
+    assert!(!w.store.gate_shut(id));
+    assert_eq!(spawns(&w, id), 1);
+    assert_eq!(entries(&w, |e| matches!(e, Entry::Left { .. })), 0);
+    for (o, _) in &units {
+        w.sim.show_in_enumeration(*o);
+    }
     w.settle().unwrap();
 }

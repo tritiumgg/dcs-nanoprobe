@@ -12,6 +12,7 @@ pub mod layout;
 pub mod log;
 pub mod map;
 pub mod mem;
+pub mod names;
 pub mod records;
 pub mod ring;
 pub mod status;

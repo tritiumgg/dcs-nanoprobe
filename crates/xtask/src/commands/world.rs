@@ -24,6 +24,16 @@
 //! left running the build it deployed, with the shell mission: the caller
 //! restores the target. Everything goes under
 //! `bundles/commands-world-<name>-<time>/`, with `world.json`, the verdict.
+//!
+//! `commands <name> --part names`: the naming check (spec/world.md, "Names").
+//! It deploys and loads a fresh shell mission as above, then runs
+//! `command-probe --part world --scenario names` once, for campaign
+//! [`NAMES_CAMPAIGN`]. When the probe reports `spawned`, this tool reads the
+//! names in the `server` state: the group by name with its units' names, and
+//! the static by name. The check passes when the probe's verdict passes and
+//! DCS returns every name exactly. Everything goes under
+//! `bundles/commands-names-<name>-<time>/`, with `names.json`; the caller
+//! restores the target.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -49,6 +59,8 @@ const NEW_TYPE: &str = "BTR-80";
 /// agent's pending destroys drained. The agent reports every 10 s, so this is
 /// two reports and a margin; a destroy still pending after it has not drained.
 const DRAIN_WAIT_S: u64 = 35;
+/// The naming check's campaign: a creation millisecond of 2025-11-13, tag `jqW`.
+const NAMES_CAMPAIGN: u64 = 1_763_000_000_000;
 /// Campaigns of the two runs, so one run's names are not the other's.
 const CAMPAIGNS: [u64; 2] = [7, 8];
 
@@ -374,6 +386,146 @@ impl Stage {
     }
 }
 
+/// Lua for the server state: `group` by name, its name and its units' names,
+/// and `static` by name and its name, as `group|unit,unit|static`. The units
+/// come in DCS's order; the caller sorts them by bytes.
+fn names_source(group: &str, stat: &str) -> String {
+    format!(
+        "local g = Group.getByName('{group}')\n\
+         local units = {{}}\n\
+         if g then for _, u in ipairs(g:getUnits() or {{}}) do units[#units + 1] = u:getName() end end\n\
+         local s = StaticObject.getByName('{stat}')\n\
+         return (g and g:getName() or '') .. '|' .. table.concat(units, ',') .. '|' .. (s and s:getName() or '')\n"
+    )
+}
+
+/// The naming check (module docs).
+pub fn run_names(repository: &Path, name: &str, units: u64) -> Result<ExitCode, String> {
+    let Opened { run, shell, .. } = live::open(repository, name, "commands-names")?;
+    let started = bundle::utc_now();
+    let result = attempt_names(&run, name, &shell, units);
+    let (verdict, read, error) = match &result {
+        Ok((v, r)) => (v.clone(), r.clone(), Value::Null),
+        Err(e) => (Value::Null, Value::Null, json!(e)),
+    };
+    let ok = verdict["pass"] == json!(true) && read["ok"] == json!(true);
+    let out = json!({
+        "target": name,
+        "started": started,
+        "ended": bundle::utc_now(),
+        "campaign": NAMES_CAMPAIGN,
+        "units": units,
+        "verdict": verdict,
+        "dcs_read": read,
+        "error": error,
+        "agent_build": crate::soak::agent_build(name),
+        "provenance": crate::soak::platform_provenance(name),
+        "ok": ok,
+    });
+    let path = run.folder.join("names.json");
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("{}: {e}", path.display()))?;
+    println!(
+        "== {}: {}",
+        if ok { "PASS" } else { "FAIL" },
+        path.display()
+    );
+    result?;
+    Ok(if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
+fn attempt_names(
+    run: &Run,
+    name: &str,
+    shell: &[u8],
+    units: u64,
+) -> Result<(Value, Value), String> {
+    let probe = link::build_linux_bins(&[("nanoprobe-fake-agent", "command-probe")])?
+        .pop()
+        .ok_or("command-probe was not built")?;
+    println!("== deploy --dev");
+    crate::deploy(name, None, true, false)?;
+    let agent_toml = run
+        .remote
+        .read(AGENT_TOML)?
+        .ok_or("no agent.toml on the target")?;
+    let budget = commanded_ms(&String::from_utf8_lossy(&agent_toml))?;
+    println!("== restart");
+    crate::restart(name)?;
+    println!("== load a fresh shell mission");
+    crate::live::load(&run.remote, "np-shell.miz", shell)?;
+    run.sh(
+        &format!("pkill -f '[c]ommand-probe --part' || true; rm -rf {DIR}"),
+        &[],
+    )?;
+    link::upload_container(&run.remote, DIR, &probe, "command-probe")?;
+    run.sh(&format!("mkdir -p {DIR}/control"), &[])?;
+    let result = (|| {
+        let origin = run.eval("server", "names-origin", ORIGIN_SOURCE, 60)?;
+        let origin = origin.as_str().ok_or("the origin is not a string")?;
+        let (x, z) = origin
+            .split_once(' ')
+            .ok_or_else(|| format!("the origin is {origin}"))?;
+        println!("== names: campaign {NAMES_CAMPAIGN}, {units} units and a static, origin {x} {z}");
+        start(
+            run,
+            "names",
+            NAMES_CAMPAIGN,
+            &format!(
+                "--units {units} --origin-x {x} --origin-z {z} --commanded-ms {budget} \
+                 --control-dir {DIR}/control"
+            ),
+        )?;
+        let mut read = Value::Null;
+        let v = drive(run, "names", &mut |run, lines| {
+            if read.is_null()
+                && let Some(p) = Stage::phase(lines, "spawned")
+            {
+                let group = p["group"].as_str().ok_or("no group name")?;
+                let stat = p["static"].as_str().ok_or("no static name")?;
+                let mut want: Vec<String> = Stage::strings(&p["objects"])
+                    .iter()
+                    .filter_map(|o| o.split('|').next().map(str::to_owned))
+                    .filter(|n| n != stat)
+                    .collect();
+                want.sort();
+                let got = run.eval("server", "names-read", &names_source(group, stat), 60)?;
+                let got = got.as_str().ok_or("the read is not a string")?;
+                println!("   DCS reads: {got}");
+                // Lua's string order follows the locale: sort here, by bytes.
+                let got = match got.splitn(3, '|').collect::<Vec<_>>()[..] {
+                    [g, u, s] => {
+                        let mut u: Vec<&str> = u.split(',').filter(|n| !n.is_empty()).collect();
+                        u.sort();
+                        format!("{g}|{}|{s}", u.join(","))
+                    }
+                    _ => got.to_owned(),
+                };
+                let expect = format!("{group}|{}|{stat}", want.join(","));
+                read = json!({ "read": got, "expected": expect, "ok": got == expect });
+                run.sh(&format!("touch {DIR}/control/checked"), &[])?;
+            }
+            Ok(())
+        })?;
+        Ok((v, read))
+    })();
+    let _ = run.sh("pkill -f '[c]ommand-probe --part' || true", &[]);
+    for file in ["names.jsonl", "names.err"] {
+        if let Ok(bytes) = run.sh(&format!("cat {DIR}/{file} 2>/dev/null || true"), &[]) {
+            let _ = std::fs::write(run.folder.join(file), bytes);
+        }
+    }
+    let _ = run.sh(&format!("rm -rf {DIR}"), &[]);
+    result
+}
+
 /// Start the probe for a scenario in the container.
 fn start(run: &Run, scenario: &str, campaign: u64, extra: &str) -> Result<(), String> {
     let [map, port, token] = run.link_args();
@@ -483,10 +635,10 @@ mod tests {
 
     #[test]
     fn the_read_walks_every_side_for_the_group_and_its_unit_names() {
-        let s = read_source("np.g.x.1", &["np.u.x.2".into(), "np.u.x.3".into()]);
+        let s = read_source("np!xyz1", &["np.xyz2".into(), "np.xyz3".into()]);
         assert!(s.contains("coalition.getGroups(side)"));
-        assert!(s.contains("g:getName() == 'np.g.x.1'"));
-        assert!(s.contains("['np.u.x.2']=true,['np.u.x.3']=true"));
+        assert!(s.contains("g:getName() == 'np!xyz1'"));
+        assert!(s.contains("['np.xyz2']=true,['np.xyz3']=true"));
         assert!(s.contains("u:getTypeName()"));
     }
 

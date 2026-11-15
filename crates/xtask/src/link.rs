@@ -876,8 +876,17 @@ mod tests {
     #[test]
     fn the_kill_switch_script_passes_its_path_to_python() {
         use std::os::unix::fs::PermissionsExt as _;
-        let dir = std::env::temp_dir().join(format!("nanoprobe-kill-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        /// Removes the folder when the test ends, whether it passes or fails.
+        struct Scratch(std::path::PathBuf);
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let scratch =
+            Scratch(std::env::temp_dir().join(format!("nanoprobe-kill-{}", std::process::id())));
+        let dir = &scratch.0;
+        std::fs::create_dir_all(dir).unwrap();
         let stand_in = dir.join("python3");
         std::fs::write(
             &stand_in,
@@ -899,6 +908,5 @@ mod tests {
             .unwrap();
         assert!(path.exists(), "{}", String::from_utf8_lossy(&out.stderr));
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "1794000000000");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

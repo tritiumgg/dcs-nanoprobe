@@ -20,8 +20,12 @@
 //! [`Ledger`] records the ground truth that the reconciler's tests check
 //! against.
 //!
-//! What the fake does not model: pause and the pending-destroy set (a
-//! destroy is immediate), `CONTROL_LOST`, the commanded-work budget in time
+//! Pause ([`FakeSim::pause`]) stops model time and movement; the agent still
+//! takes commands. A destroy while paused is pending (spec/commands.md): the
+//! rows leave as `DESTROYED` at once, and the objects stay in DCS until the
+//! resume. `BURST` lifts the per-frame command limit while paused.
+//!
+//! What the fake does not model: `CONTROL_LOST`, the commanded-work budget in time
 //! (it takes a fixed number of commands per frame), effects, and every
 //! opcode the reconciler does not write, which it answers `UNKNOWN_OPCODE`.
 
@@ -57,9 +61,21 @@ fn dead_event(object: u64, category: f64) -> nanoprobe_transport::records::Event
     }
 }
 
-/// The campaign a platform name gives, 0 for any other name.
-fn name_campaign(name: &str) -> u64 {
-    ids::parse(name).map_or(0, |p| p.campaign.0)
+/// `campaign` if a platform name carries its tag, 0 for any other name.
+fn name_campaign(name: &str, campaign: u64) -> u64 {
+    match ids::parse(name) {
+        Some(p) if campaign != 0 && ids::of_campaign(&p, ids::CampaignId(campaign)) => campaign,
+        _ => 0,
+    }
+}
+
+/// The entity a platform name gives under `campaign`, by its tag, as the
+/// agent binds a row (spec/world.md, "Names"); 0 for any other name.
+fn name_entity(name: &str, campaign: u64) -> u64 {
+    match ids::parse(name) {
+        Some(p) if name_campaign(name, campaign) != 0 => p.entity.0,
+        _ => 0,
+    }
 }
 
 /// The fake's settings.
@@ -91,6 +107,10 @@ pub struct Config {
     pub death_seed: u64,
     /// Frames between `AIRBASE` and `WAREHOUSE` samples.
     pub warehouse_every: u64,
+    /// Frames an enumeration with misses holds its `ENUM_END` after its last
+    /// slice, as when the agent's checks of the misses span frames
+    /// (spec/records.md, "Layout: ENUM_END"). 0 checks them in that slice.
+    pub enum_end_hold: u64,
 }
 
 impl Default for Config {
@@ -108,6 +128,7 @@ impl Default for Config {
             death_delay_max: 0.0,
             death_seed: 0,
             warehouse_every: 5,
+            enum_end_hold: 0,
         }
     }
 }
@@ -158,6 +179,10 @@ pub struct Ledger {
     /// campaign, entity. A kill whose death event is late is here too: it
     /// left as `MISSING` or `REMOVED` first.
     pub removed: BTreeSet<(u64, u32, u64, u64)>,
+    /// `BURST` commands taken: whether on, and whether DCS was paused.
+    pub bursts: Vec<(bool, bool)>,
+    /// The most commands the agent took in one frame.
+    pub most_per_frame: usize,
     /// Unit entities that left DCS without a death event yet, in a
     /// generation: removed, or killed with the event late, and not revived.
     /// Agent boot, generation, campaign, entity. A group with one that the
@@ -256,6 +281,8 @@ struct Run {
     seen: u32,
     /// The enumeration took the `full` flag: every row is an `OBJECT`.
     full: bool,
+    /// Frames its `ENUM_END` is still held for its misses.
+    hold: u64,
 }
 
 /// One DCS process with the agent in it.
@@ -335,6 +362,10 @@ pub struct FakeSim {
     rates_received: u32,
     /// The DCS object an `AttackUnit` task names, by DCS group.
     attack_unit: BTreeMap<u64, u64>,
+    /// Objects whose destroy is pending until the resume, by object ID.
+    pending: BTreeMap<u64, FObject>,
+    /// The restore burst (spec/commands.md, `BURST`).
+    burst: bool,
 }
 
 impl FakeSim {
@@ -394,6 +425,8 @@ impl FakeSim {
             rates: Rates::default(),
             rates_received: 0,
             attack_unit: BTreeMap::new(),
+            pending: BTreeMap::new(),
+            burst: false,
         };
         f.load_mission();
         f
@@ -514,6 +547,12 @@ impl FakeSim {
     /// The order revision the agent holds for a group entity.
     pub fn applied_order(&self, entity: u64) -> u64 {
         self.applied_order.get(&entity).copied().unwrap_or(0)
+    }
+
+    /// The binding the agent holds for a row: `(entity, group entity)`, 0s
+    /// for a row it does not bind or does not hold.
+    pub fn binding(&self, object: u64) -> (u64, u64) {
+        self.table.get(&object).copied().unwrap_or((0, 0))
     }
 
     /// The DCS objects alive in the world: object ID, the campaign its name
@@ -703,11 +742,49 @@ impl FakeSim {
         self.load_mission_on(&t);
     }
 
+    /// Pause the simulation: model time and movement stop, the agent still
+    /// runs its pump. Only a running mission pauses.
+    pub fn pause(&mut self) {
+        if self.alive && self.lifecycle == lc::RUNNING as u32 {
+            self.lifecycle = lc::PAUSED as u32;
+            self.lifecycle_record();
+        }
+    }
+
+    /// Resume a paused simulation: the objects whose destroy is pending go,
+    /// with no event, and the burst turns off.
+    pub fn resume(&mut self) {
+        if self.alive && self.paused() {
+            self.lifecycle = lc::RUNNING as u32;
+            self.pending.clear();
+            self.burst = false;
+            self.lifecycle_record();
+        }
+    }
+
+    /// Whether the simulation is paused.
+    pub fn paused(&self) -> bool {
+        self.lifecycle == lc::PAUSED as u32
+    }
+
+    /// Objects whose destroy waits for the resume: object ID and unit
+    /// entity.
+    pub fn pending_destroys(&self) -> Vec<(u64, u64)> {
+        self.pending.iter().map(|(o, x)| (*o, x.entity)).collect()
+    }
+
+    /// Whether the restore burst is on.
+    pub fn burst(&self) -> bool {
+        self.burst
+    }
+
     /// Start a mission load on another theater.
     pub fn load_mission_on(&mut self, theater: &str) {
         if !self.alive {
             return;
         }
+        self.pending.clear();
+        self.burst = false;
         self.theater = theater.to_owned();
         self.mission_gen_ += 1;
         self.groups.clear();
@@ -825,10 +902,16 @@ impl FakeSim {
         self.orphans.extend(self.groups.keys().copied());
         // Every row's payload is encoded again under the new binding.
         self.sent.clear();
+        // The agent binds a row again from its names, by the campaign's tag.
         for (object, b) in self.table.iter_mut() {
             *b = match self.objects.get(object) {
-                Some(o) if o.campaign == c && c != 0 => (o.entity, o.group_entity),
-                _ => (0, 0),
+                Some(o) => (
+                    name_entity(&o.name, c),
+                    self.groups
+                        .get(&o.group)
+                        .map_or(0, |g| name_entity(&g.name, c)),
+                ),
+                None => (0, 0),
             };
         }
     }
@@ -863,11 +946,10 @@ impl FakeSim {
                     },
                 },
             );
-            let bound = if campaign == self.campaign {
-                (*u, group)
-            } else {
-                (0, 0)
-            };
+            let bound = (
+                name_entity(&self.objects[&id].name, self.campaign),
+                name_entity(&gname, self.campaign),
+            );
             self.table.insert(id, bound);
             members.push(id);
         }
@@ -1200,6 +1282,14 @@ impl FakeSim {
         self.hidden.insert(object);
     }
 
+    /// Whether an enumeration has visited every row and holds its
+    /// `ENUM_END` for its misses (`Config::enum_end_hold`).
+    pub fn enum_end_held(&self) -> bool {
+        self.run
+            .as_ref()
+            .is_some_and(|r| r.rows.is_empty() && !r.misses.is_empty())
+    }
+
     /// Full enumerations find this object again.
     pub fn show_in_enumeration(&mut self, object: u64) {
         self.hidden.remove(&object);
@@ -1259,7 +1349,7 @@ impl FakeSim {
                     group: 0,
                     entity,
                     group_entity: 0,
-                    campaign: name_campaign(name),
+                    campaign: name_campaign(name, self.campaign),
                     kind: object_kind::STATIC,
                     at: Position { object: gid, ..at },
                 },
@@ -1296,7 +1386,7 @@ impl FakeSim {
             FGroup {
                 name: name.to_owned(),
                 entity,
-                campaign: name_campaign(name),
+                campaign: name_campaign(name, self.campaign),
                 members,
                 route: Vec::new(),
                 attack: None,
@@ -1321,6 +1411,7 @@ impl FakeSim {
             written: 0,
             seen: 0,
             full: std::mem::take(&mut self.full),
+            hold: self.cfg.enum_end_hold,
         });
         self.next_enum = self.frame + self.cfg.enum_period;
     }
@@ -1364,7 +1455,10 @@ impl FakeSim {
             }
         }
         self.flush_seen(&mut run, &mut seen);
-        if run.rows.is_empty() {
+        if run.rows.is_empty() && run.hold > 0 && !run.misses.is_empty() {
+            run.hold -= 1;
+            self.run = Some(run);
+        } else if run.rows.is_empty() {
             // Each miss is checked before the end: alive, it is written
             // with this enumeration's number; gone, it leaves.
             for row in std::mem::take(&mut run.misses) {
@@ -1413,7 +1507,10 @@ impl FakeSim {
             return;
         }
         self.frame += 1;
-        self.model_time += 0.1;
+        let paused = self.paused();
+        if !paused {
+            self.model_time += 0.1;
+        }
         if !self.attached {
             // The events queue for the next attach.
             self.fire_late();
@@ -1422,10 +1519,13 @@ impl FakeSim {
             let s = self.stamp();
             self.frame_record(&s, false);
             self.fire_late();
-            for _ in 0..self.cfg.commands_per_frame {
+            // The burst lifts the limit from the command after it on.
+            let mut taken = 0;
+            while (self.burst && paused) || taken < self.cfg.commands_per_frame {
                 let Some((pos, op, payload)) = self.inbound.pop_front() else {
                     break;
                 };
+                taken += 1;
                 self.in_head = pos;
                 if let Ok(Some(c)) = Command::decode(op, &payload)
                     && !c.body.is_control()
@@ -1437,8 +1537,11 @@ impl FakeSim {
                 }
                 self.handle(op, &payload);
             }
+            self.ledger.most_per_frame = self.ledger.most_per_frame.max(taken);
         }
-        self.move_groups();
+        if !paused {
+            self.move_groups();
+        }
         if self.attached {
             if self.run.is_none() && self.frame >= self.next_enum {
                 self.start_enumeration();
@@ -1578,6 +1681,11 @@ impl FakeSim {
                 Body::Rates(r) => {
                     self.rates = r;
                     self.rates_received += 1;
+                }
+                Body::Burst(on) => {
+                    let paused = self.paused();
+                    self.ledger.bursts.push((on, paused));
+                    self.burst = on && paused;
                 }
                 _ => {}
             }
@@ -1938,7 +2046,7 @@ impl FakeSim {
             FGroup {
                 name: name.to_owned(),
                 entity: h.entity,
-                campaign: name_campaign(name),
+                campaign: name_campaign(name, self.campaign),
                 members: members.clone(),
                 route: Vec::new(),
                 attack: None,
@@ -1976,8 +2084,13 @@ impl FakeSim {
             g.campaign,
             g.entity,
         ));
+        let paused = self.paused();
         for m in g.members {
-            self.objects.remove(&m);
+            if let Some(o) = self.objects.remove(&m)
+                && paused
+            {
+                self.pending.insert(m, o);
+            }
             self.gone(m, gone_reason::DESTROYED);
         }
     }

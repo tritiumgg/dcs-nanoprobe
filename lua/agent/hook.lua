@@ -303,15 +303,16 @@ end
 -- runs under pcall. The agent has admitted the command.
 local APPLIED, NOT_BOUND, DCS_REFUSED, LUA_ERROR = 0, 18, 22, 23
 
--- The platform's unit name form, at most 28 characters (spec/world.md, "Names").
-local UNIT_NAME = '^np%.u%.[0-9a-z]+%.[0-9a-z]+$'
+-- The platform's unit name form, at most 15 characters (spec/world.md, "Names").
+local NAME_MAX = 15
+local UNIT_NAME = '^np%.[0-9A-Za-z]+$'
 -- The agent formats the life: digits, a point and digits.
 local LIFE_TEXT = '^%d+%.%d+$'
 
 -- PICTURE's arguments, as the agent formats them: a number is digits, with a
 -- point and digits for a real; a platform name is a group's or a unit's.
 local INT_TEXT = '^%d+$'
-local NAME_TEXT = '^np%.[gu]%.[0-9a-z]+%.[0-9a-z]+$'
+local GROUP_NAME = '^np![0-9A-Za-z]+$'
 -- A picture's file name goes into Lua source for the mission state, inside
 -- double quotes. The agent rejects any name outside this set, which has no
 -- quote, backslash or control character, so the name cannot leave the
@@ -371,8 +372,8 @@ local HANDLERS = {
       if name == '' then
         return NOT_BOUND, nil, 'no campaign to name the object'
       end
-      if type(name) ~= 'string' or #name > 28 or not name:find(NAME_TEXT)
-        or name:sub(1, 5) ~= (scope == 3 and 'np.g.' or 'np.u.') then
+      if type(name) ~= 'string' or #name > NAME_MAX
+        or not name:find(scope == 3 and GROUP_NAME or UNIT_NAME) then
         return DCS_REFUSED, nil, 'not a platform name'
       end
       local class = scope == 3 and 'Group' or 'Unit'
@@ -418,7 +419,7 @@ local HANDLERS = {
   -- (LIVE, E38). A dead unit is NOT_BOUND too.
   [54] = function(a)
     local name, life = a.name, a.life_percent
-    if type(name) ~= 'string' or #name > 28 or not name:find(UNIT_NAME) then
+    if type(name) ~= 'string' or #name > NAME_MAX or not name:find(UNIT_NAME) then
       return DCS_REFUSED, nil, 'not a platform unit name'
     end
     if type(life) ~= 'string' or not life:find(LIFE_TEXT) then

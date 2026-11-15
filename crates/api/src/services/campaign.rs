@@ -7,11 +7,13 @@ use std::sync::Arc;
 use nanoprobe_proto::errors::status;
 use nanoprobe_proto::v1alpha1::campaign_service_server::CampaignService;
 use nanoprobe_proto::v1alpha1::{
-    ActivateCampaignRequest, ActivateCampaignResponse, Campaign as PbCampaign, CampaignState,
-    CreateCampaignRequest, CreateCampaignResponse, DeleteCampaignRequest, DeleteCampaignResponse,
-    ErrorReason, ExportCampaignRequest, ExportCampaignResponse, FinishCampaignRequest,
-    FinishCampaignResponse, GetCampaignRequest, GetCampaignResponse, ListCampaignsRequest,
-    ListCampaignsResponse, SuspendCampaignRequest, SuspendCampaignResponse,
+    ActivateCampaignRequest, ActivateCampaignResponse, BackupCampaignRequest,
+    BackupCampaignResponse, Campaign as PbCampaign, CampaignState, CreateCampaignRequest,
+    CreateCampaignResponse, DeleteCampaignRequest, DeleteCampaignResponse, ErrorReason,
+    ExportCampaignRequest, ExportCampaignResponse, FinishCampaignRequest, FinishCampaignResponse,
+    GetCampaignRequest, GetCampaignResponse, ListCampaignBackupsRequest,
+    ListCampaignBackupsResponse, ListCampaignsRequest, ListCampaignsResponse,
+    SuspendCampaignRequest, SuspendCampaignResponse,
 };
 use tonic::{Code, Request, Response, Status};
 
@@ -101,6 +103,7 @@ impl CampaignService for Campaigns {
                             component_schemas: Default::default(),
                             created: Some(timestamp_now()),
                             outcome: None,
+                            last_checkpoint: None,
                         },
                         if r.first_theater.is_empty() {
                             r.theaters[0].clone()
@@ -236,5 +239,19 @@ impl CampaignService for Campaigns {
         _req: Request<DeleteCampaignRequest>,
     ) -> Result<Response<DeleteCampaignResponse>, Status> {
         Err(not_built("DeleteCampaign"))
+    }
+
+    async fn backup_campaign(
+        &self,
+        _req: Request<BackupCampaignRequest>,
+    ) -> Result<Response<BackupCampaignResponse>, Status> {
+        Err(not_built("BackupCampaign"))
+    }
+
+    async fn list_campaign_backups(
+        &self,
+        _req: Request<ListCampaignBackupsRequest>,
+    ) -> Result<Response<ListCampaignBackupsResponse>, Status> {
+        Err(not_built("ListCampaignBackups"))
     }
 }

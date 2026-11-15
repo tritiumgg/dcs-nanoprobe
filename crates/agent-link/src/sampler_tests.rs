@@ -1090,7 +1090,7 @@ fn at_a_tenth_with_live_costs_subscribed_positions_keep_a_rate() {
     s.set_campaign(1);
     for i in 1..=20u64 {
         let o = w.objects.get_mut(&(1000 + i)).unwrap();
-        o.name = format!("np.u.1.{}", base36_of(i));
+        o.name = unit_name(i);
     }
     s.subscribe(1.0, false, &(1..=20).collect::<Vec<_>>());
     run_x(&mut s, &mut rec, &mut w, 120.0, 110.0, 165.0, 23.0, 3.0);
@@ -1156,7 +1156,7 @@ fn a_saturating_subscription_starves_the_lower_tiers_and_they_recover() {
     s.set_campaign(1);
     for i in 1..=1960u64 {
         let o = w.objects.get_mut(&(1000 + i)).unwrap();
-        o.name = format!("np.u.1.{}", base36_of(i));
+        o.name = unit_name(i);
     }
     run_x(&mut s, &mut rec, &mut w, 60.0, 110.0, 165.0, 23.0, 3.0);
     let before = rec.periods;
@@ -1196,7 +1196,7 @@ fn with_a_tenth_of_the_slice_the_rates_fall_in_order() {
     s.set_campaign(1);
     for i in 1..=50u64 {
         let o = w.objects.get_mut(&(1000 + i)).unwrap();
-        o.name = format!("np.u.1.{}", base36_of(i));
+        o.name = unit_name(i);
     }
     // The first frame sees the sidecar's boot and drops the subscriptions
     // of any sidecar before it: subscribe after it.
@@ -1422,18 +1422,10 @@ fn periods_are_steady_with_a_200_us_frame_each_second() {
     );
 }
 
-fn base36_of(mut v: u64) -> String {
-    let digits = b"0123456789abcdefghijklmnopqrstuvwxyz";
-    let mut out = Vec::new();
-    loop {
-        out.push(digits[(v % 36) as usize]);
-        v /= 36;
-        if v == 0 {
-            break;
-        }
-    }
-    out.reverse();
-    String::from_utf8(out).unwrap()
+/// The platform name of unit `i` of campaign 1.
+fn unit_name(i: u64) -> String {
+    use nanoprobe_transport::names::{Kind, name, tag_of};
+    name(Kind::Unit, tag_of(1), i)
 }
 
 #[test]
@@ -1470,21 +1462,21 @@ fn one_slow_cross_state_call_does_not_stop_sampling() {
 
 #[test]
 fn names_give_entities_only_under_their_campaign() {
-    assert_eq!(
-        name_entity(
-            "np.u.m3k9x2a1.1z",
-            base36("m3k9x2a1").unwrap(),
-            object_kind::UNIT
-        ),
-        71
-    );
-    assert_eq!(name_entity("np.u.m3k9x2a1.1z", 5, object_kind::UNIT), 0);
-    assert_eq!(name_entity("np.g.1.2", 1, object_kind::UNIT), 0);
-    assert_eq!(name_entity("np.g.1.2", 1, object_kind::GROUP), 2);
-    assert_eq!(name_entity("np.u.1.02", 1, object_kind::UNIT), 0);
-    assert_eq!(name_entity("np.u.1.0", 1, object_kind::UNIT), 0);
+    // Campaign 1's tag is `blp`, campaign 7's `hGx` (spec/world.md, "Names").
+    assert_eq!(name_entity("np.blp1B", 1, object_kind::UNIT), 73);
+    assert_eq!(name_entity("np#blp1B", 1, object_kind::STATIC), 73);
+    assert_eq!(name_entity("np!blp2", 1, object_kind::GROUP), 2);
+    assert_eq!(name_entity("np.blp1B", 7, object_kind::UNIT), 0);
+    assert_eq!(name_entity("np.hGx2", 7, object_kind::UNIT), 2);
+    assert_eq!(name_entity("np.BLP2", 1, object_kind::UNIT), 0);
+    assert_eq!(name_entity("np!blp2", 1, object_kind::UNIT), 0);
+    assert_eq!(name_entity("np.blp2", 1, object_kind::GROUP), 0);
+    assert_eq!(name_entity("np.blp2", 1, object_kind::STATIC), 0);
+    assert_eq!(name_entity("np.blp02", 1, object_kind::UNIT), 0);
+    assert_eq!(name_entity("np.blp0", 1, object_kind::UNIT), 0);
+    assert_eq!(name_entity("np.u.1.2", 1, object_kind::UNIT), 0);
     assert_eq!(name_entity("Ground-1-1", 1, object_kind::UNIT), 0);
-    assert_eq!(name_entity("np.u.1.2", 0, object_kind::UNIT), 0);
+    assert_eq!(name_entity("np.blp2", 0, object_kind::UNIT), 0);
 }
 
 #[test]
@@ -1678,12 +1670,7 @@ fn an_enumeration_patches_each_rows_cached_object() {
     let mut s = Sampler::new(Rates::default(), 0.07);
     let mut rec = Rec::new(0.003, 1e6 / 110.0);
     let mut w = World::default();
-    w.spawn(
-        1001,
-        object_kind::UNIT,
-        format!("np.u.1.{}", base36_of(5)),
-        0.0,
-    );
+    w.spawn(1001, object_kind::UNIT, unit_name(5), 0.0);
     let slot = s.add(&mut rec, w.found(1001).unwrap(), false) - 1;
     let expect = |s: &Sampler, n: u64| object_record(s.row(slot).unwrap(), n).encode();
     for n in [3u64, 4] {
@@ -1724,7 +1711,7 @@ fn at_a_tenth_the_sweep_saves_for_whole_batches_and_the_order_holds() {
     s.set_campaign(1);
     for i in 1..=20u64 {
         let o = w.objects.get_mut(&(1000 + i)).unwrap();
-        o.name = format!("np.u.1.{}", base36_of(i));
+        o.name = unit_name(i);
     }
     run_x(&mut s, &mut rec, &mut w, 1.0, 110.0, 165.0, 23.0, 3.0);
     // Subscribed with their attitude: the pump reads them.
@@ -1853,7 +1840,7 @@ fn at_a_tenth_the_pump_comes_under_5_times_a_second() {
     s.set_campaign(1);
     for i in 1..=20u64 {
         let o = w.objects.get_mut(&(1000 + i)).unwrap();
-        o.name = format!("np.u.1.{}", base36_of(i));
+        o.name = unit_name(i);
     }
     run_x(&mut s, &mut rec, &mut w, 1.0, 110.0, 165.0, 23.0, 3.0);
     s.subscribe(1.0, true, &(1..=20).collect::<Vec<_>>());
@@ -1895,7 +1882,7 @@ fn every_tier_holds(cases: &[(Sweep, f64, f64, Option<f64>, bool)]) {
             s.set_campaign(1);
             for i in 1..=20u64 {
                 let o = w.objects.get_mut(&(1000 + i)).unwrap();
-                o.name = format!("np.u.1.{}", base36_of(i));
+                o.name = unit_name(i);
             }
             run_x(&mut s, &mut rec, &mut w, 1.0, 110.0, 165.0, call, 3.0);
             s.subscribe(1.0, true, &(1..=20).collect::<Vec<_>>());
@@ -2017,7 +2004,7 @@ fn an_estimate_read_too_high_does_not_shut_the_pump() {
             s.set_campaign(1);
             for i in 1..=20u64 {
                 let o = w.objects.get_mut(&(1000 + i)).unwrap();
-                o.name = format!("np.u.1.{}", base36_of(i));
+                o.name = unit_name(i);
             }
             run_x(&mut s, &mut rec, &mut w, 1.0, 110.0, 165.0, 23.0, 3.0);
             if matches!(want, Want::Attitude) {
@@ -2194,7 +2181,7 @@ fn at_full_scale_subscribed_attitude_rows_keep_their_period() {
     s.set_campaign(1);
     for i in 1..=20u64 {
         let o = w.objects.get_mut(&(1000 + i)).unwrap();
-        o.name = format!("np.u.1.{}", base36_of(i));
+        o.name = unit_name(i);
     }
     run_x(&mut s, &mut rec, &mut w, 1.0, 110.0, 165.0, 23.0, 3.0);
     s.subscribe(1.0, true, &(1..=20).collect::<Vec<_>>());
@@ -2763,7 +2750,7 @@ fn only_a_subscribed_aircraft_has_its_life_read_every_vitals_period() {
     w.batch_us = 7.0;
     s.set_campaign(1);
     for i in 1..=10u64 {
-        w.objects.get_mut(&(1000 + i)).unwrap().name = format!("np.u.1.{}", base36_of(i));
+        w.objects.get_mut(&(1000 + i)).unwrap().name = unit_name(i);
     }
     run_x(&mut s, &mut rec, &mut w, 1.0, 100.0, 185.0, 29.0, 2.2);
     s.subscribe(1.0, false, &(1..=10).collect::<Vec<_>>());
@@ -2979,7 +2966,7 @@ fn the_starvation_guard_takes_one_row_at_a_time() {
         w.close_us = 6.0;
         s.set_campaign(1);
         for i in 1..=20u64 {
-            w.objects.get_mut(&(1000 + i)).unwrap().name = format!("np.u.1.{}", base36_of(i));
+            w.objects.get_mut(&(1000 + i)).unwrap().name = unit_name(i);
         }
         run_x(&mut s, &mut rec, &mut w, 1.0, 110.0, 165.0, 23.0, 3.0);
         s.subscribe(1.0, true, &(1..=20).collect::<Vec<_>>());
@@ -3021,7 +3008,7 @@ fn the_starvation_guard_keeps_the_vitals_period_in_its_band() {
         w.close_us = 6.0;
         s.set_campaign(1);
         for i in 1..=20u64 {
-            w.objects.get_mut(&(1000 + i)).unwrap().name = format!("np.u.1.{}", base36_of(i));
+            w.objects.get_mut(&(1000 + i)).unwrap().name = unit_name(i);
         }
         run_x(&mut s, &mut rec, &mut w, 1.0, 110.0, 165.0, 23.0, 3.0);
         s.subscribe(1.0, true, &(1..=20).collect::<Vec<_>>());
@@ -3154,7 +3141,7 @@ fn cycle_capped(stall_s: f64, enumeration: bool, one_sweep: bool) -> Cycle {
     s.set_campaign(1);
     for i in 1..=50u64 {
         let o = w.objects.get_mut(&(1000 + i)).unwrap();
-        o.name = format!("np.u.1.{}", base36_of(i));
+        o.name = unit_name(i);
     }
     run_x(&mut s, &mut rec, &mut w, 1.0, 110.0, 165.0, 23.0, 3.0);
     s.subscribe(1.0, false, &(1..=50).collect::<Vec<_>>());
