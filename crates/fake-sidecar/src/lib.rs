@@ -121,6 +121,12 @@ impl Running {
 /// A setting the server refuses (a non-loopback listener without tokens, a
 /// bad tokens file) fails here, before anything is bound.
 pub async fn start(cfg: Config, fake: FakeConfig) -> Result<Running, String> {
+    start_with(cfg, FakeSim::new(fake)).await
+}
+
+/// [`start`] over a fake sim that already runs: a sidecar that starts
+/// again while DCS goes on.
+pub async fn start_with(cfg: Config, sim: FakeSim) -> Result<Running, String> {
     let tokens = nanoprobe_api::server::tokens_for(&cfg)?;
     let listener = TcpListener::bind(cfg.listen)
         .await
@@ -131,7 +137,7 @@ pub async fn start(cfg: Config, fake: FakeConfig) -> Result<Running, String> {
             listen: addr,
             ..cfg
         },
-        Box::new(Fake(FakeSim::new(fake))),
+        Box::new(Fake(sim)),
     )?;
     let routes = nanoprobe_api::server::routes(&hub, tokens)?;
     let (stop, stopped) = oneshot::channel::<()>();

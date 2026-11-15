@@ -79,6 +79,96 @@ pub struct Pending {
     pub kind: EffectKind,
 }
 
+/// Every changing method's name, so an answer read back from a store gets
+/// its `&'static str`.
+const METHODS: &[&str] = &[
+    "ActivateCampaign",
+    "AdjustWarehouseStock",
+    "BackupCampaign",
+    "Capture",
+    "CreateCampaign",
+    "Dematerialize",
+    "DoEffect",
+    "FinishCampaign",
+    "Materialize",
+    "PutGroup",
+    "PutStatic",
+    "RemoveEntity",
+    "SetAirbaseOwner",
+    "SetLostPolicy",
+    "SetOptions",
+    "SetOrder",
+    "SetSampleRates",
+    "SetWarehouseStock",
+    "SuspendCampaign",
+];
+
+/// An answer as a store keeps it (spec/persistence.md, "Idempotency keys"):
+/// an `lv` table of the method, the response, the campaign and, for a
+/// pending effect, the command and what to build.
+pub fn encode_done(done: &Done) -> Vec<u8> {
+    use nanoprobe_transport::codec::{Lv, Writer};
+    let s = |v: &str| Lv::String(v.as_bytes().to_vec());
+    let mut pairs = vec![
+        (s("method"), s(done.method)),
+        (s("response"), Lv::String(done.response.clone())),
+        (s("campaign"), s(&done.campaign.to_string())),
+    ];
+    if let Some(p) = done.pending {
+        let (kind, entity) = match p.kind {
+            EffectKind::Adjust => ("adjust", 0),
+            EffectKind::Damage => ("damage", 0),
+            EffectKind::Capture(e) => ("capture", e),
+        };
+        pairs.push((s("epoch"), s(&p.cmd.0.to_string())));
+        pairs.push((s("seq"), s(&p.cmd.1.to_string())));
+        pairs.push((s("kind"), s(kind)));
+        pairs.push((s("entity"), s(&entity.to_string())));
+    }
+    let mut w = Writer::new();
+    w.lv(&Lv::Table(pairs));
+    w.finish()
+}
+
+/// [`encode_done`] read back; `None` for bytes it did not write.
+pub fn decode_done(bytes: &[u8]) -> Option<Done> {
+    use nanoprobe_transport::codec::{Lv, Reader};
+    let Lv::Table(pairs) = Reader::new(bytes).lv().ok()? else {
+        return None;
+    };
+    let get = |k: &str| {
+        pairs
+            .iter()
+            .find(|(key, _)| matches!(key, Lv::String(t) if t == k.as_bytes()))
+            .and_then(|(_, v)| match v {
+                Lv::String(t) => Some(t.clone()),
+                _ => None,
+            })
+    };
+    let text = |k: &str| get(k).and_then(|t| String::from_utf8(t).ok());
+    let num = |k: &str| text(k).and_then(|t| t.parse::<u64>().ok());
+    let method = text("method")?;
+    let method = METHODS.iter().copied().find(|m| *m == method)?;
+    let pending = match text("kind").as_deref() {
+        None => None,
+        Some(k) => Some(Pending {
+            cmd: (num("epoch")?, num("seq")?),
+            kind: match k {
+                "adjust" => EffectKind::Adjust,
+                "damage" => EffectKind::Damage,
+                "capture" => EffectKind::Capture(num("entity")?),
+                _ => return None,
+            },
+        }),
+    };
+    Some(Done {
+        method,
+        response: get("response")?,
+        campaign: num("campaign")?,
+        pending,
+    })
+}
+
 /// What a call with a key should do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Begin {
@@ -178,6 +268,26 @@ impl Idem {
         match self.slots.get(key) {
             Some(Slot::Done(_, d, _)) => Some(d.clone()),
             _ => None,
+        }
+    }
+
+    /// Put back a call a store remembered, answered `age` ago, in place of
+    /// whatever the table holds for `key`. A key past `keep` is not put back.
+    pub fn restore(&mut self, now: Instant, key: &str, d: Digest32, done: Done, age: Duration) {
+        if age >= self.keep {
+            return;
+        }
+        let at = now.checked_sub(age).unwrap_or(now);
+        self.slots.insert(key.to_owned(), Slot::Done(d, done, at));
+        // `order` is kept sorted: the entry goes where its time belongs.
+        let i = self.order.partition_point(|(t, _)| *t <= at);
+        self.order.insert(i, (at, key.to_owned()));
+    }
+
+    /// The request digest a key was used with.
+    pub fn digest_of(&self, key: &str) -> Option<Digest32> {
+        match self.slots.get(key)? {
+            Slot::Running(d) | Slot::Done(d, _, _) => Some(*d),
         }
     }
 

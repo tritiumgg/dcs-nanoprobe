@@ -13,6 +13,7 @@ pub mod mirror;
 pub mod players;
 pub mod reconciler;
 pub mod replay;
+pub mod server;
 pub mod sim;
 pub mod stock;
 pub mod store;

@@ -277,6 +277,8 @@ impl EventFile {
     /// and delete the rows this file no longer holds (spec/persistence.md,
     /// "Backups"). Runs through a connection of its own.
     pub fn copy_into(src: &Path, dest: &Path, campaign: u64) -> Result<(), DiskError> {
+        // Made if missing, and checked to be this campaign's.
+        drop(EventFile::open(src, campaign)?);
         let d = EventFile::open(dest, campaign)?;
         let src = src
             .to_str()

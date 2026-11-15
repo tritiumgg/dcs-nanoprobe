@@ -503,8 +503,10 @@ pub struct Store {
     journal: Vec<Entry>,
     /// Commands journalled with no outcome yet.
     inflight: BTreeMap<(u64, u64), Journalled>,
-    /// The last agent record folded in: agent boot and record number.
+    /// The last agent record folded in: agent boot and record number, and
+    /// the stamp it was read under (agent boot, generation, campaign).
     last_record: Option<(u64, u64)>,
+    last_stamp: Option<(u64, u32, u64)>,
     /// Keep written journal entries in memory, for tests that read them.
     keep_journal: bool,
     /// Idempotency rows to write with the next commit.
@@ -624,6 +626,7 @@ impl Store {
             journal: Vec::new(),
             inflight: BTreeMap::new(),
             last_record: None,
+            last_stamp: None,
             keep_journal: true,
             idempotency: Vec::new(),
             changes: VecDeque::new(),
@@ -983,9 +986,17 @@ impl Store {
             .is_some_and(|(boot, n)| r.agent_boot == boot && r.number <= n)
     }
 
-    /// Note the agent record just folded in; written with the next commit.
-    pub fn set_last_record(&mut self, agent_boot: u64, number: u64) {
+    /// Note the agent record just folded in and the stamp it was read
+    /// under; written with the next commit.
+    pub fn set_last_record(&mut self, agent_boot: u64, number: u64, stamp: (u64, u32, u64)) {
         self.last_record = Some((agent_boot, number));
+        self.last_stamp = Some(stamp);
+    }
+
+    /// The stamp the last record folded in was read under: the records the
+    /// agent delivers again after a restart come before their next `FRAME`.
+    pub fn last_stamp(&self) -> Option<(u64, u32, u64)> {
+        self.last_stamp
     }
 
     /// Keep a changing call's answer with the next commit. Nothing for a

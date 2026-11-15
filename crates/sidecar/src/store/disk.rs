@@ -19,8 +19,9 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use nanoprobe_transport::records::Rates;
 
 use super::{
-    Authority, CapturedMore, DesiredOwner, DesiredStock, Entry, Extension, Group, Journalled, Kind,
-    LeftAs, Loaded, LostPolicy, Outcome, Point, RouteEvent, Store, Unit, UnitState,
+    Authority, CapturedMore, DesiredOwner, DesiredStock, Entry, Extension, Group, IdemRow,
+    Journalled, Kind, LeftAs, Loaded, LostPolicy, Outcome, Point, RouteEvent, Store, Unit,
+    UnitState,
 };
 use crate::ids::{CampaignId, EntityId};
 use crate::intents::{Intent, Waypoint};
@@ -565,6 +566,61 @@ impl Store {
         r
     }
 
+    /// A changing call's answer kept in this store under `key`, written or
+    /// waiting for the next commit.
+    pub fn idempotency(&self, key: &str) -> Result<Option<IdemRow>, DiskError> {
+        if let Some(r) = self.idempotency.iter().rev().find(|r| r.key == key) {
+            return Ok(Some(r.clone()));
+        }
+        let Some(d) = self.disk.0.as_ref() else {
+            return Ok(None);
+        };
+        Ok(d.conn
+            .query_row(
+                "SELECT key, at_ms, request_hash, response FROM idempotency WHERE key = ?1",
+                [key],
+                |r| {
+                    Ok(IdemRow {
+                        key: r.get(0)?,
+                        at_ms: u64::try_from(r.get::<_, i64>(1)?).unwrap_or(0),
+                        request_hash: r.get(2)?,
+                        response: r.get(3)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// The keys of the calls answered at or after `since_ms`, for the server
+    /// store's index (spec/persistence.md, "Idempotency keys").
+    pub fn idempotency_since(&self, since_ms: u64) -> Result<Vec<(String, u64)>, DiskError> {
+        let Some(d) = self.disk.0.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let mut st = d
+            .conn
+            .prepare("SELECT key, at_ms FROM idempotency WHERE at_ms >= ?1")?;
+        let rows = st.query_map([i64::try_from(since_ms).unwrap_or(i64::MAX)], |r| {
+            Ok((r.get(0)?, u64::try_from(r.get::<_, i64>(1)?).unwrap_or(0)))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Delete the keys answered before `before_ms`.
+    pub fn prune_idempotency(&mut self, before_ms: u64) -> Result<usize, DiskError> {
+        let Some(d) = self.disk.0.as_ref() else {
+            return Ok(0);
+        };
+        Ok(d.conn.execute(
+            "DELETE FROM idempotency WHERE at_ms < ?1",
+            [i64::try_from(before_ms).unwrap_or(i64::MAX)],
+        )?)
+    }
+
     /// The last checkpoint written, if any.
     pub fn last_checkpoint(&self) -> Option<&Checkpoint> {
         self.disk
@@ -624,6 +680,7 @@ impl Disk {
             journal,
             inflight: _,
             last_record,
+            last_stamp,
             keep_journal: _,
             idempotency,
             changes: _,
@@ -750,6 +807,16 @@ impl Disk {
             ("revision", u(*rev)),
             ("loaded", loaded.as_ref().map_or(Lv::Nil, enc_loaded)),
             ("last_record", opt_record(*last_record)),
+            (
+                "last_stamp",
+                last_stamp.map_or(Lv::Nil, |(a, g, c)| {
+                    list(vec![
+                        s(&a.to_string()),
+                        s(&g.to_string()),
+                        s(&c.to_string()),
+                    ])
+                }),
+            ),
             ("owners", enc_owners(owners)),
             ("stocks", enc_stocks(stocks)),
             ("rates", rates.as_ref().map_or(Lv::Nil, enc_rates)),
@@ -887,6 +954,16 @@ fn load(path: &Path, conn: Connection, changes_keep: usize) -> Result<Store, Dis
             [] => None,
             [boot, n] => Some((dec_u(boot, "last_record")?, dec_u(n, "last_record")?)),
             _ => return Err(DiskError::Corrupt("last_record".into())),
+        };
+        store.last_stamp = match w.list("last_stamp")?.as_slice() {
+            [] => None,
+            [a, g, c] => Some((
+                dec_u(a, "last_stamp")?,
+                u32::try_from(dec_u(g, "last_stamp")?)
+                    .map_err(|_| DiskError::Corrupt("last_stamp".into()))?,
+                dec_u(c, "last_stamp")?,
+            )),
+            _ => return Err(DiskError::Corrupt("last_stamp".into())),
         };
         store.loaded = match w.get("loaded") {
             Lv::Nil => None,

@@ -6,7 +6,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use nanoprobe_api::config::{Config, StoreFiles};
-use nanoprobe_fake_sidecar::{Running, fake_config, in_process, start};
+use nanoprobe_fake_sidecar::{Running, in_process, start};
 use nanoprobe_proto::errors::reason;
 use nanoprobe_proto::v1alpha1::campaign_service_client::CampaignServiceClient;
 use nanoprobe_proto::v1alpha1::commands_service_client::CommandsServiceClient;
@@ -33,6 +33,17 @@ fn cfg(dir: &Path) -> Config {
             ..StoreFiles::new(dir.to_owned())
         }),
         ..Config::default()
+    }
+}
+
+/// A fake DCS of its own: a new process, with an agent boot no earlier one
+/// had, as a real DCS gets.
+fn fake_config() -> nanoprobe_sim_fake::Config {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    nanoprobe_sim_fake::Config {
+        first_boot: 1_000_000 + n * 1_000,
+        ..nanoprobe_fake_sidecar::fake_config()
     }
 }
 
@@ -513,4 +524,274 @@ async fn compaction_at_open_keeps_the_newest_event_and_ids_skip_unreadable_folde
     let b = create(&ch, &l, "b", false).await;
     assert!(b > far.0, "a new ID passes an unreadable folder");
     server.stop().await.expect("stop");
+}
+
+// ---- S18b: the server store ----
+
+fn server_epoch(r: &Running) -> u64 {
+    r.hub.lock().server.as_ref().expect("server store").epoch()
+}
+
+async fn activate(ch: &Channel, l: &Lease, id: u64, k: &str) {
+    CampaignServiceClient::new(ch.clone())
+        .activate_campaign(pb::ActivateCampaignRequest {
+            lease: Some(l.clone()),
+            campaign_id: id,
+            idempotency: key(k),
+        })
+        .await
+        .expect("activate");
+}
+
+/// The command epoch only grows: across a campaign switch and across a
+/// sidecar restart, kept in the server store.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_epoch_only_grows_across_a_switch_and_a_restart() {
+    let d = tempfile::tempdir().expect("dir");
+    let server = start(cfg(d.path()), fake_config()).await.expect("server");
+    let ch = connect(&server).await;
+    let l = lease(&ch).await;
+    let a = create(&ch, &l, "a", true).await;
+    let g = put_group(&ch, &l, "g", a).await;
+    until_live(&ch, a, g).await;
+    let e1 = server_epoch(&server);
+    assert!(e1 > 0, "an epoch was started and written");
+    let b = create(&ch, &l, "b", false).await;
+    let gb = put_group(&ch, &l, "gb", b).await;
+    activate(&ch, &l, b, "to-b").await;
+    until_live(&ch, b, gb).await;
+    let e2 = server_epoch(&server);
+    assert!(e2 > e1, "a switch starts a new epoch: {e1} then {e2}");
+    server.stop().await.expect("stop");
+
+    let server = start(cfg(d.path()), fake_config()).await.expect("restart");
+    assert!(server_epoch(&server) >= e2, "the epoch is read back");
+    // The store says live already; wait for the new DCS to take commands.
+    eventually("a new epoch after the restart", || async {
+        server_epoch(&server) > e2
+    })
+    .await;
+    let ch = connect(&server).await;
+    until_live(&ch, b, gb).await;
+    server.stop().await.expect("stop");
+}
+
+/// The player secret and keys are the server's: the same in every campaign
+/// and after a restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn player_keys_are_the_servers_across_campaigns_and_restarts() {
+    let d = tempfile::tempdir().expect("dir");
+    let server = start(cfg(d.path()), fake_config()).await.expect("server");
+    let ch = connect(&server).await;
+    let l = lease(&ch).await;
+    create(&ch, &l, "a", true).await;
+    {
+        let g = server.hub.lock();
+        let s = g.server.as_ref().expect("server store");
+        s.set_player_secret([7; 32]).expect("secret");
+        s.put_player("k1", "ucid-1").expect("player");
+    }
+    let b = create(&ch, &l, "b", false).await;
+    activate(&ch, &l, b, "to-b").await;
+    let read = |r: &Running| {
+        let g = r.hub.lock();
+        let s = g.server.as_ref().expect("server store");
+        (
+            s.player_secret().expect("secret"),
+            s.players().expect("players"),
+        )
+    };
+    let want = (Some([7; 32]), vec![("k1".to_owned(), "ucid-1".to_owned())]);
+    assert_eq!(read(&server), want);
+    server.stop().await.expect("stop");
+    let server = start(cfg(d.path()), fake_config()).await.expect("restart");
+    assert_eq!(read(&server), want);
+    server.stop().await.expect("stop");
+}
+
+/// A call repeated after the active campaign changed and the sidecar
+/// restarted is recognized: the same answer, nothing done twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_repeat_is_recognized_after_a_switch_and_a_restart() {
+    let d = tempfile::tempdir().expect("dir");
+    let server = start(cfg(d.path()), fake_config()).await.expect("server");
+    let ch = connect(&server).await;
+    let l = lease(&ch).await;
+    let a = create(&ch, &l, "a", true).await;
+    let first = put_group(&ch, &l, "once", a).await;
+    let b = create(&ch, &l, "b", false).await;
+    activate(&ch, &l, b, "to-b").await;
+    server.stop().await.expect("stop");
+
+    let server = start(cfg(d.path()), fake_config()).await.expect("restart");
+    let ch = connect(&server).await;
+    let l = lease(&ch).await;
+    let again = put_group(&ch, &l, "once", a).await;
+    assert_eq!(again, first, "the first answer");
+    let groups = server.hub.lock().campaigns[&a].store.groups().count();
+    assert_eq!(groups, 1, "no second group");
+    // The same key with another request is refused.
+    let e = CommandsServiceClient::new(ch.clone())
+        .put_group(PutGroupRequest {
+            write: write(&l, "once", a),
+            group_id: 0,
+            spec: None,
+            order: None,
+        })
+        .await
+        .expect_err("another request");
+    assert_eq!(reason(&e), ErrorReason::IdempotencyMismatch);
+    server.stop().await.expect("stop");
+}
+
+/// The server event log survives a restart, with its own numbers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_server_event_log_survives_a_restart() {
+    let d = tempfile::tempdir().expect("dir");
+    let server = start(cfg(d.path()), fake_config()).await.expect("server");
+    publish(&server.hub, 3);
+    let read = |ch: Channel| async move {
+        EventsServiceClient::new(ch)
+            .read_events(ReadEventsRequest {
+                filter: Some(EventFilter {
+                    server_log: true,
+                    ..EventFilter::default()
+                }),
+                after_sequence: 0,
+                limit: 0,
+            })
+            .await
+            .expect("read")
+            .into_inner()
+            .events
+            .iter()
+            .map(|e| e.sequence)
+            .collect::<Vec<u64>>()
+    };
+    let ch = connect(&server).await;
+    let before = read(ch).await;
+    assert!(before.len() >= 3);
+    server.stop().await.expect("stop");
+    let server = start(cfg(d.path()), fake_config()).await.expect("restart");
+    let ch = connect(&server).await;
+    let after = read(ch.clone()).await;
+    assert_eq!(after[..before.len()], before[..]);
+    publish(&server.hub, 1);
+    let more = read(ch).await;
+    assert_eq!(
+        *more.last().expect("one"),
+        *more.first().expect("one") + more.len() as u64 - 1
+    );
+    server.stop().await.expect("stop");
+}
+
+/// A second sidecar on the same store dir is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_sidecar_on_one_store_dir_is_refused() {
+    let d = tempfile::tempdir().expect("dir");
+    let server = start(cfg(d.path()), fake_config()).await.expect("server");
+    let e = match start(cfg(d.path()), fake_config()).await {
+        Ok(_) => panic!("a second sidecar started"),
+        Err(e) => e,
+    };
+    assert!(e.contains("locked"), "{e}");
+    server.stop().await.expect("stop");
+}
+
+/// A crash between the events commit and the store commit
+/// (spec/persistence.md, "A crash between the two commits"): the step's
+/// events are on disk, its facts are not, and the agent was not told its
+/// records were read. After a restart over the same DCS the records come
+/// again: the death is folded in once and its events are not logged twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_crash_between_the_two_commits_folds_and_logs_each_record_once() {
+    use nanoprobe_fake_sidecar::start_with;
+    use nanoprobe_sim_fake::FakeSim;
+    let d = tempfile::tempdir().expect("dir");
+    let server = start(cfg(d.path()), fake_config()).await.expect("server");
+    let ch = connect(&server).await;
+    let l = lease(&ch).await;
+    let a = create(&ch, &l, "a", true).await;
+    let g = put_group(&ch, &l, "g", a).await;
+    until_live(&ch, a, g).await;
+    let hub = std::sync::Arc::clone(&server.hub);
+    let (unit, object) = {
+        let st = &hub.lock().campaigns[&a].store;
+        let m = st
+            .group(nanoprobe_sidecar::ids::EntityId(g))
+            .expect("g")
+            .members[0];
+        (m, st.unit(m).expect("unit").object)
+    };
+    assert_ne!(object, 0);
+    // The death happens in the next frame, and the step that reads it
+    // stops between its two commits.
+    {
+        let mut inner = hub.lock();
+        let sim = inner
+            .backend
+            .as_any()
+            .and_then(|b| b.downcast_mut::<FakeSim>())
+            .expect("the fake");
+        sim.kill(object);
+        inner.crash_after_events = true;
+    }
+    eventually("the injected crash", || async { hub.closing() }).await;
+    let stopped = server.stop().await;
+    assert!(stopped.is_err(), "the driver stopped on the injected crash");
+    let events = d.path().join(a.to_string()).join("events.sqlite");
+    let logged = |p: &Path| {
+        rusqlite::Connection::open(p)
+            .expect("events")
+            .query_row(
+                "SELECT count(*) FROM event WHERE source IS NOT NULL",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .expect("count")
+    };
+    let before = logged(&events);
+    let store = store_path(d.path(), a);
+    let dead_in_file = |p: &Path| {
+        journal_of(p)
+            .expect("journal")
+            .iter()
+            .filter(|e| matches!(e, Entry::Death { unit: u } if *u == unit))
+            .count()
+    };
+    assert_eq!(dead_in_file(&store), 0, "the fact did not reach the store");
+    // The same DCS goes on; the sidecar starts again.
+    let sim = {
+        let mut inner = hub.lock();
+        let b = inner
+            .backend
+            .as_any()
+            .and_then(|b| b.downcast_mut::<FakeSim>())
+            .expect("the fake");
+        std::mem::replace(b, FakeSim::new(fake_config()))
+    };
+    drop(hub);
+    let server = start_with(cfg(d.path()), sim).await.expect("restart");
+    eventually("the death folded in", || async {
+        server.hub.lock().campaigns[&a]
+            .store
+            .unit(unit)
+            .is_some_and(|u| u.dead)
+    })
+    .await;
+    server.stop().await.expect("stop");
+    assert_eq!(dead_in_file(&store), 1, "one death fact");
+    assert!(logged(&events) >= before, "no event of the step was lost");
+    // A second event from one record would have broken the file's unique
+    // `source`: every record's events are there once.
+    let dup: i64 = rusqlite::Connection::open(&events)
+        .expect("events")
+        .query_row(
+            "SELECT count(*) FROM (SELECT source FROM event WHERE source IS NOT NULL \
+             GROUP BY source HAVING count(*) > 1)",
+            [],
+            |r| r.get(0),
+        )
+        .expect("dup");
+    assert_eq!(dup, 0);
 }

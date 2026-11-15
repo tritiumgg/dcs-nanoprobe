@@ -193,7 +193,8 @@ impl Campaigns {
                 .last()
                 .is_some_and(|b| b.schema == found && b.revision == revision);
             if !have {
-                self.take_backup(id, at_ms, found, revision, BackupReason::PreMigration)?;
+                self.backup_folder(id)
+                    .take(at_ms, found, revision, BackupReason::PreMigration)?;
             }
         }
         Store::open_with(&path, self.changes_keep, steps)
@@ -316,25 +317,57 @@ impl Campaigns {
         revision: u64,
         reason: BackupReason,
     ) -> Result<Backup, DiskError> {
-        self.take_backup(id, at_ms, SCHEMA, revision, reason)
+        self.backup_folder(id).take(at_ms, SCHEMA, revision, reason)
     }
 
+    /// The backups of a campaign's folder.
+    pub fn backup_folder(&self, id: CampaignId) -> BackupFolder {
+        BackupFolder {
+            dir: self.folder(id),
+            log: id.0,
+            keep: self.backup_keep,
+        }
+    }
+
+    /// The backups kept, oldest first.
+    pub fn backups(&self, id: CampaignId) -> Result<Vec<Backup>, DiskError> {
+        self.backup_folder(id).list()
+    }
+
+    /// Delete a campaign's folder. Never automatic.
+    pub fn delete(&self, id: CampaignId) -> io::Result<()> {
+        fs::remove_dir_all(self.folder(id))
+    }
+}
+
+/// The backups of one store folder: a campaign's, or the server store's
+/// (spec/persistence.md, "Backups").
+#[derive(Clone, Debug)]
+pub struct BackupFolder {
+    /// The folder of the store, its events file and `backups/`.
+    pub dir: PathBuf,
+    /// The campaign ID in its events file's `meta`, 0 for the server.
+    pub log: u64,
+    /// `backup_keep`.
+    pub keep: usize,
+}
+
+impl BackupFolder {
     /// Make backup folder `n`: a consistent copy of the store, then the info
     /// file that marks it complete. A failure removes the folder. Then the
     /// events copy is extended and old backups pruned.
-    fn take_backup(
+    pub fn take(
         &self,
-        id: CampaignId,
         at_ms: u64,
         schema: u32,
         revision: u64,
         reason: BackupReason,
     ) -> Result<Backup, DiskError> {
-        let number = self.next_backup(id)?;
-        let dir = self.folder(id).join(BACKUPS).join(number.to_string());
+        let number = self.next()?;
+        let dir = self.dir.join(BACKUPS).join(number.to_string());
         let made = (|| {
             fs::create_dir_all(&dir)?;
-            backup_file(&self.store_path(id), &dir.join(STORE))?;
+            backup_file(&self.dir.join(STORE), &dir.join(STORE))?;
             // VACUUM INTO does not flush the copy: flush it before the
             // marker that says it is complete, then the marker.
             fs::File::open(dir.join(STORE))?.sync_all()?;
@@ -354,11 +387,11 @@ impl Campaigns {
             }
         };
         EventFile::copy_into(
-            &self.events_path(id),
-            &self.folder(id).join(BACKUPS).join(EVENTS),
-            id.0,
+            &self.dir.join(EVENTS),
+            &self.dir.join(BACKUPS).join(EVENTS),
+            self.log,
         )?;
-        self.prune(id, number)?;
+        self.prune(number)?;
         Ok(Backup {
             number,
             at_ms,
@@ -369,8 +402,8 @@ impl Campaigns {
         })
     }
 
-    fn next_backup(&self, id: CampaignId) -> Result<u32, DiskError> {
-        let dir = self.folder(id).join(BACKUPS);
+    fn next(&self) -> Result<u32, DiskError> {
+        let dir = self.dir.join(BACKUPS);
         fs::create_dir_all(&dir)?;
         // The counter survives pruning: a number is never reused.
         let counter = dir.join("next");
@@ -378,7 +411,7 @@ impl Campaigns {
             .ok()
             .and_then(|t| t.trim().parse::<u32>().ok())
             .unwrap_or(0);
-        for n in self.numbered(id)? {
+        for n in self.numbered()? {
             newest = newest.max(n);
         }
         let n = newest + 1;
@@ -387,9 +420,9 @@ impl Campaigns {
     }
 
     /// Every numbered folder in `backups/`, complete or not.
-    fn numbered(&self, id: CampaignId) -> Result<Vec<u32>, DiskError> {
+    fn numbered(&self) -> Result<Vec<u32>, DiskError> {
         let mut out = Vec::new();
-        match fs::read_dir(self.folder(id).join(BACKUPS)) {
+        match fs::read_dir(self.dir.join(BACKUPS)) {
             Ok(rd) => {
                 for e in rd {
                     if let Some(n) = e?.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) {
@@ -406,18 +439,14 @@ impl Campaigns {
     /// Keep the newest `backup_keep` scheduled and manual backups and the
     /// newest pre-migration backup of each schema version; remove the
     /// others, and every incomplete folder older than backup `newest`.
-    fn prune(&self, id: CampaignId, newest: u32) -> Result<(), DiskError> {
-        let complete = self.backups(id)?;
+    fn prune(&self, newest: u32) -> Result<(), DiskError> {
+        let complete = self.list()?;
         let mut gone: Vec<u32> = Vec::new();
         let (pre, kept): (Vec<&Backup>, Vec<&Backup>) = complete
             .iter()
             .partition(|b| b.reason == BackupReason::PreMigration);
-        if kept.len() > self.backup_keep {
-            gone.extend(
-                kept[..kept.len() - self.backup_keep]
-                    .iter()
-                    .map(|b| b.number),
-            );
+        if kept.len() > self.keep {
+            gone.extend(kept[..kept.len() - self.keep].iter().map(|b| b.number));
         }
         for b in &pre {
             if pre
@@ -429,19 +458,19 @@ impl Campaigns {
         }
         let complete: Vec<u32> = complete.iter().map(|b| b.number).collect();
         gone.extend(
-            self.numbered(id)?
+            self.numbered()?
                 .into_iter()
                 .filter(|n| *n < newest && !complete.contains(n)),
         );
         for n in gone {
-            fs::remove_dir_all(self.folder(id).join(BACKUPS).join(n.to_string()))?;
+            fs::remove_dir_all(self.dir.join(BACKUPS).join(n.to_string()))?;
         }
         Ok(())
     }
 
     /// The backups kept, oldest first.
-    pub fn backups(&self, id: CampaignId) -> Result<Vec<Backup>, DiskError> {
-        let dir = self.folder(id).join(BACKUPS);
+    pub fn list(&self) -> Result<Vec<Backup>, DiskError> {
+        let dir = self.dir.join(BACKUPS);
         let mut out = Vec::new();
         let rd = match fs::read_dir(&dir) {
             Ok(rd) => rd,
@@ -485,11 +514,6 @@ impl Campaigns {
         }
         out.sort_by_key(|b| b.number);
         Ok(out)
-    }
-
-    /// Delete a campaign's folder. Never automatic.
-    pub fn delete(&self, id: CampaignId) -> io::Result<()> {
-        fs::remove_dir_all(self.folder(id))
     }
 }
 
@@ -589,11 +613,13 @@ mod tests {
         // A store that cannot be copied fails the backup.
         let moved = c.folder(CampaignId(1)).join("moved.sqlite");
         fs::rename(c.store_path(CampaignId(1)), &moved).expect("move");
-        let err = c.take_backup(CampaignId(1), 1, SCHEMA, 0, BackupReason::Manual);
+        let err = c
+            .backup_folder(CampaignId(1))
+            .take(1, SCHEMA, 0, BackupReason::Manual);
         assert!(err.is_err());
         fs::rename(&moved, c.store_path(CampaignId(1))).expect("move back");
         assert_eq!(
-            c.numbered(CampaignId(1)).expect("numbered"),
+            c.backup_folder(CampaignId(1)).numbered().expect("numbered"),
             Vec::<u32>::new()
         );
         // A folder left without its marker is removed at the next backup.
@@ -602,7 +628,10 @@ mod tests {
             .backup(CampaignId(1), 2, s.revision(), BackupReason::Manual)
             .expect("backup");
         assert_eq!(b.number, 3);
-        assert_eq!(c.numbered(CampaignId(1)).expect("numbered"), vec![3]);
+        assert_eq!(
+            c.backup_folder(CampaignId(1)).numbered().expect("numbered"),
+            vec![3]
+        );
         assert!(b.size > 0);
         // A create that fails leaves no campaign folder behind.
         let bad = Campaigns {

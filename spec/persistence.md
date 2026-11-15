@@ -86,7 +86,7 @@ registration of the name after a reopen gets a revision above it.
 | `schema` | The schema version, a number. 1 is this document. |
 | `campaign_id` | The campaign ID. It must equal the folder's name. |
 | `campaign` | The campaign record: ID, name, state (`active`, `suspended`, `finished`), theaters, the theater to load, clock, created time, the author's component schema versions, and the outcome of a finished campaign. Its `state` key keeps its layout in every schema version, so the state is read before a migration. The platform schema version is `schema`. |
-| `world` | The next `EntityId`, the store revision, whether the store is open, the loaded mission (agent boot, mission generation, theater), the last agent record folded in (agent boot and record number), the desired airbase owners and warehouse stocks with their revisions, the sample rates the controller set, the agent's country-to-coalition map, the model time of the last samples, and the route events not yet published. |
+| `world` | The next `EntityId`, the store revision, whether the store is open, the loaded mission (agent boot, mission generation, theater), the last agent record folded in (agent boot and record number) with the stamp it was read under (agent boot, mission generation, campaign), which records delivered again before their next `FRAME` keep, the desired airbase owners and warehouse stocks with their revisions, the sample rates the controller set, the agent's country-to-coalition map, the model time of the last samples, and the route events not yet published. |
 
 An entity body carries every field of its row in spec/world.md: for a group or static
 its spec, order and revisions, lifecycle state, authority, lost policy, error, and the
