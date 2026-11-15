@@ -39,7 +39,7 @@ if STEP == 'ban' then
   if not client then
     error('no client is connected')
   end
-  E.observe('banlist_add', tostring(net.banlist_add(client, 600, REASON)), { info = true })
+  E.observe('banlist_add', tostring((net.banlist_add(client, 600, REASON))), { info = true })
   E.observe('listed_after_ban', #ours(), { info = true })
   return 'banned; restart DCS, then run the check step'
 elseif STEP == 'check' then

@@ -562,7 +562,7 @@ event, so a cut `EVENT` always fits (see "Oversized records").
 `HIT` and `KILL` in the catalogue, scenery included (LIVE). The API reports them as
 `initiator_type` and `target_type`, from the mission's mirror when the event has none.
 `INITIATOR_MISSION_ID` joins a player's slot to the unit born in it (spec/world.md,
-"Players"); that it equals the slot ID DCS gives the player is UNVERIFIED (step S16).
+"Players"); that it equals the slot ID DCS gives the player is UNVERIFIED.
 The agent reads `INITIATOR_TYPE` on every event type whose row below lists
 `INITIATOR_CATEGORY`, `TARGET_TYPE` on every one that lists `TARGET_CATEGORY`, and
 `INITIATOR_MISSION_ID` on `S_EVENT_BIRTH` only.
@@ -586,7 +586,7 @@ time, not the time of the removal (an inference from the report's per-cause maxi
 UNVERIFIED).
 
 Whether a shooting-end event carries a count of rounds, and under what name, is
-UNVERIFIED (E32, step S16); where it does not, the sidecar fills the value from the
+UNVERIFIED (E32); where it does not, the sidecar fills the value from the
 ammunition difference. No allow-list holds `ROUNDS` until then. Codes are added and
 never renumbered.
 

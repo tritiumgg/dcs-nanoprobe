@@ -220,7 +220,8 @@ because the budget ran out stays in the ring for the next frame.
 
 No frame sees the lifecycle state `LOADING` today: `frame` moves `STARTING` and
 `LOADING` to `RUNNING` or `PAUSED` before it reads commands, so the wait is a defense.
-Whether DCS runs a frame before `onSimulationStart` is UNVERIFIED (S16 checks it).
+DCS runs no frame between `onMissionLoadBegin` and `onSimulationStart` (LIVE,
+docs/results/2026-11-15-s16-players-moderation.md).
 
 The agent reads at most 4,096 table entries (key and value pairs, at every depth) and
 16 KiB of strings from the value `command_done` receives, 16 tables deep. A string that
@@ -372,8 +373,8 @@ other, is answered `UNKNOWN_OPCODE`, and sets `last_applied_seq`.
 
 The State column names the Lua state the handler runs in: `server`, the mission
 scripting state, through the shim; `hook`, the hook's own state. A control command has
-no Lua handler. That `CHAT` and `MISSION_LOAD` run in the hook's state is UNVERIFIED
-(step S16).
+no Lua handler. `CHAT` and `MISSION_LOAD` run in the hook's state (LIVE,
+docs/results/2026-11-15-s16-players-moderation.md).
 
 The Campaign column: `active` means the command needs an active campaign; `any` means
 it also runs with campaign 0, for a server that runs a plain mission between
@@ -683,7 +684,10 @@ under a new ID.
   `markToGroup(id, text, point, group, read_only)`.
 - `DRAWING_SET` calls `trigger.action.markupToAll(shape, coalition, id, ...)` with the
   coalition number, -1 for `ALL`, and the array `args` unpacked after the ID. Points in
-  `args` are tables with `x`, `y` and `z`, as DCS takes them.
+  `args` are tables with `x`, `y` and `z`, as DCS takes them. DCS checks the arguments
+  for the shape: shape 1 with two points, colors, a line type, read only and a message
+  is drawn, and shape 2 with a number after its first point is refused with
+  `DCS_REFUSED` (LIVE, docs/results/2026-11-15-s16-players-moderation.md).
 - `MARK_REMOVE` and `DRAWING_REMOVE` call `trigger.action.removeMark` on the held ID.
   An entity the shim does not hold is `APPLIED`: it is gone already.
 
@@ -1028,7 +1032,7 @@ the agent's queue when the ring is full, and a loss is a `GAP`, never silent.
 |---|---|---|
 | `name` | string | 1 to 128 bytes |
 | `payload` | nil, boolean, number, string or table | Encoded as `lv`. A function, userdata or thread inside it becomes its type name. At most 16 KiB encoded, and 16 tables deep. |
-| `objects` | nil, or an array of at most 16 units | Each entry is a unit object, or the number in its `id_` field, which is the object ID the agent's table uses. That `id_` differs from what `getID()` returns is UNVERIFIED (step S16). The sidecar stamps the event with the player keys occupying those units, as it does for a world event. |
+| `objects` | nil, or an array of at most 16 units | Each entry is a unit object, or the number in its `id_` field, which is the object ID the agent's table uses. `id_` differs from what `getID()` returns (LIVE, docs/results/2026-11-15-s16-players-moderation.md). The sidecar stamps the event with the player keys occupying those units, as it does for a world event. |
 
 `emit` never raises. It returns `true`, or `false` and a reason: `name`, `too_large`,
 `too_deep` (a table in itself counts), `objects` (not an array of at most 16, or an
@@ -1045,9 +1049,13 @@ and no Lua error crosses a Rust frame that owns a value.
 `MODERATE` runs in the hook's state, where `net` is. `net.kick`, `net.banlist_add`,
 `net.banlist_add_by_ucid`, `net.banlist_remove`, `net.force_player_slot` and
 `net.get_player_info` are functions there (LIVE, `lua/mock/api/hook.txt`, written by
-`lua/probes/tools/api-dump.lua` on DCS 2.9.31.29434 under Wine, 2026-11-11); their
-argument orders are fixed by E34. The sidecar names a player to the agent by connection ID and
-ucid; the API names a player by player key (spec/world.md, "Players").
+`lua/probes/tools/api-dump.lua` on DCS 2.9.31.29434 under Wine, 2026-11-11).
+`net.kick(player, reason)`, `net.banlist_add(player, seconds, reason)`,
+`net.banlist_remove(ucid)` and `net.force_player_slot(player, 0, '')` do what the
+table below says, and a ban survives a DCS restart (LIVE, E34,
+docs/results/2026-11-15-s16-players-moderation.md). `net.banlist_add_by_ucid`'s
+argument order is UNVERIFIED. The sidecar names a player to the agent by connection ID
+and ucid; the API names a player by player key (spec/world.md, "Players").
 
 ### Layout: MODERATE
 

@@ -78,11 +78,14 @@ do
   -- The gui state: the input numbers a client's Input table holds, and the
   -- radio panel's missionCommands.
   local gui = host.states.gui
-  rawset(gui, 'Input', {
+  local input = {
     getEnvTable = function()
       return { Actions = { iCommandToggleCommandMenu = 9001, ICommandMenuItem10 = 9010, ICommandMenuItem1 = 9011 } }
     end,
-  })
+  }
+  rawset(gui, 'Input', input)
+  -- A client's hook state reaches ED's Input module with require (LIVE, S16).
+  host.states.hook.package.loaded.Input = input
   rawset(gui, 'missionCommands', {
     doAction = function(index)
       client.action = index
@@ -275,6 +278,32 @@ do
   S.ok(file .. ': doAction(index) runs the command; unfilled it refuses')
 end
 
+do
+  local file = 'e34-ban-restart.lua'
+  local source = S.read(root .. 'lua/experiments/s16/' .. file)
+  local saved = host.players
+  host.players = { [1] = saved[1] }
+  host:connect(2, { ucid = string.rep('ab', 16), name = 'np-client', side = 2, slot = '8580' })
+  local bans = #host.bans
+  local function step(name, id)
+    local result = eval(id, 'hook', (source:gsub("'<step>'", "'" .. name .. "'")), 30)
+    assert(result.ok and result.reply.ok, file .. ' ' .. name .. ': ' .. dump(result))
+    return observations(result, file)
+  end
+  local seen = step('ban', 's16xban1')
+  assert(seen.listed_after_ban.value == 1, 'the ban step: ' .. dump(seen))
+  -- The restart: the ban list stays, the player is gone.
+  host.players = { [1] = saved[1] }
+  seen = step('check', 's16xban2')
+  assert(seen.listed_after_restart.value == 1 and seen.removed.value == 1 and seen.listed_after_remove.value == 0,
+    'the check step: ' .. dump(seen))
+  assert(#host.bans == bans, 'a ban was left')
+  local text = dump(seen)
+  assert(not text:find(string.rep('ab', 16), 1, true), 'a ucid was returned')
+  host.players = saved
+  S.ok(file .. ': bans the lone client, finds the ban after a restart, removes it, returns no ucid')
+end
+
 -- The scripted client's snippets.
 
 local function alone(file, state, seconds, each)
@@ -285,20 +314,21 @@ end
 do
   local file = 's16-menu-pick.lua'
   local seen = alone(file, 'hook', 30)
-  need(seen, file, { 'actions_raw', 'route1_numbers', 'has_LoSetCommand', 'route2_gui', 'route2_tree', 'route1_sent' })
-  assert(seen.actions_raw.value == '9001|9010|9011', 'the numbers were ' .. tostring(seen.actions_raw.value))
+  need(seen, file, { 'route1_numbers', 'has_LoSetCommand', 'route2_gui', 'route2_tree', 'route1_sent' })
+  local n = seen.route1_numbers.value
+  assert(n.toggle == 9001 and n.item10 == 9010 and n.item1 == 9011, 'the numbers were ' .. dump(n))
   assert(#client.commands == 3 and client.commands[1] == 9001 and client.commands[2] == 9010
     and client.commands[3] == 9011, 'the commands sent were ' .. table.concat(client.commands, ','))
   S.ok(file .. ': read the input numbers at run time and sent them in order')
   -- A client with no Actions: the numbers are not found, nothing is sent.
-  local gui = host.states.gui
-  local real = gui.Input
-  rawset(gui, 'Input', { getEnvTable = function() return {} end })
+  local loaded = host.states.hook.package.loaded
+  local real = loaded.Input
+  loaded.Input = { getEnvTable = function() return {} end }
   client.commands = {}
   seen = alone(file, 'hook', 30)
   assert(seen.route1 and seen.route1.value == 'the numbers were not found', 'route 1 ran without numbers')
   assert(#client.commands == 0, 'a command was sent without a number')
-  rawset(gui, 'Input', real)
+  loaded.Input = real
   S.ok(file .. ': with no numbers it sends nothing')
 end
 
