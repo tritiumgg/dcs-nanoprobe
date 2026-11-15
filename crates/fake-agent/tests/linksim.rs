@@ -61,9 +61,20 @@ fn wait_ready(sim: &LinkSim) {
     }
 }
 
+/// A scratch folder, removed when the test ends, whether it passes or fails.
+struct Scratch(std::path::PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 #[test]
 fn predictions_hold_across_wraps_and_a_restart_drops_the_unwritten() {
-    let dir = std::env::temp_dir().join(format!("nanoprobe-linksim-{}", std::process::id()));
+    let scratch =
+        Scratch(std::env::temp_dir().join(format!("nanoprobe-linksim-{}", std::process::id())));
+    let dir = scratch.0.clone();
     std::fs::create_dir_all(&dir).unwrap();
     let port = TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -160,5 +171,4 @@ fn predictions_hold_across_wraps_and_a_restart_drops_the_unwritten() {
         seqs.windows(2).all(|w| w[1] == w[0] + 1),
         "a gap in {seqs:?}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }

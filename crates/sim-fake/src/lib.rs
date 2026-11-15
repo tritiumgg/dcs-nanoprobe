@@ -95,6 +95,10 @@ pub struct Config {
     pub death_seed: u64,
     /// Frames between `AIRBASE` and `WAREHOUSE` samples.
     pub warehouse_every: u64,
+    /// Frames an enumeration with misses holds its `ENUM_END` after its last
+    /// slice, as when the agent's checks of the misses span frames
+    /// (spec/records.md, "Layout: ENUM_END"). 0 checks them in that slice.
+    pub enum_end_hold: u64,
 }
 
 impl Default for Config {
@@ -112,6 +116,7 @@ impl Default for Config {
             death_delay_max: 0.0,
             death_seed: 0,
             warehouse_every: 5,
+            enum_end_hold: 0,
         }
     }
 }
@@ -264,6 +269,8 @@ struct Run {
     seen: u32,
     /// The enumeration took the `full` flag: every row is an `OBJECT`.
     full: bool,
+    /// Frames its `ENUM_END` is still held for its misses.
+    hold: u64,
 }
 
 /// One DCS process with the agent in it.
@@ -1252,6 +1259,14 @@ impl FakeSim {
         self.hidden.insert(object);
     }
 
+    /// Whether an enumeration has visited every row and holds its
+    /// `ENUM_END` for its misses (`Config::enum_end_hold`).
+    pub fn enum_end_held(&self) -> bool {
+        self.run
+            .as_ref()
+            .is_some_and(|r| r.rows.is_empty() && !r.misses.is_empty())
+    }
+
     /// Full enumerations find this object again.
     pub fn show_in_enumeration(&mut self, object: u64) {
         self.hidden.remove(&object);
@@ -1373,6 +1388,7 @@ impl FakeSim {
             written: 0,
             seen: 0,
             full: std::mem::take(&mut self.full),
+            hold: self.cfg.enum_end_hold,
         });
         self.next_enum = self.frame + self.cfg.enum_period;
     }
@@ -1416,7 +1432,10 @@ impl FakeSim {
             }
         }
         self.flush_seen(&mut run, &mut seen);
-        if run.rows.is_empty() {
+        if run.rows.is_empty() && run.hold > 0 && !run.misses.is_empty() {
+            run.hold -= 1;
+            self.run = Some(run);
+        } else if run.rows.is_empty() {
             // Each miss is checked before the end: alive, it is written
             // with this enumeration's number; gone, it leaves.
             for row in std::mem::take(&mut run.misses) {

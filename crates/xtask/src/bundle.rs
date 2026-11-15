@@ -368,9 +368,20 @@ mod tests {
             .collect()
     }
 
+    /// A scratch folder, removed when the test ends, whether it passes or fails.
+    struct Scratch(std::path::PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn no_planted_secret_survives() {
-        let dir = std::env::temp_dir().join(format!("nanoprobe-bundle-{}", std::process::id()));
+        let scratch =
+            Scratch(std::env::temp_dir().join(format!("nanoprobe-bundle-{}", std::process::id())));
+        let dir = scratch.0.clone();
         let _ = std::fs::remove_dir_all(&dir);
         let local = profile(&dir);
 
@@ -383,7 +394,6 @@ mod tests {
         )
         .unwrap();
         let files = unzip(&bytes);
-        std::fs::remove_dir_all(&dir).unwrap();
 
         let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, ["BUNDLE.txt", "logs/hook.log", "dcs.log"]);
@@ -419,7 +429,9 @@ mod tests {
 
     #[test]
     fn a_log_with_no_marker_is_left_out() {
-        let dir = std::env::temp_dir().join(format!("nanoprobe-nomark-{}", std::process::id()));
+        let scratch =
+            Scratch(std::env::temp_dir().join(format!("nanoprobe-nomark-{}", std::process::id())));
+        let dir = scratch.0.clone();
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("Logs")).unwrap();
         std::fs::write(dir.join("Logs/dcs.log"), "2026 INFO APP: 203.0.113.77\n").unwrap();
@@ -430,7 +442,6 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        std::fs::remove_dir_all(&dir).unwrap();
 
         let files = unzip(&bytes);
         assert_eq!(files.len(), 1);
