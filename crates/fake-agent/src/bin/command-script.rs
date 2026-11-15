@@ -534,6 +534,8 @@ fn run(args: &[String]) -> Result<bool, String> {
                 if sim.send(step.opcode, &payload).is_err() {
                     return Err("the link detached before a command was sent".into());
                 }
+                // A script has no store to commit first: let it through.
+                sim.flush();
                 sent += 1;
             }
             if steps.peek().is_none() && outstanding(&sends, &got) == 0 && sim.queued() == 0 {
