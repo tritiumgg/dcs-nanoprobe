@@ -140,8 +140,9 @@ spec/records.md and in spec/commands.md. When agent behavior the sidecar reads
 changes and no table does, `layout_version` goes up by one.
 
 **Breadcrumbs.** `crumb` 0 means no risky call is in progress. `crumb` 0x10000 plus an
-opcode means that command's handler runs, and `crumb_arg` is its `seq`. The agent
-adds codes for later risky calls here.
+opcode means that command's handler runs, and `crumb_arg` is its `seq`. `crumb`
+0x20000 means an extension's hook runs, and the crumb's text is the extension's name
+(spec/commands.md, "Extensions"). The agent adds codes for later risky calls here.
 
 ### Codes: lifecycle
 

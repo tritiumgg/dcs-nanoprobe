@@ -69,3 +69,48 @@ unit type, lane spacing and the formation names. It writes `routes.json` and
 model/real, DCS CPU and the share of groups that moved, per shape.
 
 `lua/tests/s15_experiments.lua` and `lua/tests/routes.lua` rehearse them on the mock.
+
+## S16
+
+Live checks and the exit tests of step S16 on players, moderation and extensions.
+
+`cargo xtask commands <server> --part players --raw-lua on|off` is the exit test
+that needs no person. It needs the `[lua] raw` of the profile's `agent.toml` set to
+match the flag (it refuses otherwise; the file is not changed), restarts DCS, loads
+the shell mission and runs `command-probe --part players` as the sidecar. The server
+state is read, and the menu command selected, with `exit-marks-read.lua`,
+`exit-menu-pick.lua` and `exit-mission-path.lua` in `s16/`. It writes `players.json`
+under `bundles/commands-players-<target>-<time>/`.
+
+`cargo xtask commands <server> --part moderation --client <windows-target> [--miz FILE]`
+is the E34 and E35 driver. The server needs a mission with player slots (the
+mission it starts with, or `--miz`), and the client is a windows-ssh target at its
+main menu with a `--dev` build; `client join` documents what the server profile
+needs. It writes `moderation.json`.
+
+`lua/tests/players_exit.lua` rehearses both on the mock, and `lua/tests/s16_experiments.lua`
+rehearses every snippet below.
+
+The checks in `s16/` run with `cargo xtask eval <target> <state> <file>`, on a server
+with no players, and clean up what they add.
+
+| File | State | Settles | Takes |
+|---|---|---|---|
+| `e-frame-before-start.lua` | `hook` | whether DCS runs a simulation frame between onMissionLoadBegin and onSimulationStart: the counts over one load of the running mission, which it starts itself | one load |
+| `e-emit-objects.lua` | `server` | whether `id_` equals `getID()` for 5 ground units and 1 static, and what `emit` returns for each form | a second |
+| `e-handler-survives-load.lua` | `hook` | whether an eval-installed event handler counts after `cargo xtask load`: run it, load, run it again | two runs |
+| `e36-chat-hooks.lua` | `hook` | the order and arguments of two extra `onPlayerTrySendChat` sets, one returning a replaced line, as a client chats; run `alone/s16-chat.lua` on the client while it waits | up to 180 s |
+| `e-doaction-index.lua` | `server` | which index `missionCommands.doAction` takes for a command added with `addCommand` (-2 to 300), and the error text of a string argument | a second |
+| `e-menu-client-item.lua` | `server` | whether the agent reports a command chosen through its callback: `<step>` `add`, choose `np-s16-pick3`, then `read`, which returns the count and removes the item | two runs |
+| `e34-ban-restart.lua` | `hook` | whether a ban survives a DCS restart: `<step>` `ban` (bans the lone connected test client), restart DCS, then `check` (finds the ban, removes it) | two runs and a restart |
+
+`DCS.setUserCallbacks` is additive and has no removal, so a callback set a snippet
+adds stays until DCS restarts. Each does nothing once its snippet ends or is reset.
+
+The snippets for the Windows client are in `alone/`, run with `cargo xtask eval
+<client-target> hook <file>`: `s16-menu-pick.lua` (the input-command route and the
+`doAction` fallback; the numbers are read at run time), `s16-observe.lua` (what the
+client sees of a kick, a ban or a slot move; arms, then reports on the next run),
+`s16-chat.lua` (sends chat lines) and `s16-slot-race.lua` (E35: takes a slot and
+asks to spawn in one step). A rejoin is `cargo xtask client join`, which runs
+`e30-join.lua`.

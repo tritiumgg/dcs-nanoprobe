@@ -102,7 +102,7 @@ assert(#host.callbacks == 1, 'the hook registered ' .. #host.callbacks .. ' call
 local msgs, all = records(hooklog)
 assert(msgs[1] == 'hook loaded' and msgs[2] == 'agent loaded' and msgs[3] == 'link open'
   and msgs[4] == 'capabilities', table.concat(msgs, ', '))
-assert(all[2].data.abi == '9', 'the agent loaded reads abi ' .. tostring(all[2].data.abi))
+assert(all[2].data.abi == '10', 'the agent loaded reads abi ' .. tostring(all[2].data.abi))
 assert(all[3].data.map == profile .. 'nanoprobe/test.map', 'the link opened ' .. tostring(all[3].data.map))
 for name, present in pairs(all[4].data) do
   assert(present == true, name .. ' is absent from the mock hook state')

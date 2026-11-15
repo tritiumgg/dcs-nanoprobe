@@ -37,13 +37,13 @@ use crate::convert::{
 };
 use crate::hub::{Call, Hub, Inner, Need, Slot, settle};
 use crate::idem::EffectKind;
-use crate::lua::{extra_to_lua, to_lua};
+use crate::lua::{extra_to_lua, from_lua, to_lua};
 use nanoprobe_transport::codec::{Lv, Writer};
 
 /// The service.
 pub struct Commands(pub Arc<Hub>);
 
-fn store_error(e: StoreError) -> Status {
+pub(crate) fn store_error(e: StoreError) -> Status {
     match e {
         StoreError::NoSuchEntity(id) => not_found(id.0),
         StoreError::Exhausted => status(
@@ -71,7 +71,7 @@ fn store_error(e: StoreError) -> Status {
 }
 
 /// The request with the lease left out, for the idempotency digest.
-fn unleased(w: &Option<Write>) -> Option<Write> {
+pub(crate) fn unleased(w: &Option<Write>) -> Option<Write> {
     w.clone().map(|mut w| {
         w.lease = None;
         w
@@ -104,8 +104,10 @@ macro_rules! changing {
     }};
 }
 
+pub(crate) use changing;
+
 /// A checked position on one of the campaign's theaters.
-fn place(p: Option<&pb::Position>, slot: &Slot, field: &str) -> Result<Point, Status> {
+pub(crate) fn place(p: Option<&pb::Position>, slot: &Slot, field: &str) -> Result<Point, Status> {
     let p = p.ok_or_else(|| invalid(field, "a position is required"))?;
     if p.theater.is_empty() {
         return Err(invalid(
@@ -127,7 +129,7 @@ fn place(p: Option<&pb::Position>, slot: &Slot, field: &str) -> Result<Point, St
 }
 
 /// Bytes of a value in the agent's `lv` encoding.
-fn lv_len(v: &Lv) -> usize {
+pub(crate) fn lv_len(v: &Lv) -> usize {
     let mut w = Writer::new();
     w.lv(v);
     w.len()
@@ -136,7 +138,7 @@ fn lv_len(v: &Lv) -> usize {
 /// Bytes a command may take besides the values counted: the command header,
 /// names, numbers and table keys. Generous, so an estimate never falls
 /// short of what the reconciler builds.
-const OVERHEAD: usize = 512;
+pub(crate) const OVERHEAD: usize = 512;
 
 /// An upper bound on the payload of the spawn the reconciler builds for a
 /// spec, and of the order for a route.
@@ -161,7 +163,7 @@ fn order_bound(o: Option<&pb::Order>) -> usize {
 
 /// `INVALID_FIELD` when a command for the call would be over the agent's
 /// limit (spec/errors.md, "Command outcomes").
-fn fits(bytes: usize, limit: usize, field: &str) -> Result<(), Status> {
+pub(crate) fn fits(bytes: usize, limit: usize, field: &str) -> Result<(), Status> {
     if bytes > limit {
         Err(invalid(
             field,
@@ -508,8 +510,16 @@ fn remove_entity(
 ) -> Result<RemoveEntityResponse, Status> {
     let slot = g.campaigns.get_mut(&c).expect("resolved campaign");
     let id = EntityId(r.entity_id);
+    if slot.store.marker(id).is_some() {
+        // A submenu takes the items under it.
+        slot.store
+            .remove_marker(id)
+            .map_err(|_| not_found(r.entity_id))?;
+        return Ok(RemoveEntityResponse {
+            revision: slot.store.revision(),
+        });
+    }
     if slot.store.group(id).is_none() {
-        // A mark, drawing or menu item has no entry here yet.
         return Err(if slot.store.unit(id).is_some() {
             invalid("entity_id", "a unit leaves with its group")
         } else {
@@ -641,7 +651,7 @@ fn set_sample_rates(
 
 /// The API's command result of an effect's or a query's end: none is
 /// `pending`.
-fn command_result(r: Option<&EffectResult>) -> pb::CommandResult {
+pub(crate) fn command_result(r: Option<&EffectResult>) -> pb::CommandResult {
     let Some(r) = r else {
         return pb::CommandResult {
             outcome: pb::Outcome::Pending as i32,
@@ -669,6 +679,13 @@ fn command_result(r: Option<&EffectResult>) -> pb::CommandResult {
     }
 }
 
+/// The value a Lua call returned, when the agent answered `APPLIED` with one.
+fn lua_value(r: Option<&EffectResult>) -> Option<prost_types::Value> {
+    let r = r?.result.as_ref()?;
+    (u64::from(r.code) == nanoprobe_transport::layout::result::APPLIED && r.value != Lv::Nil)
+        .then(|| from_lua(&r.value))
+}
+
 /// The encoded response of an effect or a query call from its result, none
 /// being `pending`. A capture's entity is the store's after it took what DCS
 /// read.
@@ -682,6 +699,31 @@ pub fn effect_response(
     match kind {
         EffectKind::Adjust => AdjustWarehouseStockResponse { result: result_pb }.encode_to_vec(),
         EffectKind::Damage => DoEffectResponse { result: result_pb }.encode_to_vec(),
+        EffectKind::Message => pb::SendMessageResponse { result: result_pb }.encode_to_vec(),
+        EffectKind::Chat => pb::SendChatResponse { result: result_pb }.encode_to_vec(),
+        EffectKind::Invoke => pb::InvokeLuaResponse {
+            result: result_pb,
+            value: lua_value(result),
+        }
+        .encode_to_vec(),
+        EffectKind::Eval => pb::EvalLuaResponse {
+            result: result_pb,
+            value: lua_value(result),
+        }
+        .encode_to_vec(),
+        EffectKind::Kick => pb::KickResponse { result: result_pb }.encode_to_vec(),
+        EffectKind::Ban => pb::BanResponse { result: result_pb }.encode_to_vec(),
+        EffectKind::Unban => pb::UnbanResponse { result: result_pb }.encode_to_vec(),
+        EffectKind::Move => pb::MovePlayerResponse { result: result_pb }.encode_to_vec(),
+        EffectKind::Bans => pb::ListBansResponse {
+            bans: if result.is_some_and(|r| r.outcome == Outcome::Applied) {
+                super::moderation::bans_of(g, result)
+            } else {
+                Vec::new()
+            },
+            result: result_pb,
+        }
+        .encode_to_vec(),
         EffectKind::Capture(id) => {
             let applied = result.is_some_and(|r| r.outcome == Outcome::Applied);
             let entity = applied
@@ -700,7 +742,7 @@ pub fn effect_response(
 }
 
 /// The error for a command that cannot be sent now.
-fn dcs_not_ready() -> Status {
+pub(crate) fn dcs_not_ready() -> Status {
     status(
         Code::Unavailable,
         ErrorReason::DcsNotReady,
@@ -760,7 +802,13 @@ fn effect_start(g: &mut Inner, c: u64, e: &pb::effect::Effect) -> Result<(u64, u
 /// The scope code of a sound or picture, with the target checked: a group
 /// or a unit of the campaign that DCS holds, or a number that fits a DCS
 /// coalition or country number.
-fn scope_of(g: &mut Inner, c: u64, scope: i32, target: u64, field: &str) -> Result<u32, Status> {
+pub(crate) fn scope_of(
+    g: &mut Inner,
+    c: u64,
+    scope: i32,
+    target: u64,
+    field: &str,
+) -> Result<u32, Status> {
     let code = match pb::EffectScope::try_from(scope) {
         Ok(pb::EffectScope::All) => 1,
         Ok(pb::EffectScope::Coalition) => 2,
@@ -782,7 +830,12 @@ fn scope_of(g: &mut Inner, c: u64, scope: i32, target: u64, field: &str) -> Resu
             } else {
                 slot.store.unit(id).is_some()
             };
-            if !known {
+            // An effect may name an adopted unit or group, which the store
+            // holds no row of.
+            let adopted = g
+                .with_rec(c, |rec, _, _| rec.is_adopted(id))
+                .unwrap_or(false);
+            if !known && !adopted {
                 return Err(not_found(target));
             }
             let bound = g
@@ -853,8 +906,11 @@ fn damage_start(g: &mut Inner, c: u64, d: &pb::Damage) -> Result<(u64, u64), Sta
         ));
     }
     let unit = EntityId(d.unit_id);
+    let adopted = g
+        .with_rec(c, |rec, _, _| rec.is_adopted(unit))
+        .unwrap_or(false);
     let slot = g.campaigns.get(&c).expect("resolved campaign");
-    if slot.store.unit(unit).is_none() {
+    if slot.store.unit(unit).is_none() && !adopted {
         return Err(not_found(d.unit_id));
     }
     let bound = g
@@ -1200,6 +1256,7 @@ impl CommandsService for Commands {
         })?;
         // A pending effect or query settles here once its result is in.
         let done = settle(&mut g, key, done);
+        let mut value = None;
         let (result, entity) = match done.method {
             "AdjustWarehouseStock" => (
                 AdjustWarehouseStockResponse::decode(done.response.as_slice())
@@ -1217,12 +1274,34 @@ impl CommandsService for Commands {
                 Ok(r) => (r.result, r.entity),
                 Err(_) => (None, None),
             },
+            "SendMessage" => (
+                pb::SendMessageResponse::decode(done.response.as_slice())
+                    .ok()
+                    .and_then(|r| r.result),
+                None,
+            ),
+            "SendChat" => (
+                pb::SendChatResponse::decode(done.response.as_slice())
+                    .ok()
+                    .and_then(|r| r.result),
+                None,
+            ),
+            "InvokeLua" => {
+                let r = pb::InvokeLuaResponse::decode(done.response.as_slice()).ok();
+                value = r.as_ref().and_then(|r| r.value.clone());
+                (r.and_then(|r| r.result), None)
+            }
+            "EvalLua" => {
+                let r = pb::EvalLuaResponse::decode(done.response.as_slice()).ok();
+                value = r.as_ref().and_then(|r| r.value.clone());
+                (r.and_then(|r| r.result), None)
+            }
             // A set-state call has no outcome of its own.
             _ => (None, None),
         };
         Ok(Response::new(GetOutcomeResponse {
             result,
-            value: None,
+            value,
             entity,
             campaign_id: done.campaign,
         }))

@@ -50,6 +50,24 @@ pub enum EffectKind {
     Damage,
     /// `Capture` of the entity.
     Capture(u64),
+    /// `SendMessage`.
+    Message,
+    /// `SendChat`.
+    Chat,
+    /// `InvokeLua`.
+    Invoke,
+    /// `EvalLua`.
+    Eval,
+    /// `Kick`.
+    Kick,
+    /// `Ban`.
+    Ban,
+    /// `Unban`.
+    Unban,
+    /// `ListBans`.
+    Bans,
+    /// `MovePlayer`.
+    Move,
 }
 
 /// A command whose result the call did not wait for.

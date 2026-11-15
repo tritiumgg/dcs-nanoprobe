@@ -32,6 +32,9 @@ use crate::lifecycle::{State, Trigger};
 use crate::sim::wire::{Body, Command, Input, Object, ObjectGone, Seen, gone_reason, lv, opcode};
 use crate::sim::{RawRecord, SimAdapter};
 use crate::stock::{Item, Stock};
+mod adopt;
+mod players;
+
 use crate::store::{
     Authority, CapturedMore, Entry, Journalled, Kind, LeftAs, Loaded, LostPolicy, Outcome, Point,
     Store, UnitState,
@@ -261,6 +264,8 @@ pub struct Reconciler {
     lifecycle_changes: u64,
     /// The extension each `EXTENSION_SET` in flight names, by (epoch, seq).
     ext_sent: HashMap<(u64, u64), String>,
+    /// Marks, drawings, menu items and extension removals (`players.rs`).
+    pins: players::PinState,
     /// Drift destroys (of an entity DCS should not hold) refused or unknown,
     /// by entity, in the loaded generation. At the limit they stop.
     drift_destroy_failures: HashMap<EntityId, u32>,
@@ -297,6 +302,12 @@ pub struct Reconciler {
     adjust_sent: HashMap<(u64, u64), (String, Stock)>,
     /// The rates last written since the last `HELLO`.
     rates_sent: Option<Rates>,
+    /// The units the players occupy, which `SUBSCRIBE` names (`players.rs`).
+    subscribe_want: BTreeSet<EntityId>,
+    /// The set last written since the last `HELLO`.
+    subscribe_sent: Option<BTreeSet<EntityId>>,
+    /// The unmanaged units players occupy, bound by the sidecar (`adopt.rs`).
+    adopted: adopt::Adopted,
     /// The agent's `COUNTRIES` answer for this generation is in the store.
     countries_held: bool,
     /// Results of effects and queries, by (epoch, seq), for the API.
@@ -365,6 +376,7 @@ impl Reconciler {
             lifecycle_changes: 0,
             frames_read: 0,
             ext_sent: HashMap::new(),
+            pins: players::PinState::default(),
             drift_destroy_failures: HashMap::new(),
             spawn_rejected: HashMap::new(),
             spawn_applied: HashMap::new(),
@@ -379,6 +391,9 @@ impl Reconciler {
             own_stock: HashMap::new(),
             adjust_sent: HashMap::new(),
             rates_sent: None,
+            subscribe_want: BTreeSet::new(),
+            subscribe_sent: None,
+            adopted: adopt::Adopted::default(),
             countries_held: false,
             effects: BTreeMap::new(),
             campaign_sent: false,
@@ -425,6 +440,7 @@ impl Reconciler {
     /// Read and fold in every record, then write the commands that close the
     /// difference.
     pub fn step(&mut self, store: &mut Store, sim: &mut dyn SimAdapter) {
+        self.adopt_refresh(store);
         for r in sim.read() {
             self.record(store, &r);
         }
@@ -501,16 +517,19 @@ impl Reconciler {
             Input::Object(o) => {
                 if self.current(store, r.agent_boot) {
                     self.object(store, &o);
+                    self.adopt_object(store, &o);
                 }
             }
             Input::ObjectGone(g) => {
                 if self.current(store, r.agent_boot) {
+                    self.adopt_gone(g.object);
                     self.gone(store, g);
                 }
             }
             Input::Seen(s) => {
                 if self.current(store, r.agent_boot) {
                     self.seen(store, &s);
+                    self.adopt_seen(&s);
                 }
             }
             Input::EnumBegin(e) => {
@@ -566,7 +585,12 @@ impl Reconciler {
                 }
             }
             Input::Event(_) => self.counters.events += 1,
-            Input::Other(_) => self.counters.other += 1,
+            // Read by the API's event log, not by the reconciler.
+            Input::Other(_)
+            | Input::AuthorEvent(_)
+            | Input::Player(_)
+            | Input::Menu(_)
+            | Input::Extension(_) => self.counters.other += 1,
         }
     }
 
@@ -620,6 +644,7 @@ impl Reconciler {
         self.order_held.clear();
         self.order_refused.clear();
         self.forget_generation(store);
+        self.pins_forget(store, false);
         self.spawn_rejected.clear();
         self.spawn_applied.clear();
         self.drift_destroy_failures.clear();
@@ -680,9 +705,11 @@ impl Reconciler {
             self.ext_held.clear();
             self.ext_refused.clear();
             self.forget_generation(store);
+            self.pins_forget(store, true);
             self.run = None;
         }
         self.rates_sent = None;
+        self.subscribe_sent = None;
         self.ext_not_ready.clear();
         self.cmd_not_ready.clear();
         self.agent_boot = agent_boot;
@@ -739,6 +766,13 @@ impl Reconciler {
                 | opcode::PICTURE
                 | opcode::PICTURE_STOP
                 | opcode::CAPTURE
+                | opcode::MESSAGE
+                | opcode::CHAT
+                | opcode::EVAL
+                | opcode::MISSION_LOAD
+                | opcode::MODERATE
+                | opcode::PLAYERS
+                | opcode::BANS
         ) {
             self.effects.insert(
                 (c.epoch, c.seq),
@@ -772,7 +806,27 @@ impl Reconciler {
             | opcode::DAMAGE
             | opcode::SOUND
             | opcode::PICTURE
-            | opcode::PICTURE_STOP => return,
+            | opcode::PICTURE_STOP
+            | opcode::MESSAGE
+            | opcode::CHAT
+            | opcode::EVAL
+            | opcode::MISSION_LOAD
+            | opcode::MODERATE
+            | opcode::PLAYERS
+            | opcode::BANS => return,
+            opcode::EXTENSION_REMOVE => {
+                self.extension_removed(store, c, outcome, res);
+                return;
+            }
+            opcode::MARK_SET
+            | opcode::MARK_REMOVE
+            | opcode::DRAWING_SET
+            | opcode::DRAWING_REMOVE
+            | opcode::MENU_SET
+            | opcode::MENU_REMOVE => {
+                self.pin_resolved(store, c, outcome, res);
+                return;
+            }
             opcode::AIRBASE_OWNER | opcode::WAREHOUSE_SET => {
                 self.base_resolved(c, outcome, res);
                 return;
@@ -827,6 +881,7 @@ impl Reconciler {
                         self.order_held.remove(&id);
                         self.order_refused.remove(&id);
                         self.forget_options(id);
+                        self.pins_group_respawned(store, id);
                         // Spawned again in the same generation, the entity
                         // has new DCS object IDs: an attack order on it is
                         // compiled again at a new revision. After a
@@ -1332,6 +1387,9 @@ impl Reconciler {
         }
         self.counters.enumerations += 1;
         self.enumerated = true;
+        if seen == 0 {
+            self.adopt_orphans(store);
+        }
         // A drift destroy that reached its limit is tried again after each
         // enumeration that still finds the objects.
         self.drift_destroy_failures.clear();
@@ -1384,7 +1442,7 @@ impl Reconciler {
         rev: u64,
         body: Body,
     ) -> bool {
-        let loaded = store.loaded().cloned().expect("ready");
+        let mission_gen = store.loaded().map_or(0, |l| l.mission_gen);
         let control = body.is_control();
         let header = CommandHeader {
             seq: if control { 0 } else { self.next_seq },
@@ -1392,7 +1450,7 @@ impl Reconciler {
             campaign: store.campaign().0,
             entity: entity.0,
             rev,
-            mission_gen: loaded.mission_gen,
+            mission_gen,
         };
         let units = match &body {
             Body::GroupSpawn { group, .. } => unit_names(group, store.campaign(), "units"),
@@ -1408,7 +1466,7 @@ impl Reconciler {
             opcode: op,
             entity,
             rev,
-            mission_gen: loaded.mission_gen,
+            mission_gen,
             position: sim.position_after(op, &payload),
             units,
         };
@@ -1592,15 +1650,17 @@ impl Reconciler {
     }
 
     fn plan(&mut self, store: &mut Store, sim: &mut dyn SimAdapter) {
-        if !self.ready(store) {
-            return;
-        }
-        if !self.campaign_sent {
+        // The campaign is announced as soon as the agent is known, so the
+        // server-scoped commands run with no mission loaded.
+        if self.attached && self.epoch != 0 && !self.campaign_sent {
             let c = store.campaign().0;
             if !self.send(store, sim, EntityId(0), 0, Body::Campaign(c)) {
                 return;
             }
             self.campaign_sent = true;
+        }
+        if !self.ready(store) {
+            return;
         }
         if self.enum_wanted {
             if !self.send(store, sim, EntityId(0), 0, Body::Enumerate) {
@@ -1619,6 +1679,9 @@ impl Reconciler {
                 return;
             }
             self.rates_sent = Some(r);
+        }
+        if !self.adopt_plan(store, sim) || !self.subscribe_plan(store, sim) {
+            return;
         }
         let loaded = store.loaded().expect("ready").clone();
         self.held
@@ -1776,6 +1839,9 @@ impl Reconciler {
             && !self.is_held(self.cmd_not_ready.get(&(EntityId(0), HOLD_COUNTRIES)), 0)
             && !self.send(store, sim, EntityId(0), 0, Body::Countries)
         {
+            return;
+        }
+        if !self.pins_plan(store, sim) {
             return;
         }
         self.bases_plan(store, sim);
@@ -2170,6 +2236,12 @@ impl Reconciler {
         self.ready(store) && self.attached && self.campaign_sent
     }
 
+    /// Whether a server-scoped command can be sent: the agent is attached and
+    /// the campaign announced. No mission needs to run.
+    pub(crate) fn server_ready(&self) -> bool {
+        self.attached && self.epoch != 0 && self.campaign_sent
+    }
+
     /// Add to or take from a warehouse's stock: a `WAREHOUSE_ADJUST`, an
     /// effect, never sent again. Returns the command's (epoch, seq), whose
     /// result [`Reconciler::effect_result`] gives, or None when nothing can
@@ -2298,6 +2370,7 @@ impl Reconciler {
         self.binding
             .values()
             .any(|r| r.unit == entity || r.group == entity)
+            || self.is_adopted(entity)
     }
 
     /// How an effect or a query this reconciler sent ended, by the

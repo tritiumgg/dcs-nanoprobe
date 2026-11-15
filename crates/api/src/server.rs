@@ -8,6 +8,7 @@ use nanoprobe_proto::v1alpha1::commands_service_server::CommandsServiceServer;
 use nanoprobe_proto::v1alpha1::events_service_server::EventsServiceServer;
 use nanoprobe_proto::v1alpha1::extension_service_server::ExtensionServiceServer;
 use nanoprobe_proto::v1alpha1::mission_service_server::MissionServiceServer;
+use nanoprobe_proto::v1alpha1::moderation_service_server::ModerationServiceServer;
 use nanoprobe_proto::v1alpha1::players_service_server::PlayersServiceServer;
 use nanoprobe_proto::v1alpha1::session_service_server::SessionServiceServer;
 use nanoprobe_proto::v1alpha1::world_service_server::WorldServiceServer;
@@ -21,8 +22,8 @@ use crate::auth::Tokens;
 use crate::config::Config;
 use crate::hub::Hub;
 use crate::services::{
-    campaign::Campaigns, commands::Commands, events::Events, mission::Mission, session::Session,
-    unbuilt, world::World,
+    campaign::Campaigns, commands::Commands, events::Events, extension::Extension,
+    mission::Mission, moderation::Moderation, players::Players, session::Session, world::World,
 };
 
 /// The tokens a listener uses: the file when one is configured; none on
@@ -64,8 +65,12 @@ pub fn routes(hub: &Arc<Hub>, tokens: Tokens) -> Result<Routes, String> {
         .add_service(guarded!(CommandsServiceServer, Commands(Arc::clone(hub))))
         .add_service(guarded!(CampaignServiceServer, Campaigns(Arc::clone(hub))))
         .add_service(guarded!(MissionServiceServer, Mission(Arc::clone(hub))))
-        .add_service(guarded!(PlayersServiceServer, unbuilt::Players))
-        .add_service(guarded!(ExtensionServiceServer, unbuilt::Extension))
+        .add_service(guarded!(PlayersServiceServer, Players(Arc::clone(hub))))
+        .add_service(guarded!(ExtensionServiceServer, Extension(Arc::clone(hub))))
+        .add_service(guarded!(
+            ModerationServiceServer,
+            Moderation(Arc::clone(hub))
+        ))
         .add_service(reflection);
     Ok(b.routes())
 }

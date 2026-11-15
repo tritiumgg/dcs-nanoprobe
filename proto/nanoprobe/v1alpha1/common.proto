@@ -162,6 +162,7 @@ enum ErrorReason {
   ERROR_REASON_REVISION_EXPIRED = 24;
   ERROR_REASON_OUTCOME_NOT_FOUND = 25;
   ERROR_REASON_INTERNAL = 26;
+  ERROR_REASON_UNVERIFIED = 27;
 }
 
 // Carried in the details of every failed call's gRPC status.

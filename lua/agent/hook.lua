@@ -23,7 +23,7 @@ local dir = root .. 'versions/' .. build .. '/'
 local logmodule = assert(loadfile(dir .. 'lua/log.lua'))()
 
 -- The agent's interface version this hook was written for.
-local ABI = '9'
+local ABI = '10'
 -- What agent.frame returns.
 local FRAME_RELOAD, FRAME_DISABLED = 1, 2
 
@@ -115,6 +115,14 @@ local CAPABILITIES = {
   'DCS.setUserCallbacks',
   'net.dostring_in',
   'net.load_mission',
+  'net.kick',
+  'net.banlist_add',
+  'net.banlist_add_by_ucid',
+  'net.banlist_remove',
+  'net.banlist_get',
+  'net.force_player_slot',
+  'net.get_player_list',
+  'net.get_player_info',
   'lfs.writedir',
   'lfs.attributes',
   'log.write',
@@ -251,6 +259,8 @@ local shim_loaded = false
 -- chunk with a local and a test costs about 10 µs more (LIVE, S10). The hook
 -- calls it only while a shim is loaded.
 local PUMP = '__nanoprobe_shim.pump()'
+-- The simulation stop: the shim stops the extensions.
+local STOP = '__nanoprobe_shim.simulation_stop()'
 
 local function shim_start()
   local chunk = string.format(BOOT, dll, dir .. 'lua/shim.lua', root, dir)
@@ -336,7 +346,163 @@ local function cross(state, chunk)
   return text
 end
 
+-- The path of a MISSION_LOAD the dispatch handed back: the hook calls
+-- `net.load_mission` with it after `finish`, and takes no further command in
+-- the frame.
+local pending_load
+
+
+-- A DCS call's error text with every occurrence of `ucid` removed: a ucid
+-- never goes into a RESULT message (spec/commands.md, "Player and ban
+-- queries").
+local function scrub(text, ucid)
+  text = tostring(text)
+  if type(ucid) ~= 'string' or ucid == '' then
+    return text
+  end
+  local out, from = {}, 1
+  while true do
+    local a, b = text:find(ucid, from, true)
+    if not a then
+      break
+    end
+    out[#out + 1] = text:sub(from, a - 1)
+    out[#out + 1] = '<ucid>'
+    from = b + 1
+  end
+  out[#out + 1] = text:sub(from)
+  return table.concat(out)
+end
+
+-- A value of a player's or a ban's fields the agent can carry: a string, a
+-- number or a boolean, else nothing.
+local function plain(v)
+  local t = type(v)
+  if t == 'string' or t == 'number' or t == 'boolean' then
+    return v
+  end
+end
+
+-- A slot as text: a number is its decimal text, anything but a string is ''.
+local function slot_text(v)
+  if type(v) == 'number' then
+    return string.format('%d', v)
+  end
+  return type(v) == 'string' and v or ''
+end
+
+-- The connection ID of the server itself, which has no player record.
+local SERVER = 1
+
+-- MODERATE's actions (spec/commands.md, "Codes: moderation").
+local KICK, BAN, UNBAN, SLOT = 1, 2, 3, 4
+
 local HANDLERS = {
+  -- CHAT: everyone for player 0, else one connection. DCS returns nothing
+  -- useful, so APPLIED says only that the call did not raise.
+  [55] = function(a)
+    local text, player = a.text, a.player
+    if type(text) ~= 'string' or text == '' or #text > 1024 then
+      return DCS_REFUSED, nil, 'the text is not a string of 1 to 1,024 bytes'
+    end
+    if type(player) ~= 'number' or player < 0 or player ~= math.floor(player) then
+      return DCS_REFUSED, nil, 'the player is not a connection ID'
+    end
+    local ok, err
+    if player == 0 then
+      ok, err = pcall(net.send_chat, text, true)
+    else
+      ok, err = pcall(net.send_chat_to, text, player)
+    end
+    if not ok then
+      return DCS_REFUSED, nil, tostring(err)
+    end
+    return APPLIED
+  end,
+  -- MISSION_LOAD: answers APPLIED and hands the path to `run_commands`; the
+  -- load happens after `finish`.
+  [56] = function(a)
+    local path = a.path
+    if type(path) ~= 'string' or path == '' or #path > 1024 then
+      return DCS_REFUSED, nil, 'the path is not a string of 1 to 1,024 bytes'
+    end
+    pending_load = path
+    return APPLIED
+  end,
+  -- MODERATE: the player is checked by ucid first, since a connection ID
+  -- can come to belong to someone else. A call that raises or returns false
+  -- is DCS_REFUSED.
+  [62] = function(a)
+    local action, player, ucid = a.action, a.player, a.ucid
+    local names_player = action == KICK or action == SLOT or (action == BAN and player ~= 0)
+    if names_player then
+      local ok, held = pcall(net.get_player_info, player, 'ucid')
+      if not ok then
+        return DCS_REFUSED, nil, 'DCS could not read the player: ' .. scrub(held, ucid)
+      end
+      if held == nil or held ~= ucid then
+        return NOT_BOUND, nil, 'no connected player with that ucid'
+      end
+    end
+    local ok, returned
+    if action == KICK then
+      ok, returned = pcall(net.kick, player, a.reason)
+    elseif action == BAN and player ~= 0 then
+      ok, returned = pcall(net.banlist_add, player, a.seconds, a.reason)
+    elseif action == BAN then
+      ok, returned = pcall(net.banlist_add_by_ucid, ucid, a.seconds, a.reason)
+    elseif action == UNBAN then
+      ok, returned = pcall(net.banlist_remove, ucid)
+    elseif action == SLOT then
+      ok, returned = pcall(net.force_player_slot, player, a.side, a.slot)
+    else
+      return DCS_REFUSED, nil, 'not a moderation action'
+    end
+    if not ok then
+      return DCS_REFUSED, nil, scrub(returned, ucid)
+    elseif returned == false then
+      return DCS_REFUSED, nil, 'DCS returned false'
+    end
+    return APPLIED
+  end,
+  -- PLAYERS: every connected player but the server.
+  [66] = function()
+    local ok, ids = pcall(net.get_player_list)
+    if not ok or type(ids) ~= 'table' then
+      return DCS_REFUSED, nil, 'DCS gave no player list'
+    end
+    local out = {}
+    for _, id in ipairs(ids) do
+      if id ~= SERVER then
+        local got, info = pcall(net.get_player_info, id)
+        if got and type(info) == 'table' then
+          out[#out + 1] = {
+            id = id, ucid = plain(info.ucid), name = plain(info.name),
+            side = plain(info.side), slot = slot_text(info.slot),
+          }
+        end
+      end
+    end
+    return APPLIED, out
+  end,
+  -- BANS: the ban list, each entry with its ucid, name, banned_until and
+  -- reason only.
+  [67] = function()
+    local ok, list = pcall(net.banlist_get)
+    if not ok or type(list) ~= 'table' then
+      return DCS_REFUSED, nil, 'DCS gave no ban list'
+    end
+    local out = {}
+    for _, entry in ipairs(list) do
+      if type(entry) == 'table' then
+        out[#out + 1] = {
+          ucid = plain(entry.ucid), name = plain(entry.name),
+          banned_until = plain(entry.banned_until), reason = plain(entry.reason),
+        }
+      end
+    end
+    return APPLIED, out
+  end,
   -- PICTURE: the target's mission ID from the server state for a group or a
   -- unit, then the mission state's picture function from a fixed template
   -- whose every part was checked above or is a number checked here.
@@ -367,6 +533,31 @@ local HANDLERS = {
     local first = ''
     if scope == 2 or scope == 5 then
       first = a.target .. ', '
+    elseif scope == 3 and a.group_id ~= nil then
+      -- The agent's binding holds the group: its DCS group ID is the mission
+      -- ID the picture function takes.
+      if type(a.group_id) ~= 'string' or #a.group_id > 10 or not a.group_id:find(INT_TEXT) then
+        return DCS_REFUSED, nil, 'the group ID is not formatted'
+      end
+      first = a.group_id .. ', '
+    elseif scope == 4 and a.row ~= nil then
+      -- The agent's binding holds the unit: the shim reads the ID of the
+      -- object in the row.
+      if type(a.row) ~= 'string' or #a.row > 10 or not a.row:find(INT_TEXT) then
+        return DCS_REFUSED, nil, 'the row is not formatted'
+      end
+      local text, err = cross('server', 'return __nanoprobe_shim.row_id(' .. a.row .. ')')
+      if not text then
+        return DCS_REFUSED, nil, err
+      end
+      if text == '' then
+        return NOT_BOUND, nil, 'no object in the row'
+      end
+      local id = tonumber(text)
+      if not id or id ~= math.floor(id) or id < 0 or id >= 2 ^ 53 then
+        return DCS_REFUSED, nil, 'the object has no integer mission ID'
+      end
+      first = string.format('%.0f, ', id)
     elseif scope == 3 or scope == 4 then
       local name = a.name
       if name == '' then
@@ -472,7 +663,64 @@ local function run_commands()
         agent.command_done(code, message, value)
       end
     end
+    -- A mission load takes no further command in this frame.
+    if pending_load then
+      return
+    end
   end
+end
+
+-- Start the load a MISSION_LOAD handed back. `net.load_mission` returns at
+-- once and DCS loads on a later frame; what it returned is logged, because a
+-- load DCS cannot do shows nowhere else.
+local function start_load()
+  local path = pending_load
+  pending_load = nil
+  if not path then
+    return
+  end
+  local ok, returned = pcall(net.load_mission, path)
+  file.write(ok and 'info' or 'error', 'mission load requested', { path = path, returned = tostring(returned) })
+end
+
+-- What the hook last held for each connected player, by connection ID: the
+-- fields `net.get_player_info` gave, for a DISCONNECT, whose callback is not
+-- relied on to answer it.
+local players = {}
+
+-- The player events (spec/records.md, "Layout: PLAYER").
+local CONNECT, DISCONNECT, CHANGE_SLOT, CHAT = 1, 2, 3, 4
+
+-- The seat of a slot ID: N - 1 for a `_N` suffix, else 0.
+local function seat_of(slot)
+  local n = type(slot) == 'string' and slot:match('_(%d+)$')
+  n = n and tonumber(n)
+  if n and n >= 1 then
+    return n - 1
+  end
+  return 0
+end
+
+-- A player's fields from DCS, or nil when it has none to give.
+local function read_player(id)
+  local ok, info = pcall(net.get_player_info, id)
+  if not ok or type(info) ~= 'table' or type(info.ucid) ~= 'string' or info.ucid == '' then
+    return nil
+  end
+  return {
+    client = info.ucid,
+    name = type(info.name) == 'string' and info.name or '',
+    side = type(info.side) == 'number' and info.side or 0,
+    slot = slot_text(info.slot),
+  }
+end
+
+-- Write the player record. The server's own connection writes none.
+local function send_player(event, id, p, text)
+  if not linked or type(id) ~= 'number' or id == SERVER then
+    return
+  end
+  agent.player(event, id, p.side, seat_of(p.slot), p.client, p.name, p.slot, text or '')
 end
 
 local callbacks = {}
@@ -502,7 +750,60 @@ callbacks.onSimulationStop = guard('onSimulationStop', function()
   if linked then
     agent.lifecycle('stopping', '', mission_file(), DCS.getRealTime(), DCS.getModelTime())
   end
+  -- The last callback in which the mission is still there: the extensions
+  -- stop here, since no frame follows (spec/commands.md, "Running").
+  if shim_loaded then
+    local text, ok = net.dostring_in('server', STOP)
+    if not ok then
+      file.write('error', 'extensions not stopped', { error = tostring(text) })
+    end
+  end
   file.write('info', 'simulation stop')
+end)
+
+callbacks.onPlayerConnect = guard('onPlayerConnect', function(id)
+  if id == SERVER then
+    return
+  end
+  local p = read_player(id)
+  if p then
+    players[id] = p
+    send_player(CONNECT, id, p)
+  end
+end)
+
+callbacks.onPlayerDisconnect = guard('onPlayerDisconnect', function(id, err_code)
+  -- What the hook held; a player who was connected before the hook loaded is
+  -- read now, which DCS may no longer answer.
+  local p = players[id] or read_player(id)
+  players[id] = nil
+  if p then
+    send_player(DISCONNECT, id, p, type(err_code) == 'number' and string.format('%d', err_code) or '')
+  end
+end)
+
+callbacks.onPlayerChangeSlot = guard('onPlayerChangeSlot', function(id)
+  if id == SERVER then
+    return
+  end
+  local p = read_player(id)
+  if p then
+    players[id] = p
+    send_player(CHANGE_SLOT, id, p)
+  end
+end)
+
+-- Never returns a value: a returned value would decide the matter for every
+-- other hook (ED-CODE, API/Sim_ControlAPI.md).
+callbacks.onPlayerTrySendChat = guard('onPlayerTrySendChat', function(id, message)
+  if id == SERVER then
+    return
+  end
+  local p = read_player(id)
+  if p then
+    players[id] = p
+    send_player(CHAT, id, p, type(message) == 'string' and message or '')
+  end
 end)
 
 callbacks.onSimulationFrame = guard('onSimulationFrame', function()
@@ -522,6 +823,7 @@ callbacks.onSimulationFrame = guard('onSimulationFrame', function()
         end
       end
       agent.finish()
+      start_load()
     end
     if code == nil then
       -- A caught panic disabled the agent: every entry returns nothing. The

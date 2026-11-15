@@ -141,10 +141,18 @@ A *managed* entity was created by the platform from a spec in the store. The rec
 keeps it as the spec says.
 
 An *unmanaged* entity was not: a player aircraft, a Mission Editor unit, a
-dynamic-spawn aircraft. The agent finds it by events and by the full enumeration, and
-the sidecar adopts it with a new `EntityId`. It is observed and reported, never
-reconciled, ordered or destroyed by the reconciler. A controller may still send it an
-effect.
+dynamic-spawn aircraft. The agent finds it by events and by the full enumeration. It is
+observed and reported, never reconciled, ordered or destroyed by the reconciler.
+
+The sidecar adopts the units players occupy, and the group of each, with a new
+`EntityId` and `BIND` (spec/commands.md). A controller may send an adopted unit or
+group an effect, and may give an adopted group marks, drawings and menu items. Other
+unmanaged objects are observed and reported with no `EntityId`. An adoption lasts for
+the agent's boot and the mission generation; after a sidecar restart the sidecar reads
+it back from the agent's `OBJECT` records. When an adoption ends, the sidecar removes
+from the store every mark, drawing and menu item whose target is that group, as a
+journalled removal: a player's group ends with its generation, and so do the items
+given to it.
 
 ## Positions and theaters
 
@@ -355,6 +363,31 @@ Those events go to a log in the server-scoped store, with its own sequence numbe
 the retention of spec/config.md. The Events service reads it when the request asks for
 the server log.
 
+**The server-scoped player file.** The player-key secret and the key-to-ucid pairs
+("Players") are kept in `players.json`, directly in the store's
+directory beside the campaign folders. It is written whole to a temporary file and
+renamed into place, with mode 0600. Campaign backups do not include it, and no
+diagnostics bundle reads it. With persistence off it is not written, and the keys last
+as long as the sidecar process. This file is the server-scoped store's current form for
+players.
+
+**Kill attribution.** DCS sends a weapon kill's `KILL` and `SCORE` with the late death
+event, up to 77.1 s after the object stops existing (LIVE,
+docs/results/2026-11-14-e38-life-and-ammunition.md), when the
+victim and maybe the killer have left the agent's table. The sidecar keeps, per mission
+generation, a memory of the rows that left: object ID, `EntityId`, type, coalition, the
+player keys that occupied it, and the time it left. It resolves a late event's object
+IDs from that memory, stamps the players who occupied them before they left, and
+dates the kill from the victim's `S_EVENT_BDA` when one came, else from the time its
+row left, never from the late event's own time. The event keeps DCS's time as well.
+
+**Launch attribution.** At `S_EVENT_SHOT` the sidecar maps the weapon's object ID to
+the shooter's occupants. A `HIT` or `KILL` that names that weapon carries those keys in
+`launch_players`, with the rule `WEAPON`. A gun's hit names no weapon object; it, and a
+weapon the sidecar never saw shot, fall back to the initiator's occupants before it
+left, with the rule `INITIATOR`. `initiator_players` is never rewritten. That `SHOT`
+and `KILL` carry the same weapon object ID is UNVERIFIED (E31, E32).
+
 With persistence off (spec/config.md) the stores are in memory. They last as long as
 the sidecar process. The author reads state with the capture call and writes it back
 as specs after a restart.
@@ -385,4 +418,31 @@ platform handles has one is UNVERIFIED (step S18 checks the tables it restores).
 | Seat occupancy | Player key, unit `EntityId`, seat, from, to. A multi-crew aircraft has several. |
 
 Every event is stamped with the player keys occupying its initiator and its target at
-that moment. How the player key is derived is fixed in S16 (E31).
+that moment.
+
+**Player key.** The key is the first 16 bytes of HMAC-SHA-256 of the client's ucid,
+keyed with a 32-byte random secret, written as 32 lowercase hex digits. The sidecar
+makes the secret once per server and keeps it in the server-scoped store and its
+backups, never in a bundle. An operator may give several servers the same secret so a
+player has one key on all of them. Without the secret a key does not tell which ucid it
+came from, and the same ucid has unrelated keys on servers with different secrets.
+
+The sidecar keeps the map from key to ucid in the server-scoped store, so the
+Moderation service can name a player by key. A raw ucid is accepted only as an admin's
+input, to ban or unban a ucid. The API, the event stream, logs, metrics and
+bundles carry keys and never a ucid; a bundle redacts any text with a ucid's form, 32 hex
+digits.
+
+**Seat occupancy.** A `SLOT` record (spec/records.md) gives a player's slot ID; an
+`S_EVENT_BIRTH` gives a unit's object ID and its mission ID (`INITIATOR_MISSION_ID`).
+The sidecar joins a slot to a birth whose mission ID equals the slot ID without its
+`_N` seat suffix, in either order: a slot held when the birth comes, or a birth seen
+before the slot. A held slot attaches to every later birth with its mission ID, so a
+respawn in the same slot is covered. A slot change or a disconnect ends the occupancy;
+so does the unit leaving the table. A slot that matches no birth leaves the player's
+unit unknown: the sidecar counts it and does not guess. The sidecar subscribes each
+occupied unit to the higher sampling rate (spec/sampling.md) and reports the fuel a
+player used over a campaign from those vitals samples.
+
+**Menu attribution.** A menu selection names the players who could have made it
+(spec/records.md, "Layout: MENU").

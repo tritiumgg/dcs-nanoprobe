@@ -11,16 +11,19 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use nanoprobe_agent_link::config::{AgentToml, read_token};
+use nanoprobe_agent_link::revisions::RevKey;
 pub use nanoprobe_agent_link::sampler::{Found, Read};
 use nanoprobe_agent_link::sampler::{Rates, Report, Sampler, clock_cost};
 use nanoprobe_agent_link::{Admit, Link, Options};
 use nanoprobe_transport::codec::{Lv, Reader, Writer};
 use nanoprobe_transport::layout::{
-    HandlerState, kind, lifecycle, opcode as op, opcode_row, result,
+    HandlerState, kind, lifecycle, moderation, opcode as op, opcode_row, result,
 };
 use nanoprobe_transport::log::{Level, Value};
 use nanoprobe_transport::names::{self, Kind};
-use nanoprobe_transport::records::{Airbase, Bind, CommandHeader, Event, Log, Subscribe};
+use nanoprobe_transport::records::{
+    Airbase, AuthorEvent, Bind, CommandHeader, Event, ExtensionStats, Log, Menu, Player, Subscribe,
+};
 
 use crate::state;
 
@@ -88,6 +91,9 @@ struct Driver {
     waiting: bool,
     /// A command with a `hook` handler waits at the ring's head.
     hook_waiting: bool,
+    /// The shim reported an extension with work for the pump: a hook for
+    /// events or frames, a timer, or a callback waiting.
+    ext_active: bool,
     /// This frame's pump is for commands only: it samples nothing.
     forced: bool,
     /// The pump called `command` at least once.
@@ -291,6 +297,7 @@ pub fn start(root: &Path, dcs_version: &str) -> Result<String, String> {
         syscall: false,
         waiting: false,
         hook_waiting: false,
+        ext_active: false,
         forced: false,
         pumped: false,
         handler_time: Duration::ZERO,
@@ -491,7 +498,12 @@ pub fn frame(
         // A command with a `server` handler at the ring's head asks for a
         // pump of its own, never on the system-call frame (spec/commands.md,
         // "Handlers").
-        let commands = d.open && d.waiting && d.shim && !d.syscall;
+        // An extension with work asks for a pump of its own on every frame
+        // of a running mission, which is commanded work.
+        let extensions = d.ext_active
+            && [lifecycle::RUNNING as u32, lifecycle::PAUSED as u32]
+                .contains(&d.link.stamps().lifecycle);
+        let commands = d.open && (d.waiting || extensions) && d.shim && !d.syscall;
         // A command with a `hook` handler at the head: the hook runs it, after
         // the pump if there is one, and ends the frame (spec/commands.md,
         // "Handlers"). Never on the system-call frame.
@@ -799,14 +811,20 @@ enum Who {
 }
 
 /// The state a sequenced command's Lua handler runs in, or None when Rust
-/// answers it. `CHAT` and `MISSION_LOAD` have no hook handler yet: they are
-/// answered `UNKNOWN_OPCODE` in Rust (spec/commands.md, "Handlers").
+/// answers it (an opcode the agent has no handler for is `UNKNOWN_OPCODE`).
 fn handler_state(opcode: u16) -> Option<HandlerState> {
     if has_server_handler(opcode) {
         Some(HandlerState::Server)
     } else if matches!(
         u64::from(opcode),
-        op::DAMAGE | op::PICTURE | op::PICTURE_STOP
+        op::DAMAGE
+            | op::PICTURE
+            | op::PICTURE_STOP
+            | op::CHAT
+            | op::MISSION_LOAD
+            | op::MODERATE
+            | op::PLAYERS
+            | op::BANS
     ) {
         Some(HandlerState::Hook)
     } else {
@@ -907,7 +925,9 @@ fn lua_command(d: &mut Driver, opcode: u16, payload: &[u8], in_pump: bool) -> St
             message = "no extension of that name";
             result::LUA_ERROR
         }
-        Admit::Run => match arguments(opcode, &h, body) {
+        Admit::Run => match arguments_with(opcode, &h, body, &|scope, target| {
+            bound_target(&d.sampler, scope, target)
+        }) {
             Some(args) => {
                 d.staged = args;
                 d.outstanding = Some(Outstanding {
@@ -988,7 +1008,52 @@ fn lv_bytes<'a>(rd: &mut Reader<'a>, body: &'a [u8]) -> Option<&'a [u8]> {
 /// the fields of its layout by name (spec/commands.md, "Handler arguments"),
 /// and the platform names built from the header. `None` when the payload does
 /// not decode.
+#[cfg(test)]
 fn arguments(opcode: u16, h: &CommandHeader, body: &[u8]) -> Option<Vec<u8>> {
+    arguments_with(opcode, h, body, &|_, _| None)
+}
+
+/// What the agent's binding holds for the entity a `GROUP` or `UNIT` scope
+/// names: the DCS group ID, or the slot of the unit's row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Bound {
+    Group(u64),
+    Row(u32),
+}
+
+/// The binding lookup of a command's arguments: by scope code and target.
+type Lookup<'a> = &'a dyn Fn(u32, u64) -> Option<Bound>;
+
+/// What the sampler's rows hold for a `GROUP` (3) or `UNIT` (4) target.
+fn bound_target(sampler: &Sampler, scope: u32, target: u64) -> Option<Bound> {
+    match scope {
+        3 => sampler.group_id_of_entity(target).map(Bound::Group),
+        4 => sampler.slot_of_entity(target).map(Bound::Row),
+        _ => None,
+    }
+}
+
+/// Adds what a bound target is to the arguments: `group_id` for a group,
+/// `row` for a unit. `text` writes the number as text.
+fn push_bound(f: &mut Fields, bound: Option<Bound>, text: bool) {
+    let (key, n) = match bound {
+        Some(Bound::Group(id)) => ("group_id", id),
+        Some(Bound::Row(slot)) => ("row", u64::from(slot)),
+        None => return,
+    };
+    if text {
+        f.text(key, &n.to_string());
+    } else {
+        f.num(key, n as f64);
+    }
+}
+
+fn arguments_with(
+    opcode: u16,
+    h: &CommandHeader,
+    body: &[u8],
+    held: Lookup<'_>,
+) -> Option<Vec<u8>> {
     // A name is built only for an entity in range (spec/world.md, "Names").
     let named = matches!(
         u64::from(opcode),
@@ -1078,7 +1143,10 @@ fn arguments(opcode: u16, h: &CommandHeader, body: &[u8]) -> Option<Vec<u8>> {
             f.num("scope", f64::from(scope));
             f.num("target", target as f64);
             if let Some(name) = name {
-                f.text("name", &name);
+                match held(scope, target) {
+                    bound @ Some(_) => push_bound(&mut f, bound, false),
+                    None => f.text("name", &name),
+                }
             }
             f.text("file", file);
         }
@@ -1106,7 +1174,10 @@ fn arguments(opcode: u16, h: &CommandHeader, body: &[u8]) -> Option<Vec<u8>> {
             f.text("scope", &scope.to_string());
             f.text("target", &target.to_string());
             if let Some(name) = name {
-                f.text("name", &name);
+                match held(scope, target) {
+                    bound @ Some(_) => push_bound(&mut f, bound, true),
+                    None => f.text("name", &name),
+                }
             }
             f.text("file", file);
             f.text("seconds", &format!("{seconds:.4}"));
@@ -1123,6 +1194,108 @@ fn arguments(opcode: u16, h: &CommandHeader, body: &[u8]) -> Option<Vec<u8>> {
                 &platform_name(Kind::Static, h.campaign, h.entity),
             );
         }
+        op::EXTENSION_REMOVE => f.text("name", rd.str().ok()?),
+        op::MARK_REMOVE | op::DRAWING_REMOVE | op::MENU_REMOVE => {
+            f.text("entity", &h.entity.to_string());
+        }
+        op::MARK_SET => {
+            let scope = rd.u32().ok()?;
+            let read_only = rd.u32().ok()?;
+            let target = rd.u64().ok()?;
+            let (x, y, z) = (rd.f64().ok()?, rd.f64().ok()?, rd.f64().ok()?);
+            let text = rd.str().ok()?;
+            f.text("entity", &h.entity.to_string());
+            scoped(&mut f, scope, target, h, &[1, 2, 3], held)?;
+            f.push("read_only", &Lv::Bool(read_only != 0));
+            f.num("x", x);
+            f.num("y", y);
+            f.num("z", z);
+            f.text("text", text);
+        }
+        op::DRAWING_SET => {
+            let scope = rd.u32().ok()?;
+            let shape = rd.u32().ok()?;
+            let target = rd.u64().ok()?;
+            f.text("entity", &h.entity.to_string());
+            scoped(&mut f, scope, target, h, &[1, 2], held)?;
+            f.num("shape", f64::from(shape));
+            f.raw("args", lv_bytes(&mut rd, body)?);
+        }
+        op::MENU_SET => {
+            let parent = rd.u64().ok()?;
+            let target = rd.u64().ok()?;
+            let scope = rd.u32().ok()?;
+            let submenu = rd.u32().ok()?;
+            let text = rd.str().ok()?;
+            f.text("entity", &h.entity.to_string());
+            f.text("parent", &parent.to_string());
+            scoped(&mut f, scope, target, h, &[1, 2, 3], held)?;
+            f.push("submenu", &Lv::Bool(submenu != 0));
+            f.text("text", text);
+        }
+        op::MESSAGE => {
+            let scope = rd.u32().ok()?;
+            let clear = rd.u32().ok()?;
+            let target = rd.u64().ok()?;
+            let seconds = rd.f64().ok()? + 0.0;
+            let text = rd.str().ok()?;
+            if !(seconds.is_finite() && (0.0..=MESSAGE_SECONDS_MAX).contains(&seconds)) {
+                return None;
+            }
+            scoped(&mut f, scope, target, h, &[1, 2, 3, 4, 5], held)?;
+            f.push("clear", &Lv::Bool(clear != 0));
+            f.num("seconds", seconds);
+            f.text("text", text);
+        }
+        op::CHAT => {
+            let player = rd.u32().ok()?;
+            rd.skip(4).ok()?;
+            let text = rd.str().ok()?;
+            if text.is_empty() || text.len() > CHAT_BYTES_MAX {
+                return None;
+            }
+            f.num("player", f64::from(player));
+            f.text("text", text);
+        }
+        op::MISSION_LOAD => {
+            let path = rd.str().ok()?;
+            if path.is_empty() || path.len() > PATH_BYTES_MAX {
+                return None;
+            }
+            f.text("path", path);
+        }
+        op::EVAL => f.raw("source", lv_bytes(&mut rd, body)?),
+        op::MODERATE => {
+            let action = rd.u32().ok()?;
+            let player = rd.u32().ok()?;
+            let side = rd.u32().ok()?;
+            rd.skip(4).ok()?;
+            let seconds = rd.f64().ok()? + 0.0;
+            let ucid = rd.str().ok()?;
+            let slot = rd.str().ok()?;
+            let reason = rd.str().ok()?;
+            let known = [
+                moderation::KICK,
+                moderation::BAN,
+                moderation::UNBAN,
+                moderation::SLOT,
+            ];
+            // Player 1 is the server itself.
+            if !known.contains(&u64::from(action))
+                || ucid.is_empty()
+                || !(seconds.is_finite() && seconds >= 0.0)
+                || player == SERVER_PLAYER
+            {
+                return None;
+            }
+            f.num("action", f64::from(action));
+            f.num("player", f64::from(player));
+            f.num("side", f64::from(side));
+            f.num("seconds", seconds);
+            f.text("ucid", ucid);
+            f.text("slot", slot);
+            f.text("reason", reason);
+        }
         _ => {}
     }
     Some(f.finish())
@@ -1134,6 +1307,14 @@ const PICTURE_SECONDS_MAX: f64 = 86_400.0;
 const PICTURE_SIZE_MIN: f64 = 0.0001;
 /// The largest `PICTURE` size.
 const PICTURE_SIZE_MAX: f64 = 10_000.0;
+/// The longest a `MESSAGE` stays, in seconds.
+const MESSAGE_SECONDS_MAX: f64 = 86_400.0;
+/// The DCS connection ID of the server itself.
+const SERVER_PLAYER: u32 = 1;
+/// The longest `CHAT` text, in bytes.
+const CHAT_BYTES_MAX: usize = 1024;
+/// The longest `MISSION_LOAD` path, in bytes.
+const PATH_BYTES_MAX: usize = 1024;
 /// The largest target a Lua number holds exactly.
 const EXACT_TARGET_MAX: u64 = 1 << 53;
 
@@ -1155,6 +1336,34 @@ fn scope_name(scope: u32, target: u64, h: &CommandHeader) -> Option<Option<Strin
         }
         _ => None,
     }
+}
+
+/// Adds a scoped command's `scope`, `name` and `target` to its arguments:
+/// `name` is the platform name of a `GROUP` or `UNIT` target and empty
+/// otherwise, `target` is a number for `COALITION`, `GROUP` and `COUNTRY` and
+/// absent otherwise. A `GROUP` or `UNIT` target the agent's binding holds adds
+/// `group_id` or `row` (see [`Bound`]) and its `name` is empty. `None` when the scope is not one of `allowed` or the target is
+/// out of range for it (spec/commands.md, "Handler arguments").
+fn scoped(
+    f: &mut Fields,
+    scope: u32,
+    target: u64,
+    h: &CommandHeader,
+    allowed: &[u32],
+    held: Lookup<'_>,
+) -> Option<()> {
+    if !allowed.contains(&scope) {
+        return None;
+    }
+    let name = scope_name(scope, target, h)?.unwrap_or_default();
+    let bound = held(scope, target);
+    f.num("scope", f64::from(scope));
+    if matches!(scope, 2 | 3 | 5) {
+        f.num("target", target as f64);
+    }
+    f.text("name", if bound.is_some() { "" } else { &name });
+    push_bound(f, bound, false);
+    Some(())
 }
 
 /// What a spawn's result carries: the DCS ID the handler returned becomes the
@@ -1596,6 +1805,110 @@ pub fn event(event: Event, started: Instant) -> u32 {
         freed
     })
     .unwrap_or(0)
+}
+
+/// Queue a `PLAYER` record from the hook's callbacks. An event-class record:
+/// it is held when the ring is full, and a loss is a `GAP`.
+pub fn player(record: &Player) {
+    with(|d| d.link.enqueue(kind::PLAYER as u16, record.encode()));
+}
+
+/// Queue a `MENU` record from the shim's menu callback.
+pub fn menu(record: &Menu) {
+    with(|d| d.link.enqueue(kind::MENU as u16, record.encode()));
+}
+
+/// The most objects `emit` takes.
+pub const EMIT_OBJECTS_MAX: usize = 16;
+/// The longest `emit` name, in bytes.
+pub const EMIT_NAME_MAX: usize = 128;
+/// The most bytes an `emit` payload encodes to.
+pub const EMIT_PAYLOAD_MAX: usize = 16 * 1024;
+
+/// Queue an `AUTHOR_EVENT` record from `emit`. The reason is `disabled` with
+/// raw Lua off or no link, and `objects` for an object the agent's table
+/// does not hold (spec/commands.md, "emit"). The caller has checked the name
+/// and the payload.
+pub fn emit(name: &str, objects: &[u64], payload: Lv) -> Result<(), &'static str> {
+    with(|d| {
+        if !d.link.raw_lua() {
+            return Err("disabled");
+        }
+        if objects.iter().any(|&o| d.sampler.slot_of(o).is_none()) {
+            return Err("objects");
+        }
+        let record = AuthorEvent {
+            objects: objects.to_vec(),
+            name: name.into(),
+            payload,
+        };
+        d.link.enqueue(kind::AUTHOR_EVENT as u16, record.encode());
+        Ok(())
+    })
+    .unwrap_or(Err("disabled"))
+}
+
+/// Whether raw Lua is on, for `emit`'s fast refusal.
+pub fn raw_lua() -> bool {
+    with(|d| d.link.raw_lua()).unwrap_or(false)
+}
+
+/// Write one `EXTENSION` record in the frame in progress. The record carries
+/// the agent's applied revision of the extension, whatever the shim held.
+/// Returns whether it was written: a sample is dropped and counted when the
+/// ring has no room, and none is written outside a frame.
+pub fn extension(mut stats: ExtensionStats) -> bool {
+    with(|d| {
+        if !d.open {
+            return false;
+        }
+        stats.rev = d
+            .link
+            .revisions()
+            .get(&RevKey::Extension(stats.name.as_bytes().to_vec()));
+        d.link.sample(kind::EXTENSION as u16, &stats.encode())
+    })
+    .unwrap_or(false)
+}
+
+/// What the shim needs to run extension hooks in this frame.
+pub struct ExtensionBudget {
+    /// Microseconds of the frame's commanded-work budget left.
+    pub left_us: f64,
+    /// The active campaign, as decimal text.
+    pub campaign: String,
+    /// Raw Lua is on.
+    pub raw_lua: bool,
+    /// The lifecycle state's code.
+    pub lifecycle: u32,
+}
+
+/// Charge `spent_us` of extension hook time to the frame's commanded work, as
+/// a handler's time is, and report what is left of the budget. `active`, when
+/// given, says whether any extension has work for the next pump.
+pub fn extension_budget(spent_us: f64, active: Option<bool>) -> ExtensionBudget {
+    with(|d| {
+        if let Some(active) = active {
+            d.ext_active = active;
+        }
+        if spent_us.is_finite() && spent_us > 0.0 {
+            let spent = Duration::from_secs_f64(spent_us.min(1e9) / 1e6);
+            d.spent += spent;
+            handled(d, spent);
+        }
+        ExtensionBudget {
+            left_us: d.commanded.saturating_sub(d.spent).as_secs_f64() * 1e6,
+            campaign: d.link.stamps().campaign.to_string(),
+            raw_lua: d.link.raw_lua(),
+            lifecycle: d.link.stamps().lifecycle,
+        }
+    })
+    .unwrap_or(ExtensionBudget {
+        left_us: 0.0,
+        campaign: String::new(),
+        raw_lua: false,
+        lifecycle: 0,
+    })
 }
 
 /// The DCS event IDs that remove a row, from the shim's `world.event`.
@@ -2221,6 +2534,334 @@ mod tests {
         }
         // A DAMAGE payload one byte short.
         assert!(arguments(op::DAMAGE as u16, &h, &[0; 7]).is_none());
+    }
+
+    fn mark(scope: u32, target: u64) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u32(scope).u32(1).u64(target);
+        w.f64(1.5).f64(2.5).f64(-3.5).str("hi");
+        w.finish()
+    }
+
+    fn message(scope: u32, target: u64, seconds: f64) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u32(scope).u32(1).u64(target).f64(seconds).str("hello");
+        w.finish()
+    }
+
+    #[test]
+    fn marks_drawings_and_menus_decode_with_their_scope() {
+        let h = header(71, 36);
+        let entity = ("entity", s("36"));
+        expect(
+            op::MARK_SET,
+            &h,
+            &mark(1, 0),
+            vec![
+                entity.clone(),
+                ("scope", n(1.0)),
+                ("name", s("")),
+                ("read_only", Lv::Bool(true)),
+                ("x", n(1.5)),
+                ("y", n(2.5)),
+                ("z", n(-3.5)),
+                ("text", s("hi")),
+            ],
+        );
+        expect(
+            op::MARK_SET,
+            &h,
+            &mark(2, 2),
+            vec![
+                entity.clone(),
+                ("scope", n(2.0)),
+                ("target", n(2.0)),
+                ("name", s("")),
+                ("read_only", Lv::Bool(true)),
+                ("x", n(1.5)),
+                ("y", n(2.5)),
+                ("z", n(-3.5)),
+                ("text", s("hi")),
+            ],
+        );
+        let got = args(op::MARK_SET, &h, &mark(3, 37)).expect("group mark");
+        assert!(got.contains(&("name".into(), s("np!enPb"))));
+        assert!(got.contains(&("target".into(), n(37.0))));
+        // A target the binding holds is named by the DCS group ID or the
+        // unit's row, with an empty platform name.
+        let held = |scope: u32, target: u64| match (scope, target) {
+            (3, 37) => Some(Bound::Group(902)),
+            (4, 38) => Some(Bound::Row(5)),
+            _ => None,
+        };
+        let bytes = arguments_with(op::MARK_SET as u16, &h, &mark(3, 37), &held).expect("bound");
+        let Lv::Table(pairs) = Reader::new(&bytes).lv().expect("decodes") else {
+            panic!("not a table");
+        };
+        let get = |k: &str| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == s(k))
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(get("group_id"), Some(n(902.0)));
+        assert_eq!(get("name"), Some(s("")));
+        assert_eq!(get("row"), None);
+        let w = {
+            let mut w = Writer::new();
+            w.u32(4).u32(0).u64(38).f64(5.0).str("hi");
+            w.finish()
+        };
+        let bytes = arguments_with(op::MESSAGE as u16, &h, &w, &held).expect("bound unit");
+        let Lv::Table(pairs) = Reader::new(&bytes).lv().expect("decodes") else {
+            panic!("not a table");
+        };
+        let get = |k: &str| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == s(k))
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!((get("row"), get("group_id")), (Some(n(5.0)), None));
+        // A mark takes no UNIT or COUNTRY scope, and no scope outside 1 to 5.
+        for scope in [0, 4, 5, 6] {
+            assert!(arguments(op::MARK_SET as u16, &h, &mark(scope, 1)).is_none());
+        }
+        assert!(arguments(op::MARK_SET as u16, &h, &mark(2, 1 << 32)).is_none());
+        assert!(arguments(op::MARK_SET as u16, &h, &mark(3, 1 << 53)).is_none());
+        assert!(arguments(op::MARK_SET as u16, &h, &[0; 39]).is_none());
+
+        let shape = table(vec![("0", n(1.0))]);
+        let drawing = |scope: u32, target: u64| {
+            let mut w = Writer::new();
+            w.u32(scope).u32(7).u64(target).lv(&shape);
+            w.finish()
+        };
+        expect(
+            op::DRAWING_SET,
+            &h,
+            &drawing(2, 1),
+            vec![
+                entity.clone(),
+                ("scope", n(2.0)),
+                ("target", n(1.0)),
+                ("name", s("")),
+                ("shape", n(7.0)),
+                ("args", shape.clone()),
+            ],
+        );
+        for scope in [0, 3, 4, 5] {
+            assert!(arguments(op::DRAWING_SET as u16, &h, &drawing(scope, 1)).is_none());
+        }
+        assert!(arguments(op::DRAWING_SET as u16, &h, &[0; 16]).is_none());
+
+        let menu = |parent: u64, scope: u32, submenu: u32| {
+            let mut w = Writer::new();
+            w.u64(parent).u64(37).u32(scope).u32(submenu).str("Menu");
+            w.finish()
+        };
+        expect(
+            op::MENU_SET,
+            &h,
+            &menu(u64::MAX, 3, 1),
+            vec![
+                entity.clone(),
+                ("parent", s("18446744073709551615")),
+                ("scope", n(3.0)),
+                ("target", n(37.0)),
+                ("name", s("np!enPb")),
+                ("submenu", Lv::Bool(true)),
+                ("text", s("Menu")),
+            ],
+        );
+        let got = args(op::MENU_SET, &h, &menu(0, 1, 0)).expect("root command");
+        assert!(got.contains(&("parent".into(), s("0"))));
+        assert!(got.contains(&("submenu".into(), Lv::Bool(false))));
+        for scope in [0, 4, 5] {
+            assert!(arguments(op::MENU_SET as u16, &h, &menu(0, scope, 0)).is_none());
+        }
+        for opcode in [op::MARK_REMOVE, op::DRAWING_REMOVE, op::MENU_REMOVE] {
+            expect(opcode, &h, &[], vec![entity.clone()]);
+        }
+        // An entity above 2^53 keeps every digit.
+        let big = header(71, u64::MAX);
+        expect(
+            op::MARK_REMOVE,
+            &big,
+            &[],
+            vec![("entity", s("18446744073709551615"))],
+        );
+    }
+
+    #[test]
+    fn a_message_checks_its_scope_and_seconds() {
+        let h = header(71, 0);
+        expect(
+            op::MESSAGE,
+            &h,
+            &message(4, 36, 10.0),
+            vec![
+                ("scope", n(4.0)),
+                ("name", s("np.enPa")),
+                ("clear", Lv::Bool(true)),
+                ("seconds", n(10.0)),
+                ("text", s("hello")),
+            ],
+        );
+        expect(
+            op::MESSAGE,
+            &h,
+            &message(5, 2, 0.0),
+            vec![
+                ("scope", n(5.0)),
+                ("target", n(2.0)),
+                ("name", s("")),
+                ("clear", Lv::Bool(true)),
+                ("seconds", n(0.0)),
+                ("text", s("hello")),
+            ],
+        );
+        for scope in [1, 2, 3] {
+            assert!(arguments(op::MESSAGE as u16, &h, &message(scope, 1, 86_400.0)).is_some());
+        }
+        for scope in [0, 6] {
+            assert!(arguments(op::MESSAGE as u16, &h, &message(scope, 1, 1.0)).is_none());
+        }
+        for seconds in [-0.5, 86_400.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                arguments(op::MESSAGE as u16, &h, &message(1, 0, seconds)).is_none(),
+                "{seconds}"
+            );
+        }
+        assert!(arguments(op::MESSAGE as u16, &h, &message(1, 0, -0.0)).is_some());
+        assert!(arguments(op::MESSAGE as u16, &h, &[0; 23]).is_none());
+    }
+
+    #[test]
+    fn chat_load_eval_and_extension_remove_decode() {
+        let h = header(0, 0);
+        let chat = |player: u32, text: &str| {
+            let mut w = Writer::new();
+            w.u32(player).pad(4).str(text);
+            w.finish()
+        };
+        expect(
+            op::CHAT,
+            &h,
+            &chat(7, "hi"),
+            vec![("player", n(7.0)), ("text", s("hi"))],
+        );
+        let longest = "a".repeat(1024);
+        assert!(arguments(op::CHAT as u16, &h, &chat(0, &longest)).is_some());
+        assert!(arguments(op::CHAT as u16, &h, &chat(0, "")).is_none());
+        assert!(arguments(op::CHAT as u16, &h, &chat(0, &"a".repeat(1025))).is_none());
+        assert!(arguments(op::CHAT as u16, &h, &[0; 7]).is_none());
+
+        let mut w = Writer::new();
+        w.str("Missions/a.miz");
+        expect(
+            op::MISSION_LOAD,
+            &h,
+            &w.finish(),
+            vec![("path", s("Missions/a.miz"))],
+        );
+        assert!(arguments(op::MISSION_LOAD as u16, &h, &[]).is_none());
+        let path = |p: &str| {
+            let mut w = Writer::new();
+            w.str(p);
+            w.finish()
+        };
+        assert!(arguments(op::MISSION_LOAD as u16, &h, &path("")).is_none());
+        assert!(arguments(op::MISSION_LOAD as u16, &h, &path(&"a".repeat(1025))).is_none());
+        assert!(arguments(op::MISSION_LOAD as u16, &h, &path(&"a".repeat(1024))).is_some());
+
+        let mut w = Writer::new();
+        w.lv(&s("return 1"));
+        expect(op::EVAL, &h, &w.finish(), vec![("source", s("return 1"))]);
+        assert!(arguments(op::EVAL as u16, &h, &[]).is_none());
+
+        let mut w = Writer::new();
+        w.str("ext");
+        expect(
+            op::EXTENSION_REMOVE,
+            &h,
+            &w.finish(),
+            vec![("name", s("ext"))],
+        );
+        assert!(arguments(op::EXTENSION_REMOVE as u16, &h, &[]).is_none());
+    }
+
+    fn moderate(action: u32, player: u32, seconds: f64, ucid: &str) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u32(action).u32(player).u32(2).pad(4).f64(seconds);
+        w.str(ucid).str("slot-1").str("why");
+        w.finish()
+    }
+
+    #[test]
+    fn moderate_decodes_every_action() {
+        let h = header(0, 0);
+        for action in 1..=4u32 {
+            expect(
+                op::MODERATE,
+                &h,
+                &moderate(action, 7, 30.5, "abc"),
+                vec![
+                    ("action", n(f64::from(action))),
+                    ("player", n(7.0)),
+                    ("side", n(2.0)),
+                    ("seconds", n(30.5)),
+                    ("ucid", s("abc")),
+                    ("slot", s("slot-1")),
+                    ("reason", s("why")),
+                ],
+            );
+        }
+        // Player 0 names none, as a ban by ucid does.
+        assert!(arguments(op::MODERATE as u16, &h, &moderate(2, 0, 0.0, "abc")).is_some());
+        assert!(arguments(op::MODERATE as u16, &h, &moderate(2, 0, -0.0, "abc")).is_some());
+    }
+
+    #[test]
+    fn moderate_refuses_what_the_spec_names() {
+        let h = header(0, 0);
+        let bad = |bytes: Vec<u8>| arguments(op::MODERATE as u16, &h, &bytes).is_none();
+        assert!(bad(moderate(0, 7, 0.0, "abc")));
+        assert!(bad(moderate(5, 7, 0.0, "abc")));
+        assert!(bad(moderate(1, 7, 0.0, "")));
+        assert!(bad(moderate(1, 1, 0.0, "abc")));
+        for seconds in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(bad(moderate(2, 7, seconds, "abc")), "{seconds}");
+        }
+        assert!(bad(vec![0; 23]));
+        assert!(bad(moderate(1, 7, 0.0, "abc")[..30].to_vec()));
+    }
+
+    #[test]
+    fn the_player_opcodes_run_in_the_hook() {
+        for opcode in [op::MODERATE, op::PLAYERS, op::BANS] {
+            assert_eq!(handler_state(opcode as u16), Some(HandlerState::Hook));
+        }
+        for opcode in [op::PLAYERS, op::BANS] {
+            let h = header(0, 0);
+            assert_eq!(
+                arguments(opcode as u16, &h, &[]),
+                Some(Fields::default().finish())
+            );
+        }
+    }
+
+    #[test]
+    fn chat_and_mission_load_run_in_the_hook() {
+        assert_eq!(handler_state(op::CHAT as u16), Some(HandlerState::Hook));
+        assert_eq!(
+            handler_state(op::MISSION_LOAD as u16),
+            Some(HandlerState::Hook)
+        );
+        assert_eq!(
+            handler_state(op::MESSAGE as u16),
+            Some(HandlerState::Server)
+        );
     }
 
     #[test]

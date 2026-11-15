@@ -56,7 +56,12 @@
 //! `{"ev":"result","seq":N,"epoch":N,"opcode":N,"code":N,"code_name":"..",
 //! "message":"..","cost_us":N,"object":N,"depth":N,"value":<json>}`, where `depth` is how
 //! deep the value's tables nest; one for each `OBJECT_GONE`,
-//! `{"ev":"gone","object":N,"reason":N,"entity":N}`; and last
+//! `{"ev":"gone","object":N,"reason":N,"entity":N}`; one for each `PLAYER`,
+//! `{"ev":"player","event":N,"id":N,"side":N,"seat":N,"client":"..","name":"..","slot":"..","text":".."}`;
+//! one for each `MENU`, `{"ev":"menu","entity":N,"target":N,"scope":N,"player":N}`;
+//! one for each `AUTHOR_EVENT`, `{"ev":"author","name":"..","objects":[N,..],"payload":<json>}`;
+//! one for each `EXTENSION`, `{"ev":"extension","name":"..","calls":N,"total_us":N,
+//! "max_us":N,"rev":N,"skipped":N,"stopped":N}`; and last
 //! `{"ev":"end","sent":N,"results":N,"complete":B,"duplicates":N}`. The tool ends
 //! `--linger-ms` (default 300) after every command it sent is answered, or
 //! after `--seconds` (default 60), and exits 0 only when all were answered.
@@ -74,7 +79,9 @@ use nanoprobe_sidecar::link::Config;
 use nanoprobe_sidecar::sim::SimAdapter;
 use nanoprobe_transport::codec::{Lv, Writer};
 use nanoprobe_transport::layout::{kind, opcode, result};
-use nanoprobe_transport::records::{CommandHeader, CommandResult, Hello, ObjectGone};
+use nanoprobe_transport::records::{
+    AuthorEvent, CommandHeader, CommandResult, ExtensionStats, Hello, Menu, ObjectGone, Player,
+};
 use serde_json::Value;
 
 /// One command of the script.
@@ -437,6 +444,57 @@ fn run(args: &[String]) -> Result<bool, String> {
                         println!(
                             "{{\"ev\":\"gone\",\"object\":{},\"reason\":{},\"entity\":{}}}",
                             g.object, g.reason, g.entity
+                        );
+                    }
+                }
+                kind::PLAYER => {
+                    if let Ok(p) = Player::decode(&r.payload) {
+                        println!(
+                            "{{\"ev\":\"player\",\"event\":{},\"id\":{},\"side\":{},\"seat\":{},\
+                             \"client\":{},\"name\":{},\"slot\":{},\"text\":{}}}",
+                            p.event,
+                            p.player,
+                            p.side,
+                            p.seat,
+                            json_string(&p.client),
+                            json_string(&p.name),
+                            json_string(&p.slot),
+                            json_string(&p.text)
+                        );
+                    }
+                }
+                kind::MENU => {
+                    if let Ok(m) = Menu::decode(&r.payload) {
+                        println!(
+                            "{{\"ev\":\"menu\",\"entity\":{},\"target\":{},\"scope\":{},\"player\":{}}}",
+                            m.entity, m.target, m.scope, m.player
+                        );
+                    }
+                }
+                kind::AUTHOR_EVENT => {
+                    if let Ok(a) = AuthorEvent::decode(&r.payload) {
+                        let objects: Vec<String> =
+                            a.objects.iter().map(ToString::to_string).collect();
+                        println!(
+                            "{{\"ev\":\"author\",\"name\":{},\"objects\":[{}],\"payload\":{}}}",
+                            json_string(&a.name),
+                            objects.join(","),
+                            lv_json(&a.payload)
+                        );
+                    }
+                }
+                kind::EXTENSION => {
+                    if let Ok(e) = ExtensionStats::decode(&r.payload) {
+                        println!(
+                            "{{\"ev\":\"extension\",\"name\":{},\"calls\":{},\"total_us\":{},\
+                             \"max_us\":{},\"rev\":{},\"skipped\":{},\"stopped\":{}}}",
+                            json_string(&e.name),
+                            e.calls,
+                            e.total_us,
+                            e.max_us,
+                            e.rev,
+                            e.events_skipped,
+                            e.stopped
                         );
                     }
                 }

@@ -788,6 +788,7 @@ dependencies = [
  "nanoprobe-proto",
  "nanoprobe-sidecar",
  "nanoprobe-sim-fake",
+ "nanoprobe-transport",
  "prost",
  "prost-types",
  "tokio",
@@ -830,10 +831,13 @@ dependencies = [
 name = "nanoprobe-sidecar"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.3.4",
  "nanoprobe-sim-fake",
  "nanoprobe-transport",
  "proptest",
  "rusqlite",
+ "serde_json",
+ "sha2",
  "tempfile",
 ]
 

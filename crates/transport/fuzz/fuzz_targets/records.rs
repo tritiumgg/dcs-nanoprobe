@@ -4,7 +4,7 @@
 use libfuzzer_sys::fuzz_target;
 use nanoprobe_transport::codec::Reader;
 use nanoprobe_transport::records::{
-    Airbase, Ammo, Attitude, Bind, CommandHeader, CommandResult, EnumBegin, EnumEnd, Event, Frame,
+    Airbase, Ammo, AuthorEvent, ExtensionStats, Menu, Player, Attitude, Bind, CommandHeader, CommandResult, EnumBegin, EnumEnd, Event, Frame,
     Gap, Hello, Lifecycle, Log, Object, ObjectGone, Positions, Rates, Seen, Subscribe, Vitals,
     Warehouse,
 };
@@ -29,6 +29,22 @@ fuzz_target!(|data: &[u8]| {
     }
     let _ = (ObjectGone::decode(data), EnumBegin::decode(data), EnumEnd::decode(data));
     let _ = (Rates::decode(data), Airbase::decode(data));
+    if let Ok(m) = Menu::decode(data) {
+        assert_eq!(Menu::decode(&m.encode()).as_ref(), Ok(&m));
+    }
+    if let Ok(p) = Player::decode(data) {
+        assert_eq!(Player::decode(&p.encode()).as_ref(), Ok(&p));
+    }
+    if let Ok(x) = ExtensionStats::decode(data) {
+        assert_eq!(ExtensionStats::decode(&x.encode()).as_ref(), Ok(&x));
+    }
+    // The payload may hold a NaN, which is not equal to itself, so the
+    // re-encoded bytes are compared.
+    if let Ok(a) = AuthorEvent::decode(data) {
+        let again = AuthorEvent::decode(&a.encode()).expect("a record decodes again");
+        assert_eq!(again.encode(), a.encode());
+        assert_eq!((again.objects, again.name), (a.objects, a.name));
+    }
     if let Ok(s) = Seen::decode(data) {
         assert_eq!(Seen::decode(&s.encode()).as_ref(), Ok(&s));
     }

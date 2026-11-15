@@ -36,7 +36,10 @@ local t0 = DCS.getRealTime()
 return E.wait(function()
   local blue = #(DCS.getAvailableSlots('blue') or {})
   local red = #(DCS.getAvailableSlots('red') or {})
-  if blue + red > 0 or DCS.getRealTime() - t0 > 75 then
+  -- After a kick the client still lists the last session's slots (LIVE, S16),
+  -- so a join counts only once the client is in a session with an ID.
+  local joined = blue + red > 0 and DCS.isMultiplayer() and (net.get_my_player_id() or 0) ~= 0
+  if joined or DCS.getRealTime() - t0 > 75 then
     E.observe('joined', {
       id = net.get_my_player_id(),
       multiplayer = DCS.isMultiplayer(),

@@ -120,20 +120,21 @@ local function main()
   end
 
   -- The handshake: the probe attaches, reads the HELLO, and announces
-  -- campaign 7. Its command for campaign 7 is answered UNKNOWN_OPCODE (20),
-  -- and its command for campaign 8 WRONG_CAMPAIGN (24).
+  -- campaign 7. Its command for campaign 7 is a MESSAGE with random bytes
+  -- after the header, which the agent answers BAD_PAYLOAD (19), and its
+  -- command for campaign 8 WRONG_CAMPAIGN (24).
   local function result(seq, code)
     return find(function(e)
       return e.ev == 'result' and e.seq == seq and e.code == code
     end) ~= nil
   end
   assert(run(10, function()
-    return result(1, 20) and result(2, 24)
+    return result(1, 19) and result(2, 24)
   end), 'no attach and answered commands within 10 s:\n' .. (S.read(out) or ''))
   local hello = find(function(e)
     return e.ev == 'hello'
   end)
-  assert(hello and hello.interface == 9, 'the HELLO reads interface ' .. tostring(hello and hello.interface))
+  assert(hello and hello.interface == 10, 'the HELLO reads interface ' .. tostring(hello and hello.interface))
   assert(hello.build == BUILD, 'the HELLO reads build ' .. tostring(hello.build))
   assert(find(function(e)
     return e.ev == 'log' and e.target == 'hook' and e.msg == 'capabilities'

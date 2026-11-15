@@ -16,7 +16,7 @@
 local agent, root, dir, previous = ...
 
 -- The agent's interface version this shim was written for.
-local ABI = '9'
+local ABI = '10'
 if type(agent) ~= 'table' or agent.abi ~= ABI then
   error('the shim needs agent ABI ' .. ABI .. '; the DLL has '
     .. tostring(type(agent) == 'table' and agent.abi or agent), 0)
@@ -166,6 +166,9 @@ M.FIELDS = {
   COMMENT = { 15, 'comment', nil, 'string' },
   INITIATOR_CATEGORY = { 17, 'initiator_data', 'object_category', 'number' },
   TARGET_CATEGORY = { 18, 'target_data', 'object_category', 'number' },
+  INITIATOR_TYPE = { 19, 'initiator_data', 'unit_type', 'string' },
+  TARGET_TYPE = { 20, 'target_data', 'unit_type', 'string' },
+  INITIATOR_MISSION_ID = { 21, 'initiator_data', 'mission_id', 'string' },
 }
 
 -- The fields read per event type, by world.event name. A type not named
@@ -215,6 +218,26 @@ M.ALLOW = {
   S_EVENT_SIMULATION_START = { 'TIME' },
 }
 
+-- The type fields follow the category fields (spec/records.md, "Codes:
+-- event_field"): INITIATOR_TYPE wherever INITIATOR_CATEGORY is read,
+-- TARGET_TYPE wherever TARGET_CATEGORY is, and INITIATOR_MISSION_ID on a
+-- birth only.
+for name, list in pairs(M.ALLOW) do
+  local out = {}
+  for _, field in ipairs(list) do
+    out[#out + 1] = field
+    if field == 'INITIATOR_CATEGORY' then
+      out[#out + 1] = 'INITIATOR_TYPE'
+    elseif field == 'TARGET_CATEGORY' then
+      out[#out + 1] = 'TARGET_TYPE'
+    end
+  end
+  if name == 'S_EVENT_BIRTH' then
+    out[#out + 1] = 'INITIATOR_MISSION_ID'
+  end
+  M.ALLOW[name] = out
+end
+
 -- The allow-lists by event ID, as lists of FIELDS entries, from this
 -- state's world.event. A name this DCS lacks is left out.
 local function by_id()
@@ -237,6 +260,16 @@ local function by_id()
   end
   return out
 end
+
+-- The marks, drawings and menu items the shim set, by EntityId as decimal
+-- text (spec/commands.md, "Marks, drawings and menu items in DCS"). They
+-- outlive a shim reload and are dropped on a new mission generation.
+M.marks = previous and previous.marks or {}
+M.menus = previous and previous.menus or {}
+-- The next DCS ID for a mark or a drawing, and the next menu order number.
+-- DCS's own mark IDs are UNVERIFIED to start low, so these start at 2^30.
+M.next_mark = previous and previous.next_mark or 2 ^ 30
+M.next_menu = previous and previous.next_menu or 1
 
 -- Filled when the handler is registered, once world.event exists.
 local BY_ID = {}
@@ -273,6 +306,10 @@ local function forget(slot)
   T.ids[slot], T.objs[slot], T.unit[slot] = nil, nil, nil
 end
 
+-- Queue a copy of the event for the extensions that want one; defined with
+-- the extensions below.
+local queue_event
+
 local function forward(event)
   if type(event) ~= 'table' then
     return
@@ -306,6 +343,7 @@ local function forward(event)
   if freed then
     forget(freed)
   end
+  queue_event(event)
   -- A birth of a unit or static: keep the object for the next pump, which
   -- reads it (spec/records.md, "The object table"). Nothing is called on it
   -- here.
@@ -848,6 +886,8 @@ local function reset(gen)
   T.gen = gen
   T.ids, T.objs, T.unit, T.births, T.airbases, T.enum = {}, {}, {}, {}, {}, nil
   T.slot_of = {}
+  -- A mission load removed every mark, drawing and menu item from DCS.
+  M.marks, M.menus = {}, {}
   local ok, bases = pcall(world.getAirbases)
   if ok and type(bases) == 'table' then
     for _, base in ipairs(bases) do
@@ -873,27 +913,299 @@ end
 -- Result codes (spec/commands.md, "Codes: result").
 local APPLIED, NOT_BOUND, UNKNOWN_OPCODE, DCS_REFUSED, LUA_ERROR = 0, 18, 20, 22, 23
 
--- Extensions by name: the source, the environment's hooks, and the chunk's
--- revision is the agent's (spec/commands.md, "Extensions"). The registry
--- survives a shim reload.
+-- Extensions by name (spec/commands.md, "Extensions"). The registry survives
+-- a shim reload. Each holds its source, its hooks, the queue of events for
+-- `on_event`, its run counters, and what it started through the agent: timers,
+-- callbacks waiting to run, and menu items.
 M.extensions = previous and previous.extensions or {}
+-- The last timer ID an extension's `timer.scheduleFunction` returned.
+M.next_timer = previous and previous.next_timer or 0
 
--- The globals an extension sees: the state's, through its own table. The
--- replaced globals of spec/commands.md, "The environment", are step S16's.
-local function environment()
-  return setmetatable({}, { __index = _G })
+-- The agent's breadcrumb code for an extension's hook, with its name as the
+-- text (spec/transport.md, "Breadcrumbs").
+local CRUMB_EXTENSION = 0x20000
+-- Events one extension's queue holds, and the most callbacks it holds
+-- waiting.
+local QUEUE_MAX = 256
+-- Errors in a row after which an extension's hooks stop.
+local ERRORS_STOP = 10
+-- Seconds between one extension's `EXTENSION` records.
+local REPORT_EVERY = 10
+
+-- Extension hook time since the last call to the agent's budget, in
+-- microseconds. A hook that runs inside a command handler is part of the
+-- command's time and charges nothing here.
+local charged = 0
+local in_command = false
+
+-- A fresh run state for an extension: counters, queues and what it started.
+local function reset_extension(e)
+  e.hooks = {}
+  e.q, e.q_head, e.q_tail = {}, 1, 0
+  e.skipped, e.calls, e.total_us, e.max_us = 0, 0, 0, 0
+  e.errors, e.stopped, e.dead = 0, false, false
+  e.timers, e.pending, e.items = {}, {}, {}
+  e.next_report = 0
 end
 
--- Compile and run an extension's chunk. Returns its hooks, or nil and why.
-local function load_extension(name, source)
-  if type(source) ~= 'string' then
+-- Write the extension's `EXTENSION` record. The agent knows the revision.
+local function send_stats(e)
+  if type(agent.extension) == 'function' then
+    pcall(agent.extension, e.name, e.calls, e.total_us, e.max_us, 0, e.skipped, e.stopped)
+  end
+end
+
+-- Count an error of the extension's hook and stop its hooks at the tenth in
+-- a row, with a log record and an `EXTENSION` record.
+local function hook_failed(e, what, err)
+  e.errors = e.errors + 1
+  pcall(function()
+    M.file.write('error', 'extension hook raised', { name = e.name, hook = what, error = tostring(err), in_a_row = e.errors })
+  end)
+  if e.errors >= ERRORS_STOP and not e.stopped then
+    e.stopped = true
+    pcall(function()
+      M.file.write('error', 'extension hooks stopped after errors', { name = e.name, errors = e.errors })
+    end)
+    send_stats(e)
+  end
+end
+
+-- Call one hook of the extension under pcall, with the breadcrumb set to it,
+-- and count its time. Returns whether it ran without raising, then what it
+-- returned. A stopped extension runs nothing.
+local function run_hook(e, what, fn, ...)
+  if e.stopped then
+    return false, 'the extension\'s hooks are stopped'
+  end
+  if type(agent.crumb) == 'function' then
+    pcall(agent.crumb, CRUMB_EXTENSION, e.name)
+  end
+  local started = agent.clock()
+  local ok, value = pcall(fn, ...)
+  local us = (agent.clock() - started) * 1e6
+  if type(agent.crumb) == 'function' then
+    pcall(agent.crumb, 0)
+  end
+  e.calls = e.calls + 1
+  e.total_us = e.total_us + us
+  if us > e.max_us then
+    e.max_us = us
+  end
+  if not in_command then
+    charged = charged + us
+  end
+  if ok then
+    e.errors = 0
+  else
+    hook_failed(e, what, value)
+  end
+  return ok, value
+end
+
+-- The queue of callbacks DCS made for the extension (menu commands), run
+-- from the pump as hooks.
+local function push_pending(e, fn, arg)
+  if e.dead then
+    return
+  end
+  if #e.pending >= QUEUE_MAX then
+    table.remove(e.pending, 1)
+    e.skipped = e.skipped + 1
+  end
+  e.pending[#e.pending + 1] = { fn, arg }
+end
+
+-- A shallow copy of a world event, field by field with no metamethod, queued
+-- for each extension with an `on_event` hook. The oldest event goes when the
+-- queue is full, and is counted.
+queue_event = function(event)
+  local queued = false
+  for _, e in pairs(M.extensions) do
+    if not e.stopped and not e.dead and type(e.hooks.on_event) == 'function' then
+      local copy = {}
+      local k, v = next(event)
+      while k ~= nil do
+        copy[k] = v
+        k, v = next(event, k)
+      end
+      if e.q_tail - e.q_head + 1 >= QUEUE_MAX then
+        e.q[e.q_head] = nil
+        e.q_head = e.q_head + 1
+        e.skipped = e.skipped + 1
+      end
+      e.q_tail = e.q_tail + 1
+      e.q[e.q_tail] = copy
+      queued = true
+    end
+  end
+  -- The agent asks for a pump of its own while an extension has events.
+  if queued and type(agent.extension_budget) == 'function' then
+    agent.extension_budget(0, true)
+  end
+end
+
+-- The `emit` of the spec (spec/commands.md, "emit"): the agent's entry under
+-- pcall. It returns true, or false and a reason, and never raises.
+local function emit(name, payload, objects)
+  local ok, done, reason = pcall(agent.emit, name, payload, objects)
+  if not ok then
+    return false, tostring(done)
+  elseif done == nil then
+    return false, 'disabled'
+  end
+  return done, reason
+end
+M.emit = emit
+
+-- A table that reads through to the state's global `name` and holds
+-- `replaced` over it.
+local function over(name, replaced)
+  return setmetatable(replaced, {
+    __index = function(_, key)
+      local real = _G[name]
+      return real and real[key]
+    end,
+  })
+end
+
+-- The paths of two menu items are the same when their names are.
+local function same_path(a, b)
+  if #a ~= #b then
+    return false
+  end
+  for i = 1, #a do
+    if a[i] ~= b[i] then
+      return false
+    end
+  end
+  return true
+end
+
+-- Whether `path` is `prefix` or under it.
+local function under(path, prefix)
+  if #path < #prefix then
+    return false
+  end
+  for i = 1, #prefix do
+    if path[i] ~= prefix[i] then
+      return false
+    end
+  end
+  return true
+end
+
+-- The globals an extension sees: the state's, through its own table, with the
+-- replaced globals of spec/commands.md, "The environment". `e` is the
+-- extension, or nil for an EVAL chunk, which has `emit` and nothing else
+-- replaced.
+local function environment(e)
+  local env = { emit = emit }
+  if e then
+    local function refuse()
+      error('an extension does not add event handlers: use on_event', 2)
+    end
+    env.world = over('world', { addEventHandler = refuse, removeEventHandler = refuse })
+    env.timer = over('timer', {
+      scheduleFunction = function(fn, arg, time)
+        if type(fn) ~= 'function' or type(time) ~= 'number' then
+          error('timer.scheduleFunction takes a function, an argument and a time', 2)
+        end
+        M.next_timer = M.next_timer + 1
+        e.timers[M.next_timer] = { fn = fn, arg = arg, time = time }
+        return M.next_timer
+      end,
+      removeFunction = function(id)
+        e.timers[id] = nil
+      end,
+      setFunctionTime = function(id, time)
+        local t = e.timers[id]
+        if t and type(time) == 'number' then
+          t.time = time
+        end
+      end,
+    })
+    -- A menu item the extension adds, kept with the call that removes it.
+    local mc = {}
+    local function track(remove, path, kind, scope)
+      if type(path) == 'table' then
+        e.items[#e.items + 1] = { remove = remove, path = path, kind = kind, scope = scope }
+      end
+      return path
+    end
+    local function callback(fn, arg)
+      return function()
+        push_pending(e, fn, arg)
+      end
+    end
+    local function add(call, remove, kind)
+      return function(...)
+        local n = select('#', ...)
+        local args = { ... }
+        local scope
+        if kind ~= 'all' then
+          scope = args[1]
+        end
+        -- The name and the path come after the scope; a command's function
+        -- and argument come last.
+        local first = kind == 'all' and 1 or 2
+        local fn_at = first + 2
+        if type(args[fn_at]) == 'function' then
+          args[fn_at] = callback(args[fn_at], args[fn_at + 1])
+          args[fn_at + 1] = nil
+          n = fn_at
+        end
+        local path = call(unpack(args, 1, n))
+        return track(remove, path, kind, scope)
+      end
+    end
+    local function remover(call, kind)
+      return function(...)
+        local args = { ... }
+        local path = args[#args]
+        local result = call(...)
+        if type(path) == 'table' then
+          local scope = kind ~= 'all' and args[1] or nil
+          for i = #e.items, 1, -1 do
+            local item = e.items[i]
+            if item.kind == kind and item.scope == scope and under(item.path, path) then
+              table.remove(e.items, i)
+            end
+          end
+        end
+        return result
+      end
+    end
+    local real = function(name)
+      return function(...)
+        return _G.missionCommands[name](...)
+      end
+    end
+    mc.addCommand = add(real('addCommand'), 'removeItem', 'all')
+    mc.addSubMenu = add(real('addSubMenu'), 'removeItem', 'all')
+    mc.addCommandForCoalition = add(real('addCommandForCoalition'), 'removeItemForCoalition', 'coalition')
+    mc.addSubMenuForCoalition = add(real('addSubMenuForCoalition'), 'removeItemForCoalition', 'coalition')
+    mc.addCommandForGroup = add(real('addCommandForGroup'), 'removeItemForGroup', 'group')
+    mc.addSubMenuForGroup = add(real('addSubMenuForGroup'), 'removeItemForGroup', 'group')
+    mc.removeItem = remover(real('removeItem'), 'all')
+    mc.removeItemForCoalition = remover(real('removeItemForCoalition'), 'coalition')
+    mc.removeItemForGroup = remover(real('removeItemForGroup'), 'group')
+    env.missionCommands = over('missionCommands', mc)
+  end
+  return setmetatable(env, { __index = _G })
+end
+
+-- Compile and run an extension's chunk in its environment. Returns its
+-- hooks, or nil and why.
+local function load_extension(e)
+  if type(e.source) ~= 'string' then
     return nil, 'the source is not a string'
   end
-  local chunk, err = loadstring(source, '=' .. name)
+  local chunk, err = loadstring(e.source, '=' .. e.name)
   if not chunk then
     return nil, err
   end
-  setfenv(chunk, environment())
+  setfenv(chunk, environment(e))
   local ok, hooks = pcall(chunk)
   if not ok then
     return nil, tostring(hooks)
@@ -904,13 +1216,40 @@ local function load_extension(name, source)
   return hooks or {}
 end
 
-local function stop_extension(e)
-  if e and type(e.hooks.on_stop) == 'function' then
-    local ok, err = pcall(e.hooks.on_stop)
-    if not ok then
-      M.file.write('warn', 'extension on_stop raised', { name = e.name, error = tostring(err) })
+-- Take down what the extension started in DCS: its menu items, newest first,
+-- and its timers and waiting work. A call that raises is skipped.
+local function clean_extension(e)
+  e.dead = true
+  for i = #e.items, 1, -1 do
+    local item = e.items[i]
+    local real = rawget(_G, 'missionCommands')
+    if real then
+      if item.kind == 'all' then
+        pcall(real[item.remove], item.path)
+      else
+        pcall(real[item.remove], item.scope, item.path)
+      end
     end
   end
+  e.items, e.timers, e.pending = {}, {}, {}
+  e.q, e.q_head, e.q_tail = {}, 1, 0
+end
+
+-- `on_stop`, then the extension's leftovers go. An extension whose hooks
+-- stopped after errors gets no `on_stop`.
+local function stop_extension(e)
+  if not e then
+    return
+  end
+  if type(e.hooks.on_stop) == 'function' and not e.stopped and not e.dead then
+    local ok, err = run_hook(e, 'on_stop', e.hooks.on_stop)
+    if not ok then
+      pcall(function()
+        M.file.write('warn', 'extension on_stop raised', { name = e.name, error = tostring(err) })
+      end)
+    end
+  end
+  clean_extension(e)
 end
 
 -- World commands (spec/commands.md, "Handler arguments"). A handler returns
@@ -1104,6 +1443,216 @@ local function mission_id(class, name)
   return id
 end
 
+-- The mission ID of the group or unit a scoped command names. The agent
+-- passes what its binding holds for the target: `group_id`, the DCS group ID,
+-- or `row`, the slot of the unit's row, whose object handle gives the ID.
+-- With neither, the platform name in `name` is looked up.
+local function target_id(class, a)
+  if type(a.group_id) == 'number' then
+    return a.group_id
+  end
+  if type(a.row) == 'number' then
+    local o = T.objs[a.row]
+    if not o then
+      return nil, NOT_BOUND, 'no object in the row'
+    end
+    local ok, id = pcall(o.getID, o)
+    id = ok and tonumber(id)
+    if not id then
+      return nil, DCS_REFUSED, 'the object has no mission ID'
+    end
+    return id
+  end
+  return mission_id(class, a.name)
+end
+
+-- The mission ID of the unit in a row, as text, or nothing: the hook asks
+-- for it through the server state.
+function M.row_id(slot)
+  local id = target_id(Unit, { row = tonumber(slot) })
+  return id and string.format('%.0f', id) or ''
+end
+
+-- Marks and drawings share DCS's mark ID space. Each gets an ID from the
+-- shim's counter; a replacement removes the held mark first and adds the new
+-- one under a new ID.
+local function new_mark_id()
+  local id = M.next_mark
+  M.next_mark = id + 1
+  return id
+end
+
+-- Remove the held mark or drawing of `entity` from DCS and forget it. An
+-- entity the shim does not hold is gone already.
+local function remove_mark(entity)
+  local held = M.marks[entity]
+  if not held then
+    return APPLIED
+  end
+  local ok, err = pcall(trigger.action.removeMark, held.id)
+  if not ok then
+    return DCS_REFUSED, nil, tostring(err)
+  end
+  M.marks[entity] = nil
+  return APPLIED
+end
+
+-- Replace the mark or drawing of `entity`: the old one is removed, then
+-- `add(id)` calls DCS with the new ID.
+local function set_mark(entity, add)
+  local held = M.marks[entity]
+  if held then
+    pcall(trigger.action.removeMark, held.id)
+    M.marks[entity] = nil
+  end
+  local id = new_mark_id()
+  local ok, err = pcall(add, id)
+  if not ok then
+    return DCS_REFUSED, nil, tostring(err)
+  end
+  M.marks[entity] = { id = id }
+  return APPLIED
+end
+
+-- The mission ID of a GROUP scope's group, for a command whose scope is 3.
+-- Returns nothing for another scope.
+local function scope_group(a)
+  if a.scope == 3 then
+    return target_id(Group, a)
+  end
+end
+
+-- Remove a held menu item from DCS by its scope. `item.group` is the
+-- mission ID of a GROUP scope. Returns what `pcall` returns.
+local function menu_remove(item)
+  local scope = item.scope
+  if scope == 1 then
+    return pcall(missionCommands.removeItem, item.path)
+  elseif scope == 2 then
+    return pcall(missionCommands.removeItemForCoalition, item.target, item.path)
+  end
+  return pcall(missionCommands.removeItemForGroup, item.group, item.path)
+end
+
+-- The command callback: tells the agent which item was chosen. It never
+-- raises into DCS, and does nothing until the agent has a `menu` entry.
+local function menu_callback(item)
+  return function()
+    pcall(function()
+      if type(agent.menu) == 'function' then
+        -- The target the record holds: a coalition number, a group's
+        -- `EntityId` (else its platform name), or nothing.
+        local target
+        if item.scope == 2 then
+          target = item.target
+        elseif item.scope == 3 then
+          if item.target ~= nil then
+            target = item.target
+          else
+            target = item.name
+          end
+        end
+        agent.menu(item.entity, target, item.scope)
+      end
+    end)
+  end
+end
+
+-- Add `item` to DCS under its parent's path and keep the path DCS returns.
+-- Returns true, or false and the reason.
+local function menu_add(item, parent_path)
+  local scope = item.scope
+  local call, first
+  if scope == 1 then
+    call = item.submenu and missionCommands.addSubMenu or missionCommands.addCommand
+  elseif scope == 2 then
+    call = item.submenu and missionCommands.addSubMenuForCoalition or missionCommands.addCommandForCoalition
+    first = item.target
+  else
+    call = item.submenu and missionCommands.addSubMenuForGroup or missionCommands.addCommandForGroup
+    first = item.group
+  end
+  local function make()
+    if item.submenu then
+      if first ~= nil then
+        return call(first, item.text, parent_path)
+      end
+      return call(item.text, parent_path)
+    end
+    local callback = menu_callback(item)
+    if first ~= nil then
+      return call(first, item.text, parent_path, callback)
+    end
+    return call(item.text, parent_path, callback)
+  end
+  local ok, path = pcall(make)
+  if not ok then
+    return false, tostring(path)
+  elseif type(path) ~= 'table' then
+    return false, 'DCS returned no menu path'
+  end
+  item.path = path
+  return true
+end
+
+-- The held items directly under `entity`, in the order they were first set.
+local function menu_children(entity)
+  local out = {}
+  for _, item in pairs(M.menus) do
+    if item.parent == entity then
+      out[#out + 1] = item
+    end
+  end
+  table.sort(out, function(x, y)
+    return x.order < y.order
+  end)
+  return out
+end
+
+-- Forget every item held under `entity`, at every depth, without touching
+-- DCS: DCS removed them with their submenu. The entity of each is added to
+-- `dropped` when there is one.
+local function menu_forget_below(entity, dropped)
+  for _, child in ipairs(menu_children(entity)) do
+    menu_forget_below(child.entity, dropped)
+    M.menus[child.entity] = nil
+    if dropped then
+      dropped[#dropped + 1] = child.entity
+    end
+  end
+end
+
+-- Add again, under the new path of `entity`, the items held below it, in the
+-- order they were first set, at every depth. An item DCS refuses is
+-- forgotten with the items below it, and each is added to `dropped`.
+local function menu_readd_below(item, dropped)
+  for _, child in ipairs(menu_children(item.entity)) do
+    local ok, why = menu_add(child, item.path)
+    if ok then
+      menu_readd_below(child, dropped)
+    else
+      menu_forget_below(child.entity, dropped)
+      M.menus[child.entity] = nil
+      dropped[#dropped + 1] = child.entity
+      M.file.write('warn', 'menu item not added again', { entity = child.entity, error = why })
+    end
+  end
+end
+
+-- Whether `entity` is `ancestor` or sits under it.
+local function menu_under(entity, ancestor)
+  local steps = 0
+  while entity and entity ~= '0' and steps < 1000 do
+    if entity == ancestor then
+      return true
+    end
+    local item = M.menus[entity]
+    entity = item and item.parent
+    steps = steps + 1
+  end
+  return false
+end
+
 -- Command handlers by opcode. Each returns a result code, then a value, a
 -- message, and `destroyed`. The agent has admitted the command and checked
 -- raw Lua.
@@ -1204,7 +1753,7 @@ local HANDLERS = {
     elseif scope == 5 then
       call, first = trigger.action.outSoundForCountry, a.target
     elseif scope == 3 or scope == 4 then
-      local id, code, message = mission_id(scope == 3 and Group or Unit, a.name)
+      local id, code, message = target_id(scope == 3 and Group or Unit, a)
       if not id then
         return code, nil, message
       end
@@ -1223,6 +1772,179 @@ local HANDLERS = {
       return DCS_REFUSED, nil, tostring(err)
     end
     return APPLIED
+  end,
+  -- MARK_SET: the mark to all, a coalition or a group, under a new DCS ID.
+  [25] = function(a)
+    if a.scope ~= 1 and a.scope ~= 2 and a.scope ~= 3 then
+      return DCS_REFUSED, nil, 'the scope is not 1 to 3'
+    end
+    local group, code, message = scope_group(a)
+    if a.scope == 3 and not group then
+      return code, nil, message
+    end
+    local point = { x = a.x, y = a.y, z = a.z }
+    local read_only = a.read_only and true or false
+    return set_mark(a.entity, function(id)
+      if a.scope == 1 then
+        trigger.action.markToAll(id, a.text, point, read_only)
+      elseif a.scope == 2 then
+        trigger.action.markToCoalition(id, a.text, point, a.target, read_only)
+      else
+        trigger.action.markToGroup(id, a.text, point, group, read_only)
+      end
+    end)
+  end,
+  -- MARK_REMOVE
+  [26] = function(a)
+    return remove_mark(a.entity)
+  end,
+  -- DRAWING_SET: markupToAll with the coalition, -1 for all, and the array
+  -- unpacked after the ID.
+  [27] = function(a)
+    if a.scope ~= 1 and a.scope ~= 2 then
+      return DCS_REFUSED, nil, 'the scope is not 1 or 2'
+    end
+    if type(a.args) ~= 'table' then
+      return DCS_REFUSED, nil, 'the arguments are not an array'
+    end
+    local coalition = a.scope == 1 and -1 or a.target
+    return set_mark(a.entity, function(id)
+      trigger.action.markupToAll(a.shape, coalition, id, unpack(a.args, 1, table.maxn(a.args)))
+    end)
+  end,
+  -- DRAWING_REMOVE
+  [28] = function(a)
+    return remove_mark(a.entity)
+  end,
+  -- MENU_SET: the item under its parent's path. A replacement removes the
+  -- old item and adds a submenu's held items again under the new path.
+  [29] = function(a)
+    local scope = a.scope
+    if scope ~= 1 and scope ~= 2 and scope ~= 3 then
+      return DCS_REFUSED, nil, 'the scope is not 1 to 3'
+    end
+    local group, code, message = scope_group(a)
+    if scope == 3 and not group then
+      return code, nil, message
+    end
+    local parent_path
+    if a.parent ~= '0' then
+      local parent = M.menus[a.parent]
+      if not parent or not parent.submenu or not parent.path or parent.scope ~= scope
+        or parent.target ~= a.target or parent.group ~= group then
+        return NOT_BOUND, nil, 'no submenu ' .. tostring(a.parent) .. ' in this scope'
+      end
+      if menu_under(a.parent, a.entity) then
+        return NOT_BOUND, nil, 'the parent is the item or below it'
+      end
+      parent_path = parent.path
+    end
+    local old = M.menus[a.entity]
+    local item = {
+      entity = a.entity, parent = a.parent, scope = scope, target = a.target, name = a.name,
+      group = group, submenu = a.submenu and true or false, text = a.text,
+      order = old and old.order,
+    }
+    if not item.order then
+      item.order = M.next_menu
+      M.next_menu = item.order + 1
+    end
+    if old then
+      if old.path then
+        menu_remove(old)
+      end
+      -- A command holds no items, and a submenu in another scope cannot hold
+      -- the old ones.
+      if not item.submenu or old.scope ~= scope or old.target ~= a.target or old.group ~= group then
+        menu_forget_below(a.entity)
+      end
+    end
+    local ok, why = menu_add(item, parent_path)
+    if not ok then
+      M.menus[a.entity] = nil
+      menu_forget_below(a.entity)
+      return DCS_REFUSED, nil, why
+    end
+    M.menus[a.entity] = item
+    if item.submenu then
+      -- The entities of the items DCS would not take again: the value of
+      -- the result, so the sidecar sends them again.
+      local dropped = {}
+      menu_readd_below(item, dropped)
+      if #dropped > 0 then
+        return APPLIED, dropped
+      end
+    end
+    return APPLIED
+  end,
+  -- MENU_REMOVE: the item, and every item the shim holds below a submenu.
+  [30] = function(a)
+    local item = M.menus[a.entity]
+    if not item then
+      return APPLIED
+    end
+    if item.path then
+      local ok, err = menu_remove(item)
+      if not ok then
+        return DCS_REFUSED, nil, tostring(err)
+      end
+    end
+    menu_forget_below(a.entity)
+    M.menus[a.entity] = nil
+    return APPLIED
+  end,
+  -- EXTENSION_REMOVE: on_stop, then the extension is gone. A name nobody
+  -- registered is gone already.
+  [32] = function(a)
+    stop_extension(M.extensions[a.name])
+    M.extensions[a.name] = nil
+    return APPLIED
+  end,
+  -- MESSAGE: outText, or the form the scope names.
+  [49] = function(a)
+    local text, scope = a.text, a.scope
+    if type(text) ~= 'string' then
+      return DCS_REFUSED, nil, 'the text is not a string'
+    end
+    local ok, err
+    if scope == 1 then
+      ok, err = pcall(trigger.action.outText, text, a.seconds, a.clear)
+    elseif scope == 2 or scope == 5 then
+      local call = scope == 2 and trigger.action.outTextForCoalition or trigger.action.outTextForCountry
+      ok, err = pcall(call, a.target, text, a.seconds, a.clear)
+    elseif scope == 3 or scope == 4 then
+      local id, code, message = target_id(scope == 3 and Group or Unit, a)
+      if not id then
+        return code, nil, message
+      end
+      local call = scope == 3 and trigger.action.outTextForGroup or trigger.action.outTextForUnit
+      ok, err = pcall(call, id, text, a.seconds, a.clear)
+    else
+      return DCS_REFUSED, nil, 'the scope is not 1 to 5'
+    end
+    if not ok then
+      return DCS_REFUSED, nil, tostring(err)
+    end
+    return APPLIED
+  end,
+  -- EVAL: the source runs in a new environment that reads through to the
+  -- state's globals, so an assignment to a global stays in it. The value is
+  -- the first value the chunk returns.
+  [58] = function(a)
+    if type(a.source) ~= 'string' then
+      return LUA_ERROR, nil, 'the source is not a string'
+    end
+    local chunk, err = loadstring(a.source, '=eval')
+    if not chunk then
+      return LUA_ERROR, nil, tostring(err)
+    end
+    local env = environment()
+    setfenv(chunk, env)
+    local ok, value = pcall(chunk)
+    if not ok then
+      return LUA_ERROR, nil, tostring(value)
+    end
+    return APPLIED, value
   end,
   -- AIRBASE_OWNER: automatic capture off, then the owner.
   [23] = function(a)
@@ -1272,12 +1994,16 @@ local HANDLERS = {
   end,
   -- EXTENSION_SET: the old extension keeps running when the new one fails.
   [31] = function(a)
-    local hooks, err = load_extension(a.name, a.source)
+    local e = { name = a.name, source = a.source }
+    reset_extension(e)
+    local hooks, err = load_extension(e)
     if not hooks then
+      clean_extension(e)
       return LUA_ERROR, nil, err
     end
+    e.hooks = hooks
     stop_extension(M.extensions[a.name])
-    M.extensions[a.name] = { name = a.name, source = a.source, hooks = hooks }
+    M.extensions[a.name] = e
     return APPLIED
   end,
   -- EXTENSION_INVOKE: the first value `invoke` returns.
@@ -1287,13 +2013,50 @@ local HANDLERS = {
       return LUA_ERROR, nil, 'no extension ' .. tostring(a.name) .. ' with invoke'
     end
     local args = type(a.args) == 'table' and a.args or {}
-    local ok, value = pcall(e.hooks.invoke, unpack(args, 1, table.maxn(args)))
+    local ok, value = run_hook(e, 'invoke', e.hooks.invoke, unpack(args, 1, table.maxn(args)))
     if not ok then
       return LUA_ERROR, nil, tostring(value)
     end
     return APPLIED, value
   end,
 }
+
+-- Marks, drawings and menu items the shim holds, taken out of DCS.
+local function clear_held()
+  for _, held in pairs(M.marks) do
+    pcall(trigger.action.removeMark, held.id)
+  end
+  for _, item in pairs(M.menus) do
+    if item.parent == '0' and item.path then
+      pcall(menu_remove, item)
+    end
+  end
+  M.marks, M.menus = {}, {}
+end
+
+-- The campaign the shim last saw, as the agent's decimal text. A switch to
+-- another campaign ends every extension (`on_stop`, then gone) and takes the
+-- held marks, drawings and menu items out of DCS. The agent's budget call
+-- reports the active campaign, and the lifecycle state.
+M.campaign = previous and previous.campaign or nil
+local function check_campaign()
+  if type(agent.extension_budget) ~= 'function' then
+    return
+  end
+  local _, campaign = agent.extension_budget()
+  if type(campaign) ~= 'string' then
+    return
+  end
+  if M.campaign ~= nil and M.campaign ~= campaign then
+    local old = M.extensions
+    M.extensions = {}
+    for _, e in pairs(old) do
+      stop_extension(e)
+    end
+    clear_held()
+  end
+  M.campaign = campaign
+end
 
 -- Run the commands the agent hands out, in ring order, until it has none.
 local function commands()
@@ -1302,11 +2065,16 @@ local function commands()
     if not opcode then
       return
     end
+    -- A control command the agent ran on the way may have switched the
+    -- campaign.
+    check_campaign()
     local handler = HANDLERS[opcode]
     if not handler then
       agent.command_done(UNKNOWN_OPCODE, 'no handler in the shim')
     else
+      in_command = true
       local ok, code, value, message, destroyed = pcall(handler, args or {})
+      in_command = false
       if not ok then
         agent.command_done(LUA_ERROR, tostring(code))
       elseif type(code) ~= 'number' then
@@ -1333,15 +2101,153 @@ local function commands()
 end
 
 -- Run every registered extension's chunk again with a new environment, on a
--- mission start: nothing an extension held survives a load.
+-- mission start: nothing an extension held survives a load, and the counters
+-- and a stop after errors start over.
 local function restart_extensions()
   for name, e in pairs(M.extensions) do
-    local hooks, err = load_extension(name, e.source)
+    reset_extension(e)
+    local hooks, err = load_extension(e)
     if hooks then
       e.hooks = hooks
     else
-      e.hooks = {}
+      clean_extension(e)
       M.file.write('error', 'extension did not start again', { name = name, error = err })
+    end
+  end
+end
+
+-- The model time, or nil when the state gives none.
+local function model_time()
+  local ok, t = pcall(timer.getTime)
+  return ok and type(t) == 'number' and t or nil
+end
+
+-- The extensions' turn in a pump (spec/commands.md, "Budget"): queued events,
+-- the callbacks DCS made and the timers that came due, then `on_frame`, each
+-- while the frame's commanded-work budget has time left. The extensions take
+-- turns to go first. Hook time is charged to the budget as it is spent.
+local running = false
+local function run_extensions()
+  if type(agent.extension_budget) ~= 'function' then
+    return
+  end
+  local list = {}
+  for _, e in pairs(M.extensions) do
+    list[#list + 1] = e
+  end
+  table.sort(list, function(x, y)
+    return x.name < y.name
+  end)
+  local now = agent.clock()
+  -- Charge the time spent and read the lifecycle first, so that the first
+  -- pump of a loaded or unpaused mission already asks for the next one.
+  local _, _, _, lifecycle = agent.extension_budget(charged)
+  charged = 0
+  running = lifecycle == 3
+  local active = false
+  for _, e in ipairs(list) do
+    if not e.dead and now >= e.next_report then
+      e.next_report = now + REPORT_EVERY
+      send_stats(e)
+    end
+    -- Queued events, waiting callbacks and timers, and an `on_frame` hook
+    -- while the mission runs ask for the next pump. An `on_event` hook with
+    -- an empty queue asks for nothing: `queue_event` asks when it queues.
+    if not e.stopped and not e.dead
+      and (e.q_head <= e.q_tail or next(e.timers) ~= nil or #e.pending > 0
+        or (running and type(e.hooks.on_frame) == 'function')) then
+      active = true
+    end
+  end
+  local left = agent.extension_budget(0, active)
+  local n = #list
+  if n == 0 or left <= 0 then
+    return
+  end
+  M.turn = (M.turn or 0) + 1
+  local first = M.turn % n
+  -- Charge the hook time spent since the last call and read what is left.
+  local function settle()
+    local rest = agent.extension_budget(charged)
+    charged = 0
+    return rest
+  end
+  local at = model_time()
+  for i = 0, n - 1 do
+    local e = list[(first + i) % n + 1]
+    if not e.stopped and not e.dead then
+      local on_event = e.hooks.on_event
+      while left > 0 and not e.stopped and e.q_head <= e.q_tail do
+        local event = e.q[e.q_head]
+        e.q[e.q_head] = nil
+        e.q_head = e.q_head + 1
+        if type(on_event) == 'function' then
+          run_hook(e, 'on_event', on_event, event)
+          left = settle()
+        end
+      end
+      -- The callbacks DCS made: the work that does not fit stays in front.
+      local waiting = e.pending
+      e.pending = {}
+      local j = 1
+      while j <= #waiting and left > 0 and not e.stopped and not e.dead do
+        run_hook(e, 'callback', waiting[j][1], waiting[j][2])
+        left = settle()
+        j = j + 1
+      end
+      if j <= #waiting and not e.dead then
+        local rest = {}
+        for k = j, #waiting do
+          rest[#rest + 1] = waiting[k]
+        end
+        for _, item in ipairs(e.pending) do
+          rest[#rest + 1] = item
+        end
+        e.pending = rest
+      end
+      -- The timers that came due, earliest first, once each.
+      if at and next(e.timers) ~= nil then
+        local due = {}
+        for id, t in pairs(e.timers) do
+          if t.time <= at then
+            due[#due + 1] = id
+          end
+        end
+        table.sort(due, function(x, y)
+          local tx, ty = e.timers[x].time, e.timers[y].time
+          return tx < ty or (tx == ty and x < y)
+        end)
+        for _, id in ipairs(due) do
+          local t = e.timers[id]
+          if left <= 0 or e.stopped or e.dead then
+            break
+          end
+          if t then
+            local ok, next_time = run_hook(e, 'timer', t.fn, t.arg, t.time)
+            if e.timers[id] == t then
+              if ok and type(next_time) == 'number' then
+                t.time = next_time
+              else
+                e.timers[id] = nil
+              end
+            end
+            left = settle()
+          end
+        end
+      end
+    end
+  end
+  if lifecycle == 3 and at then
+    for i = 0, n - 1 do
+      local e = list[(first + i) % n + 1]
+      local on_frame = e.hooks.on_frame
+      if left <= 0 then
+        break
+      end
+      if not e.stopped and not e.dead and type(on_frame) == 'function' then
+        run_hook(e, 'on_frame', on_frame, at)
+        left = settle()
+      end
     end
   end
 end
@@ -1356,9 +2262,18 @@ local function pump()
     -- The airbases count for this frame's plan comes on the next pump.
   end
   -- Commands go before sampling (spec/commands.md, "Handlers").
-  local ok, err = pcall(commands)
+  local ok, err = pcall(check_campaign)
+  if ok then
+    ok, err = pcall(commands)
+  end
   if not ok then
+    in_command = false
     M.file.write('error', 'commands raised', { error = tostring(err) })
+  end
+  -- Then the extensions, while the frame's commanded-work budget lasts.
+  ok, err = pcall(run_extensions)
+  if not ok then
+    M.file.write('error', 'extensions raised', { error = tostring(err) })
   end
   if not sample then
     return
@@ -1413,6 +2328,24 @@ function M.pump()
   end
 end
 
+-- Called by the hook from `onSimulationStop`, the last callback in which the
+-- mission is still there: every extension stops (`on_stop`) and stays
+-- stopped until the next mission start runs its chunk again. Never raises.
+function M.simulation_stop()
+  local ok, err = pcall(function()
+    for _, e in pairs(M.extensions) do
+      stop_extension(e)
+    end
+  end)
+  charged = 0
+  if not ok then
+    pcall(function()
+      M.file.write('error', 'extensions did not stop', { error = tostring(err) })
+    end)
+  end
+  return ok
+end
+
 -- Called by the hook on every simulation start, and after a reload. Returns
 -- a short summary for the hook's log.
 function M.start()
@@ -1426,6 +2359,10 @@ function M.start()
     if M.starts > 1 then
       restart_extensions()
     end
+    -- `emit` is a global only when raw Lua is on; the agent's budget call
+    -- says whether it is.
+    local raw = type(agent.extension_budget) == 'function' and select(3, agent.extension_budget())
+    rawset(_G, 'emit', raw and emit or nil)
   end)
   if not ok then
     M.file.write('error', 'start raised', { error = tostring(err) })

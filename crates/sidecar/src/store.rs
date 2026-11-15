@@ -24,6 +24,9 @@ pub use disk::{
     SCHEMA, TierPeriod, backup_file, ident_of, record_of, schema_of, state_of,
 };
 
+mod markers;
+pub use markers::{Marker, MarkerError, MarkerKind, MarkerSpec, Markers, scope};
+
 /// Who simulates a managed entity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Authority {
@@ -265,7 +268,12 @@ pub enum Entry {
         /// The new revision.
         rev: u64,
     },
-    /// The controller removed a group or static.
+    /// The controller removed an extension.
+    ExtensionRemoved {
+        /// The extension's name.
+        name: String,
+    },
+    /// The controller removed a group, static or marker.
     Removed {
         /// The entity.
         entity: EntityId,
@@ -478,6 +486,7 @@ pub struct Store {
     changes_keep: usize,
     grid: Grid,
     extensions: BTreeMap<String, Extension>,
+    markers: Markers,
     owners: BTreeMap<(String, String), DesiredOwner>,
     stocks: BTreeMap<(String, String), DesiredStock>,
     rates: Option<Rates>,
@@ -573,6 +582,7 @@ impl Store {
             changes_keep,
             grid: Grid::new(GRID_CELL_M),
             extensions: BTreeMap::new(),
+            markers: Markers::default(),
             owners: BTreeMap::new(),
             stocks: BTreeMap::new(),
             rates: None,
@@ -830,7 +840,10 @@ impl Store {
         {
             return e.spec_rev;
         }
-        let rev = self.extensions.get(name).map_or(1, |e| e.spec_rev + 1);
+        let rev = self
+            .extensions
+            .get(name)
+            .map_or(self.extension_floor(name) + 1, |e| e.spec_rev + 1);
         self.extensions.insert(
             name.to_owned(),
             Extension {
@@ -916,6 +929,20 @@ impl Store {
         let id = EntityId(self.next_entity);
         self.next_entity += 1;
         Ok(id)
+    }
+
+    /// A new `EntityId` for an unmanaged entity the sidecar adopts. The
+    /// store keeps no row for it: the ID is only never given again.
+    pub fn adopt_id(&mut self) -> Result<EntityId, StoreError> {
+        self.allocate()
+    }
+
+    /// An `EntityId` the agent's binding holds for an adopted entity, read
+    /// back after a restart: it is never given again.
+    pub fn reserve_id(&mut self, id: EntityId) {
+        if id.0 >= self.next_entity && id.0 <= MAX_ID {
+            self.next_entity = id.0 + 1;
+        }
     }
 
     /// Create a group from its spec, in state `virtual`.

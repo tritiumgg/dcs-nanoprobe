@@ -6,6 +6,7 @@
 //! lock, does its work and lets go. Streams wake on [`Hub::tick`], which the
 //! driver and every successful change advance.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -14,6 +15,7 @@ use std::time::{Duration, Instant, SystemTime};
 use nanoprobe_proto::errors::status;
 use nanoprobe_proto::v1alpha1::{self as pb, ErrorReason, Health, event};
 use nanoprobe_sidecar::ids::CampaignId;
+use nanoprobe_sidecar::players::{Ctx as RosterCtx, Keyring, Roster, Unmanaged};
 use nanoprobe_sidecar::reconciler::{Config as RecConfig, EffectResult, Reconciler};
 use nanoprobe_sidecar::sim::wire::{Body, Command, Input};
 use nanoprobe_sidecar::sim::{Detached, RawRecord, SimAdapter};
@@ -24,7 +26,7 @@ use tokio::sync::{Notify, watch};
 use tonic::{Code, Status};
 
 use crate::config::Config;
-use crate::events::{EventLog, Link, Read, route_body};
+use crate::events::{EventLog, Link, Lookup, Read, player_body, route_body};
 use crate::idem::{self, Begin, Done, Idem};
 use crate::idem::{EffectKind, Pending};
 use crate::lease::{LeaseError, Leases};
@@ -79,6 +81,22 @@ pub struct Slot {
     pub theater: String,
 }
 
+/// A moderation call sent to DCS, waiting for its result. An applied one
+/// becomes a `ModerationEvent` with the role of the token that made it.
+#[derive(Clone, Debug)]
+pub struct PendingModeration {
+    /// The command's epoch and sequence number.
+    pub cmd: (u64, u64),
+    /// What was done.
+    pub action: pb::ModerationAction,
+    /// The player acted on.
+    pub player_key: String,
+    /// The reason given.
+    pub reason: String,
+    /// The role of the caller's token.
+    pub role: pb::Role,
+}
+
 /// The shared state. Services reach it through [`Hub::lock`].
 pub struct Inner {
     /// DCS.
@@ -100,6 +118,13 @@ pub struct Inner {
     pub server_log: EventLog,
     /// What the records say about the agent.
     pub link: Link,
+    /// The players: keys, who is connected, who is in which unit. Server
+    /// scoped: it lives through campaign changes.
+    pub roster: Roster,
+    /// Moderation calls whose result has not come.
+    pub moderation: Vec<PendingModeration>,
+    /// The `PLAYERS` query in flight.
+    players_cmd: Option<(u64, u64)>,
     /// The server's default lost policy (`[world] on_lost`).
     pub on_lost: LostPolicy,
     /// A `CAMPAIGN 0` is owed to the agent: no campaign is active and the
@@ -219,6 +244,9 @@ impl Inner {
     pub fn restart(&mut self, cfg: &Config) {
         self.backend.detach();
         self.link.attached = false;
+        self.players_cmd = None;
+        self.moderation.clear();
+        self.roster.want_resync();
         self.sidecar_boot += 1;
         self.rec = self.active.map(|id| {
             let rc = self.rec_config(cfg, id);
@@ -288,16 +316,67 @@ impl Inner {
             }
             _ => self.backend.sim().read(),
         };
+        let now = wall_ms() as f64 / 1000.0;
+        let mut reads = Vec::new();
+        // The roster adopts the unmanaged units players occupy: it reaches
+        // the reconciler, the store and the adapter through one cell.
+        let env = match (self.active, self.rec.as_mut()) {
+            (Some(id), Some(rec)) => self
+                .campaigns
+                .get_mut(&id)
+                .map(|slot| RefCell::new((rec, &mut slot.store, self.backend.sim()))),
+            _ => None,
+        };
         for r in &records {
             if self.active.is_none()
                 && let Ok(Input::Hello(h)) = Input::decode(r.kind, &r.payload)
             {
                 self.clear_campaign = h.campaign != 0;
             }
-            if let Some(read) = self.link.read(r) {
-                self.log(read);
+            let bound = |o: u64| {
+                env.as_ref().and_then(|e| {
+                    let g = e.borrow();
+                    g.0.entity_of(&*g.1, o)
+                })
+            };
+            let adopt = |u: &Unmanaged| {
+                env.as_ref().and_then(|e| {
+                    let mut g = e.borrow_mut();
+                    let (rec, store, sim) = &mut *g;
+                    rec.adopt(store, &mut **sim, u)
+                })
+            };
+            let notes = self.roster.fold(
+                r,
+                &RosterCtx {
+                    now,
+                    bound: &bound,
+                    adopt: Some(&adopt),
+                },
+            );
+            let unit = |o: u64| bound(o).map(|b| b.0);
+            let look = Lookup {
+                unit: &unit,
+                roster: Some(&self.roster),
+            };
+            if let Some(read) = self.link.read_with(r, &look) {
+                reads.push(read);
+            }
+            for n in notes {
+                reads.push(Read {
+                    campaign: self.link.frame_campaign,
+                    stamp: self.link.stamp(),
+                    body: player_body(n),
+                });
             }
         }
+        for read in reads {
+            self.log(read);
+        }
+        // A pair learned in this step is written to the keyring file. A
+        // failed write is tried again at the next step.
+        let _ = self.roster.flush_keys();
+        self.drive_players();
         // With no campaign active the agent must hold none: it idles, and
         // its records stamp campaign 0 (plan 4.6, "Suspend").
         if self.clear_campaign && self.active.is_none() {
@@ -309,6 +388,65 @@ impl Inner {
             if self.backend.sim().send(op, &payload).is_ok() {
                 self.clear_campaign = false;
             }
+        }
+    }
+
+    /// What the roster and the moderation calls need after a step: the
+    /// `PLAYERS` query when one is owed, the occupied units for `SUBSCRIBE`,
+    /// and the events of moderation calls that were applied.
+    fn drive_players(&mut self) {
+        let Some(id) = self.active else {
+            self.moderation.clear();
+            return;
+        };
+        let Some(rec) = self.rec.as_mut() else {
+            return;
+        };
+        rec.set_subscribed(self.roster.occupied_units());
+        if let Some(cmd) = self.players_cmd {
+            match rec.effect_result(cmd) {
+                Some(r) => {
+                    // A lost query is asked again; one the agent refused or
+                    // rejected waits for the next `HELLO` or mission load.
+                    if matches!(r.outcome, Outcome::Unknown | Outcome::NotSent) {
+                        self.roster.want_resync();
+                    }
+                    self.players_cmd = None;
+                }
+                None if !rec.inflight().any(|j| (j.epoch, j.seq) == cmd) => {
+                    self.roster.want_resync();
+                    self.players_cmd = None;
+                }
+                None => {}
+            }
+        }
+        if self.players_cmd.is_none() && self.roster.resync_wanted() {
+            let slot = self.campaigns.get_mut(&id).expect("active campaign");
+            let sim = self.backend.sim();
+            if let Some(cmd) = rec.query_players(&mut slot.store, sim) {
+                self.roster.take_resync();
+                self.players_cmd = Some(cmd);
+            }
+        }
+        let mut applied = Vec::new();
+        self.moderation.retain(|m| match rec.effect_result(m.cmd) {
+            Some(r) => {
+                if r.outcome == Outcome::Applied {
+                    applied.push((m.clone(), r.clone()));
+                }
+                false
+            }
+            None => rec.inflight().any(|j| (j.epoch, j.seq) == m.cmd),
+        });
+        for (m, r) in applied {
+            let result = crate::services::commands::command_result(Some(&r));
+            self.publish(event::Body::Moderation(pb::ModerationEvent {
+                action: m.action as i32,
+                player_key: m.player_key,
+                reason: m.reason,
+                role: m.role as i32,
+                result: Some(result),
+            }));
         }
     }
 
@@ -445,6 +583,14 @@ impl Hub {
                 idem: Idem::new(cfg.idempotency_keep),
                 server_log: EventLog::new(cfg.events_keep),
                 link: Link::default(),
+                roster: Roster::new(match &cfg.store_dir {
+                    // A keyring file that cannot be read stops the server: a
+                    // new secret would give every player a new key.
+                    Some(dir) => Keyring::open(dir).expect("the keyring file is readable"),
+                    None => Keyring::generate(),
+                }),
+                moderation: Vec::new(),
+                players_cmd: None,
                 on_lost: LostPolicy::Report,
                 clear_campaign: false,
             }),

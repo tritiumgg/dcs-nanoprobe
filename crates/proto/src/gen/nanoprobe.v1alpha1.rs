@@ -372,6 +372,7 @@ pub enum ErrorReason {
     RevisionExpired = 24,
     OutcomeNotFound = 25,
     Internal = 26,
+    Unverified = 27,
 }
 impl ErrorReason {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -407,6 +408,7 @@ impl ErrorReason {
             Self::RevisionExpired => "ERROR_REASON_REVISION_EXPIRED",
             Self::OutcomeNotFound => "ERROR_REASON_OUTCOME_NOT_FOUND",
             Self::Internal => "ERROR_REASON_INTERNAL",
+            Self::Unverified => "ERROR_REASON_UNVERIFIED",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -439,729 +441,9 @@ impl ErrorReason {
             "ERROR_REASON_REVISION_EXPIRED" => Some(Self::RevisionExpired),
             "ERROR_REASON_OUTCOME_NOT_FOUND" => Some(Self::OutcomeNotFound),
             "ERROR_REASON_INTERNAL" => Some(Self::Internal),
+            "ERROR_REASON_UNVERIFIED" => Some(Self::Unverified),
             _ => None,
         }
-    }
-}
-/// Every field but sequence and stamp is optional: DCS does not always send
-/// the same fields for one event type.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct Event {
-    /// Grows by one per event within a campaign, or within the server log.
-    #[prost(uint64, tag = "1")]
-    pub sequence: u64,
-    #[prost(message, optional, tag = "2")]
-    pub stamp: ::core::option::Option<Stamp>,
-    /// The campaign the sequence number belongs to, 0 for the server log.
-    #[prost(uint64, tag = "9")]
-    pub campaign_id: u64,
-    #[prost(oneof = "event::Body", tags = "3, 4, 5, 6, 7, 8, 10")]
-    pub body: ::core::option::Option<event::Body>,
-}
-/// Nested message and enum types in `Event`.
-pub mod event {
-    #[derive(Clone, PartialEq, ::prost::Oneof)]
-    pub enum Body {
-        #[prost(message, tag = "3")]
-        World(super::WorldEvent),
-        #[prost(message, tag = "4")]
-        Player(super::PlayerEvent),
-        #[prost(message, tag = "5")]
-        Author(super::AuthorEvent),
-        #[prost(message, tag = "6")]
-        Menu(super::MenuEvent),
-        #[prost(message, tag = "7")]
-        Gap(super::Gap),
-        #[prost(message, tag = "8")]
-        Lifecycle(super::LifecycleEvent),
-        #[prost(message, tag = "10")]
-        Route(super::RouteEvent),
-    }
-}
-/// A DCS world event.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct WorldEvent {
-    /// The DCS event ID.
-    #[prost(uint32, tag = "1")]
-    pub dcs_id: u32,
-    /// The event's name where the platform knows it, such as "kill".
-    #[prost(string, tag = "2")]
-    pub name: ::prost::alloc::string::String,
-    #[prost(uint64, optional, tag = "3")]
-    pub initiator_id: ::core::option::Option<u64>,
-    #[prost(uint64, optional, tag = "4")]
-    pub target_id: ::core::option::Option<u64>,
-    /// Player keys in the initiator and in the target when it happened.
-    #[prost(string, repeated, tag = "5")]
-    pub initiator_players: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    #[prost(string, repeated, tag = "6")]
-    pub target_players: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    #[prost(string, optional, tag = "7")]
-    pub weapon: ::core::option::Option<::prost::alloc::string::String>,
-    /// The airbase the event names.
-    #[prost(string, optional, tag = "8")]
-    pub place: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(message, optional, tag = "9")]
-    pub position: ::core::option::Option<Position>,
-    #[prost(string, optional, tag = "10")]
-    pub text: ::core::option::Option<::prost::alloc::string::String>,
-    /// Rounds expended, for a shooting-end event: from the event where DCS
-    /// sends a count, otherwise from the ammunition difference.
-    #[prost(uint32, optional, tag = "11")]
-    pub rounds: ::core::option::Option<u32>,
-    /// Fields the platform read and has no typed field for.
-    #[prost(message, optional, tag = "12")]
-    pub extra: ::core::option::Option<::prost_types::Struct>,
-}
-/// Progress of a group along its route order (spec/world.md, "Route
-/// progress"). The sidecar writes it from position samples, so it is as
-/// current as they are.
-#[derive(Clone, Copy, PartialEq, ::prost::Message)]
-pub struct RouteEvent {
-    #[prost(enumeration = "RouteEventKind", tag = "1")]
-    pub kind: i32,
-    /// The group.
-    #[prost(uint64, tag = "2")]
-    pub group_id: u64,
-    /// The order revision the route was given at.
-    #[prost(uint64, tag = "3")]
-    pub order_revision: u64,
-    /// The waypoint's index in the order's own numbering, from 0. Not set for
-    /// ROUTE_COMPLETE.
-    #[prost(uint32, optional, tag = "4")]
-    pub waypoint_index: ::core::option::Option<u32>,
-    /// Model time of the position sample that showed it, in seconds.
-    #[prost(double, tag = "5")]
-    pub model_time: f64,
-    /// True when the position was observed in DCS, false when the controller
-    /// wrote it.
-    #[prost(bool, tag = "6")]
-    pub observed: bool,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct PlayerEvent {
-    #[prost(enumeration = "PlayerEventKind", tag = "1")]
-    pub kind: i32,
-    #[prost(string, tag = "2")]
-    pub player_key: ::prost::alloc::string::String,
-    #[prost(string, tag = "3")]
-    pub name: ::prost::alloc::string::String,
-    #[prost(uint64, optional, tag = "4")]
-    pub unit_id: ::core::option::Option<u64>,
-    #[prost(uint32, optional, tag = "5")]
-    pub seat: ::core::option::Option<u32>,
-    #[prost(string, optional, tag = "6")]
-    pub text: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(enumeration = "Coalition", tag = "7")]
-    pub coalition: i32,
-}
-/// An event from emit, an extension or PublishEvent.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct AuthorEvent {
-    #[prost(string, tag = "1")]
-    pub name: ::prost::alloc::string::String,
-    /// Any value: emit accepts nil, a boolean, a number, a string or a table.
-    #[prost(message, optional, tag = "2")]
-    pub payload: ::core::option::Option<::prost_types::Value>,
-    #[prost(string, repeated, tag = "3")]
-    pub player_keys: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    /// The units the event is about.
-    #[prost(uint64, repeated, tag = "4")]
-    pub entity_ids: ::prost::alloc::vec::Vec<u64>,
-}
-/// A player selected a menu item.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct MenuEvent {
-    #[prost(uint64, tag = "1")]
-    pub item_id: u64,
-    /// The player where DCS identifies one; otherwise the players the item was
-    /// shown to.
-    #[prost(string, repeated, tag = "2")]
-    pub player_keys: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-}
-/// Events in this span were lost. A consumer marks what overlaps it as
-/// incomplete.
-/// The agent reports a gap in DCS real time; the server converts the ends to
-/// wall-clock time with the offset it tracks, so the wall times are estimates.
-/// The stamps carry no frame.
-#[derive(Clone, Copy, PartialEq, ::prost::Message)]
-pub struct Gap {
-    #[prost(message, optional, tag = "1")]
-    pub from: ::core::option::Option<Stamp>,
-    #[prost(message, optional, tag = "2")]
-    pub to: ::core::option::Option<Stamp>,
-    #[prost(uint32, tag = "3")]
-    pub lost: u32,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct LifecycleEvent {
-    #[prost(enumeration = "SimState", tag = "1")]
-    pub state: i32,
-    #[prost(string, tag = "2")]
-    pub theater: ::prost::alloc::string::String,
-}
-/// Gap and lifecycle events pass every filter.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct EventFilter {
-    /// The campaign to read, 0 for the active one.
-    #[prost(uint64, tag = "1")]
-    pub campaign_id: u64,
-    /// Only these DCS event IDs; empty for all.
-    #[prost(uint32, repeated, tag = "2")]
-    pub dcs_ids: ::prost::alloc::vec::Vec<u32>,
-    /// Only events that name this player.
-    #[prost(string, tag = "3")]
-    pub player_key: ::prost::alloc::string::String,
-    /// Read the server log: events recorded while no campaign was active.
-    /// campaign_id must be 0.
-    #[prost(bool, tag = "4")]
-    pub server_log: bool,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SubscribeEventsRequest {
-    #[prost(message, optional, tag = "1")]
-    pub filter: ::core::option::Option<EventFilter>,
-    /// Send events after this sequence number. 0 starts at the oldest retained.
-    #[prost(uint64, tag = "2")]
-    pub after_sequence: u64,
-    /// Start at the newest event instead.
-    #[prost(bool, tag = "3")]
-    pub live_only: bool,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct SubscribeEventsResponse {
-    #[prost(message, optional, tag = "1")]
-    pub event: ::core::option::Option<Event>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ReadEventsRequest {
-    #[prost(message, optional, tag = "1")]
-    pub filter: ::core::option::Option<EventFilter>,
-    #[prost(uint64, tag = "2")]
-    pub after_sequence: u64,
-    #[prost(uint32, tag = "3")]
-    pub limit: u32,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ReadEventsResponse {
-    #[prost(message, repeated, tag = "1")]
-    pub events: ::prost::alloc::vec::Vec<Event>,
-    /// True when more history follows the last event.
-    #[prost(bool, tag = "2")]
-    pub more: bool,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
-pub enum RouteEventKind {
-    Unspecified = 0,
-    /// A waypoint of the group's route was reached.
-    WaypointReached = 1,
-    /// The last waypoint was reached; one per route, after its last
-    /// WAYPOINT_REACHED.
-    RouteComplete = 2,
-}
-impl RouteEventKind {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    ///
-    /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::Unspecified => "ROUTE_EVENT_KIND_UNSPECIFIED",
-            Self::WaypointReached => "ROUTE_EVENT_KIND_WAYPOINT_REACHED",
-            Self::RouteComplete => "ROUTE_EVENT_KIND_ROUTE_COMPLETE",
-        }
-    }
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "ROUTE_EVENT_KIND_UNSPECIFIED" => Some(Self::Unspecified),
-            "ROUTE_EVENT_KIND_WAYPOINT_REACHED" => Some(Self::WaypointReached),
-            "ROUTE_EVENT_KIND_ROUTE_COMPLETE" => Some(Self::RouteComplete),
-            _ => None,
-        }
-    }
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
-pub enum PlayerEventKind {
-    Unspecified = 0,
-    Connect = 1,
-    Disconnect = 2,
-    EnterUnit = 3,
-    LeaveUnit = 4,
-    Chat = 5,
-    Rename = 6,
-}
-impl PlayerEventKind {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    ///
-    /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::Unspecified => "PLAYER_EVENT_KIND_UNSPECIFIED",
-            Self::Connect => "PLAYER_EVENT_KIND_CONNECT",
-            Self::Disconnect => "PLAYER_EVENT_KIND_DISCONNECT",
-            Self::EnterUnit => "PLAYER_EVENT_KIND_ENTER_UNIT",
-            Self::LeaveUnit => "PLAYER_EVENT_KIND_LEAVE_UNIT",
-            Self::Chat => "PLAYER_EVENT_KIND_CHAT",
-            Self::Rename => "PLAYER_EVENT_KIND_RENAME",
-        }
-    }
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "PLAYER_EVENT_KIND_UNSPECIFIED" => Some(Self::Unspecified),
-            "PLAYER_EVENT_KIND_CONNECT" => Some(Self::Connect),
-            "PLAYER_EVENT_KIND_DISCONNECT" => Some(Self::Disconnect),
-            "PLAYER_EVENT_KIND_ENTER_UNIT" => Some(Self::EnterUnit),
-            "PLAYER_EVENT_KIND_LEAVE_UNIT" => Some(Self::LeaveUnit),
-            "PLAYER_EVENT_KIND_CHAT" => Some(Self::Chat),
-            "PLAYER_EVENT_KIND_RENAME" => Some(Self::Rename),
-            _ => None,
-        }
-    }
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
-pub enum SimState {
-    Unspecified = 0,
-    Starting = 1,
-    Loading = 2,
-    Running = 3,
-    Paused = 4,
-    Stopping = 5,
-    Disabled = 6,
-    /// The health verdict is gone: no DCS process holds a running agent. A DCS
-    /// the server is not attached to still reports its own state.
-    Gone = 7,
-}
-impl SimState {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    ///
-    /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::Unspecified => "SIM_STATE_UNSPECIFIED",
-            Self::Starting => "SIM_STATE_STARTING",
-            Self::Loading => "SIM_STATE_LOADING",
-            Self::Running => "SIM_STATE_RUNNING",
-            Self::Paused => "SIM_STATE_PAUSED",
-            Self::Stopping => "SIM_STATE_STOPPING",
-            Self::Disabled => "SIM_STATE_DISABLED",
-            Self::Gone => "SIM_STATE_GONE",
-        }
-    }
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "SIM_STATE_UNSPECIFIED" => Some(Self::Unspecified),
-            "SIM_STATE_STARTING" => Some(Self::Starting),
-            "SIM_STATE_LOADING" => Some(Self::Loading),
-            "SIM_STATE_RUNNING" => Some(Self::Running),
-            "SIM_STATE_PAUSED" => Some(Self::Paused),
-            "SIM_STATE_STOPPING" => Some(Self::Stopping),
-            "SIM_STATE_DISABLED" => Some(Self::Disabled),
-            "SIM_STATE_GONE" => Some(Self::Gone),
-            _ => None,
-        }
-    }
-}
-/// Generated client implementations.
-pub mod events_service_client {
-    #![allow(
-        unused_variables,
-        dead_code,
-        missing_docs,
-        clippy::wildcard_imports,
-        clippy::let_unit_value,
-    )]
-    use tonic::codegen::*;
-    use tonic::codegen::http::Uri;
-    #[derive(Debug, Clone)]
-    pub struct EventsServiceClient<T> {
-        inner: tonic::client::Grpc<T>,
-    }
-    impl EventsServiceClient<tonic::transport::Channel> {
-        /// Attempt to create a new client by connecting to a given endpoint.
-        pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
-        where
-            D: TryInto<tonic::transport::Endpoint>,
-            D::Error: Into<StdError>,
-        {
-            let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
-            Ok(Self::new(conn))
-        }
-    }
-    impl<T> EventsServiceClient<T>
-    where
-        T: tonic::client::GrpcService<tonic::body::Body>,
-        T::Error: Into<StdError>,
-        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
-        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
-    {
-        pub fn new(inner: T) -> Self {
-            let inner = tonic::client::Grpc::new(inner);
-            Self { inner }
-        }
-        pub fn with_origin(inner: T, origin: Uri) -> Self {
-            let inner = tonic::client::Grpc::with_origin(inner, origin);
-            Self { inner }
-        }
-        pub fn with_interceptor<F>(
-            inner: T,
-            interceptor: F,
-        ) -> EventsServiceClient<InterceptedService<T, F>>
-        where
-            F: tonic::service::Interceptor,
-            T::ResponseBody: Default,
-            T: tonic::codegen::Service<
-                http::Request<tonic::body::Body>,
-                Response = http::Response<
-                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
-                >,
-            >,
-            <T as tonic::codegen::Service<
-                http::Request<tonic::body::Body>,
-            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
-        {
-            EventsServiceClient::new(InterceptedService::new(inner, interceptor))
-        }
-        /// Compress requests with the given encoding.
-        ///
-        /// This requires the server to support it otherwise it might respond with an
-        /// error.
-        #[must_use]
-        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.inner = self.inner.send_compressed(encoding);
-            self
-        }
-        /// Enable decompressing responses.
-        #[must_use]
-        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.inner = self.inner.accept_compressed(encoding);
-            self
-        }
-        /// Limits the maximum size of a decoded message.
-        ///
-        /// Default: `4MB`
-        #[must_use]
-        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
-            self.inner = self.inner.max_decoding_message_size(limit);
-            self
-        }
-        /// Limits the maximum size of an encoded message.
-        ///
-        /// Default: `usize::MAX`
-        #[must_use]
-        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
-            self.inner = self.inner.max_encoding_message_size(limit);
-            self
-        }
-        /// Events from a sequence number onward, then live.
-        pub async fn subscribe_events(
-            &mut self,
-            request: impl tonic::IntoRequest<super::SubscribeEventsRequest>,
-        ) -> std::result::Result<
-            tonic::Response<tonic::codec::Streaming<super::SubscribeEventsResponse>>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/nanoprobe.v1alpha1.EventsService/SubscribeEvents",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new(
-                        "nanoprobe.v1alpha1.EventsService",
-                        "SubscribeEvents",
-                    ),
-                );
-            self.inner.server_streaming(req, path, codec).await
-        }
-        /// A page of history.
-        pub async fn read_events(
-            &mut self,
-            request: impl tonic::IntoRequest<super::ReadEventsRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ReadEventsResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/nanoprobe.v1alpha1.EventsService/ReadEvents",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("nanoprobe.v1alpha1.EventsService", "ReadEvents"),
-                );
-            self.inner.unary(req, path, codec).await
-        }
-    }
-}
-/// Generated server implementations.
-pub mod events_service_server {
-    #![allow(
-        unused_variables,
-        dead_code,
-        missing_docs,
-        clippy::wildcard_imports,
-        clippy::let_unit_value,
-    )]
-    use tonic::codegen::*;
-    /// Generated trait containing gRPC methods that should be implemented for use with EventsServiceServer.
-    #[async_trait]
-    pub trait EventsService: std::marker::Send + std::marker::Sync + 'static {
-        /// Server streaming response type for the SubscribeEvents method.
-        type SubscribeEventsStream: tonic::codegen::tokio_stream::Stream<
-                Item = std::result::Result<super::SubscribeEventsResponse, tonic::Status>,
-            >
-            + std::marker::Send
-            + 'static;
-        /// Events from a sequence number onward, then live.
-        async fn subscribe_events(
-            &self,
-            request: tonic::Request<super::SubscribeEventsRequest>,
-        ) -> std::result::Result<
-            tonic::Response<Self::SubscribeEventsStream>,
-            tonic::Status,
-        >;
-        /// A page of history.
-        async fn read_events(
-            &self,
-            request: tonic::Request<super::ReadEventsRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ReadEventsResponse>,
-            tonic::Status,
-        >;
-    }
-    #[derive(Debug)]
-    pub struct EventsServiceServer<T> {
-        inner: Arc<T>,
-        accept_compression_encodings: EnabledCompressionEncodings,
-        send_compression_encodings: EnabledCompressionEncodings,
-        max_decoding_message_size: Option<usize>,
-        max_encoding_message_size: Option<usize>,
-    }
-    impl<T> EventsServiceServer<T> {
-        pub fn new(inner: T) -> Self {
-            Self::from_arc(Arc::new(inner))
-        }
-        pub fn from_arc(inner: Arc<T>) -> Self {
-            Self {
-                inner,
-                accept_compression_encodings: Default::default(),
-                send_compression_encodings: Default::default(),
-                max_decoding_message_size: None,
-                max_encoding_message_size: None,
-            }
-        }
-        pub fn with_interceptor<F>(
-            inner: T,
-            interceptor: F,
-        ) -> InterceptedService<Self, F>
-        where
-            F: tonic::service::Interceptor,
-        {
-            InterceptedService::new(Self::new(inner), interceptor)
-        }
-        /// Enable decompressing requests with the given encoding.
-        #[must_use]
-        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.accept_compression_encodings.enable(encoding);
-            self
-        }
-        /// Compress responses with the given encoding, if the client supports it.
-        #[must_use]
-        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.send_compression_encodings.enable(encoding);
-            self
-        }
-        /// Limits the maximum size of a decoded message.
-        ///
-        /// Default: `4MB`
-        #[must_use]
-        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
-            self.max_decoding_message_size = Some(limit);
-            self
-        }
-        /// Limits the maximum size of an encoded message.
-        ///
-        /// Default: `usize::MAX`
-        #[must_use]
-        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
-            self.max_encoding_message_size = Some(limit);
-            self
-        }
-    }
-    impl<T, B> tonic::codegen::Service<http::Request<B>> for EventsServiceServer<T>
-    where
-        T: EventsService,
-        B: Body + std::marker::Send + 'static,
-        B::Error: Into<StdError> + std::marker::Send + 'static,
-    {
-        type Response = http::Response<tonic::body::Body>;
-        type Error = std::convert::Infallible;
-        type Future = BoxFuture<Self::Response, Self::Error>;
-        fn poll_ready(
-            &mut self,
-            _cx: &mut Context<'_>,
-        ) -> Poll<std::result::Result<(), Self::Error>> {
-            Poll::Ready(Ok(()))
-        }
-        fn call(&mut self, req: http::Request<B>) -> Self::Future {
-            match req.uri().path() {
-                "/nanoprobe.v1alpha1.EventsService/SubscribeEvents" => {
-                    #[allow(non_camel_case_types)]
-                    struct SubscribeEventsSvc<T: EventsService>(pub Arc<T>);
-                    impl<
-                        T: EventsService,
-                    > tonic::server::ServerStreamingService<
-                        super::SubscribeEventsRequest,
-                    > for SubscribeEventsSvc<T> {
-                        type Response = super::SubscribeEventsResponse;
-                        type ResponseStream = T::SubscribeEventsStream;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::ResponseStream>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::SubscribeEventsRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as EventsService>::subscribe_events(&inner, request)
-                                    .await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = SubscribeEventsSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.server_streaming(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/nanoprobe.v1alpha1.EventsService/ReadEvents" => {
-                    #[allow(non_camel_case_types)]
-                    struct ReadEventsSvc<T: EventsService>(pub Arc<T>);
-                    impl<
-                        T: EventsService,
-                    > tonic::server::UnaryService<super::ReadEventsRequest>
-                    for ReadEventsSvc<T> {
-                        type Response = super::ReadEventsResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::ReadEventsRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as EventsService>::read_events(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = ReadEventsSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                _ => {
-                    Box::pin(async move {
-                        let mut response = http::Response::new(
-                            tonic::body::Body::default(),
-                        );
-                        let headers = response.headers_mut();
-                        headers
-                            .insert(
-                                tonic::Status::GRPC_STATUS,
-                                (tonic::Code::Unimplemented as i32).into(),
-                            );
-                        headers
-                            .insert(
-                                http::header::CONTENT_TYPE,
-                                tonic::metadata::GRPC_CONTENT_TYPE,
-                            );
-                        Ok(response)
-                    })
-                }
-            }
-        }
-    }
-    impl<T> Clone for EventsServiceServer<T> {
-        fn clone(&self) -> Self {
-            let inner = self.inner.clone();
-            Self {
-                inner,
-                accept_compression_encodings: self.accept_compression_encodings,
-                send_compression_encodings: self.send_compression_encodings,
-                max_decoding_message_size: self.max_decoding_message_size,
-                max_encoding_message_size: self.max_encoding_message_size,
-            }
-        }
-    }
-    /// Generated gRPC service name
-    pub const SERVICE_NAME: &str = "nanoprobe.v1alpha1.EventsService";
-    impl<T> tonic::server::NamedService for EventsServiceServer<T> {
-        const NAME: &'static str = SERVICE_NAME;
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1819,6 +1101,867 @@ pub mod session_service_server {
     /// Generated gRPC service name
     pub const SERVICE_NAME: &str = "nanoprobe.v1alpha1.SessionService";
     impl<T> tonic::server::NamedService for SessionServiceServer<T> {
+        const NAME: &'static str = SERVICE_NAME;
+    }
+}
+/// Every field but sequence and stamp is optional: DCS does not always send
+/// the same fields for one event type.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Event {
+    /// Grows by one per event within a campaign, or within the server log.
+    #[prost(uint64, tag = "1")]
+    pub sequence: u64,
+    #[prost(message, optional, tag = "2")]
+    pub stamp: ::core::option::Option<Stamp>,
+    /// The campaign the sequence number belongs to, 0 for the server log.
+    #[prost(uint64, tag = "9")]
+    pub campaign_id: u64,
+    #[prost(oneof = "event::Body", tags = "3, 4, 5, 6, 7, 8, 10, 11")]
+    pub body: ::core::option::Option<event::Body>,
+}
+/// Nested message and enum types in `Event`.
+pub mod event {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Body {
+        #[prost(message, tag = "3")]
+        World(super::WorldEvent),
+        #[prost(message, tag = "4")]
+        Player(super::PlayerEvent),
+        #[prost(message, tag = "5")]
+        Author(super::AuthorEvent),
+        #[prost(message, tag = "6")]
+        Menu(super::MenuEvent),
+        #[prost(message, tag = "7")]
+        Gap(super::Gap),
+        #[prost(message, tag = "8")]
+        Lifecycle(super::LifecycleEvent),
+        #[prost(message, tag = "10")]
+        Route(super::RouteEvent),
+        #[prost(message, tag = "11")]
+        Moderation(super::ModerationEvent),
+    }
+}
+/// A DCS world event.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct WorldEvent {
+    /// The DCS event ID.
+    #[prost(uint32, tag = "1")]
+    pub dcs_id: u32,
+    /// The event's name where the platform knows it, such as "kill".
+    #[prost(string, tag = "2")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(uint64, optional, tag = "3")]
+    pub initiator_id: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "4")]
+    pub target_id: ::core::option::Option<u64>,
+    /// Player keys in the initiator and in the target when it happened.
+    #[prost(string, repeated, tag = "5")]
+    pub initiator_players: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "6")]
+    pub target_players: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "7")]
+    pub weapon: ::core::option::Option<::prost::alloc::string::String>,
+    /// The airbase the event names.
+    #[prost(string, optional, tag = "8")]
+    pub place: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(message, optional, tag = "9")]
+    pub position: ::core::option::Option<Position>,
+    #[prost(string, optional, tag = "10")]
+    pub text: ::core::option::Option<::prost::alloc::string::String>,
+    /// Rounds expended, for a shooting-end event: from the event where DCS
+    /// sends a count, otherwise from the ammunition difference.
+    #[prost(uint32, optional, tag = "11")]
+    pub rounds: ::core::option::Option<u32>,
+    /// Fields the platform read and has no typed field for.
+    #[prost(message, optional, tag = "12")]
+    pub extra: ::core::option::Option<::prost_types::Struct>,
+    /// The DCS type names of the initiator and the target: the event's own
+    /// when it carries them, else the type the mission's table held for the
+    /// object.
+    #[prost(string, optional, tag = "13")]
+    pub initiator_type: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "14")]
+    pub target_type: ::core::option::Option<::prost::alloc::string::String>,
+    /// Model time of the kill, for a KILL or DEAD: the victim's BDA time when
+    /// one came, else the time the victim's row left the table. DCS's own time
+    /// of the event stays in extra.time. A weapon kill's KILL and DEAD come up
+    /// to 83 s after the object stopped existing; this is the time to count.
+    #[prost(double, optional, tag = "15")]
+    pub dated_time: ::core::option::Option<f64>,
+    /// The players who launched the weapon of a HIT or KILL. initiator_players
+    /// is never rewritten; this is a separate attribution.
+    #[prost(string, repeated, tag = "16")]
+    pub launch_players: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(enumeration = "LaunchRule", tag = "17")]
+    pub launch_rule: i32,
+}
+/// Progress of a group along its route order (spec/world.md, "Route
+/// progress"). The sidecar writes it from position samples, so it is as
+/// current as they are.
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct RouteEvent {
+    #[prost(enumeration = "RouteEventKind", tag = "1")]
+    pub kind: i32,
+    /// The group.
+    #[prost(uint64, tag = "2")]
+    pub group_id: u64,
+    /// The order revision the route was given at.
+    #[prost(uint64, tag = "3")]
+    pub order_revision: u64,
+    /// The waypoint's index in the order's own numbering, from 0. Not set for
+    /// ROUTE_COMPLETE.
+    #[prost(uint32, optional, tag = "4")]
+    pub waypoint_index: ::core::option::Option<u32>,
+    /// Model time of the position sample that showed it, in seconds.
+    #[prost(double, tag = "5")]
+    pub model_time: f64,
+    /// True when the position was observed in DCS, false when the controller
+    /// wrote it.
+    #[prost(bool, tag = "6")]
+    pub observed: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PlayerEvent {
+    #[prost(enumeration = "PlayerEventKind", tag = "1")]
+    pub kind: i32,
+    #[prost(string, tag = "2")]
+    pub player_key: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(uint64, optional, tag = "4")]
+    pub unit_id: ::core::option::Option<u64>,
+    #[prost(uint32, optional, tag = "5")]
+    pub seat: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "6")]
+    pub text: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(enumeration = "Coalition", tag = "7")]
+    pub coalition: i32,
+}
+/// An event from emit, an extension or PublishEvent.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AuthorEvent {
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+    /// Any value: emit accepts nil, a boolean, a number, a string or a table.
+    #[prost(message, optional, tag = "2")]
+    pub payload: ::core::option::Option<::prost_types::Value>,
+    #[prost(string, repeated, tag = "3")]
+    pub player_keys: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// The units the event is about.
+    #[prost(uint64, repeated, tag = "4")]
+    pub entity_ids: ::prost::alloc::vec::Vec<u64>,
+}
+/// A player selected a menu item.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MenuEvent {
+    #[prost(uint64, tag = "1")]
+    pub item_id: u64,
+    /// With SELECTOR the player; with AUDIENCE the candidates.
+    #[prost(string, repeated, tag = "2")]
+    pub player_keys: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(enumeration = "MenuAttribution", tag = "3")]
+    pub attribution: i32,
+}
+/// A moderation call DCS applied.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ModerationEvent {
+    #[prost(enumeration = "ModerationAction", tag = "1")]
+    pub action: i32,
+    /// The player acted on. Never a ucid.
+    #[prost(string, tag = "2")]
+    pub player_key: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub reason: ::prost::alloc::string::String,
+    /// The role of the token that made the call.
+    #[prost(enumeration = "Role", tag = "4")]
+    pub role: i32,
+    #[prost(message, optional, tag = "5")]
+    pub result: ::core::option::Option<CommandResult>,
+}
+/// Events in this span were lost. A consumer marks what overlaps it as
+/// incomplete.
+/// The agent reports a gap in DCS real time; the server converts the ends to
+/// wall-clock time with the offset it tracks, so the wall times are estimates.
+/// The stamps carry no frame.
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct Gap {
+    #[prost(message, optional, tag = "1")]
+    pub from: ::core::option::Option<Stamp>,
+    #[prost(message, optional, tag = "2")]
+    pub to: ::core::option::Option<Stamp>,
+    #[prost(uint32, tag = "3")]
+    pub lost: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LifecycleEvent {
+    #[prost(enumeration = "SimState", tag = "1")]
+    pub state: i32,
+    #[prost(string, tag = "2")]
+    pub theater: ::prost::alloc::string::String,
+}
+/// Gap and lifecycle events pass every filter.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EventFilter {
+    /// The campaign to read, 0 for the active one.
+    #[prost(uint64, tag = "1")]
+    pub campaign_id: u64,
+    /// Only these DCS event IDs; empty for all.
+    #[prost(uint32, repeated, tag = "2")]
+    pub dcs_ids: ::prost::alloc::vec::Vec<u32>,
+    /// Only events that name this player.
+    #[prost(string, tag = "3")]
+    pub player_key: ::prost::alloc::string::String,
+    /// Read the server log: events recorded while no campaign was active.
+    /// campaign_id must be 0.
+    #[prost(bool, tag = "4")]
+    pub server_log: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SubscribeEventsRequest {
+    #[prost(message, optional, tag = "1")]
+    pub filter: ::core::option::Option<EventFilter>,
+    /// Send events after this sequence number. 0 starts at the oldest retained.
+    #[prost(uint64, tag = "2")]
+    pub after_sequence: u64,
+    /// Start at the newest event instead.
+    #[prost(bool, tag = "3")]
+    pub live_only: bool,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SubscribeEventsResponse {
+    #[prost(message, optional, tag = "1")]
+    pub event: ::core::option::Option<Event>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ReadEventsRequest {
+    #[prost(message, optional, tag = "1")]
+    pub filter: ::core::option::Option<EventFilter>,
+    #[prost(uint64, tag = "2")]
+    pub after_sequence: u64,
+    #[prost(uint32, tag = "3")]
+    pub limit: u32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ReadEventsResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub events: ::prost::alloc::vec::Vec<Event>,
+    /// True when more history follows the last event.
+    #[prost(bool, tag = "2")]
+    pub more: bool,
+}
+/// How launch_players was found (spec/world.md, "Launch attribution").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum LaunchRule {
+    Unspecified = 0,
+    /// The event names a weapon whose shooter the sidecar saw at SHOT.
+    Weapon = 1,
+    /// The weapon is unknown, as for a gun: the initiator's occupants before it
+    /// left.
+    Initiator = 2,
+}
+impl LaunchRule {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "LAUNCH_RULE_UNSPECIFIED",
+            Self::Weapon => "LAUNCH_RULE_WEAPON",
+            Self::Initiator => "LAUNCH_RULE_INITIATOR",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "LAUNCH_RULE_UNSPECIFIED" => Some(Self::Unspecified),
+            "LAUNCH_RULE_WEAPON" => Some(Self::Weapon),
+            "LAUNCH_RULE_INITIATOR" => Some(Self::Initiator),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum RouteEventKind {
+    Unspecified = 0,
+    /// A waypoint of the group's route was reached.
+    WaypointReached = 1,
+    /// The last waypoint was reached; one per route, after its last
+    /// WAYPOINT_REACHED.
+    RouteComplete = 2,
+}
+impl RouteEventKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "ROUTE_EVENT_KIND_UNSPECIFIED",
+            Self::WaypointReached => "ROUTE_EVENT_KIND_WAYPOINT_REACHED",
+            Self::RouteComplete => "ROUTE_EVENT_KIND_ROUTE_COMPLETE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "ROUTE_EVENT_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "ROUTE_EVENT_KIND_WAYPOINT_REACHED" => Some(Self::WaypointReached),
+            "ROUTE_EVENT_KIND_ROUTE_COMPLETE" => Some(Self::RouteComplete),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum PlayerEventKind {
+    Unspecified = 0,
+    Connect = 1,
+    Disconnect = 2,
+    EnterUnit = 3,
+    LeaveUnit = 4,
+    Chat = 5,
+    Rename = 6,
+}
+impl PlayerEventKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "PLAYER_EVENT_KIND_UNSPECIFIED",
+            Self::Connect => "PLAYER_EVENT_KIND_CONNECT",
+            Self::Disconnect => "PLAYER_EVENT_KIND_DISCONNECT",
+            Self::EnterUnit => "PLAYER_EVENT_KIND_ENTER_UNIT",
+            Self::LeaveUnit => "PLAYER_EVENT_KIND_LEAVE_UNIT",
+            Self::Chat => "PLAYER_EVENT_KIND_CHAT",
+            Self::Rename => "PLAYER_EVENT_KIND_RENAME",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "PLAYER_EVENT_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "PLAYER_EVENT_KIND_CONNECT" => Some(Self::Connect),
+            "PLAYER_EVENT_KIND_DISCONNECT" => Some(Self::Disconnect),
+            "PLAYER_EVENT_KIND_ENTER_UNIT" => Some(Self::EnterUnit),
+            "PLAYER_EVENT_KIND_LEAVE_UNIT" => Some(Self::LeaveUnit),
+            "PLAYER_EVENT_KIND_CHAT" => Some(Self::Chat),
+            "PLAYER_EVENT_KIND_RENAME" => Some(Self::Rename),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum MenuAttribution {
+    Unspecified = 0,
+    /// DCS named the player who selected the item: player_keys holds that one.
+    Selector = 1,
+    /// DCS did not say. player_keys holds the players who could have selected
+    /// it by occupancy and connection when the record arrived; the platform
+    /// never picks one. To know exactly who chose an item, give it to a group
+    /// with one player seat.
+    Audience = 2,
+}
+impl MenuAttribution {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "MENU_ATTRIBUTION_UNSPECIFIED",
+            Self::Selector => "MENU_ATTRIBUTION_SELECTOR",
+            Self::Audience => "MENU_ATTRIBUTION_AUDIENCE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "MENU_ATTRIBUTION_UNSPECIFIED" => Some(Self::Unspecified),
+            "MENU_ATTRIBUTION_SELECTOR" => Some(Self::Selector),
+            "MENU_ATTRIBUTION_AUDIENCE" => Some(Self::Audience),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ModerationAction {
+    Unspecified = 0,
+    Kick = 1,
+    Ban = 2,
+    Unban = 3,
+    Move = 4,
+}
+impl ModerationAction {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "MODERATION_ACTION_UNSPECIFIED",
+            Self::Kick => "MODERATION_ACTION_KICK",
+            Self::Ban => "MODERATION_ACTION_BAN",
+            Self::Unban => "MODERATION_ACTION_UNBAN",
+            Self::Move => "MODERATION_ACTION_MOVE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "MODERATION_ACTION_UNSPECIFIED" => Some(Self::Unspecified),
+            "MODERATION_ACTION_KICK" => Some(Self::Kick),
+            "MODERATION_ACTION_BAN" => Some(Self::Ban),
+            "MODERATION_ACTION_UNBAN" => Some(Self::Unban),
+            "MODERATION_ACTION_MOVE" => Some(Self::Move),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum SimState {
+    Unspecified = 0,
+    Starting = 1,
+    Loading = 2,
+    Running = 3,
+    Paused = 4,
+    Stopping = 5,
+    Disabled = 6,
+    /// The health verdict is gone: no DCS process holds a running agent. A DCS
+    /// the server is not attached to still reports its own state.
+    Gone = 7,
+}
+impl SimState {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "SIM_STATE_UNSPECIFIED",
+            Self::Starting => "SIM_STATE_STARTING",
+            Self::Loading => "SIM_STATE_LOADING",
+            Self::Running => "SIM_STATE_RUNNING",
+            Self::Paused => "SIM_STATE_PAUSED",
+            Self::Stopping => "SIM_STATE_STOPPING",
+            Self::Disabled => "SIM_STATE_DISABLED",
+            Self::Gone => "SIM_STATE_GONE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SIM_STATE_UNSPECIFIED" => Some(Self::Unspecified),
+            "SIM_STATE_STARTING" => Some(Self::Starting),
+            "SIM_STATE_LOADING" => Some(Self::Loading),
+            "SIM_STATE_RUNNING" => Some(Self::Running),
+            "SIM_STATE_PAUSED" => Some(Self::Paused),
+            "SIM_STATE_STOPPING" => Some(Self::Stopping),
+            "SIM_STATE_DISABLED" => Some(Self::Disabled),
+            "SIM_STATE_GONE" => Some(Self::Gone),
+            _ => None,
+        }
+    }
+}
+/// Generated client implementations.
+pub mod events_service_client {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    use tonic::codegen::http::Uri;
+    #[derive(Debug, Clone)]
+    pub struct EventsServiceClient<T> {
+        inner: tonic::client::Grpc<T>,
+    }
+    impl EventsServiceClient<tonic::transport::Channel> {
+        /// Attempt to create a new client by connecting to a given endpoint.
+        pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
+        where
+            D: TryInto<tonic::transport::Endpoint>,
+            D::Error: Into<StdError>,
+        {
+            let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
+            Ok(Self::new(conn))
+        }
+    }
+    impl<T> EventsServiceClient<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::Body>,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
+    {
+        pub fn new(inner: T) -> Self {
+            let inner = tonic::client::Grpc::new(inner);
+            Self { inner }
+        }
+        pub fn with_origin(inner: T, origin: Uri) -> Self {
+            let inner = tonic::client::Grpc::with_origin(inner, origin);
+            Self { inner }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> EventsServiceClient<InterceptedService<T, F>>
+        where
+            F: tonic::service::Interceptor,
+            T::ResponseBody: Default,
+            T: tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+                Response = http::Response<
+                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
+                >,
+            >,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+        {
+            EventsServiceClient::new(InterceptedService::new(inner, interceptor))
+        }
+        /// Compress requests with the given encoding.
+        ///
+        /// This requires the server to support it otherwise it might respond with an
+        /// error.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.send_compressed(encoding);
+            self
+        }
+        /// Enable decompressing responses.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.accept_compressed(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_encoding_message_size(limit);
+            self
+        }
+        /// Events from a sequence number onward, then live.
+        pub async fn subscribe_events(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SubscribeEventsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<tonic::codec::Streaming<super::SubscribeEventsResponse>>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nanoprobe.v1alpha1.EventsService/SubscribeEvents",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "nanoprobe.v1alpha1.EventsService",
+                        "SubscribeEvents",
+                    ),
+                );
+            self.inner.server_streaming(req, path, codec).await
+        }
+        /// A page of history.
+        pub async fn read_events(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ReadEventsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ReadEventsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nanoprobe.v1alpha1.EventsService/ReadEvents",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("nanoprobe.v1alpha1.EventsService", "ReadEvents"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+    }
+}
+/// Generated server implementations.
+pub mod events_service_server {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    /// Generated trait containing gRPC methods that should be implemented for use with EventsServiceServer.
+    #[async_trait]
+    pub trait EventsService: std::marker::Send + std::marker::Sync + 'static {
+        /// Server streaming response type for the SubscribeEvents method.
+        type SubscribeEventsStream: tonic::codegen::tokio_stream::Stream<
+                Item = std::result::Result<super::SubscribeEventsResponse, tonic::Status>,
+            >
+            + std::marker::Send
+            + 'static;
+        /// Events from a sequence number onward, then live.
+        async fn subscribe_events(
+            &self,
+            request: tonic::Request<super::SubscribeEventsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<Self::SubscribeEventsStream>,
+            tonic::Status,
+        >;
+        /// A page of history.
+        async fn read_events(
+            &self,
+            request: tonic::Request<super::ReadEventsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ReadEventsResponse>,
+            tonic::Status,
+        >;
+    }
+    #[derive(Debug)]
+    pub struct EventsServiceServer<T> {
+        inner: Arc<T>,
+        accept_compression_encodings: EnabledCompressionEncodings,
+        send_compression_encodings: EnabledCompressionEncodings,
+        max_decoding_message_size: Option<usize>,
+        max_encoding_message_size: Option<usize>,
+    }
+    impl<T> EventsServiceServer<T> {
+        pub fn new(inner: T) -> Self {
+            Self::from_arc(Arc::new(inner))
+        }
+        pub fn from_arc(inner: Arc<T>) -> Self {
+            Self {
+                inner,
+                accept_compression_encodings: Default::default(),
+                send_compression_encodings: Default::default(),
+                max_decoding_message_size: None,
+                max_encoding_message_size: None,
+            }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> InterceptedService<Self, F>
+        where
+            F: tonic::service::Interceptor,
+        {
+            InterceptedService::new(Self::new(inner), interceptor)
+        }
+        /// Enable decompressing requests with the given encoding.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.accept_compression_encodings.enable(encoding);
+            self
+        }
+        /// Compress responses with the given encoding, if the client supports it.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.send_compression_encodings.enable(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.max_decoding_message_size = Some(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.max_encoding_message_size = Some(limit);
+            self
+        }
+    }
+    impl<T, B> tonic::codegen::Service<http::Request<B>> for EventsServiceServer<T>
+    where
+        T: EventsService,
+        B: Body + std::marker::Send + 'static,
+        B::Error: Into<StdError> + std::marker::Send + 'static,
+    {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: http::Request<B>) -> Self::Future {
+            match req.uri().path() {
+                "/nanoprobe.v1alpha1.EventsService/SubscribeEvents" => {
+                    #[allow(non_camel_case_types)]
+                    struct SubscribeEventsSvc<T: EventsService>(pub Arc<T>);
+                    impl<
+                        T: EventsService,
+                    > tonic::server::ServerStreamingService<
+                        super::SubscribeEventsRequest,
+                    > for SubscribeEventsSvc<T> {
+                        type Response = super::SubscribeEventsResponse;
+                        type ResponseStream = T::SubscribeEventsStream;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::ResponseStream>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SubscribeEventsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as EventsService>::subscribe_events(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SubscribeEventsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.server_streaming(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/nanoprobe.v1alpha1.EventsService/ReadEvents" => {
+                    #[allow(non_camel_case_types)]
+                    struct ReadEventsSvc<T: EventsService>(pub Arc<T>);
+                    impl<
+                        T: EventsService,
+                    > tonic::server::UnaryService<super::ReadEventsRequest>
+                    for ReadEventsSvc<T> {
+                        type Response = super::ReadEventsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ReadEventsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as EventsService>::read_events(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ReadEventsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                _ => {
+                    Box::pin(async move {
+                        let mut response = http::Response::new(
+                            tonic::body::Body::default(),
+                        );
+                        let headers = response.headers_mut();
+                        headers
+                            .insert(
+                                tonic::Status::GRPC_STATUS,
+                                (tonic::Code::Unimplemented as i32).into(),
+                            );
+                        headers
+                            .insert(
+                                http::header::CONTENT_TYPE,
+                                tonic::metadata::GRPC_CONTENT_TYPE,
+                            );
+                        Ok(response)
+                    })
+                }
+            }
+        }
+    }
+    impl<T> Clone for EventsServiceServer<T> {
+        fn clone(&self) -> Self {
+            let inner = self.inner.clone();
+            Self {
+                inner,
+                accept_compression_encodings: self.accept_compression_encodings,
+                send_compression_encodings: self.send_compression_encodings,
+                max_decoding_message_size: self.max_decoding_message_size,
+                max_encoding_message_size: self.max_encoding_message_size,
+            }
+        }
+    }
+    /// Generated gRPC service name
+    pub const SERVICE_NAME: &str = "nanoprobe.v1alpha1.EventsService";
+    impl<T> tonic::server::NamedService for EventsServiceServer<T> {
         const NAME: &'static str = SERVICE_NAME;
     }
 }
@@ -7875,6 +8018,727 @@ pub mod extension_service_server {
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct KickRequest {
+    #[prost(message, optional, tag = "1")]
+    pub write: ::core::option::Option<Write>,
+    #[prost(string, tag = "2")]
+    pub player_key: ::prost::alloc::string::String,
+    /// Shown to the player.
+    #[prost(string, tag = "3")]
+    pub reason: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct KickResponse {
+    #[prost(message, optional, tag = "1")]
+    pub result: ::core::option::Option<CommandResult>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BanRequest {
+    #[prost(message, optional, tag = "1")]
+    pub write: ::core::option::Option<Write>,
+    /// How long, above 0. 0 (the DCS default) is refused with UNIMPLEMENTED and
+    /// reason UNVERIFIED until E34 verifies it.
+    #[prost(double, tag = "4")]
+    pub seconds: f64,
+    /// Shown to the player.
+    #[prost(string, tag = "5")]
+    pub reason: ::prost::alloc::string::String,
+    /// One of a player key or a ucid. The API bans a connected player only; a
+    /// ban of a player with no connection is refused with UNIMPLEMENTED and
+    /// reason UNVERIFIED until E34 verifies it.
+    #[prost(oneof = "ban_request::Target", tags = "2, 3")]
+    pub target: ::core::option::Option<ban_request::Target>,
+}
+/// Nested message and enum types in `BanRequest`.
+pub mod ban_request {
+    /// One of a player key or a ucid. The API bans a connected player only; a
+    /// ban of a player with no connection is refused with UNIMPLEMENTED and
+    /// reason UNVERIFIED until E34 verifies it.
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Target {
+        #[prost(string, tag = "2")]
+        PlayerKey(::prost::alloc::string::String),
+        #[prost(string, tag = "3")]
+        Ucid(::prost::alloc::string::String),
+    }
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BanResponse {
+    #[prost(message, optional, tag = "1")]
+    pub result: ::core::option::Option<CommandResult>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UnbanRequest {
+    #[prost(message, optional, tag = "1")]
+    pub write: ::core::option::Option<Write>,
+    #[prost(oneof = "unban_request::Target", tags = "2, 3")]
+    pub target: ::core::option::Option<unban_request::Target>,
+}
+/// Nested message and enum types in `UnbanRequest`.
+pub mod unban_request {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Target {
+        #[prost(string, tag = "2")]
+        PlayerKey(::prost::alloc::string::String),
+        #[prost(string, tag = "3")]
+        Ucid(::prost::alloc::string::String),
+    }
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct UnbanResponse {
+    #[prost(message, optional, tag = "1")]
+    pub result: ::core::option::Option<CommandResult>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListBansRequest {
+    #[prost(message, optional, tag = "1")]
+    pub write: ::core::option::Option<Write>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Ban {
+    /// The key of the banned ucid, derived like any player key.
+    #[prost(string, tag = "1")]
+    pub player_key: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub name: ::prost::alloc::string::String,
+    /// When the ban ends. Absent when DCS gives none.
+    #[prost(message, optional, tag = "3")]
+    pub until: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(string, tag = "4")]
+    pub reason: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListBansResponse {
+    #[prost(message, optional, tag = "1")]
+    pub result: ::core::option::Option<CommandResult>,
+    #[prost(message, repeated, tag = "2")]
+    pub bans: ::prost::alloc::vec::Vec<Ban>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MovePlayerRequest {
+    #[prost(message, optional, tag = "1")]
+    pub write: ::core::option::Option<Write>,
+    #[prost(string, tag = "2")]
+    pub player_key: ::prost::alloc::string::String,
+    #[prost(enumeration = "Coalition", tag = "3")]
+    pub coalition: i32,
+    /// The slot ID. Empty moves the player to spectators; a slot ID is refused
+    /// with UNIMPLEMENTED and reason UNVERIFIED until E34 verifies it.
+    #[prost(string, tag = "4")]
+    pub slot: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MovePlayerResponse {
+    #[prost(message, optional, tag = "1")]
+    pub result: ::core::option::Option<CommandResult>,
+}
+/// Generated client implementations.
+pub mod moderation_service_client {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    use tonic::codegen::http::Uri;
+    /// Players are named by player key. The API never carries a ucid: a ucid
+    /// goes in only where an admin bans or unbans one. Each
+    /// applied call is a ModerationEvent in the event stream, with the role of
+    /// the token that made it. Every call needs a campaign to be active, since it
+    /// reaches DCS through the active campaign's command stream.
+    #[derive(Debug, Clone)]
+    pub struct ModerationServiceClient<T> {
+        inner: tonic::client::Grpc<T>,
+    }
+    impl ModerationServiceClient<tonic::transport::Channel> {
+        /// Attempt to create a new client by connecting to a given endpoint.
+        pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
+        where
+            D: TryInto<tonic::transport::Endpoint>,
+            D::Error: Into<StdError>,
+        {
+            let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
+            Ok(Self::new(conn))
+        }
+    }
+    impl<T> ModerationServiceClient<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::Body>,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
+    {
+        pub fn new(inner: T) -> Self {
+            let inner = tonic::client::Grpc::new(inner);
+            Self { inner }
+        }
+        pub fn with_origin(inner: T, origin: Uri) -> Self {
+            let inner = tonic::client::Grpc::with_origin(inner, origin);
+            Self { inner }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> ModerationServiceClient<InterceptedService<T, F>>
+        where
+            F: tonic::service::Interceptor,
+            T::ResponseBody: Default,
+            T: tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+                Response = http::Response<
+                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
+                >,
+            >,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+        {
+            ModerationServiceClient::new(InterceptedService::new(inner, interceptor))
+        }
+        /// Compress requests with the given encoding.
+        ///
+        /// This requires the server to support it otherwise it might respond with an
+        /// error.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.send_compressed(encoding);
+            self
+        }
+        /// Enable decompressing responses.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.accept_compressed(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_encoding_message_size(limit);
+            self
+        }
+        /// Remove a connected player from the server.
+        pub async fn kick(
+            &mut self,
+            request: impl tonic::IntoRequest<super::KickRequest>,
+        ) -> std::result::Result<tonic::Response<super::KickResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nanoprobe.v1alpha1.ModerationService/Kick",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("nanoprobe.v1alpha1.ModerationService", "Kick"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Ban a connected player, by key or ucid, for a time above 0 seconds.
+        pub async fn ban(
+            &mut self,
+            request: impl tonic::IntoRequest<super::BanRequest>,
+        ) -> std::result::Result<tonic::Response<super::BanResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nanoprobe.v1alpha1.ModerationService/Ban",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("nanoprobe.v1alpha1.ModerationService", "Ban"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn unban(
+            &mut self,
+            request: impl tonic::IntoRequest<super::UnbanRequest>,
+        ) -> std::result::Result<tonic::Response<super::UnbanResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nanoprobe.v1alpha1.ModerationService/Unban",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("nanoprobe.v1alpha1.ModerationService", "Unban"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn list_bans(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListBansRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListBansResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nanoprobe.v1alpha1.ModerationService/ListBans",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("nanoprobe.v1alpha1.ModerationService", "ListBans"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Move a connected player to spectators. A move into a slot is refused
+        /// with UNIMPLEMENTED and reason UNVERIFIED until E34 verifies it.
+        pub async fn move_player(
+            &mut self,
+            request: impl tonic::IntoRequest<super::MovePlayerRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::MovePlayerResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nanoprobe.v1alpha1.ModerationService/MovePlayer",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("nanoprobe.v1alpha1.ModerationService", "MovePlayer"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+    }
+}
+/// Generated server implementations.
+pub mod moderation_service_server {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    /// Generated trait containing gRPC methods that should be implemented for use with ModerationServiceServer.
+    #[async_trait]
+    pub trait ModerationService: std::marker::Send + std::marker::Sync + 'static {
+        /// Remove a connected player from the server.
+        async fn kick(
+            &self,
+            request: tonic::Request<super::KickRequest>,
+        ) -> std::result::Result<tonic::Response<super::KickResponse>, tonic::Status>;
+        /// Ban a connected player, by key or ucid, for a time above 0 seconds.
+        async fn ban(
+            &self,
+            request: tonic::Request<super::BanRequest>,
+        ) -> std::result::Result<tonic::Response<super::BanResponse>, tonic::Status>;
+        async fn unban(
+            &self,
+            request: tonic::Request<super::UnbanRequest>,
+        ) -> std::result::Result<tonic::Response<super::UnbanResponse>, tonic::Status>;
+        async fn list_bans(
+            &self,
+            request: tonic::Request<super::ListBansRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListBansResponse>,
+            tonic::Status,
+        >;
+        /// Move a connected player to spectators. A move into a slot is refused
+        /// with UNIMPLEMENTED and reason UNVERIFIED until E34 verifies it.
+        async fn move_player(
+            &self,
+            request: tonic::Request<super::MovePlayerRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::MovePlayerResponse>,
+            tonic::Status,
+        >;
+    }
+    /// Players are named by player key. The API never carries a ucid: a ucid
+    /// goes in only where an admin bans or unbans one. Each
+    /// applied call is a ModerationEvent in the event stream, with the role of
+    /// the token that made it. Every call needs a campaign to be active, since it
+    /// reaches DCS through the active campaign's command stream.
+    #[derive(Debug)]
+    pub struct ModerationServiceServer<T> {
+        inner: Arc<T>,
+        accept_compression_encodings: EnabledCompressionEncodings,
+        send_compression_encodings: EnabledCompressionEncodings,
+        max_decoding_message_size: Option<usize>,
+        max_encoding_message_size: Option<usize>,
+    }
+    impl<T> ModerationServiceServer<T> {
+        pub fn new(inner: T) -> Self {
+            Self::from_arc(Arc::new(inner))
+        }
+        pub fn from_arc(inner: Arc<T>) -> Self {
+            Self {
+                inner,
+                accept_compression_encodings: Default::default(),
+                send_compression_encodings: Default::default(),
+                max_decoding_message_size: None,
+                max_encoding_message_size: None,
+            }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> InterceptedService<Self, F>
+        where
+            F: tonic::service::Interceptor,
+        {
+            InterceptedService::new(Self::new(inner), interceptor)
+        }
+        /// Enable decompressing requests with the given encoding.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.accept_compression_encodings.enable(encoding);
+            self
+        }
+        /// Compress responses with the given encoding, if the client supports it.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.send_compression_encodings.enable(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.max_decoding_message_size = Some(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.max_encoding_message_size = Some(limit);
+            self
+        }
+    }
+    impl<T, B> tonic::codegen::Service<http::Request<B>> for ModerationServiceServer<T>
+    where
+        T: ModerationService,
+        B: Body + std::marker::Send + 'static,
+        B::Error: Into<StdError> + std::marker::Send + 'static,
+    {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: http::Request<B>) -> Self::Future {
+            match req.uri().path() {
+                "/nanoprobe.v1alpha1.ModerationService/Kick" => {
+                    #[allow(non_camel_case_types)]
+                    struct KickSvc<T: ModerationService>(pub Arc<T>);
+                    impl<
+                        T: ModerationService,
+                    > tonic::server::UnaryService<super::KickRequest> for KickSvc<T> {
+                        type Response = super::KickResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::KickRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModerationService>::kick(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = KickSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/nanoprobe.v1alpha1.ModerationService/Ban" => {
+                    #[allow(non_camel_case_types)]
+                    struct BanSvc<T: ModerationService>(pub Arc<T>);
+                    impl<
+                        T: ModerationService,
+                    > tonic::server::UnaryService<super::BanRequest> for BanSvc<T> {
+                        type Response = super::BanResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::BanRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModerationService>::ban(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = BanSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/nanoprobe.v1alpha1.ModerationService/Unban" => {
+                    #[allow(non_camel_case_types)]
+                    struct UnbanSvc<T: ModerationService>(pub Arc<T>);
+                    impl<
+                        T: ModerationService,
+                    > tonic::server::UnaryService<super::UnbanRequest> for UnbanSvc<T> {
+                        type Response = super::UnbanResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::UnbanRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModerationService>::unban(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = UnbanSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/nanoprobe.v1alpha1.ModerationService/ListBans" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListBansSvc<T: ModerationService>(pub Arc<T>);
+                    impl<
+                        T: ModerationService,
+                    > tonic::server::UnaryService<super::ListBansRequest>
+                    for ListBansSvc<T> {
+                        type Response = super::ListBansResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListBansRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModerationService>::list_bans(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListBansSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/nanoprobe.v1alpha1.ModerationService/MovePlayer" => {
+                    #[allow(non_camel_case_types)]
+                    struct MovePlayerSvc<T: ModerationService>(pub Arc<T>);
+                    impl<
+                        T: ModerationService,
+                    > tonic::server::UnaryService<super::MovePlayerRequest>
+                    for MovePlayerSvc<T> {
+                        type Response = super::MovePlayerResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::MovePlayerRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModerationService>::move_player(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = MovePlayerSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                _ => {
+                    Box::pin(async move {
+                        let mut response = http::Response::new(
+                            tonic::body::Body::default(),
+                        );
+                        let headers = response.headers_mut();
+                        headers
+                            .insert(
+                                tonic::Status::GRPC_STATUS,
+                                (tonic::Code::Unimplemented as i32).into(),
+                            );
+                        headers
+                            .insert(
+                                http::header::CONTENT_TYPE,
+                                tonic::metadata::GRPC_CONTENT_TYPE,
+                            );
+                        Ok(response)
+                    })
+                }
+            }
+        }
+    }
+    impl<T> Clone for ModerationServiceServer<T> {
+        fn clone(&self) -> Self {
+            let inner = self.inner.clone();
+            Self {
+                inner,
+                accept_compression_encodings: self.accept_compression_encodings,
+                send_compression_encodings: self.send_compression_encodings,
+                max_decoding_message_size: self.max_decoding_message_size,
+                max_encoding_message_size: self.max_encoding_message_size,
+            }
+        }
+    }
+    /// Generated gRPC service name
+    pub const SERVICE_NAME: &str = "nanoprobe.v1alpha1.ModerationService";
+    impl<T> tonic::server::NamedService for ModerationServiceServer<T> {
+        const NAME: &'static str = SERVICE_NAME;
+    }
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Player {
     /// Constant across sessions, names and campaigns.
     #[prost(string, tag = "1")]
@@ -7890,6 +8754,11 @@ pub struct Player {
     pub unit_id: u64,
     #[prost(uint32, tag = "6")]
     pub seat: u32,
+    /// Fuel the player used in the active campaign, in fractions of a full
+    /// tank, summed over the units the player flew. A rise in a unit's fuel
+    /// counts for nothing.
+    #[prost(double, tag = "7")]
+    pub fuel_used: f64,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Occupancy {

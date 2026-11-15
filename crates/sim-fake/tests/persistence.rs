@@ -319,6 +319,41 @@ fn a_store_reads_back_exactly_as_written() {
     }
 }
 
+#[test]
+fn a_removed_extension_is_absent_after_a_reopen() {
+    let d = temp();
+    let path = d.path().join("store.sqlite");
+    let mut w = World::new_late(3, 1, LostPolicy::Respawn, 0);
+    w.store.set_extension("probe", "return 1");
+    w.store.save_as(&path, record("a")).expect("save");
+    assert!(w.store.remove_extension("probe"));
+    w.store.commit().expect("commit");
+    let (_d, mut s) = read_back(&path);
+    assert!(s.extension("probe").is_none());
+    assert!(s.set_extension("probe", "return 1") > 1);
+}
+
+#[test]
+fn a_removal_the_agent_has_not_confirmed_is_sent_again_after_a_reopen() {
+    let d = temp();
+    let path = d.path().join("store.sqlite");
+    let mut w = World::new(0, 0, LostPolicy::Report);
+    w.settle().expect("settles");
+    w.store.set_extension("probe", "return {}");
+    w.store.save_as(&path, record("a")).expect("save");
+    ticks(&mut w, 10);
+    assert_eq!(w.sim.extension_rev("probe"), 1);
+    assert!(w.store.remove_extension("probe"));
+    w.store.commit().expect("commit");
+    // The sidecar stops before the agent is told; the agent keeps its boot.
+    reopen(&mut w, &path);
+    assert_eq!(w.store.extension_removals().count(), 1);
+    ticks(&mut w, 20);
+    assert_eq!(w.sim.extension_rev("probe"), 0);
+    assert_eq!(w.sim.ledger().extension_removals, vec!["probe".to_owned()]);
+    assert_eq!(w.store.extension_removals().count(), 0);
+}
+
 /// One seed of the deterministic simulation's late schedule, 300 operations
 /// then settling. With `file`, every sidecar restart reads its store back
 /// from the file and keeps nothing else, and writes happen only where the

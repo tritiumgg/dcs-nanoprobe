@@ -16,6 +16,9 @@
 //!
 //! `--part world` runs the S15 exit test instead, and `--part names` the
 //! naming check (`commands/world.rs`).
+//! `--part players --raw-lua on|off` and `--part moderation --client <target>
+//! [--miz FILE]` run the S16 live tests (`commands/players.rs`,
+//! `commands/moderation.rs`).
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -27,6 +30,8 @@ use crate::install::{AGENT_TOML, Profile as _};
 use crate::sampling::live::{self, Opened, Run};
 use crate::{bundle, link};
 
+mod moderation;
+mod players;
 mod world;
 
 /// Where the probe goes in the container.
@@ -43,10 +48,18 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
     let (mut seed, mut commands, mut restart_every) = (1u64, 1_000u64, 100u64);
     let (mut groups, mut units) = (100u64, 4u64);
     let mut part = "commands";
+    let (mut raw_lua, mut client, mut miz): (Option<&str>, Option<&str>, Option<&str>) =
+        (None, None, None);
     let mut rest = rest;
     while let [flag, v, tail @ ..] = rest {
         if *flag == "--part" {
             part = v;
+        } else if *flag == "--raw-lua" {
+            raw_lua = Some(v);
+        } else if *flag == "--client" {
+            client = Some(v);
+        } else if *flag == "--miz" {
+            miz = Some(v);
         } else {
             let n = v.parse::<u64>().map_err(|e| format!("{flag}: {e}"))?;
             match *flag {
@@ -76,8 +89,24 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
             }
             return world::run_names(repository, name, units);
         }
+        "players" => {
+            let raw = match raw_lua {
+                Some("on") => true,
+                Some("off") => false,
+                _ => return Err("--part players needs --raw-lua on|off".into()),
+            };
+            return players::run(repository, name, raw);
+        }
+        "moderation" => {
+            let client = client.ok_or("--part moderation needs --client <windows-target>")?;
+            return moderation::run(repository, name, client, miz.map(Path::new));
+        }
         "commands" => {}
-        other => return Err(format!("--part is commands, world or names, not {other}")),
+        other => {
+            return Err(format!(
+                "--part is commands, world, names, players or moderation, not {other}"
+            ));
+        }
     }
     // The exit test needs forced sidecar restarts.
     if restart_every == 0 || restart_every >= commands {
@@ -88,7 +117,9 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
 
 const USAGE: &str = "usage: cargo xtask commands <name> [--seed N] [--commands 1000] \
     [--restart-every 100] | cargo xtask commands <name> --part world [--groups 100] [--units 4] \
-    | cargo xtask commands <name> --part names [--units 4]";
+    | cargo xtask commands <name> --part names [--units 4] \
+    | cargo xtask commands <name> --part players --raw-lua on|off \
+    | cargo xtask commands <name> --part moderation --client <windows-target> [--miz FILE]";
 
 /// `old` with `[lua] raw = true`, every other key kept.
 fn raw_on(old: &str) -> Result<String, String> {

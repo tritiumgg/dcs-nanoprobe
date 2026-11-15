@@ -1117,6 +1117,32 @@ impl Sampler {
         self.by_object.get(&object).copied()
     }
 
+    /// The shim's slot of the row the binding gives the unit or static
+    /// `entity`: the slot `add` returned, one past the row's index.
+    pub fn slot_of_entity(&self, entity: u64) -> Option<u32> {
+        if entity == 0 {
+            return None;
+        }
+        self.rows
+            .iter()
+            .position(|r| {
+                r.as_ref()
+                    .is_some_and(|r| r.entity == entity && r.found.object != 0)
+            })
+            .map(|index| index as u32 + 1)
+    }
+
+    /// The DCS group ID of the group the binding gives `entity`.
+    pub fn group_id_of_entity(&self, entity: u64) -> Option<u64> {
+        if entity == 0 {
+            return None;
+        }
+        self.rows.iter().flatten().find_map(|r| {
+            (r.group_entity == entity && r.found.object != 0 && r.found.group != 0)
+                .then_some(r.found.group)
+        })
+    }
+
     /// The object in a slot.
     pub fn object_at(&self, slot: u32) -> Option<u64> {
         self.row(slot).map(|r| r.found.object)

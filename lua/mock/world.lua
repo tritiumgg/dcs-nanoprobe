@@ -65,6 +65,12 @@
 --     getInventory reads them back. A weapon's name starts with `weapons.`.
 --   - Airbase:autoCapture(flag) records the flag; setCoalition sets the owner.
 --   - Controller:setOption records each option's value by group.
+--   - trigger.action.markToAll, markToCoalition, markToGroup and markupToAll
+--     add to `sim.marks` by ID and send S_EVENT_MARK_ADDED; removeMark takes
+--     one out. outText and its Coalition, Country, Group and Unit forms record
+--     each call in `sim.messages`. missionCommands keeps one menu tree per
+--     scope; `sim:menu_list(key)` and `sim:menu_select(key, path)` read it.
+--     What DCS returns for a path is UNVERIFIED beyond a table of names.
 --   - trigger.action.outSound and its Coalition, Country, Group and Unit
 --     forms (server state) take a file and, for a form, a number first; the
 --     mock records each call in `sim.sounds` as { call, target, file }, for any
@@ -139,6 +145,10 @@ function Sim:clear()
   self.dead_statics, self.gone_statics = {}, {}
   self.groups, self.statics = {}, {}
   self.marks = {}
+  -- F10 menu trees by scope key (`all`, `c<coalition>`, `g<group ID>`), and
+  -- the text calls of trigger.action.outText and its forms.
+  self.menus, self.messages = {}, {}
+  self.actions, self.next_action = {}, -1
   self.orders = {}
   -- Controller options by group ID, then option number.
   self.options = {}
@@ -977,9 +987,12 @@ local function scripting(host, name)
 
   -- A mark event, dispatched to every state's handlers once: only the
   -- server state's trigger table sends it.
-  local function mark_event(event_name, id, text, point, side, removed)
+  local function mark_event(event_name, id, text, point, side, removed, group, extra)
     if not removed then
-      sim.marks[id] = { text = text, point = point, coalition = side }
+      sim.marks[id] = { text = text, point = point, coalition = side, group = group }
+      for k, v in pairs(extra or {}) do
+        sim.marks[id][k] = v
+      end
     end
     if name ~= 'server' then
       return
@@ -990,9 +1003,20 @@ local function scripting(host, name)
       text = text,
       pos = { x = point.x, y = point.y, z = point.z },
       coalition = side,
-      groupID = -1,
+      groupID = group or -1,
       time = host.start_time + host.model,
     })
+  end
+
+  -- A mark call checks the argument types the way DCS takes them. A test
+  -- sets `sim.mark_raises` to make one raise.
+  local function mark_check(call, id, text, point)
+    if type(id) ~= 'number' or type(text) ~= 'string' or type(point) ~= 'table' then
+      error('mock: ' .. call .. ' takes an ID, a text and a point', 3)
+    end
+    if sim.mark_raises then
+      error('mock: ' .. call .. ' raises', 3)
+    end
   end
 
   state.trigger = ns(name, 'trigger', {
@@ -1004,11 +1028,33 @@ local function scripting(host, name)
       -- removal S_EVENT_MARK_REMOVED, with no initiator, coalition 255 and
       -- group -1 for one shown to all, and a time that is not model time
       -- (LIVE, the S9 event catalogue). The mock's time is the time of day.
-      markToAll = function(id, text, point)
-        mark_event('S_EVENT_MARK_ADDED', id, text, point, 255)
+      markToAll = function(id, text, point, read_only)
+        mark_check('markToAll', id, text, point)
+        mark_event('S_EVENT_MARK_ADDED', id, text, point, 255, false, nil, { read_only = read_only })
       end,
-      markToCoalition = function(id, text, point, side)
-        mark_event('S_EVENT_MARK_ADDED', id, text, point, side)
+      markToCoalition = function(id, text, point, side, read_only)
+        mark_check('markToCoalition', id, text, point)
+        mark_event('S_EVENT_MARK_ADDED', id, text, point, side, false, nil, { read_only = read_only })
+      end,
+      markToGroup = function(id, text, point, group, read_only)
+        mark_check('markToGroup', id, text, point)
+        if type(group) ~= 'number' then
+          error('mock: markToGroup takes a group ID', 2)
+        end
+        mark_event('S_EVENT_MARK_ADDED', id, text, point, 255, false, group, { read_only = read_only })
+      end,
+      -- A drawing: the shape, the coalition (-1 for all) and its arguments.
+      markupToAll = function(shape, side, id, ...)
+        if type(shape) ~= 'number' or type(side) ~= 'number' or type(id) ~= 'number' then
+          error('mock: markupToAll takes a shape, a coalition and an ID', 2)
+        end
+        if sim.mark_raises then
+          error('mock: markupToAll raises', 2)
+        end
+        local first = ...
+        local point = type(first) == 'table' and first.x and first or { x = 0, y = 0, z = 0 }
+        mark_event('S_EVENT_MARK_ADDED', id, '', point, side == -1 and 255 or side, false, nil,
+          { shape = shape, args = { ... }, drawing = true })
       end,
       lineToAll = function(side, id, from)
         mark_event('S_EVENT_MARK_ADDED', id, '', from, side == -1 and 255 or side)
@@ -1017,11 +1063,176 @@ local function scripting(host, name)
         local mark = sim.marks[id]
         if mark then
           sim.marks[id] = nil
-          mark_event('S_EVENT_MARK_REMOVED', id, mark.text, mark.point, mark.coalition, true)
+          mark_event('S_EVENT_MARK_REMOVED', id, mark.text, mark.point, mark.coalition, true, mark.group)
         end
       end,
     },
   })
+
+  -- A text call: records each call in `sim.messages` as
+  -- { call, target, text, seconds, clear }. A test sets
+  -- `sim.message_raises` to make one raise.
+  local function message(call, targeted)
+    return function(...)
+      local target, text, seconds, clear = ...
+      if not targeted then
+        target, text, seconds, clear = nil, ...
+      end
+      if type(text) ~= 'string' or type(seconds) ~= 'number' or type(clear) ~= 'boolean'
+        or (targeted and type(target) ~= 'number') then
+        error('mock: ' .. call .. ' takes ' .. (targeted and 'a number, ' or '') .. 'a text, seconds and a boolean', 2)
+      end
+      if sim.message_raises then
+        error('mock: ' .. call .. ' raises', 2)
+      end
+      sim.messages[#sim.messages + 1] = { call = call, target = target, text = text, seconds = seconds, clear = clear }
+    end
+  end
+  state.trigger.action.outText = message('outText', false)
+  state.trigger.action.outTextForCoalition = message('outTextForCoalition', true)
+  state.trigger.action.outTextForCountry = message('outTextForCountry', true)
+  state.trigger.action.outTextForGroup = message('outTextForGroup', true)
+  state.trigger.action.outTextForUnit = message('outTextForUnit', true)
+
+  -- F10 menus: one tree for each scope key. A path is the array of item
+  -- names from the root, as DCS returns one; its form beyond that is
+  -- UNVERIFIED. A command's function runs through `sim:menu_select`. A test
+  -- sets `sim.menu_raises` to make an add raise.
+  if names.kinds.missionCommands then
+    local function root(key)
+      sim.menus[key] = sim.menus[key] or { children = {} }
+      return sim.menus[key]
+    end
+    local function find(key, path)
+      local node = root(key)
+      for _, part in ipairs(path or {}) do
+        local found
+        for _, child in ipairs(node.children or {}) do
+          if child.name == part then
+            found = child
+            break
+          end
+        end
+        if not found then
+          return nil
+        end
+        node = found
+      end
+      return node
+    end
+    local function add(call, key, item_name, path, submenu, func, arg)
+      if type(item_name) ~= 'string' or (path ~= nil and type(path) ~= 'table') then
+        error('mock: ' .. call .. ' takes a name and a path', 3)
+      end
+      if not submenu and type(func) ~= 'function' then
+        error('mock: ' .. call .. ' takes a function', 3)
+      end
+      if sim.menu_raises then
+        error('mock: ' .. call .. ' raises', 3)
+      end
+      local parent = find(key, path)
+      if not parent or not parent.children then
+        error('mock: ' .. call .. ' has no submenu at that path', 3)
+      end
+      local node = { name = item_name, func = func, arg = arg, children = submenu and {} or nil }
+      parent.children[#parent.children + 1] = node
+      -- DCS numbers the actions the radio panel selects by index, from 0
+      -- (LIVE, docs/results/2026-11-15-s16-players-moderation.md). The mock
+      -- counts the commands in the order they were added.
+      if not submenu then
+        sim.actions = sim.actions or {}
+        sim.next_action = (sim.next_action or -1) + 1
+        node.index = sim.next_action
+        sim.actions[node.index] = node
+      end
+      local out = {}
+      for i, part in ipairs(path or {}) do
+        out[i] = part
+      end
+      out[#out + 1] = item_name
+      return out
+    end
+    local function remove(call, key, path)
+      if type(path) ~= 'table' or #path == 0 then
+        error('mock: ' .. call .. ' takes a path', 3)
+      end
+      local parent_path = { unpack(path, 1, #path - 1) }
+      local parent = find(key, parent_path)
+      for i, child in ipairs(parent and parent.children or {}) do
+        if child.name == path[#path] then
+          table.remove(parent.children, i)
+          child.removed = true
+          return
+        end
+      end
+    end
+    local function number(call, v)
+      if type(v) ~= 'number' then
+        error('mock: ' .. call .. ' takes a number first', 3)
+      end
+      return v
+    end
+    state.missionCommands = ns(name, 'missionCommands', {
+      addSubMenu = function(n, path)
+        return add('addSubMenu', 'all', n, path, true)
+      end,
+      addSubMenuForCoalition = function(side, n, path)
+        return add('addSubMenuForCoalition', 'c' .. number('addSubMenuForCoalition', side), n, path, true)
+      end,
+      addSubMenuForGroup = function(group, n, path)
+        return add('addSubMenuForGroup', 'g' .. number('addSubMenuForGroup', group), n, path, true)
+      end,
+      addCommand = function(n, path, func, arg)
+        return add('addCommand', 'all', n, path, false, func, arg)
+      end,
+      addCommandForCoalition = function(side, n, path, func, arg)
+        return add('addCommandForCoalition', 'c' .. number('addCommandForCoalition', side), n, path, false, func, arg)
+      end,
+      addCommandForGroup = function(group, n, path, func, arg)
+        return add('addCommandForGroup', 'g' .. number('addCommandForGroup', group), n, path, false, func, arg)
+      end,
+      removeItem = function(path)
+        remove('removeItem', 'all', path)
+      end,
+      removeItemForCoalition = function(side, path)
+        remove('removeItemForCoalition', 'c' .. number('removeItemForCoalition', side), path)
+      end,
+      removeItemForGroup = function(group, path)
+        remove('removeItemForGroup', 'g' .. number('removeItemForGroup', group), path)
+      end,
+    })
+    -- The action the radio panel runs for an index: ED's panel calls
+    -- missionCommands.doAction(index) (ED-CODE). An index with no live
+    -- command does nothing.
+    rawset(state.missionCommands, 'doAction', function(index)
+      if type(index) ~= 'number' then
+        error('mock: missionCommands.doAction takes a number', 2)
+      end
+      local node = sim.actions and sim.actions[index]
+      if node and not node.removed then
+        node.func(node.arg)
+      end
+    end)
+    -- The items of a scope key, depth first, as `Name/Name` strings.
+    function sim:menu_list(key)
+      local out = {}
+      local function walk(node, prefix)
+        for _, child in ipairs(node.children or {}) do
+          local label = prefix .. child.name
+          out[#out + 1] = label
+          walk(child, label .. '/')
+        end
+      end
+      walk(root(key), '')
+      return out
+    end
+    -- Select the command at `path`, as a player does: runs its function.
+    function sim:menu_select(key, path)
+      local node = find(key, path)
+      assert(node and node.func, 'mock: no command at that path')
+      return node.func(node.arg)
+    end
+  end
 
   -- A sound call: records and checks the argument types the way DCS takes
   -- them. A test sets `sim.sound_raises` to make the call raise.
@@ -1087,6 +1298,18 @@ local function scripting(host, name)
   if name == 'server' then
     rawset(state.world, 'getAirbases', airbases)
     rawset(state.world, 'searchObjects', search)
+    -- The marks and drawings on the map, as a list of panels. The field
+    -- names are UNVERIFIED: the mock gives id, text, pos and coalition.
+    rawset(state.world, 'getMarkPanels', function()
+      local out = {}
+      for id, mark in pairs(sim.marks) do
+        out[#out + 1] = { id = id, text = mark.text, pos = mark.point, coalition = mark.coalition }
+      end
+      table.sort(out, function(a, b)
+        return a.id < b.id
+      end)
+      return out
+    end)
     rawset(state.DCS, 'getUnitPositionByObjectId', W.position(sim))
     state.Export = ns(name, 'Export', {
       LoGetWorldObjects = function()

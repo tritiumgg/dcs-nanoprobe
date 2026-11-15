@@ -21,6 +21,10 @@ pub struct Config {
     pub result_wait: Duration,
     /// `[store] idempotency_keep_h`.
     pub idempotency_keep: Duration,
+    /// `[store] dir`, when persistence is on: the keyring file
+    /// `players.json` lives in it, beside the campaign folders. `None` keeps
+    /// the keyring in memory.
+    pub store_dir: Option<PathBuf>,
     /// `[store] world_changes_keep`.
     pub world_changes_keep: usize,
     /// Events kept per campaign and in the server log. The default keeps
@@ -48,6 +52,7 @@ impl Default for Config {
             stream_buffer: 1024,
             result_wait: Duration::from_secs(10),
             idempotency_keep: Duration::from_secs(24 * 3600),
+            store_dir: None,
             world_changes_keep: 100_000,
             events_keep: usize::MAX,
             position_period_min: Duration::from_millis(100),

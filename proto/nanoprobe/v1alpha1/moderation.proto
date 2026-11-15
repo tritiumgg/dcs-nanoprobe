@@ -1,0 +1,99 @@
+// Moderation: kick, ban, unban, the ban list and slot moves. Admin only.
+syntax = "proto3";
+
+package nanoprobe.v1alpha1;
+
+import "google/protobuf/timestamp.proto";
+import "nanoprobe/v1alpha1/common.proto";
+import "nanoprobe/v1alpha1/session.proto";
+
+// Players are named by player key. The API never carries a ucid: a ucid
+// goes in only where an admin bans or unbans one. Each
+// applied call is a ModerationEvent in the event stream, with the role of
+// the token that made it. Every call needs a campaign to be active, since it
+// reaches DCS through the active campaign's command stream.
+service ModerationService {
+  // Remove a connected player from the server.
+  rpc Kick(KickRequest) returns (KickResponse);
+  // Ban a connected player, by key or ucid, for a time above 0 seconds.
+  rpc Ban(BanRequest) returns (BanResponse);
+  rpc Unban(UnbanRequest) returns (UnbanResponse);
+  rpc ListBans(ListBansRequest) returns (ListBansResponse);
+  // Move a connected player to spectators. A move into a slot is refused
+  // with UNIMPLEMENTED and reason UNVERIFIED until E34 verifies it.
+  rpc MovePlayer(MovePlayerRequest) returns (MovePlayerResponse);
+}
+
+message KickRequest {
+  Write write = 1;
+  string player_key = 2;
+  // Shown to the player.
+  string reason = 3;
+}
+
+message KickResponse {
+  CommandResult result = 1;
+}
+
+message BanRequest {
+  Write write = 1;
+  // One of a player key or a ucid. The API bans a connected player only; a
+  // ban of a player with no connection is refused with UNIMPLEMENTED and
+  // reason UNVERIFIED until E34 verifies it.
+  oneof target {
+    string player_key = 2;
+    string ucid = 3;
+  }
+  // How long, above 0. 0 (the DCS default) is refused with UNIMPLEMENTED and
+  // reason UNVERIFIED until E34 verifies it.
+  double seconds = 4;
+  // Shown to the player.
+  string reason = 5;
+}
+
+message BanResponse {
+  CommandResult result = 1;
+}
+
+message UnbanRequest {
+  Write write = 1;
+  oneof target {
+    string player_key = 2;
+    string ucid = 3;
+  }
+}
+
+message UnbanResponse {
+  CommandResult result = 1;
+}
+
+message ListBansRequest {
+  Write write = 1;
+}
+
+message Ban {
+  // The key of the banned ucid, derived like any player key.
+  string player_key = 1;
+  string name = 2;
+  // When the ban ends. Absent when DCS gives none.
+  google.protobuf.Timestamp until = 3;
+  string reason = 4;
+}
+
+message ListBansResponse {
+  CommandResult result = 1;
+  repeated Ban bans = 2;
+}
+
+message MovePlayerRequest {
+  Write write = 1;
+  string player_key = 2;
+  Coalition coalition = 3;
+  // The slot ID. Empty moves the player to spectators; a slot ID is refused
+  // with UNIMPLEMENTED and reason UNVERIFIED until E34 verifies it.
+  string slot = 4;
+}
+
+message MovePlayerResponse {
+  CommandResult result = 1;
+}
