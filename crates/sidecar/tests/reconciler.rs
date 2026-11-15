@@ -1772,3 +1772,55 @@ fn a_restarted_sidecar_rebinds_from_names_alone() {
         assert_eq!(w.sim.binding(*o), (9_102, 9_101));
     }
 }
+
+/// A menu pinned to an adopted group is removed when a mission load ends the
+/// adoption, with its children, and the removal is journalled.
+#[test]
+fn markers_of_an_adopted_group_are_removed_when_a_mission_load_ends_the_adoption() {
+    use nanoprobe_sidecar::ids::EntityId;
+    use nanoprobe_sidecar::players::Unmanaged;
+    use nanoprobe_sidecar::store::{MarkerSpec, scope};
+
+    let mut w = World::new(1, 0, LostPolicy::Report);
+    w.settle().unwrap();
+    let (_unit, group) = w
+        .rec
+        .adopt(
+            &mut w.store,
+            &mut w.sim,
+            &Unmanaged {
+                object: 90_001,
+                group: 90_002,
+                entity: 0,
+                group_entity: 0,
+            },
+        )
+        .expect("adopted");
+    let menu = |parent: EntityId, submenu: bool| MarkerSpec::MenuItem {
+        parent,
+        submenu,
+        text: "m".into(),
+    };
+    let (sub, _) = w
+        .store
+        .put_marker(EntityId(0), scope::GROUP, group, menu(EntityId(0), true))
+        .unwrap();
+    let (child, _) = w
+        .store
+        .put_marker(EntityId(0), scope::GROUP, group, menu(sub, false))
+        .unwrap();
+    let (other, _) = w
+        .store
+        .put_marker(EntityId(0), scope::ALL, 0, menu(EntityId(0), false))
+        .unwrap();
+    w.tick().unwrap();
+    assert!(!w.store.marker(sub).unwrap().removed);
+
+    w.sim.load_mission();
+    w.tick().unwrap();
+    w.tick().unwrap();
+    assert!(!w.rec.is_adopted(EntityId(group)));
+    assert!(w.store.marker(sub).unwrap().removed);
+    assert!(w.store.marker(child).unwrap().removed);
+    assert!(!w.store.marker(other).unwrap().removed, "other scopes stay");
+}

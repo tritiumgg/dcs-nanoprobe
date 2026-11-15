@@ -141,15 +141,18 @@ A *managed* entity was created by the platform from a spec in the store. The rec
 keeps it as the spec says.
 
 An *unmanaged* entity was not: a player aircraft, a Mission Editor unit, a
-dynamic-spawn aircraft. The agent finds it by events and by the full enumeration, and
-the sidecar adopts it with a new `EntityId`. It is observed and reported, never
-reconciled, ordered or destroyed by the reconciler. A controller may still send it an
-effect.
+dynamic-spawn aircraft. The agent finds it by events and by the full enumeration. It is
+observed and reported, never reconciled, ordered or destroyed by the reconciler.
 
-The sidecar adopts the units players occupy, and the group of each, with `BIND`
-(spec/commands.md). Other unmanaged objects keep no `EntityId`. An adoption lasts for
+The sidecar adopts the units players occupy, and the group of each, with a new
+`EntityId` and `BIND` (spec/commands.md). A controller may send an adopted unit or
+group an effect, and may give an adopted group marks, drawings and menu items. Other
+unmanaged objects are observed and reported with no `EntityId`. An adoption lasts for
 the agent's boot and the mission generation; after a sidecar restart the sidecar reads
-it back from the agent's `OBJECT` records.
+it back from the agent's `OBJECT` records. When an adoption ends, the sidecar removes
+from the store every mark, drawing and menu item whose target is that group, as a
+journalled removal: a player's group ends with its generation, and so do the items
+given to it.
 
 ## Positions and theaters
 

@@ -52,10 +52,18 @@ fn scope_of(store: &Store) -> Option<(u64, u32, u64)> {
 }
 
 impl Adopted {
-    /// Drop every row when the agent boot, generation or campaign changed.
-    fn refresh(&mut self, store: &Store) {
+    /// Drop every row when the agent boot, generation or campaign changed,
+    /// and remove the marks, drawings and menu items pinned to an adopted
+    /// group: the group is not bound again in the new scope.
+    fn refresh(&mut self, store: &mut Store) {
         let now = scope_of(store);
         if self.scope != now {
+            let mut gone: Vec<EntityId> = self.rows.values().map(|b| b.group).collect();
+            gone.extend(self.groups.values().copied());
+            gone.retain(|g| g.0 != 0);
+            if !gone.is_empty() {
+                store.remove_markers_of_groups(&gone);
+            }
             self.rows.clear();
             self.groups.clear();
             self.rebind.clear();
@@ -161,7 +169,7 @@ impl Reconciler {
     }
 
     /// Leave the adoption of a step's old scope.
-    pub(super) fn adopt_refresh(&mut self, store: &Store) {
+    pub(super) fn adopt_refresh(&mut self, store: &mut Store) {
         self.adopted.refresh(store);
     }
 

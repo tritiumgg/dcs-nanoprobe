@@ -326,7 +326,7 @@ struct Rig {
     menus: Vec<u64>,
     players: Vec<Seen>,
     authors: Vec<(Instant, String)>,
-    extensions: Vec<(Instant, String, u64, u32)>,
+    extensions: Vec<(Instant, String, u64, u64, u32)>,
     events: Vec<(Instant, u32)>,
     steps: Vec<Value>,
     /// What to remove when the run ends or fails: `(entity, body)`.
@@ -377,7 +377,9 @@ impl Rig {
                 self.menus.push(m.entity);
             }
             Input::AuthorEvent(a) => self.authors.push((now, a.name)),
-            Input::Extension(e) => self.extensions.push((now, e.name, e.calls, e.stopped)),
+            Input::Extension(e) => self
+                .extensions
+                .push((now, e.name, e.calls, e.total_us, e.stopped)),
             Input::Event(e) => self.events.push((now, e.id)),
             Input::Player(p) => {
                 let seen = Seen {
@@ -1029,14 +1031,17 @@ fn extension_run(r: &mut Rig) -> Result<(), String> {
     if !r.until("an EXTENSION record", 40, |r| {
         r.extensions
             .iter()
-            .any(|(t, n, c, _)| *t >= by && n == EXTENSION && *c > 0)
+            .any(|(t, n, c, us, _)| *t >= by && n == EXTENSION && *c > 0 && *us > 0)
     })? {
         return Err(r.fail(
             "extension_record",
-            "no EXTENSION record with calls above 0 in 40 s",
+            "no EXTENSION record with calls and time above 0 in 40 s",
         ));
     }
-    r.pass("extension_record", "an EXTENSION record with calls above 0");
+    r.pass(
+        "extension_record",
+        "an EXTENSION record with calls and time above 0",
+    );
     Ok(())
 }
 
@@ -1132,16 +1137,16 @@ fn extension_after_load(r: &mut Rig) -> Result<(), String> {
     if !r.until("an EXTENSION record", 40, |r| {
         r.extensions
             .iter()
-            .any(|(t, n, c, _)| *t >= by && n == EXTENSION && *c > 0)
+            .any(|(t, n, c, us, _)| *t >= by && n == EXTENSION && *c > 0 && *us > 0)
     })? {
         return Err(r.fail(
             "extension_record_after_load",
-            "no EXTENSION record with calls above 0 after the load in 40 s",
+            "no EXTENSION record with calls and time above 0 after the load in 40 s",
         ));
     }
     r.pass(
         "extension_record_after_load",
-        "an EXTENSION record with calls above 0 after the load",
+        "an EXTENSION record with calls and time above 0 after the load",
     );
     let authors = r.authors.len();
     match invoke(r, "emit") {

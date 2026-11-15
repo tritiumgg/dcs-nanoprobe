@@ -1831,7 +1831,7 @@ local HANDLERS = {
     if a.parent ~= '0' then
       local parent = M.menus[a.parent]
       if not parent or not parent.submenu or not parent.path or parent.scope ~= scope
-        or parent.target ~= a.target or parent.name ~= a.name then
+        or parent.target ~= a.target or parent.group ~= group then
         return NOT_BOUND, nil, 'no submenu ' .. tostring(a.parent) .. ' in this scope'
       end
       if menu_under(a.parent, a.entity) then
@@ -1855,7 +1855,7 @@ local HANDLERS = {
       end
       -- A command holds no items, and a submenu in another scope cannot hold
       -- the old ones.
-      if not item.submenu or old.scope ~= scope or old.target ~= a.target or old.name ~= a.name then
+      if not item.submenu or old.scope ~= scope or old.target ~= a.target or old.group ~= group then
         menu_forget_below(a.entity)
       end
     end
@@ -2139,6 +2139,11 @@ local function run_extensions()
     return x.name < y.name
   end)
   local now = agent.clock()
+  -- Charge the time spent and read the lifecycle first, so that the first
+  -- pump of a loaded or unpaused mission already asks for the next one.
+  local _, _, _, lifecycle = agent.extension_budget(charged)
+  charged = 0
+  running = lifecycle == 3
   local active = false
   for _, e in ipairs(list) do
     if not e.dead and now >= e.next_report then
@@ -2154,9 +2159,7 @@ local function run_extensions()
       active = true
     end
   end
-  local left, _, _, lifecycle = agent.extension_budget(charged, active)
-  charged = 0
-  running = lifecycle == 3
+  local left = agent.extension_budget(0, active)
   local n = #list
   if n == 0 or left <= 0 then
     return

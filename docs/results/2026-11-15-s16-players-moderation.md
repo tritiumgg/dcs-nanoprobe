@@ -72,7 +72,7 @@ to end, 17 of 17 steps.
 
 | Experiment | Rule | Runs | Verdict | Key facts |
 |---|---|---|---|---|
-| E34 moderation calls | Each does what it says, or the gap is recorded | 2 | Met | Kick with a reason, ban, unban, move to spectators. A ban survives a DCS restart. LIVE. |
+| E34 moderation calls | Each does what it says, or the gap is recorded and the API leaves it out | 2 | Met in part | Kick with a reason, ban by connection, unban, move to spectators. A ban survives a DCS restart. A ban by ucid and a move into a slot were not run; the API refuses both. LIVE. |
 | E35 slot gating | Out within 1 s with a controller that answers at once, no crash | 2 | Met | 16.8 ms and 27.6 ms from the client's `SLOT` record to the result. No aircraft spawned. LIVE. |
 | E36 chat | Recorded; the owner chooses the chat design | 3 attempts | Recorded | A returned value ends the chain for sets installed before it. LIVE. |
 | Frame before start | Recorded | 1 | Recorded | No frame before `onSimulationStart`. LIVE. |
@@ -101,6 +101,11 @@ unless stated.
 `net.kick` and `net.force_player_slot` are all present in the hook state (the agent's
 capability record in `hook.log`).
 
+Not run: a ban by ucid of a client that is not connected (`net.banlist_add_by_ucid`), a
+move into an aircraft slot, and a ban with DCS's default length (seconds 0). By E34's rule
+the API leaves the first two out: `Ban` of a player who is not connected and `MovePlayer`
+with a slot answer `FAILED_PRECONDITION`. The ban test used 180 s and an explicit unban.
+
 ### E35 slot gating
 
 The client took a slot and asked to spawn in one step while the server's slot handler sent
@@ -113,10 +118,14 @@ a move to spectators on the slot event.
 | `SLOT` record to spectators | 25.5 ms | 14.7 ms |
 | Result | 27.6 ms | 16.8 ms |
 
-Each time is measured from the client's own `SLOT` record. Both runs are inside the 1 s
+Each time is measured by the probe, which stands in for the sidecar and a controller
+that answers at once, from the moment it read the client's `SLOT` record from the link.
+The time from the hook writing that record to the probe reading it is not measured. The
+`SLOT` record to spectators is the event stream's record of the move. Both runs are inside the 1 s
 limit. The client's own record shows the slot change to the aircraft slot and, in the same
 moment, the change to side 0 with an empty slot. No aircraft spawned in either run and no
-`BIRTH` followed the record. The event IDs after the slot record were `[21]`. The client saw
+`BIRTH` followed the record. The only world event after the slot record was ID 21, `S_EVENT_PLAYER_LEAVE_UNIT`, with
+no `BIRTH` before it; whether DCS created the aircraft for an instant is not known. The client saw
 side 0, slot `""`, unit `""`, with no disconnect and no mission change. No crash.
 
 When the client took the slot in the normal way (before the gating test), the events were
@@ -132,9 +141,9 @@ further arguments.
 
 | Attempt | Install order | DCS call order | Result |
 |---|---|---|---|
-| 1 | replacer, then observer | observer, then replacer, for both lines | Both callbacks saw both lines. The sender saw both lines unchanged. |
+| 1 | replacer, then observer (`<order>` left unfilled) | observer, then replacer, for both lines | Both callbacks saw both lines. The sender saw both lines unchanged. |
 | 2 | harness race | | The client sent before the server snippet was installed. Nothing was seen. Not counted. |
-| 3 | observer, then replacer | replacer, then observer | For the plain line the observer was called next. For the replaced line the observer was not called. The sender saw both lines unchanged. |
+| 3 | observer, then replacer (`<order>` filled with `observer-first`) | replacer, then observer | For the plain line the observer was called next. For the replaced line the observer was not called. The sender saw both lines unchanged. |
 
 DCS calls the most recently installed callback set first. A set that returns a value ends
 the chain for the sets installed before it. A set that returns nothing lets the chain
@@ -160,7 +169,8 @@ filter.
   answered `false` for `objects`: they were not yet in the agent's table.
 - `missionCommands.doAction` indices count from 0. An item added with
   `missionCommands.addCommand` was selected by `doAction(0)`; indexes -2 to 300 hit only 0.
-  `doAction('name')` raises `Parameter #1 (action id) missed`.
+  `doAction('name')` raises `Parameter #1 (action id) missed`
+  (`lua/experiments/s16/e-doaction-index.lua`, server state, on the shell mission).
 - DCS refused `markupToAll` shape 2 with a number at parameter 5: it wants a point there.
 - A menu callback gets no player. ED-CODE: the radio panel calls
   `missionCommands.doAction(actionIndex)` (`Scripts/UI/RadioCommandDialogPanel/RadioCommandDialogsPanel.lua`).
@@ -178,14 +188,15 @@ their numbers.
 
 - Attempt 1: the client's `net.dostring_in` answered nil for the gui, export, mission and
   server states, and the hook state has no `Input` global. Nothing was sent.
-- Attempt 2: `require('Input')` in the client's hook state gives ED's module.
+- Attempt 2 (`lua/experiments/alone/s16-menu-pick.lua`): `require('Input')` in the client's hook state gives ED's module.
   `Input.getEnvTable().Actions` gives `iCommandToggleCommandMenu` 179, `ICommandMenuItem10`
   975 and `ICommandMenuItem1` 966 (DCS 2.9.31.29434, Windows client). The client sat in its
   A-10C and sent the three commands with `Export.LoSetCommand`, 0.6 s apart. The server-side
   hit counter was unreadable: each server eval runs in its own environment, so the reading
   eval did not see the counter. Result unknown.
 - Attempt 3: a server item whose callback raises a global counter and calls the agent's
-  menu hook. The client sat in its A-10C, unpaused, and sent the same three commands with
+  menu hook (`lua/experiments/s16/e-menu-client-item.lua`), with `link-probe --record` in the
+  game container as the sidecar. The client sat in its A-10C, unpaused, and sent the same three commands with
   `Export.LoSetCommand`. The counter stayed 0 and no `MENU` record came in 1,954 records. The
   callback did not run.
 
@@ -199,6 +210,13 @@ waits for the owner on a client with a person.
 - The client menu callback is not settled (see above). The owner runs it on a client with a
   person at the controls.
 - Whether other clients see a replaced chat line is not observed: E36 ran with one client.
+- A script installed after the agent's hook whose `onPlayerTrySendChat` returns a value
+  keeps the line from the agent, so no `CHAT` record is written for it (follows from E36;
+  the agent's records were not captured in the E36 runs).
+- That `INITIATOR_MISSION_ID` on a player's `BIRTH` equals the slot ID is UNVERIFIED: the
+  moderation runs did not record the field.
+- E34's ban by ucid of a client who is not connected, a move into an aircraft slot, and a
+  ban with DCS's default length were not run; the API refuses the first two until they are.
 - E36 and the opt-in chat filter design are the owner's choice.
 - `PLAYERS` is not sent while no campaign is active.
 - `players.json` waits for S18 to wire the store directory.

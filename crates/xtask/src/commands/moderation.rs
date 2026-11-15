@@ -26,8 +26,10 @@
 //!    time from the record to the command being queued, written, answered and
 //!    to the next `SLOT` record, and whether a `BIRTH` came;
 //! 4. `KICK` with a reason: the client's own disconnect and the reason text
-//!    it saw (`client_kick_disconnect`); it joins again;
-//! 5. `BAN`: the same, a join that is refused (`client_rejoin_refused`);
+//!    it saw, which must carry the kick reason and a code
+//!    (`client_kick_disconnect`); it joins again;
+//! 5. `BAN`: the same (`client_ban_disconnect`), a join that is refused, with
+//!    the ban code 101 seen by the client (`client_rejoin_refused`);
 //!    `BANS` lists the client; `UNBAN`; `BANS` no longer lists it; a join
 //!    that works; the client leaves.
 //!
@@ -63,7 +65,7 @@ const SLOT_RACE: &str = include_str!("../../../../lua/experiments/alone/s16-slot
 const WAIT: &str = "'<wait>'";
 
 /// The steps a run must pass.
-const REQUIRED: [&str; 18] = [
+const REQUIRED: [&str; 19] = [
     "link",
     "players_query",
     "connect",
@@ -81,6 +83,7 @@ const REQUIRED: [&str; 18] = [
     "rejoin_after_unban",
     "client_slot_after_move",
     "client_kick_disconnect",
+    "client_ban_disconnect",
     "client_rejoin_refused",
 ];
 
@@ -175,22 +178,39 @@ fn slot_changed(report: &Value) -> Option<String> {
     }
 }
 
-/// What a client report shows of a disconnect: the reason text, and whether it
-/// carries `marker`. `None` when it saw no disconnect and still reads as
-/// connected.
-fn disconnect_seen(report: &Value, marker: &str) -> Option<(String, bool)> {
-    if let Some(d) = report["disconnects"].as_array().and_then(|a| a.first()) {
-        let reason = d["reason"].as_str().unwrap_or("").to_owned();
-        let has = reason.contains(marker);
-        return Some((format!("reason {reason:?}, code {}", d["code"]), has));
+/// The ban code a client's `onNetDisconnect` gets (`ERR_BANNED`, LIVE).
+const BAN_CODE: &str = "101";
+
+/// The first disconnect of a client report with a reason that carries
+/// `marker` and a code: its description, or why it is not one.
+fn disconnect_with_reason(report: &Value, marker: &str) -> Result<String, String> {
+    let Some(d) = report["disconnects"].as_array().and_then(|a| a.first()) else {
+        return Err(format!("no disconnect callback: {report}"));
+    };
+    let reason = d["reason"].as_str().unwrap_or("");
+    let code = d["code"].as_str().unwrap_or("");
+    if !reason.contains(marker) {
+        return Err(format!("the reason {reason:?} lacks {marker:?}"));
     }
-    let last = report["samples"].as_array().and_then(|a| a.last())?;
-    (last["multiplayer"] == json!(false)).then(|| {
-        (
-            "no callback; the client reads as not in multiplayer".to_owned(),
-            false,
-        )
-    })
+    if code.is_empty() || code == "nil" {
+        return Err(format!("the disconnect has no code: {d}"));
+    }
+    Ok(format!("reason {reason:?}, code {code}"))
+}
+
+/// Whether a client report holds a disconnect with the ban code.
+fn saw_ban_code(report: &Value) -> bool {
+    report["disconnects"]
+        .as_array()
+        .is_some_and(|a| a.iter().any(|d| d["code"].as_str() == Some(BAN_CODE)))
+}
+
+/// A step from a verdict that is `Ok` for a pass and `Err` for a failure.
+fn verdict_step(c: &mut Client, name: &str, v: Result<String, String>) {
+    match v {
+        Ok(d) => c.step(name, "pass", &d),
+        Err(d) => c.step(name, "fail", &d),
+    }
 }
 
 pub fn run(
@@ -401,21 +421,11 @@ fn on_phase(run: &Run, phase: &str, c: &mut Client) -> Result<(), String> {
             // Give DCS a moment to run the client's callbacks.
             std::thread::sleep(Duration::from_secs(5));
             let report = c.report()?;
-            match disconnect_seen(&report, "np-s16-kick") {
-                Some((d, true)) => c.step("client_kick_disconnect", "pass", &d),
-                Some((d, false)) => {
-                    c.step(
-                        "client_kick_disconnect",
-                        "pass",
-                        &format!("{d}; the kick reason is not in the text"),
-                    );
-                }
-                None => c.step(
-                    "client_kick_disconnect",
-                    "fail",
-                    &format!("no disconnect seen: {report}"),
-                ),
-            }
+            verdict_step(
+                c,
+                "client_kick_disconnect",
+                disconnect_with_reason(&report, "np-s16-kick"),
+            );
             if !c.join()? {
                 return Err("the client did not rejoin after the kick".into());
             }
@@ -428,24 +438,32 @@ fn on_phase(run: &Run, phase: &str, c: &mut Client) -> Result<(), String> {
         "banned" => {
             std::thread::sleep(Duration::from_secs(5));
             let report = c.report()?;
-            match disconnect_seen(&report, "np-s16-ban") {
-                Some((d, _)) => c.step("client_ban_disconnect", "pass", &d),
-                None => c.step(
-                    "client_ban_disconnect",
-                    "fail",
-                    &format!("no disconnect seen: {report}"),
-                ),
-            }
-            let again = c.join()?;
-            c.step(
-                "client_rejoin_refused",
-                if again { "fail" } else { "pass" },
-                if again {
-                    "the banned client joined"
-                } else {
-                    "the join did not succeed"
-                },
+            verdict_step(
+                c,
+                "client_ban_disconnect",
+                disconnect_with_reason(&report, "np-s16-ban"),
             );
+            // Arm again, so the refusal of the rejoin is observed.
+            c.arm()?;
+            let again = c.join()?;
+            if again {
+                c.step("client_rejoin_refused", "fail", "the banned client joined");
+            } else {
+                std::thread::sleep(Duration::from_secs(5));
+                match c.report() {
+                    Ok(report) if saw_ban_code(&report) => c.step(
+                        "client_rejoin_refused",
+                        "pass",
+                        &format!("the join failed and the client saw code {BAN_CODE}"),
+                    ),
+                    Ok(report) => c.step(
+                        "client_rejoin_refused",
+                        "fail",
+                        &format!("the join failed and the client saw no ban code: {report}"),
+                    ),
+                    Err(e) => c.step("client_rejoin_refused", "fail", &e),
+                }
+            }
             answer_file(
                 run,
                 "rejoin_tried",
@@ -495,17 +513,22 @@ mod tests {
     }
 
     #[test]
-    fn a_disconnect_is_read_from_the_callback_or_the_connection() {
-        let report =
-            json!({"disconnects": [{"reason": "kicked: np-s16-kick", "code": "5"}], "samples": []});
-        let (d, has) = disconnect_seen(&report, "np-s16-kick").unwrap();
-        assert!(has && d.contains("kicked"));
-        let other = json!({"disconnects": [{"reason": "x", "code": "1"}], "samples": []});
-        assert!(!disconnect_seen(&other, "np-s16-kick").unwrap().1);
-        let left = json!({"disconnects": [], "samples": [{"multiplayer": false}]});
-        assert!(disconnect_seen(&left, "m").is_some());
-        let still = json!({"disconnects": [], "samples": [{"multiplayer": true}]});
-        assert!(disconnect_seen(&still, "m").is_none());
+    fn a_kick_or_ban_needs_the_reason_and_a_code() {
+        let ok = json!({"disconnects": [{"reason": "kicked: np-s16-kick", "code": "5"}]});
+        assert!(disconnect_with_reason(&ok, "np-s16-kick").is_ok());
+        let other = json!({"disconnects": [{"reason": "x", "code": "5"}]});
+        assert!(disconnect_with_reason(&other, "np-s16-kick").is_err());
+        let no_code = json!({"disconnects": [{"reason": "np-s16-kick", "code": "nil"}]});
+        assert!(disconnect_with_reason(&no_code, "np-s16-kick").is_err());
+        let sampled = json!({"disconnects": [], "samples": [{"multiplayer": false}]});
+        assert!(disconnect_with_reason(&sampled, "np-s16-kick").is_err());
+    }
+
+    #[test]
+    fn a_refused_rejoin_needs_the_ban_code() {
+        assert!(saw_ban_code(&json!({"disconnects": [{"code": "101"}]})));
+        assert!(!saw_ban_code(&json!({"disconnects": [{"code": "5"}]})));
+        assert!(!saw_ban_code(&json!({"disconnects": []})));
     }
 
     #[test]

@@ -21,8 +21,8 @@
 -- * moderation-fails: the same, and a rejoin after the ban is let through: the
 --   probe fails `ban_refused`, unbans the client and stops.
 --
--- The mock's doAction index, the mark panel fields and what a ban does to a
--- connected player are UNVERIFIED; the live run settles them.
+-- The mark panel fields and what a ban does to a connected player are
+-- UNVERIFIED; the live run settles them.
 
 local S = dofile((arg[0]:match('^(.*/)') or './') .. 'support.lua')
 local root = S.root()
@@ -166,7 +166,7 @@ local function tool_phases(host, e, out)
   local server = host.states.server
   if e.name == 'menus_set' then
     local picked
-    for index = 1, 40 do
+    for index = 0, 40 do
       server.missionCommands.doAction(index)
       spin(host, 0.3, function()
         for _, l in ipairs(lines(out)) do

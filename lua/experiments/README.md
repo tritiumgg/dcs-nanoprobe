@@ -100,6 +100,9 @@ with no players, and clean up what they add.
 | `e-emit-objects.lua` | `server` | whether `id_` equals `getID()` for 5 ground units and 1 static, and what `emit` returns for each form | a second |
 | `e-handler-survives-load.lua` | `hook` | whether an eval-installed event handler counts after `cargo xtask load`: run it, load, run it again | two runs |
 | `e36-chat-hooks.lua` | `hook` | the order and arguments of two extra `onPlayerTrySendChat` sets, one returning a replaced line, as a client chats; run `alone/s16-chat.lua` on the client while it waits | up to 180 s |
+| `e-doaction-index.lua` | `server` | which index `missionCommands.doAction` takes for a command added with `addCommand` (-2 to 300), and the error text of a string argument | a second |
+| `e-menu-client-item.lua` | `server` | whether the agent reports a command chosen through its callback: `<step>` `add`, choose `np-s16-pick3`, then `read`, which returns the count and removes the item | two runs |
+| `e34-ban-restart.lua` | `hook` | whether a ban survives a DCS restart: `<step>` `ban` (bans the lone connected test client), restart DCS, then `check` (finds the ban, removes it) | two runs and a restart |
 
 `DCS.setUserCallbacks` is additive and has no removal, so a callback set a snippet
 adds stays until DCS restarts. Each does nothing once its snippet ends or is reset.

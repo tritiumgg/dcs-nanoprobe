@@ -15,7 +15,7 @@
 //!   from 0 (LIVE: a mission's only item was index 0); the order of several
 //!   items is UNVERIFIED, so it tries index 0, 1, ... up to 40 and stops when
 //!   the probe prints a `MENU` record for the item. When the call is not there or
-//!   raises, it answers `unreachable` and the probe reports the step as skipped.
+//!   raises, it answers `unreachable`, the probe reports the step as skipped and the exit test fails.
 //! - `marks_set` and `marks_removed`: `world.getMarkPanels()` in the server
 //!   state (`lua/experiments/s16/exit-marks-read.lua`).
 //! - the mission's path, learned from the hook state before the probe starts
@@ -52,12 +52,12 @@ const MENU_PICK: &str = include_str!("../../../../lua/experiments/s16/exit-menu-
 /// The placeholder in [`MENU_PICK`].
 const PLACEHOLDER: &str = "'<index>'";
 
-/// The steps a run must pass in each mode. `menu_select` may also be skipped
-/// when the tool could not reach the callback.
+/// The steps a run must pass in each mode.
 fn required(raw: bool) -> Vec<&'static str> {
     let mut steps = vec![
         "link",
         "menu_set",
+        "menu_select",
         "menu_remove",
         "mark_set",
         "marks_present",
@@ -127,21 +127,14 @@ pub(super) fn meets_exit_test(verdict: &Value, raw: bool) -> bool {
         && verdict["raw_lua_seen"] == json!(raw)
 }
 
-/// The required steps that did not pass. The menu selection must pass or be
-/// skipped.
+/// The required steps that did not pass. A skipped step did not pass.
 fn missing(verdict: &Value, raw: bool) -> Vec<String> {
     let done = passed(verdict);
-    let skipped = steps_with(verdict, &["skip"]);
-    let has = |list: &[String], name: &str| list.iter().any(|d| d == name);
-    let mut out: Vec<String> = required(raw)
+    required(raw)
         .into_iter()
-        .filter(|name| !has(&done, name))
+        .filter(|name| !done.iter().any(|d| d == name))
         .map(str::to_owned)
-        .collect();
-    if !has(&done, "menu_select") && !has(&skipped, "menu_select") {
-        out.push("menu_select".into());
-    }
-    out
+        .collect()
 }
 
 pub fn run(repository: &Path, name: &str, raw: bool) -> Result<ExitCode, String> {
@@ -467,34 +460,28 @@ mod tests {
     fn the_exit_test_needs_every_required_step_in_the_mode() {
         for raw in [true, false] {
             let mut names = required(raw);
-            let mut all = names.clone();
-            all.push("menu_select");
+            let all = names.clone();
             assert!(meets_exit_test(&verdict(raw, &all, &[]), raw));
-            // The menu step may be skipped.
-            assert!(meets_exit_test(
-                &verdict(raw, &names, &["menu_select"]),
+            // The menu step may not be skipped.
+            let without: Vec<&str> = all
+                .iter()
+                .copied()
+                .filter(|n| *n != "menu_select")
+                .collect();
+            assert!(!meets_exit_test(
+                &verdict(raw, &without, &["menu_select"]),
                 raw
             ));
-            // But not left out.
-            assert!(!meets_exit_test(&verdict(raw, &names, &[]), raw));
-            // Another step may not.
+            // Nor left out.
+            assert!(!meets_exit_test(&verdict(raw, &without, &[]), raw));
+            // Another step may not be left out.
             let last = names.pop().unwrap();
-            let mut fewer = names.clone();
-            fewer.push("menu_select");
-            assert!(!meets_exit_test(&verdict(raw, &fewer, &[]), raw), "{last}");
+            assert!(!meets_exit_test(&verdict(raw, &names, &[]), raw), "{last}");
             // A probe that saw the other mode does not pass.
             assert!(!meets_exit_test(&verdict(!raw, &all, &[]), raw));
         }
         // A verdict that did not pass does not.
-        let mut v = verdict(
-            true,
-            &{
-                let mut a = required(true);
-                a.push("menu_select");
-                a
-            },
-            &[],
-        );
+        let mut v = verdict(true, &required(true), &[]);
         v["pass"] = json!(false);
         assert!(!meets_exit_test(&v, true));
     }

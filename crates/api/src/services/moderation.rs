@@ -23,7 +23,7 @@ use tonic::{Code, Request, Response, Status};
 use super::commands::{dcs_not_ready, unleased};
 use super::players::connected;
 use crate::auth::{Access, require};
-use crate::convert::{dcs_coalition, invalid};
+use crate::convert::invalid;
 use crate::hub::{Call, Hub, Inner, Need, PendingModeration};
 use crate::idem::EffectKind;
 
@@ -76,6 +76,17 @@ fn target(
         }
         (None, None) => Err(invalid("target", "name a player key or a ucid")),
     }
+}
+
+/// The refusal for a path E34 did not verify on DCS.
+fn unverified(field: &str, what: &str) -> Status {
+    status(
+        Code::FailedPrecondition,
+        ErrorReason::DcsNotReady,
+        format!("{what} is not verified on DCS (E34) and is not offered"),
+        0,
+        field,
+    )
 }
 
 /// Send a `MODERATE` and remember who asked for it.
@@ -240,6 +251,12 @@ impl ModerationService for Moderation {
                 // A player who is connected is banned by connection, which
                 // also removes them; any other by ucid.
                 let conn = g.roster.conn_of(&key).unwrap_or(0);
+                if conn == 0 {
+                    return Err(unverified(
+                        "target",
+                        "a ban of a player who is not connected (net.banlist_add_by_ucid)",
+                    ));
+                }
                 moderate(
                     g,
                     c,
@@ -319,12 +336,12 @@ impl ModerationService for Moderation {
             MovePlayerResponse,
             |g: &mut Inner, c, role, r: &MovePlayerRequest| {
                 check_text(&r.slot, "slot", 128)?;
-                let side = if r.slot.is_empty() {
-                    0
-                } else {
-                    dcs_coalition(r.coalition)
-                        .ok_or_else(|| invalid("coalition", "a coalition is required"))?
-                };
+                if !r.slot.is_empty() {
+                    return Err(unverified(
+                        "slot",
+                        "a move into an aircraft slot (net.force_player_slot)",
+                    ));
+                }
                 let ucid = g
                     .roster
                     .ucid_of(&r.player_key)
@@ -340,7 +357,7 @@ impl ModerationService for Moderation {
                     r.player_key.clone(),
                     ucid,
                     conn,
-                    side,
+                    0,
                     0.0,
                     &r.slot,
                     "",

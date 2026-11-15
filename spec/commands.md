@@ -279,15 +279,17 @@ is the group's platform name for the scope `GROUP` (and the unit's for `MESSAGE`
 is absent otherwise.
 
 When the agent's table holds a row bound to the target entity, the handler gets the
-bound target and `name` is empty: for `GROUP`, `group_id`, the DCS group ID the row
+bound target, and `name` is empty for `MARK_SET`, `DRAWING_SET`, `MENU_SET` and
+`MESSAGE` and absent for `SOUND` and `PICTURE`: for `GROUP`, `group_id`, the DCS group ID the row
 holds, which the scoped DCS calls take as the group's mission ID; for `UNIT`, `row`, the
 shim's row slot, whose object the shim asks for `getID()`. This is how a scope names
 an adopted unit or group (spec/world.md, "Managed and unmanaged"), which keeps its own
 DCS name. `PICTURE` gets both as decimal text, and its hook handler reads the unit's
-mission ID through the `server` state. With no bound row, the handler resolves `name`. A scope the opcode does not take is `BAD_PAYLOAD`, from the agent.
+mission ID through the `server` state. With no bound row, the handler resolves `name`.
+A scope the opcode does not take is `BAD_PAYLOAD`, from the agent.
 
-For `SOUND` and `PICTURE`, `name` is present for the scope `GROUP` or `UNIT` only: the
-platform name built from the header's `campaign` and the `target` (`np!` or `np.`),
+For `SOUND` and `PICTURE` with no bound row, `name` is present for the scope `GROUP` or
+`UNIT` only: the platform name built from the header's `campaign` and the `target` (`np!` or `np.`),
 empty with campaign 0. `PICTURE`'s hook handler builds Lua source, so the agent formats
 its numbers as text, as for `DAMAGE`, and a `file` that is empty, longer than 255 bytes or
 holds a character outside letters, digits, space and `_.-/()+,#` is `BAD_PAYLOAD`. So are

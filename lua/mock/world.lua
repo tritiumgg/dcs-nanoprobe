@@ -148,7 +148,7 @@ function Sim:clear()
   -- F10 menu trees by scope key (`all`, `c<coalition>`, `g<group ID>`), and
   -- the text calls of trigger.action.outText and its forms.
   self.menus, self.messages = {}, {}
-  self.actions, self.next_action = {}, 0
+  self.actions, self.next_action = {}, -1
   self.orders = {}
   -- Controller options by group ID, then option number.
   self.options = {}
@@ -1136,11 +1136,12 @@ local function scripting(host, name)
       end
       local node = { name = item_name, func = func, arg = arg, children = submenu and {} or nil }
       parent.children[#parent.children + 1] = node
-      -- DCS numbers the actions the radio panel selects by index. The
-      -- mock counts the commands in the order they were added (UNVERIFIED).
+      -- DCS numbers the actions the radio panel selects by index, from 0
+      -- (LIVE, docs/results/2026-11-15-s16-players-moderation.md). The mock
+      -- counts the commands in the order they were added.
       if not submenu then
         sim.actions = sim.actions or {}
-        sim.next_action = (sim.next_action or 0) + 1
+        sim.next_action = (sim.next_action or -1) + 1
         node.index = sim.next_action
         sim.actions[node.index] = node
       end

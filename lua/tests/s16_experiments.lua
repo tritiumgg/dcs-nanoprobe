@@ -268,10 +268,10 @@ do
   server.missionCommands.addCommand('np-s16 test', nil, function()
     called = true
   end)
-  local source = S.read(root .. 'lua/experiments/s16/' .. file):gsub("'<index>'", '1')
+  local source = S.read(root .. 'lua/experiments/s16/' .. file):gsub("'<index>'", '0')
   local result = eval('s16xpick', 'server', source, 30)
   assert(result.ok and result.reply.ok and result.reply.values[1] == 'ok', file)
-  assert(called, 'doAction(1) did not run the command')
+  assert(called, 'doAction(0) did not run the command')
   local unfilled = S.read(root .. 'lua/experiments/s16/' .. file)
   result = eval('s16xpick2', 'server', unfilled, 30)
   assert(not result.reply.ok, 'the snippet ran with its placeholder unfilled')
@@ -302,6 +302,61 @@ do
   assert(not text:find(string.rep('ab', 16), 1, true), 'a ucid was returned')
   host.players = saved
   S.ok(file .. ': bans the lone client, finds the ban after a restart, removes it, returns no ucid')
+end
+
+do
+  local file = 'e-doaction-index.lua'
+  local server = host.states.server
+  local ran = 0
+  server.missionCommands.addCommand('np-s16 other', nil, function()
+    ran = ran + 1
+  end)
+  local source = S.read(root .. 'lua/experiments/s16/' .. file)
+  local result = eval('s16xidx', 'server', source, 60)
+  assert(result.ok and result.reply.ok, file .. ': ' .. dump(result))
+  local seen = observations(result, file)
+  need(seen, file, { 'string_argument_raised', 'string_argument_error', 'indices_that_hit' })
+  local hit = seen.indices_that_hit.value
+  -- exit-menu-pick's command is 0 and this block's is 1: the snippet's is 2.
+  assert(#hit == 1 and hit[1] == 2, 'the hits were ' .. dump(hit))
+  assert(seen.string_argument_raised.value == true, 'a string index did not raise')
+  assert(ran == 1, 'the other command ran ' .. ran .. ' times')
+  assert(rawget(server, '__np_s16_doaction_hits') == nil, 'the global is left')
+  S.ok(file .. ': finds the index of its command, records the string error, removes the item and the global')
+end
+
+do
+  local file = 'e-menu-client-item.lua'
+  local server = host.states.server
+  local source = S.read(root .. 'lua/experiments/s16/' .. file)
+  local function step(name, id)
+    local result = eval(id, 'server', (source:gsub("'<step>'", "'" .. name .. "'")), 30)
+    assert(result.ok and result.reply.ok, file .. ' ' .. name .. ': ' .. dump(result))
+    return result
+  end
+  local heard = {}
+  local shim = rawget(server, '__nanoprobe_shim')
+  local saved = shim and shim.agent and shim.agent.menu
+  if shim and shim.agent then
+    shim.agent.menu = function(...)
+      heard[#heard + 1] = { ... }
+    end
+  end
+  step('add', 's16xcia')
+  -- The mock numbers the commands from 0 in the order they were added.
+  for i = 0, 5 do
+    server.missionCommands.doAction(i)
+  end
+  local result = step('read', 's16xcir')
+  local seen = observations(result, file)
+  need(seen, file, { 'callback_count' })
+  assert(seen.callback_count.value >= 1, 'the callback did not count')
+  assert(rawget(server, '__np_s16_pick3_count') == nil and rawget(server, '__np_s16_pick3_path') == nil,
+    'a global is left')
+  if shim and shim.agent then
+    shim.agent.menu = saved
+  end
+  S.ok(file .. ': adds the command, counts its callback, removes the item and the globals')
 end
 
 -- The scripted client's snippets.

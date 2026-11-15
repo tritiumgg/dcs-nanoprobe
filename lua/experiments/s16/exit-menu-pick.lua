@@ -1,9 +1,10 @@
 -- The S16 exit test: select a mission menu command as ED's radio panel does,
 -- `missionCommands.doAction(index)` (ED-CODE,
 -- Scripts/UI/RadioCommandDialogPanel/RadioCommandDialogsPanel.lua). The
--- command writes the index in place of the placeholder. DCS's numbering of the
--- items is UNVERIFIED, so the caller tries one index after another until the
--- agent's `MENU` record names its item. Returns `ok`, or `raised <text>`.
+-- command writes the index in place of the placeholder. DCS counts the
+-- indices from 0 (LIVE, docs/results/2026-11-15-s16-players-moderation.md), so
+-- the caller tries one index after another from 0 until the agent's `MENU`
+-- record names its item. Returns `ok`, or `raised <text>`.
 -- states: server
 -- timeout: 30
 

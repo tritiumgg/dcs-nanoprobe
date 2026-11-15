@@ -303,6 +303,28 @@ impl Store {
         Ok(order)
     }
 
+    /// Remove every marker whose `GROUP` target is one of `groups`, as the
+    /// end of an adoption does: the group has no binding to place them on.
+    /// Each removal is journalled. Returns the IDs removed now.
+    pub fn remove_markers_of_groups(&mut self, groups: &[EntityId]) -> Vec<EntityId> {
+        let hit: Vec<EntityId> = self
+            .markers
+            .items
+            .values()
+            .filter(|m| {
+                !m.removed && m.scope == scope::GROUP && groups.contains(&EntityId(m.target))
+            })
+            .map(|m| m.id)
+            .collect();
+        let mut out = Vec::new();
+        for id in hit {
+            if let Ok(v) = self.remove_marker(id) {
+                out.extend(v);
+            }
+        }
+        out
+    }
+
     /// The agent must apply a marker's spec again, as after its group was
     /// spawned again: one more spec revision, journalled. Returns the new
     /// revision, or `None` for a marker that is gone.

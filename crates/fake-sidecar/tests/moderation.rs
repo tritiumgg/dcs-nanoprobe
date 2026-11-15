@@ -469,8 +469,8 @@ async fn the_moderation_service_works_end_to_end_without_a_ucid() {
         assert_eq!(r.outcome, pb::Outcome::Applied as i32, "{r:?}");
     };
 
-    // Move to a slot, then to spectators.
-    let r = m
+    // A move into an aircraft slot is not verified on DCS (E34): refused.
+    let e = m
         .move_player(pb::MovePlayerRequest {
             write: write(&l, "move1", c),
             player_key: ka.clone(),
@@ -478,11 +478,12 @@ async fn the_moderation_service_works_end_to_end_without_a_ucid() {
             slot: "55".into(),
         })
         .await
-        .expect("move")
-        .into_inner();
-    out += &format!("{r:?}");
-    applied(r.result);
-    assert_eq!(fake(&hub, |s| s.clients()[&2].slot.clone()), "55");
+        .expect_err("slot move");
+    assert_eq!(e.code(), Code::FailedPrecondition);
+    assert!(e.message().contains("E34"), "{e}");
+    assert_eq!(fake(&hub, |s| s.clients()[&2].slot.clone()), "");
+    out += e.message();
+    // A move to spectators works.
     let r = m
         .move_player(pb::MovePlayerRequest {
             write: write(&l, "move2", c),
@@ -558,7 +559,7 @@ async fn the_moderation_service_works_end_to_end_without_a_ucid() {
     applied(r.result);
     assert!(!fake(&hub, |s| s.clients().contains_key(&3)));
 
-    // Ban a connected player by key, and a ucid never seen by ucid.
+    // Ban a connected player by key, and another by ucid.
     let r = m
         .ban(pb::BanRequest {
             write: write(&l, "ban-ann", c),
@@ -572,6 +573,22 @@ async fn the_moderation_service_works_end_to_end_without_a_ucid() {
     out += &format!("{r:?}");
     applied(r.result);
     assert!(!fake(&hub, |s| s.connect_client(2, UCID_A, "Ann", 2)));
+    // A ban by ucid of a player who is not connected is not verified on DCS
+    // (E34): refused. A connected player named by ucid is banned by connection.
+    let e = m
+        .ban(pb::BanRequest {
+            write: write(&l, "ban-offline", c),
+            target: Some(pb::ban_request::Target::Ucid(UCID_D.into())),
+            seconds: 0.0,
+            reason: "known abuser".into(),
+        })
+        .await
+        .expect_err("ban of an offline ucid");
+    assert_eq!(e.code(), Code::FailedPrecondition);
+    assert!(e.message().contains("E34"), "{e}");
+    out += e.message();
+    fake(&hub, |s| s.connect_client(5, UCID_D, "Di", 1));
+    until(|| async { players_now(&ch, false).await.iter().any(|p| p.key == fresh) }).await;
     let r = m
         .ban(pb::BanRequest {
             write: write(&l, "ban-new", c),
@@ -709,7 +726,6 @@ async fn the_moderation_service_works_end_to_end_without_a_ucid() {
         seen,
         vec![
             (A::Move as i32, ka.as_str()),
-            (A::Move as i32, ka.as_str()),
             (A::Kick as i32, kb.as_str()),
             (A::Ban as i32, ka.as_str()),
             (A::Ban as i32, fresh.as_str()),
@@ -722,7 +738,7 @@ async fn the_moderation_service_works_end_to_end_without_a_ucid() {
             .iter()
             .all(|m| m.result.as_ref().unwrap().outcome == pb::Outcome::Applied as i32)
     );
-    assert_eq!(moderated[2].reason, "spam");
+    assert_eq!(moderated[1].reason, "spam");
     // The key filter finds a player's moderation events.
     let mine = events_of(
         &ch,

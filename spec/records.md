@@ -701,8 +701,11 @@ renames from names. That `onPlayerDisconnect` still answers `net.get_player_info
 relied on.
 
 The hook registers an `onPlayerTry*` callback only where it needs one, and such a
-callback never returns a value: a returned value would decide the matter for every
-other hook.
+callback never returns a value. DCS calls the callback sets of several scripts in the
+reverse of the order they were installed, and a set that returns a value ends the
+chain for the sets installed before it (LIVE, E36, docs/results/2026-11-15-s16-players-moderation.md). The hook is installed when
+DCS starts, so a script installed later whose `onPlayerTrySendChat` returns a value
+keeps the line from the hook: no `CHAT` record is written for it.
 
 The sidecar builds the API's player events from these records:
 

@@ -5,8 +5,12 @@
 -- what each sees, and whether a set that returns a replacement line stops the
 -- later set.
 --
--- It installs, in this order, with DCS.setUserCallbacks (additive, no
--- removal):
+-- It installs two sets with DCS.setUserCallbacks (additive, no removal), in
+-- the order the `<order>` placeholder names: empty or `replacer-first`
+-- installs the replacer, then the observer; `observer-first` the other way
+-- round. DCS calls the later set first (LIVE, S16), so `observer-first` puts
+-- the replacer ahead of the observer. The run line below leaves `<order>`
+-- empty; fill it with `observer-first` for the second order.
 --   replacer  returns `replaced:<line>` for a line that starts with `np-s16-r`,
 --             and nothing for any other
 --   observer  returns nothing and records every call
@@ -62,9 +66,8 @@ local observer = {
     lines.observed = (lines.observed or 0) + 1
   end,
 }
--- The install order. Fill `<order>` with `observer-first` to install the
--- observer first: DCS called the later set first (LIVE, S16 attempt 1), so
--- that order puts the replacer ahead of the observer.
+-- The install order: `observer-first` installs the observer first, any other
+-- value (empty or `replacer-first`) installs the replacer first.
 local ORDER = '<order>'
 if ORDER == 'observer-first' then
   DCS.setUserCallbacks(observer)

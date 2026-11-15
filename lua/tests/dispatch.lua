@@ -1740,6 +1740,57 @@ scenario('menus', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   assert(list('g' .. group_id) == 'Group,Group/Group command', 'the group menu is ' .. list('g' .. group_id))
   assert(list() == 'Top2,Top2/C,Top2/Sub2,Top2/Sub2/B,Top2/A2,Top2/Inner', 'the all menu changed')
 
+  -- A group submenu set while the agent held no row for the group carries
+  -- the platform name; a later set carries the group ID and an empty name.
+  -- The shim hands the commands to itself through the agent's ring, so the
+  -- test chooses the arguments.
+  do
+    local agent = shim.agent
+    local real_command, real_done = agent.command, agent.command_done
+    local queue, done = {}, {}
+    agent.command = function()
+      local c = table.remove(queue, 1)
+      if c then
+        return 29, c
+      end
+    end
+    agent.command_done = function(code, message, value)
+      done[#done + 1] = { code = code, message = message, value = value }
+      return 0
+    end
+    local function send(c)
+      c.scope, c.target = 3, 1
+      queue[1] = c
+      done = {}
+      ctx.stop()
+      shim.pump()
+      return done[1]
+    end
+    local by_name = { name = 'np.g.7.1' }
+    local by_id = { name = '', group_id = group_id }
+    local function set(entity, parent, extra, text, submenu)
+      local c = { entity = entity, parent = parent, submenu = submenu, text = text }
+      for k, v in pairs(extra) do
+        c[k] = v
+      end
+      return send(c)
+    end
+    expect(set('80', '0', by_name, 'GS', true), APPLIED, 'a group submenu by name')
+    expect(set('81', '80', by_name, 'GS child', false), APPLIED, 'a group child by name')
+    expect(set('83', '80', by_id, 'GS child by ID', false), APPLIED, 'a child by group ID under a submenu set by name')
+    local again = set('80', '0', by_id, 'GS2', true)
+    expect(again, APPLIED, 're-setting the submenu by group ID')
+    assert(again.value == nil, 'the re-set dropped children')
+    expect(set('82', '80', by_id, 'GS child 2', false), APPLIED, 'a child by group ID')
+    assert(list('g' .. group_id) == 'Group,Group/Group command,GS2,GS2/GS child,GS2/GS child by ID,GS2/GS child 2',
+      'the group menu is ' .. list('g' .. group_id))
+    expect(send({ entity = '80', parent = '0', submenu = true, text = 'x', name = '', group_id = group_id }),
+      APPLIED, 'a plain re-set')
+    agent.command, agent.command_done = real_command, real_done
+    r = run({ { op = 'MENU_REMOVE', entity = 80 } }, 'removal of the group submenu')
+    expect(r[1], APPLIED, 'MENU_REMOVE of the group submenu')
+  end
+
   -- A refused add leaves nothing held.
   sim.menu_raises = true
   r = run({ menu(60, 1, 0, 1, 0, false, 'refused') }, 'a refused menu item')
@@ -2419,6 +2470,16 @@ scenario('extension-hooks', SHIM, function(ctx)
   assert(b.events == 5 + 2 and b.text == 'paused', 'on_event ran ' .. tostring(b.events) .. ' times')
   host:set_pause(false, { silent = true })
   S.ok('while the mission is paused on_event runs and on_frame does not')
+
+  -- After the unpause the first pump in RUNNING already asks for the next,
+  -- so on_frame runs on the frames that follow without a sampling pump.
+  host:set_pause(false, { silent = true })
+  local frames_at = {}
+  play(ctx, { ext_invoke('f', 0), ext_invoke('f', 200), ext_invoke('f', 0) }, nil, 'after the unpause')
+  frames_at.first, frames_at.last = ctx.result(1).value.frames, ctx.result(3).value.frames
+  assert(frames_at.last - frames_at.first >= 10,
+    'on_frame ran ' .. (frames_at.last - frames_at.first) .. ' times in 20 frames after the unpause')
+  S.ok('on_frame runs on every frame right after an unpause')
 
   -- The queue holds 256 events: the oldest are dropped and counted.
   fired = 0
