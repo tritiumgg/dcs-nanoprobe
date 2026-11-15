@@ -557,6 +557,10 @@ struct Window {
     forgiven_us: f64,
     /// Births' and the enumeration's time past their balance's bound, µs.
     maintenance_forgiven_us: f64,
+    /// Vitals rows due in the window at the target period, and the rows
+    /// the vitals cursor read: event-marked reads are in neither.
+    vitals_due: f64,
+    vitals_swept: u64,
     /// Event handling time in the window, µs.
     events_us: f64,
     /// Where the window's agent time went.
@@ -788,6 +792,13 @@ pub struct Sampler {
     /// full-cycle cap changes.
     #[cfg(test)]
     vitals_cap_one_sweep: bool,
+    /// The vitals rows due at the target period since the sampler began,
+    /// uncapped, and the rows the vitals cursor read: a test's measure of
+    /// the period as a rate.
+    #[cfg(test)]
+    vitals_due: f64,
+    #[cfg(test)]
+    vitals_swept: u64,
     /// When a batch of each tier was last planned.
     last_planned: [Option<Instant>; 8],
     /// The tier the pump's planning runs late, which takes one row.
@@ -1095,6 +1106,10 @@ impl Sampler {
             no_guard: false,
             #[cfg(test)]
             vitals_cap_one_sweep: false,
+            #[cfg(test)]
+            vitals_due: 0.0,
+            #[cfg(test)]
+            vitals_swept: 0,
             last_planned: [None; 8],
             late_tier: None,
             x_decayed: false,
@@ -2266,7 +2281,7 @@ impl Sampler {
     }
 
     /// The share of a frame's sampling allowance that births and the
-    /// enumeration may take while a row tier owes rows.
+    /// enumeration earn, whether or not a row tier owes rows.
     fn maintenance_share(&self, now: Instant) -> f64 {
         if self.enumeration_overdue(now) {
             MAINTENANCE_SHARE_OVERDUE
@@ -2345,18 +2360,19 @@ impl Sampler {
             // A pump that comes for maintenance (births pending, or the
             // enumeration) pays the call and plans nothing when the budget
             // cannot pay its first step (LIVE, S11: 50 births pending for
-            // over 2 minutes at k = 0.1, about 8 such pumps a second). While
-            // rows are owed, maintenance goes only on a balance of a batch
-            // (`Sampler::maintenance_may`). On a short one it plans no step
-            // and the pump comes for the owed rows alone; with only event
-            // marks owed, which may not be ripe, or a tier whose cost is
-            // unmeasured, it plans nothing unless the budget pays a row.
-            // The budget must pay the step, a batch's fixed part and the
-            // close. With no debt a measured step goes alone whatever the
+            // over 2 minutes at k = 0.1, about 8 such pumps a second).
+            // Maintenance goes only on a balance that pays a batch
+            // (`Sampler::maintenance_pays`). On a short one
+            // it plans no step and the pump comes for the owed rows alone, or
+            // not at all when none are owed; with only event marks owed,
+            // which may not be ripe, or a tier whose cost is unmeasured, it
+            // plans nothing unless the budget pays a row. The budget must pay
+            // the step, a batch's fixed part and the close. With no debt and
+            // the balance paid, a measured step goes alone whatever the
             // budget, as above: the budget never reaches one step at a tenth
             // of the slice, and holding it to that would starve it. An
             // unmeasured step counts as free, so the first one still goes.
-            let may = !self.rows_owed() || self.maintenance_us >= self.maintenance_batch();
+            let may = self.maintenance_pays();
             let step = if !may {
                 self.cheapest(false)
             } else if self.births > 0 {
@@ -2447,10 +2463,10 @@ impl Sampler {
     /// on them; or they owe anything and the last pump is `PUMP_WAIT_S` old.
     fn pump_worth(&self, now: Instant) -> bool {
         // Births and the enumeration count only while they may take a batch
-        // ([`Sampler::maintenance_may`]): a pump that can plan nothing costs
+        // ([`Sampler::maintenance_pays`]): a pump that can plan nothing costs
         // its call for no rows.
         let maintenance = (self.births > 0 || self.enum_due || self.enumeration.is_some())
-            && (!self.rows_owed() || self.maintenance_us >= self.maintenance_batch());
+            && self.maintenance_pays();
         if maintenance || self.sub_wanted() || !self.urgent.is_empty() {
             return true;
         }
@@ -3063,8 +3079,15 @@ impl Sampler {
         #[cfg(not(test))]
         let one_sweep = false;
         for (tier, n, period) in periods {
-            let t = &mut self.tiers[tier.index()];
             let period = period.max(1e-3);
+            if tier == Tier::Vitals {
+                self.window.vitals_due += n * dt / period;
+                #[cfg(test)]
+                {
+                    self.vitals_due += n * dt / period;
+                }
+            }
+            let t = &mut self.tiers[tier.index()];
             // A tier holds at most one sweep's rows. Vitals holds one full slow
             // cycle, every row once: a stall or a higher tier's hold costs it
             // more than a twelfth of its rows, and the rows owed are repaid.
@@ -3168,7 +3191,6 @@ impl Sampler {
             return None;
         }
         let remaining = self.remaining_us(now);
-        let owed = self.rows_owed();
         let behind = self.behind();
         // A tier below the positions that the pumps could not afford and
         // that has owed rows for over two of its periods goes first: the
@@ -3219,7 +3241,7 @@ impl Sampler {
             (false, _) => 4 + Tier::ALL.iter().position(|x| x == t).unwrap_or(0),
         });
         for tier in order {
-            if !self.maintenance_may(tier, owed) {
+            if !self.maintenance_may(tier) {
                 continue;
             }
             // The host sweeps these in its own state.
@@ -3309,7 +3331,9 @@ impl Sampler {
             .any(|t| self.tiers[t.index()].credit >= 1.0 && self.tiers[t.index()].cost > 0.0)
     }
 
-    /// Whether a row tier owes rows.
+    /// Whether a row tier owes rows: a stopped row, an event mark, or a
+    /// tier with a row's credit. It sets the balance births and the
+    /// enumeration need for a batch ([`Sampler::maintenance_pays`]).
     fn rows_owed(&self) -> bool {
         !self.stopped.is_empty()
             || !self.life_marks.is_empty()
@@ -3329,9 +3353,10 @@ impl Sampler {
     /// `us` µs of their time; `charge` passes `us` by what the scale
     /// withholds. The −1,000 µs floor stops that surplus. Their own time
     /// may take the balance below the floor, down to the bound the debt has,
-    /// one second's budget; what passes that bound, such as a stall inside
-    /// a step, is forgiven and counted. None of it becomes the row tiers'
-    /// debt.
+    /// one second's budget. A batch starts only on a balance that pays it
+    /// ([`Sampler::maintenance_pays`]), so only a step dearer than that
+    /// bound, a stall inside it, passes it; what passes is forgiven and counted.
+    /// None of it becomes the row tiers' debt.
     fn pay_maintenance(&mut self, us: f64, charge: f64) {
         let us = us.max(0.0);
         let owed = (self.maintenance_us - charge)
@@ -3344,18 +3369,30 @@ impl Sampler {
         self.pump_paid += us;
     }
 
-    /// Whether births or the enumeration may take a batch (spec/sampling.md,
-    /// "Tiers"): while rows are owed, only while their balance is above 0.
-    /// Births go before the enumeration in the tier order.
-    fn maintenance_may(&self, tier: Tier, owed: bool) -> bool {
-        !matches!(tier, Tier::Births | Tier::Enumeration)
-            || !owed
-            || self.maintenance_us >= self.maintenance_batch()
+    /// Whether `tier` may take a batch: births and the enumeration only while
+    /// their balance pays one ([`Sampler::maintenance_pays`]). Births go
+    /// before the enumeration in the tier order.
+    fn maintenance_may(&self, tier: Tier) -> bool {
+        !matches!(tier, Tier::Births | Tier::Enumeration) || self.maintenance_pays()
     }
 
-    /// What births and the enumeration must have saved to take a batch while
-    /// rows are owed: three calls, or the owed rows' cost and a batch's
-    /// fixed part if that is less, at most what a frame can reach.
+    /// Whether births' and the enumeration's balance pays a batch
+    /// (spec/sampling.md, "Tiers"): while a row tier owes rows it covers
+    /// [`Sampler::maintenance_batch`]; with no row owed it is at or above 0.
+    /// The plan, the pump's worth and the gate below scale 1 all ask this.
+    fn maintenance_pays(&self) -> bool {
+        let need = if self.rows_owed() {
+            self.maintenance_batch()
+        } else {
+            0.0
+        };
+        self.maintenance_us >= need
+    }
+
+    /// What births and the enumeration must have saved to take a batch:
+    /// three calls, or the owed rows' cost and a batch's fixed part if that
+    /// is less, at most what a frame can reach. Asked only while a row is
+    /// owed ([`Sampler::maintenance_pays`]).
     fn maintenance_batch(&self) -> f64 {
         let call = if self.xcall_seen > 0.0 {
             self.xcall_seen
@@ -3924,6 +3961,13 @@ impl Sampler {
                 }
                 // The cursor's rows: the ones after the marked.
                 let done = all.saturating_sub(lead);
+                if tier == Tier::Vitals {
+                    self.window.vitals_swept += done as u64;
+                    #[cfg(test)]
+                    {
+                        self.vitals_swept += done as u64;
+                    }
+                }
                 let len = self.list_len(tier);
                 let wrap = self.batch.wrap.take();
                 let t = &mut self.tiers[tier.index()];
@@ -4566,6 +4610,8 @@ impl Sampler {
             sweep_waits: std::mem::take(&mut self.sweep_waits),
             maintenance_us: self.maintenance_us,
             maintenance_forgiven_us: self.window.maintenance_forgiven_us,
+            vitals_due: self.window.vitals_due,
+            vitals_swept: self.window.vitals_swept,
             sweep_overrun_us: std::mem::take(&mut self.sweep_overrun_max),
             steps: [0, 1].map(|k| {
                 (
@@ -4792,8 +4838,14 @@ pub struct Report {
     /// The births' and the enumeration's balance at the window's end, µs.
     pub maintenance_us: f64,
     /// Their time in the window that passed their balance's bound, µs:
-    /// forgiven, and not the row tiers' debt.
+    /// forgiven, and not the row tiers' debt. Only a stall inside a step
+    /// passes it.
     pub maintenance_forgiven_us: f64,
+    /// Vitals rows due in the window at the target period: the period as a
+    /// rate is the target × `vitals_due` / `vitals_swept`.
+    pub vitals_due: f64,
+    /// Vitals rows the cursor read in the window, event-marked reads apart.
+    pub vitals_swept: u64,
 }
 
 /// The histogram bucket of a value in µs (spec/transport.md, "Metrics").

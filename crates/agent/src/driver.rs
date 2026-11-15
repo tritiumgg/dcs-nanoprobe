@@ -641,6 +641,8 @@ fn report(d: &mut Driver, r: &Report) {
             ("rows_positions", Value::Int(r.spend.tier_rows[3] as i64)),
             ("rows_stopped", Value::Int(r.spend.tier_rows[4] as i64)),
             ("rows_vitals", Value::Int(r.spend.tier_rows[5] as i64)),
+            ("due_vitals", Value::Num(r.vitals_due)),
+            ("swept_vitals", Value::Int(r.vitals_swept as i64)),
             ("rows_ammo", Value::Int(r.spend.tier_rows[6] as i64)),
             ("rows_warehouses", Value::Int(r.spend.tier_rows[7] as i64)),
             ("idle", Value::Int(r.idle as i64)),
