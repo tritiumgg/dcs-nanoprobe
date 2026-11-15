@@ -124,9 +124,11 @@ Every changing call carries an idempotency key; the lease calls are the exceptio
 empty key is `INVALID_FIELD`. A repeated call with the same key and the same request,
 the lease left out of the comparison, returns the first call's response and does
 nothing else; while the first call is still waiting, the repeat waits with it. A key
-is remembered in the server-scoped store, with the campaign the call resolved to, for
-`idempotency_keep_h` hours (spec/config.md). A key is therefore one key on the whole
-server: a repeat sent after the active campaign changed still finds the first call.
+is remembered for `idempotency_keep_h` hours (spec/config.md): a call that resolved to a
+campaign in that campaign's store, written with its change, and in the server store's
+index of keys; a call on no campaign in the server store (spec/persistence.md,
+"Idempotency keys"). A key is therefore one key on the whole server: a repeat sent
+after the active campaign changed still finds the first call.
 After the time passes a repeat is a new call. A call that fails is not remembered: a
 repeat of it after the cause is fixed, such as a new lease or an active campaign, runs
 as a new call.

@@ -38,7 +38,8 @@ of one before it in the ring.
 
 ## Sequence, epoch and revisions
 
-The command epoch is a counter the sidecar owns and keeps in the server-scoped store.
+The command epoch is a counter the sidecar owns and keeps in the server store
+(spec/persistence.md, "The server store"), so it grows across campaigns.
 It only grows. The sidecar starts a new epoch when the controller lease changes hands,
 when the active campaign changes, when it attaches to a new agent boot, and when it
 starts without its journal. A new epoch is one more than the larger of the store's

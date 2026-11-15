@@ -359,9 +359,9 @@ the waypoint (spec/sampling.md). No script runs in DCS for it.
 Events are numbered per campaign and kept in the campaign's event history
 (spec/persistence.md, "Event history"). While no campaign
 is active, events still happen: players connect and chat, and a plain mission runs.
-Those events go to a log in the server-scoped store, with its own sequence numbers and
-the retention of spec/config.md. The Events service reads it when the request asks for
-the server log.
+Those events go to the server event log (spec/persistence.md, "The server store"), with
+its own sequence numbers and the retention of spec/config.md. The Events service reads
+it when the request asks for the server log.
 
 **The server-scoped player file.** The player-key secret and the key-to-ucid pairs
 ("Players") are kept in `players.json`, directly in the store's
