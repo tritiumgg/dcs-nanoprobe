@@ -614,9 +614,20 @@ async fn events_resume_in_order_and_a_slow_subscriber_is_ended() {
 const OBSERVER_TOKEN: &str = "observer-0123456789abcdef0123456789";
 const CONTROLLER_TOKEN: &str = "controller-0123456789abcdef01234567";
 
+/// A scratch folder, removed when the test ends, whether it passes or fails.
+struct Scratch(std::path::PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tokens_give_roles() {
-    let dir = std::env::temp_dir().join(format!("nanoprobe-tokens-{}", std::process::id()));
+    let scratch =
+        Scratch(std::env::temp_dir().join(format!("nanoprobe-tokens-{}", std::process::id())));
+    let dir = scratch.0.clone();
     std::fs::create_dir_all(&dir).expect("dir");
     let path = dir.join("tokens.toml");
     std::fs::write(
@@ -692,7 +703,6 @@ async fn tokens_give_roles() {
         assert_eq!(reason(&e), ErrorReason::TokenRequired);
     }
     server.stop().await.expect("stop");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -712,7 +722,9 @@ async fn a_bad_listener_setting_refuses_to_start() {
     // holds: the refusal is the file's, so nothing was bound first.
     let held = std::net::TcpListener::bind("127.0.0.1:0").expect("hold a port");
     let port = held.local_addr().expect("addr").port();
-    let dir = std::env::temp_dir().join(format!("nanoprobe-badtokens-{}", std::process::id()));
+    let scratch =
+        Scratch(std::env::temp_dir().join(format!("nanoprobe-badtokens-{}", std::process::id())));
+    let dir = scratch.0.clone();
     std::fs::create_dir_all(&dir).expect("dir");
     let path = dir.join("tokens.toml");
     std::fs::write(
@@ -736,7 +748,6 @@ async fn a_bad_listener_setting_refuses_to_start() {
     .expect("a bad tokens file refuses to start");
     assert!(e.contains("unknown role"), "{e}");
     drop(held);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
