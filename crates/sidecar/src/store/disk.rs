@@ -246,6 +246,24 @@ pub fn record_of(path: &Path) -> Result<(CampaignId, u32, CampaignRecord), DiskE
     Ok((campaign, schema, record))
 }
 
+/// The last checkpoint in the store file at `path`, read without opening
+/// the store. The caller has checked the schema is not newer than this
+/// sidecar's.
+pub fn checkpoint_of(path: &Path) -> Result<Option<Checkpoint>, DiskError> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let body: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT body FROM checkpoint ORDER BY seq DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match body {
+        Some(b) => Ok(Some(dec_checkpoint(&decode(&b)?)?)),
+        None => Ok(None),
+    }
+}
+
 /// The state in the campaign record of the store file at `path`, read
 /// without opening the store. Only the record's `state` key is read, which
 /// keeps its layout in every schema version.

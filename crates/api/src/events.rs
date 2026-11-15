@@ -4,52 +4,107 @@
 //! Each campaign has a log numbered from 1, and so does the server log, which
 //! holds events recorded while no campaign is active. A log is never
 //! conflated: a consumer reads every event in order from a sequence number,
-//! and a lost span is an explicit `Gap`. Step S18 keeps the logs in the
-//! stores; here they are in memory and keep the newest `events_keep`.
+//! and a lost span is an explicit `Gap`. A campaign's log on disk is backed
+//! by its `history.log` (spec/persistence.md, "Event history"): an event is
+//! appended and flushed before it is published. Every log keeps the newest
+//! `events_keep` in memory for the Events service.
 
 use std::collections::VecDeque;
+use std::io;
 use std::time::{Duration, SystemTime};
 
 use nanoprobe_proto::v1alpha1::{
     self as pb, AuthorEvent, Event, Gap as PbGap, LifecycleEvent, MenuAttribution, MenuEvent,
     PlayerEvent, PlayerEventKind, SimState, WorldEvent, event,
 };
+use nanoprobe_sidecar::history::History;
 use nanoprobe_sidecar::players::{LaunchRule, Note, Roster};
 use nanoprobe_sidecar::sim::RawRecord;
 use nanoprobe_sidecar::sim::wire::Input;
 use nanoprobe_transport::layout::{gap_class, lifecycle as lc};
 use nanoprobe_transport::records;
 
+use prost::Message;
+
 use crate::lua::from_lua;
 
 /// One numbered log.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct EventLog {
     keep: usize,
     next: u64,
     events: VecDeque<Event>,
+    history: Option<History>,
 }
 
 impl EventLog {
-    /// An empty log keeping the newest `keep` events.
+    /// An empty log in memory keeping the newest `keep` events.
     pub fn new(keep: usize) -> EventLog {
         EventLog {
             keep: keep.max(1),
             next: 1,
             events: VecDeque::new(),
+            history: None,
         }
     }
 
-    /// Append an event, numbering it. Returns its sequence number.
+    /// A log backed by `history`, keeping its newest `keep` events in
+    /// memory. A record whose body does not decode as an event is an error.
+    pub fn open(history: History, keep: usize) -> io::Result<EventLog> {
+        let keep = keep.max(1);
+        let mut events = VecDeque::new();
+        for r in history.read_from(0)? {
+            let e = Event::decode(r.body.as_slice()).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("history: event {} does not decode: {e}", r.seq),
+                )
+            })?;
+            events.push_back(e);
+            if events.len() > keep {
+                events.pop_front();
+            }
+        }
+        Ok(EventLog {
+            keep,
+            next: history.next_seq(),
+            events,
+            history: Some(history),
+        })
+    }
+
+    /// Append an event, numbering it. Returns its sequence number. A log on
+    /// disk appends and flushes the event's record first; a failure stops
+    /// the sidecar through its panic path (spec/persistence.md, "Event
+    /// history").
     pub fn push(&mut self, campaign: u64, stamp: pb::Stamp, body: event::Body) -> u64 {
         let sequence = self.next;
-        self.next += 1;
-        self.events.push_back(Event {
+        let e = Event {
             sequence,
             stamp: Some(stamp),
             body: Some(body),
             campaign_id: campaign,
-        });
+        };
+        if let Some(h) = self.history.as_mut() {
+            let wall_ms = e
+                .stamp
+                .as_ref()
+                .and_then(|s| s.wall)
+                .map_or_else(now_ms, |t| {
+                    u64::try_from(t.seconds)
+                        .unwrap_or(0)
+                        .saturating_mul(1000)
+                        .saturating_add(u64::try_from(t.nanos / 1_000_000).unwrap_or(0))
+                });
+            if let Err(err) = h
+                .append(sequence, wall_ms, &e.encode_to_vec())
+                .and_then(|()| h.flush())
+            {
+                panic!("the event history could not be written, stopping: {err}");
+            }
+        }
+        self.next += 1;
+        self.events.push_back(e);
         while self.events.len() > self.keep {
             self.events.pop_front();
         }
@@ -247,6 +302,12 @@ fn wall(seconds: f64) -> Option<prost_types::Timestamp> {
         seconds: i64::try_from(d.as_secs()).ok()?,
         nanos: i32::try_from(d.subsec_nanos()).ok()?,
     })
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 fn now_s() -> f64 {

@@ -791,6 +791,7 @@ dependencies = [
  "nanoprobe-transport",
  "prost",
  "prost-types",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tonic",

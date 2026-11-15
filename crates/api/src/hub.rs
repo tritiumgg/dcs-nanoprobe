@@ -14,12 +14,16 @@ use std::time::{Duration, Instant, SystemTime};
 
 use nanoprobe_proto::errors::status;
 use nanoprobe_proto::v1alpha1::{self as pb, ErrorReason, Health, event};
-use nanoprobe_sidecar::ids::CampaignId;
+use nanoprobe_sidecar::campaigns::{BackupReason, Campaigns};
+use nanoprobe_sidecar::ids::{CampaignId, EntityId};
 use nanoprobe_sidecar::players::{Ctx as RosterCtx, Keyring, Roster, Unmanaged};
 use nanoprobe_sidecar::reconciler::{Config as RecConfig, EffectResult, Reconciler};
 use nanoprobe_sidecar::sim::wire::{Body, Command, Input};
 use nanoprobe_sidecar::sim::{Detached, RawRecord, SimAdapter};
-use nanoprobe_sidecar::store::{LostPolicy, Outcome, Store};
+use nanoprobe_sidecar::store::{
+    CampaignRecord, CampaignState, Checkpoint, DiskError, LostPolicy, Outcome, Store, TierPeriod,
+    checkpoint_of,
+};
 use nanoprobe_transport::records::CommandHeader;
 use prost::Message;
 use tokio::sync::{Notify, watch};
@@ -63,7 +67,17 @@ pub trait Backend: Send + 'static {
     fn as_any(&mut self) -> Option<&mut dyn std::any::Any> {
         None
     }
+    /// The periods the sampling tiers achieve now, in seconds: position,
+    /// vitals, ammunition, warehouse, enumeration (the agent's metrics,
+    /// spec/transport.md); `None` when unknown.
+    fn achieved(&self) -> Option<[f64; 5]> {
+        None
+    }
 }
+
+/// The sampling tiers by their `SampleRates` field names, in the order of
+/// [`Backend::achieved`].
+const TIERS: [&str; 5] = ["position", "vitals", "ammo", "warehouse", "enumeration"];
 
 /// One campaign: its description, its store and what the API keeps beside
 /// the store.
@@ -79,6 +93,11 @@ pub struct Slot {
     pub on_lost: LostPolicy,
     /// The theater its next activation loads.
     pub theater: String,
+    /// For a campaign on disk, whether `store` is its file, opened. One not
+    /// opened holds an empty store in memory; the first call that names it
+    /// opens it (spec/persistence.md, "Campaign operations"). Always true
+    /// for a campaign in memory.
+    pub opened: bool,
 }
 
 /// A moderation call sent to DCS, waiting for its result. An applied one
@@ -130,6 +149,18 @@ pub struct Inner {
     /// A `CAMPAIGN 0` is owed to the agent: no campaign is active and the
     /// last `HELLO` named one (spec/commands.md).
     clear_campaign: bool,
+    /// The campaign folders, with `[store]` on disk.
+    files: Option<Campaigns>,
+    /// When the active campaign's next checkpoint is due, wall ms.
+    next_checkpoint_ms: u64,
+    /// When the active campaign's next scheduled backup is due, wall ms.
+    next_backup_ms: u64,
+    /// Why the last scheduled backup failed, empty when it did not. A
+    /// failed backup is taken again at the next interval.
+    pub backup_error: String,
+    /// Campaign folders that could not be read at start, with why. Their IDs
+    /// are never given to a new campaign.
+    pub unreadable: Vec<(u64, String)>,
 }
 
 /// The shared state and its wake-ups.
@@ -296,8 +327,9 @@ impl Inner {
         }
     }
 
-    /// One driver step: a frame, then every record read and folded in.
-    fn step(&mut self) {
+    /// One driver step: a frame, every record read and folded in, then the
+    /// checkpoint and backup timers.
+    fn step(&mut self, cfg: &Config) {
         self.backend.frame();
         let records = match (self.active, self.rec.as_mut()) {
             (Some(id), Some(rec)) => {
@@ -389,6 +421,7 @@ impl Inner {
                 self.clear_campaign = false;
             }
         }
+        self.timers(cfg);
     }
 
     /// What the roster and the moderation calls need after a step: the
@@ -450,8 +483,78 @@ impl Inner {
         }
     }
 
-    /// The campaign a call names: 0 resolves to the active one.
-    pub fn resolve(&self, id: u64, need: Need) -> Result<u64, Status> {
+    /// Read the campaign folders (see [`Hub::open`]).
+    fn load(&mut self, cfg: &Config, sf: &crate::config::StoreFiles) -> Result<(), String> {
+        let files = Campaigns::new(&sf.dir, cfg.world_changes_keep, sf.backup_keep)
+            .map_err(|e| format!("the store folder {}: {e}", sf.dir.display()))?;
+        let listed = files
+            .list()
+            .map_err(|e| format!("the store folder {}: {e}", sf.dir.display()))?;
+        let cutoff = wall_ms().saturating_sub(ms(sf.event_retention));
+        let mut active = Vec::new();
+        for (id, r) in listed {
+            let path = files.store_path(id);
+            let read = r.and_then(|r| {
+                let (_, schema, _) = nanoprobe_sidecar::store::record_of(&path)?;
+                Ok((r, schema, checkpoint_of(&path)?))
+            });
+            let (record, schema, cp) = match read {
+                Ok(x) => x,
+                Err(e) => {
+                    self.unreadable.push((id.0, e.to_string()));
+                    continue;
+                }
+            };
+            let events = files.history(id).and_then(|mut h| {
+                // A finished campaign is read-only: its history is kept whole.
+                if !sf.event_retention.is_zero() && record.state != CampaignState::Finished {
+                    h.compact(cutoff)?;
+                }
+                EventLog::open(h, cfg.events_keep)
+            });
+            let events = match events {
+                Ok(l) => l,
+                Err(e) => {
+                    self.unreadable.push((id.0, format!("history: {e}")));
+                    continue;
+                }
+            };
+            if record.state == CampaignState::Active {
+                active.push(id.0);
+            }
+            self.campaigns.insert(
+                id.0,
+                Slot {
+                    meta: meta_from(id.0, schema, &record, cp.as_ref()),
+                    store: Store::new(id, cfg.world_changes_keep),
+                    events,
+                    on_lost: self.on_lost,
+                    theater: record.theater.clone(),
+                    opened: false,
+                },
+            );
+        }
+        self.files = Some(files);
+        match active.as_slice() {
+            [] => {}
+            [id] => {
+                self.open_store(*id).map_err(|e| e.message().to_owned())?;
+                self.active = Some(*id);
+                self.start_timers(cfg, *id);
+            }
+            many => {
+                return Err(format!(
+                    "more than one campaign is marked active: {many:?}; suspend all but one \
+                     by restoring a backup, or remove the extra folders"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The campaign a call names: 0 resolves to the active one. A campaign
+    /// on disk that is not finished is opened.
+    pub fn resolve(&mut self, id: u64, need: Need) -> Result<u64, Status> {
         if need == Need::Nothing && id == 0 {
             return Ok(self.active.unwrap_or(0));
         }
@@ -477,14 +580,18 @@ impl Inner {
                 "campaign_id",
             )
         })?;
-        if need != Need::Nothing && slot.meta.state == pb::CampaignState::Finished as i32 {
-            return Err(status(
-                Code::FailedPrecondition,
-                ErrorReason::CampaignReadOnly,
-                format!("campaign {id} is finished"),
-                0,
-                "campaign_id",
-            ));
+        if slot.meta.state == pb::CampaignState::Finished as i32 {
+            if need != Need::Nothing {
+                return Err(status(
+                    Code::FailedPrecondition,
+                    ErrorReason::CampaignReadOnly,
+                    format!("campaign {id} is finished"),
+                    0,
+                    "campaign_id",
+                ));
+            }
+        } else {
+            self.open_store(id)?;
         }
         if need == Need::Active && self.active != Some(id) {
             return Err(status(
@@ -499,7 +606,7 @@ impl Inner {
     }
 
     /// The campaign a read names, active or not; 0 is the active one.
-    pub fn resolve_read(&self, id: u64) -> Result<u64, Status> {
+    pub fn resolve_read(&mut self, id: u64) -> Result<u64, Status> {
         self.resolve(id, Need::Campaign).or_else(|e| {
             // Reads accept a finished campaign.
             if nanoprobe_proto::errors::reason(&e) == ErrorReason::CampaignReadOnly {
@@ -510,69 +617,463 @@ impl Inner {
         })
     }
 
+    /// The campaign folders, when the stores are on disk.
+    pub fn files(&self) -> Option<&Campaigns> {
+        self.files.as_ref()
+    }
+
+    /// Open a campaign's store file if it is on disk and not open yet
+    /// (and migrate it, spec/persistence.md). A finished store is never
+    /// opened.
+    fn open_store(&mut self, id: u64) -> Result<(), Status> {
+        let Some(files) = self.files.as_ref() else {
+            return Ok(());
+        };
+        let Some(slot) = self.campaigns.get_mut(&id) else {
+            return Ok(());
+        };
+        if slot.opened {
+            return Ok(());
+        }
+        let store = files
+            .open(CampaignId(id), wall_ms())
+            .map_err(|e| disk_status(id, &e))?;
+        slot.meta.last_checkpoint = store.last_checkpoint().map(checkpoint_info);
+        slot.store = store;
+        slot.opened = true;
+        Ok(())
+    }
+
+    /// Write a campaign's store, if it is open on disk. A failure stops the
+    /// sidecar through its panic path (spec/persistence.md, "Writes").
+    fn commit(&mut self, id: u64) {
+        if let Some(slot) = self.campaigns.get_mut(&id)
+            && slot.opened
+            && let Err(e) = slot.store.commit()
+        {
+            panic!("the store of campaign {id} could not be written, stopping: {e}");
+        }
+    }
+
+    /// Write the store of the campaign a call acted on and of the active
+    /// one: an acknowledged change is on disk before the call answers.
+    fn commit_for_answer(&mut self, id: u64) {
+        self.commit(id);
+        if let Some(a) = self.active
+            && a != id
+        {
+            self.commit(a);
+        }
+    }
+
+    /// The periods the sampling tiers achieve now, with the targets the
+    /// campaign set; none when the backend does not know them.
+    fn achieved(&self, id: u64) -> Vec<TierPeriod> {
+        let Some(periods) = self.backend.achieved() else {
+            return Vec::new();
+        };
+        let targets = self
+            .campaigns
+            .get(&id)
+            .and_then(|s| s.store.rates())
+            .map(|r| {
+                [
+                    r.position_s,
+                    r.vitals_s,
+                    r.ammo_s,
+                    r.warehouse_s,
+                    r.enumeration_s,
+                ]
+            })
+            .unwrap_or_default();
+        TIERS
+            .iter()
+            .zip(periods)
+            .zip(targets)
+            .map(|((tier, achieved_s), target_s)| TierPeriod {
+                tier: (*tier).to_owned(),
+                target_s,
+                achieved_s,
+            })
+            .collect()
+    }
+
+    /// Close a campaign's store with a final checkpoint and `state`
+    /// (spec/persistence.md, "Campaign operations"); the slot then holds an
+    /// empty store until the campaign is opened again. Nothing for a store
+    /// in memory or one not open. A failure stops the sidecar.
+    fn close_store(&mut self, id: u64, state: CampaignState, outcome: Option<Vec<u8>>) {
+        let achieved = self.achieved(id);
+        let (Some(files), Some(slot)) = (self.files.as_ref(), self.campaigns.get_mut(&id)) else {
+            return;
+        };
+        if !slot.opened {
+            return;
+        }
+        let at = wall_ms();
+        let r = match outcome {
+            Some(o) => files.finish(&mut slot.store, at, achieved, o),
+            None if state == CampaignState::Finished => {
+                files.finish(&mut slot.store, at, achieved, Vec::new())
+            }
+            None => files.suspend(&mut slot.store, at, achieved),
+        };
+        if let Err(e) = r {
+            panic!("campaign {id} could not be closed, stopping: {e}");
+        }
+        slot.meta.last_checkpoint = slot.store.last_checkpoint().map(checkpoint_info);
+        slot.store = Store::new(CampaignId(id), files.changes_keep());
+        slot.opened = false;
+    }
+
+    /// Set the state in an open store's campaign record and write it.
+    fn set_state(&mut self, id: u64, state: CampaignState) {
+        let Some(slot) = self.campaigns.get_mut(&id) else {
+            return;
+        };
+        if !slot.opened || !slot.store.on_disk() {
+            return;
+        }
+        let Some(mut r) = slot.store.record().cloned() else {
+            return;
+        };
+        r.state = state;
+        if let Err(e) = slot.store.set_record(r) {
+            panic!("the store of campaign {id} could not be written, stopping: {e}");
+        }
+    }
+
+    /// Start the checkpoint and backup timers of the campaign just made
+    /// active: a checkpoint `checkpoint_s` from now, a backup
+    /// `backup_interval_h` after the newest one kept, or from now.
+    fn start_timers(&mut self, cfg: &Config, id: u64) {
+        let (Some(files), Some(sf)) = (self.files.as_ref(), cfg.store.as_ref()) else {
+            return;
+        };
+        let now = wall_ms();
+        let newest = files
+            .backups(CampaignId(id))
+            .ok()
+            .and_then(|b| b.last().map(|b| b.at_ms))
+            .unwrap_or(now);
+        self.next_checkpoint_ms = now.saturating_add(ms(sf.checkpoint));
+        self.next_backup_ms = newest.saturating_add(ms(sf.backup_interval));
+    }
+
+    /// The active campaign's checkpoint and scheduled backup, when due. A
+    /// checkpoint that fails stops the sidecar; a backup that fails is
+    /// reported in `backup_error` and taken again at the next interval.
+    fn timers(&mut self, cfg: &Config) {
+        let (Some(id), Some(sf)) = (self.active, cfg.store.as_ref()) else {
+            return;
+        };
+        if !self.campaigns.get(&id).is_some_and(|s| s.opened) {
+            return;
+        }
+        let now = wall_ms();
+        if now >= self.next_checkpoint_ms {
+            let achieved = self.achieved(id);
+            let slot = self.campaigns.get_mut(&id).expect("active campaign");
+            match slot.store.checkpoint(now, achieved) {
+                Ok(c) => slot.meta.last_checkpoint = Some(checkpoint_info(&c)),
+                Err(e) => panic!("campaign {id} could not be checkpointed, stopping: {e}"),
+            }
+            self.next_checkpoint_ms = now.saturating_add(ms(sf.checkpoint));
+        }
+        if now >= self.next_backup_ms {
+            let files = self.files.as_ref().expect("files with a store on disk");
+            let slot = self.campaigns.get_mut(&id).expect("active campaign");
+            self.backup_error = match files.backup(&mut slot.store, now, BackupReason::Scheduled) {
+                Ok(_) => String::new(),
+                Err(e) => format!("campaign {id}: {e}"),
+            };
+            self.next_backup_ms = now.saturating_add(ms(sf.backup_interval));
+        }
+    }
+
     /// A new campaign's ID (spec/world.md, "Identities"): the wall clock in
-    /// milliseconds, or one more than the newest.
+    /// milliseconds, or one more than the newest campaign, counting folders
+    /// that could not be read.
     pub fn new_campaign_id(&self) -> u64 {
-        let newest = self.campaigns.keys().next_back().copied().unwrap_or(0);
+        let newest = self
+            .campaigns
+            .keys()
+            .copied()
+            .chain(self.unreadable.iter().map(|(id, _)| *id))
+            .max()
+            .unwrap_or(0);
         wall_ms().max(newest + 1)
     }
 
-    /// Add a campaign, suspended, to be loaded on `theater`.
-    pub fn add_campaign(&mut self, cfg: &Config, meta: pb::Campaign, theater: String) {
+    /// Add a campaign, suspended, to be loaded on `theater`. With the
+    /// stores on disk its folder is made, its store opened.
+    pub fn add_campaign(
+        &mut self,
+        cfg: &Config,
+        meta: pb::Campaign,
+        theater: String,
+    ) -> Result<(), Status> {
         let id = meta.id;
+        let (store, events) = match self.files.as_ref() {
+            Some(files) => {
+                let record = record_from(&meta, &theater);
+                let store = files
+                    .create(CampaignId(id), record)
+                    .map_err(|e| disk_status(id, &e))?;
+                let events = files
+                    .history(CampaignId(id))
+                    .and_then(|h| EventLog::open(h, cfg.events_keep))
+                    .map_err(|e| disk_status(id, &DiskError::Io(e)))?;
+                (store, events)
+            }
+            None => (
+                Store::new(CampaignId(id), cfg.world_changes_keep),
+                EventLog::new(cfg.events_keep),
+            ),
+        };
         self.campaigns.insert(
             id,
             Slot {
                 meta,
-                store: Store::new(CampaignId(id), cfg.world_changes_keep),
-                events: EventLog::new(cfg.events_keep),
+                store,
+                events,
                 on_lost: self.on_lost,
                 theater,
+                opened: true,
             },
         );
+        Ok(())
     }
 
-    /// Make a campaign the active one, suspending the one before.
+    /// Tell the agent no campaign is active (`CAMPAIGN 0`), now if it is
+    /// attached, otherwise after its next `HELLO`.
+    fn send_no_campaign(&mut self) {
+        let (op, payload) = Command {
+            header: CommandHeader::default(),
+            body: Body::Campaign(0),
+        }
+        .encode();
+        if self.backend.sim().send(op, &payload).is_err() {
+            self.clear_campaign = true;
+        }
+    }
+
+    /// Make a campaign the active one, suspending the one before. The
+    /// caller resolved `id`, which opened its store.
     pub fn activate(&mut self, cfg: &Config, id: u64) {
         if self.active == Some(id) {
             return;
         }
-        if let Some(old) = self.active.take()
-            && let Some(s) = self.campaigns.get_mut(&old)
-        {
-            s.meta.state = pb::CampaignState::Suspended as i32;
-            s.meta.loaded_theater.clear();
+        if let Some(old) = self.active.take() {
+            self.close_store(old, CampaignState::Suspended, None);
+            if let Some(s) = self.campaigns.get_mut(&old) {
+                s.meta.state = pb::CampaignState::Suspended as i32;
+                s.meta.loaded_theater.clear();
+            }
         }
+        self.set_state(id, CampaignState::Active);
         let mut theater = String::new();
         if let Some(s) = self.campaigns.get_mut(&id) {
             s.meta.state = pb::CampaignState::Active as i32;
             theater = s.theater.clone();
         }
         self.active = Some(id);
+        self.start_timers(cfg, id);
         self.restart(cfg);
         // A campaign is restored on the path of a mission load: the
         // reconciler learns the loaded theater from the load's LIFECYCLE.
         self.backend.load_mission(&theater);
     }
 
-    /// Suspend a campaign. DCS keeps running whatever it holds, unmanaged.
-    pub fn suspend(&mut self, cfg: &Config, id: u64) {
+    /// Suspend a campaign, or finish it with `outcome` (the encoded
+    /// `google.protobuf.Struct`). The active one first tells the agent no
+    /// campaign is active; then its store takes a final checkpoint and is
+    /// closed (spec/persistence.md, "Campaign operations"). DCS keeps
+    /// running whatever it holds, unmanaged. The caller captured the live
+    /// groups before.
+    pub fn suspend(&mut self, cfg: &Config, id: u64, outcome: Option<Vec<u8>>) {
+        let finished = outcome.is_some();
+        if self.active == Some(id) {
+            self.send_no_campaign();
+        }
+        let state = if finished {
+            CampaignState::Finished
+        } else {
+            CampaignState::Suspended
+        };
+        self.close_store(id, state, outcome.clone());
         if let Some(s) = self.campaigns.get_mut(&id) {
-            s.meta.state = pb::CampaignState::Suspended as i32;
+            s.meta.state = if finished {
+                pb::CampaignState::Finished as i32
+            } else {
+                pb::CampaignState::Suspended as i32
+            };
             s.meta.loaded_theater.clear();
+            if let Some(o) = outcome {
+                s.meta.outcome = prost_types::Struct::decode(o.as_slice()).ok();
+            }
         }
         if self.active == Some(id) {
             self.active = None;
             self.restart(cfg);
         }
     }
+
+    /// Close every open store cleanly, for a sidecar that stops: the active
+    /// one with a checkpoint, keeping its state, so the next start resumes
+    /// it. A failure is returned; the rest are still closed.
+    pub fn close_all(&mut self) -> Result<(), String> {
+        let mut errors = Vec::new();
+        let ids: Vec<u64> = self.campaigns.keys().copied().collect();
+        for id in ids {
+            let achieved = self.achieved(id);
+            let Some(slot) = self.campaigns.get_mut(&id) else {
+                continue;
+            };
+            if !slot.opened || !slot.store.on_disk() {
+                continue;
+            }
+            let r = if self.active == Some(id) {
+                slot.store
+                    .checkpoint(wall_ms(), achieved)
+                    .map(|_| ())
+                    .and_then(|()| slot.store.close())
+            } else {
+                slot.store.close()
+            };
+            if let Err(e) = r {
+                errors.push(format!("campaign {id}: {e}"));
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+}
+
+fn ms(d: Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn timestamp_ms(ms: u64) -> prost_types::Timestamp {
+    prost_types::Timestamp {
+        seconds: i64::try_from(ms / 1000).unwrap_or(i64::MAX),
+        nanos: i32::try_from((ms % 1000) * 1_000_000).unwrap_or(0),
+    }
+}
+
+fn ms_of(t: &prost_types::Timestamp) -> i64 {
+    t.seconds
+        .saturating_mul(1000)
+        .saturating_add(i64::from(t.nanos / 1_000_000))
+}
+
+/// The API's view of a checkpoint (spec/persistence.md, "Achieved
+/// periods"): the achieved periods by tier; the targets are not shown.
+pub fn checkpoint_info(c: &Checkpoint) -> pb::CheckpointInfo {
+    let mut rates = pb::SampleRates::default();
+    for t in &c.achieved {
+        let Ok(d) = Duration::try_from_secs_f64(t.achieved_s) else {
+            continue;
+        };
+        let d = prost_types::Duration::try_from(d).ok();
+        match t.tier.as_str() {
+            "position" => rates.position = d,
+            "vitals" => rates.vitals = d,
+            "ammo" => rates.ammo = d,
+            "warehouse" => rates.warehouse = d,
+            "enumeration" => rates.enumeration = d,
+            _ => {}
+        }
+    }
+    pb::CheckpointInfo {
+        taken: Some(timestamp_ms(c.at_ms)),
+        sim: Some(pb::Stamp {
+            wall: None,
+            model_time: c.model_time,
+            mission_generation: c.mission_gen,
+            frame: 0,
+        }),
+        achieved: (!c.achieved.is_empty()).then_some(rates),
+    }
+}
+
+/// The campaign record of a new campaign.
+fn record_from(meta: &pb::Campaign, theater: &str) -> CampaignRecord {
+    CampaignRecord {
+        name: meta.name.clone(),
+        state: CampaignState::Suspended,
+        theaters: meta.theaters.clone(),
+        theater: theater.to_owned(),
+        clock_ms: meta.clock.as_ref().map(ms_of),
+        created_ms: meta
+            .created
+            .as_ref()
+            .map_or(0, |t| u64::try_from(ms_of(t)).unwrap_or(0)),
+        component_schemas: meta.component_schemas.clone().into_iter().collect(),
+        outcome: None,
+    }
+}
+
+/// The API's campaign from a stored record.
+fn meta_from(id: u64, schema: u32, r: &CampaignRecord, cp: Option<&Checkpoint>) -> pb::Campaign {
+    pb::Campaign {
+        id,
+        name: r.name.clone(),
+        state: match r.state {
+            CampaignState::Active => pb::CampaignState::Active,
+            CampaignState::Suspended => pb::CampaignState::Suspended,
+            CampaignState::Finished => pb::CampaignState::Finished,
+        } as i32,
+        theaters: r.theaters.clone(),
+        loaded_theater: String::new(),
+        clock: r.clock_ms.map(|c| prost_types::Timestamp {
+            seconds: c.div_euclid(1000),
+            nanos: i32::try_from(c.rem_euclid(1000) * 1_000_000).unwrap_or(0),
+        }),
+        platform_schema: schema,
+        component_schemas: r.component_schemas.clone().into_iter().collect(),
+        created: Some(timestamp_ms(r.created_ms)),
+        outcome: r
+            .outcome
+            .as_ref()
+            .and_then(|o| prost_types::Struct::decode(o.as_slice()).ok()),
+        last_checkpoint: cp.map(checkpoint_info),
+    }
+}
+
+/// The status for a store that cannot be created, opened or read.
+pub fn disk_status(id: u64, e: &DiskError) -> Status {
+    status(
+        Code::Internal,
+        ErrorReason::Internal,
+        format!("the store of campaign {id}: {e}"),
+        0,
+        "campaign_id",
+    )
 }
 
 impl Hub {
     /// A hub over a backend. Nothing is attached until [`Hub::start`].
+    ///
+    /// # Panics
+    ///
+    /// With `cfg.store` set, when [`Hub::open`] fails.
     pub fn new(cfg: Config, backend: Box<dyn Backend>) -> Arc<Hub> {
+        Hub::open(cfg, backend).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// A hub over a backend, with the campaigns in `cfg.store`'s folder:
+    /// each listed from its record without being opened, its history read
+    /// and compacted (`event_retention_days`). A campaign whose record says
+    /// active is opened and is the active one again: the sidecar stopped
+    /// while it ran. A folder that cannot be read is skipped and listed in
+    /// [`Inner::unreadable`]. Nothing is attached until [`Hub::start`].
+    pub fn open(cfg: Config, backend: Box<dyn Backend>) -> Result<Arc<Hub>, String> {
         let (tick, _) = watch::channel(0);
-        Arc::new(Hub {
+        let hub = Arc::new(Hub {
             inner: Mutex::new(Inner {
                 backend,
                 campaigns: BTreeMap::new(),
@@ -593,13 +1094,23 @@ impl Hub {
                 players_cmd: None,
                 on_lost: LostPolicy::Report,
                 clear_campaign: false,
+                files: None,
+                next_checkpoint_ms: 0,
+                next_backup_ms: 0,
+                backup_error: String::new(),
+                unreadable: Vec::new(),
             }),
             tick,
             settled: Notify::new(),
             closing: std::sync::atomic::AtomicBool::new(false),
             poisoned: std::sync::atomic::AtomicBool::new(false),
             cfg,
-        })
+        });
+        if let Some(sf) = hub.cfg.store.clone() {
+            let mut g = hub.lock();
+            g.load(&hub.cfg, &sf)?;
+        }
+        Ok(hub)
     }
 
     /// The shared state. Never hold the guard across an `.await`.
@@ -673,7 +1184,7 @@ impl Hub {
     pub fn step(&self) -> Result<(), String> {
         let r = {
             let mut g = self.lock();
-            catch_unwind(AssertUnwindSafe(|| g.step()))
+            catch_unwind(AssertUnwindSafe(|| g.step(&self.cfg)))
         };
         if r.is_err() {
             self.poison();
@@ -703,6 +1214,73 @@ impl Hub {
                 return Err("a call panicked; the state may be half-changed".into());
             }
             self.step()?;
+        }
+    }
+
+    /// Before a suspend, a finish or a switch of the active campaign:
+    /// capture every group and static DCS holds of the active campaign
+    /// (`campaign`, 0 for the active one) and wait up to `result_wait` for
+    /// the results, which the store takes as they arrive (spec/persistence.md,
+    /// "Campaign operations"). Nothing when that campaign is not active, the
+    /// lease is refused, the call's key is answered or running, or DCS is
+    /// not ready. A repeat of the call that arrives while the first waits
+    /// captures again: a capture is a query.
+    pub async fn capture_live(
+        &self,
+        key: Option<&pb::Idempotency>,
+        lease: Option<&pb::Lease>,
+        campaign: u64,
+    ) {
+        let sent: Vec<(u64, u64)> = {
+            let mut g = self.lock();
+            if self.closing() {
+                return;
+            }
+            let now = Instant::now();
+            let key = key.map(|k| k.key.as_str()).unwrap_or_default();
+            if key.is_empty() || g.idem.running(key) || g.idem.get(now, key).is_some() {
+                return;
+            }
+            if g.leases
+                .check(now, lease.map(|l| (l.epoch, l.lease_id.as_str())))
+                .is_err()
+            {
+                return;
+            }
+            let Some(id) = g.active.filter(|a| campaign == 0 || campaign == *a) else {
+                return;
+            };
+            g.with_rec(id, |rec, store, sim| {
+                let live: Vec<EntityId> = store
+                    .groups()
+                    .filter(|grp| !grp.removed && rec.is_bound(grp.id))
+                    .map(|grp| grp.id)
+                    .collect();
+                live.into_iter()
+                    .filter_map(|e| rec.capture(store, sim, e))
+                    .collect()
+            })
+            .unwrap_or_default()
+        };
+        if sent.is_empty() {
+            return;
+        }
+        let mut ticks = self.tick();
+        let deadline = tokio::time::Instant::now() + self.cfg.result_wait;
+        loop {
+            {
+                let g = self.lock();
+                let done = g.rec.as_ref().is_none_or(|r| {
+                    sent.iter().all(|k| {
+                        r.effect_result(*k).is_some()
+                            || !r.inflight().any(|j| (j.epoch, j.seq) == *k)
+                    })
+                });
+                if done || self.closing() || tokio::time::Instant::now() >= deadline {
+                    return;
+                }
+            }
+            let _ = tokio::time::timeout_at(deadline, ticks.changed()).await;
         }
     }
 
@@ -768,7 +1346,14 @@ impl Hub {
                             .and_then(|c| {
                                 let f = f.take().expect("a call runs once");
                                 let inner: &mut Inner = &mut g;
-                                catch_unwind(AssertUnwindSafe(|| f(inner, c))).map_err(|_| {
+                                catch_unwind(AssertUnwindSafe(|| {
+                                    let r = f(inner, c);
+                                    if let Ok((_, acted)) = &r {
+                                        inner.commit_for_answer(*acted);
+                                    }
+                                    r
+                                }))
+                                .map_err(|_| {
                                     // Under the lock, so no other call runs
                                     // between the panic and the refusal.
                                     self.poisoned

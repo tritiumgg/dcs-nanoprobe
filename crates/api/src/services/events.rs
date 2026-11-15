@@ -44,7 +44,7 @@ enum Which {
     Campaign(u64),
 }
 
-fn which(g: &Inner, f: &EventFilter) -> Result<Which, Status> {
+fn which(g: &mut Inner, f: &EventFilter) -> Result<Which, Status> {
     if f.server_log {
         if f.campaign_id != 0 {
             return Err(invalid(
@@ -120,8 +120,8 @@ impl EventsService for Events {
         let r = req.into_inner();
         let f = r.filter.unwrap_or_default();
         let (w, mut cursor, follows) = {
-            let g = self.0.lock();
-            let w = which(&g, &f)?;
+            let mut g = self.0.lock();
+            let w = which(&mut g, &f)?;
             let l = log(&g, w).expect("resolved log");
             let cursor = if r.live_only {
                 l.last()
@@ -229,8 +229,8 @@ impl EventsService for Events {
             0 => READ_MAX,
             n => usize::try_from(n).unwrap_or(READ_MAX).min(READ_MAX),
         };
-        let g = self.0.lock();
-        let w = which(&g, &f)?;
+        let mut g = self.0.lock();
+        let w = which(&mut g, &f)?;
         let l = log(&g, w).expect("resolved log");
         if r.after_sequence != 0 && !l.covers(r.after_sequence) {
             return Err(refused(l, r.after_sequence));

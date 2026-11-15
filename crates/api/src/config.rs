@@ -29,8 +29,8 @@ pub struct Config {
     pub world_changes_keep: usize,
     /// Events kept per campaign and in the server log. The default keeps
     /// every one, as `event_retention_days = 0` does (spec/config.md); a
-    /// smaller number is for tests. The stores of step S18 apply
-    /// `event_retention_days` and `server_log_days`.
+    /// smaller number is for tests. `event_retention_days` applies to the
+    /// history on disk.
     pub events_keep: usize,
     /// `[world] position_period_min_s`: the cap on position rates.
     pub position_period_min: Duration,
@@ -41,6 +41,38 @@ pub struct Config {
     /// How often the driver reads the agent and steps the reconciler
     /// (`[agent] poll_ms` for a real agent; one fake frame for the fake).
     pub step: Duration,
+    /// The `[store]` files; `None` keeps every store in memory, as
+    /// `[store] enabled = false` does.
+    pub store: Option<StoreFiles>,
+}
+
+/// The `[store]` keys of a store on disk (spec/config.md,
+/// spec/persistence.md).
+#[derive(Clone, Debug)]
+pub struct StoreFiles {
+    /// `[store] dir`: one folder per campaign.
+    pub dir: PathBuf,
+    /// `[store] checkpoint_s`.
+    pub checkpoint: Duration,
+    /// `[store] backup_interval_h`.
+    pub backup_interval: Duration,
+    /// `[store] backup_keep`.
+    pub backup_keep: usize,
+    /// `[store] event_retention_days`; zero keeps every event.
+    pub event_retention: Duration,
+}
+
+impl StoreFiles {
+    /// spec/config.md's defaults, in `dir`.
+    pub fn new(dir: PathBuf) -> StoreFiles {
+        StoreFiles {
+            dir,
+            checkpoint: Duration::from_secs(5),
+            backup_interval: Duration::from_secs(24 * 3600),
+            backup_keep: 7,
+            event_retention: Duration::ZERO,
+        }
+    }
 }
 
 impl Default for Config {
@@ -59,6 +91,7 @@ impl Default for Config {
             materialize_per_frame: 1,
             destroy_retries: 3,
             step: Duration::from_millis(2),
+            store: None,
         }
     }
 }

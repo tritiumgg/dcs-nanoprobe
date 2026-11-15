@@ -86,6 +86,11 @@ impl Campaigns {
         })
     }
 
+    /// The changes a store keeps for a watch to resume from.
+    pub fn changes_keep(&self) -> usize {
+        self.changes_keep
+    }
+
     /// A campaign's folder.
     pub fn folder(&self, id: CampaignId) -> PathBuf {
         self.dir.join(id.0.to_string())
