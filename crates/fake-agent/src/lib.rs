@@ -8,6 +8,7 @@ pub mod content;
 pub mod linksim;
 pub mod stub;
 pub mod verify;
+pub mod world_exit;
 
 /// `s` as a JSON string, with its quotes.
 pub fn json_string(s: &str) -> String {

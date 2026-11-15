@@ -13,6 +13,8 @@
 //! build it deployed, with the shell mission: the caller restores the
 //! target. Everything goes under `bundles/commands-<name>-<time>/`, with
 //! `commands.json`, the run's verdict.
+//!
+//! `--part world` runs the S15 exit test instead (`commands/world.rs`).
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -23,6 +25,8 @@ use serde_json::{Value, json};
 use crate::install::{AGENT_TOML, Profile as _};
 use crate::sampling::live::{self, Opened, Run};
 use crate::{bundle, link};
+
+mod world;
 
 /// Where the probe goes in the container.
 const DIR: &str = "/tmp/nanoprobe-commands";
@@ -36,19 +40,37 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
         return Err(USAGE.into());
     };
     let (mut seed, mut commands, mut restart_every) = (1u64, 1_000u64, 100u64);
+    let (mut groups, mut units) = (100u64, 4u64);
+    let mut part = "commands";
     let mut rest = rest;
-    while let [flag, n, tail @ ..] = rest {
-        let n = n.parse::<u64>().map_err(|e| format!("{flag}: {e}"))?;
-        match *flag {
-            "--seed" => seed = n,
-            "--commands" => commands = n,
-            "--restart-every" => restart_every = n,
-            _ => return Err(USAGE.into()),
+    while let [flag, v, tail @ ..] = rest {
+        if *flag == "--part" {
+            part = v;
+        } else {
+            let n = v.parse::<u64>().map_err(|e| format!("{flag}: {e}"))?;
+            match *flag {
+                "--seed" => seed = n,
+                "--commands" => commands = n,
+                "--restart-every" => restart_every = n,
+                "--groups" => groups = n,
+                "--units" => units = n,
+                _ => return Err(USAGE.into()),
+            }
         }
         rest = tail;
     }
     if !rest.is_empty() {
         return Err(USAGE.into());
+    }
+    match part {
+        "world" => {
+            if groups == 0 || units == 0 || units > 50 {
+                return Err("--groups is at least 1 and --units between 1 and 50".into());
+            }
+            return world::run(repository, name, groups, units);
+        }
+        "commands" => {}
+        other => return Err(format!("--part is commands or world, not {other}")),
     }
     // The exit test needs forced sidecar restarts.
     if restart_every == 0 || restart_every >= commands {
@@ -57,8 +79,8 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
     run(repository, name, seed, commands, restart_every)
 }
 
-const USAGE: &str =
-    "usage: cargo xtask commands <name> [--seed N] [--commands 1000] [--restart-every 100]";
+const USAGE: &str = "usage: cargo xtask commands <name> [--seed N] [--commands 1000] \
+    [--restart-every 100] | cargo xtask commands <name> --part world [--groups 100] [--units 4]";
 
 /// `old` with `[lua] raw = true`, every other key kept.
 fn raw_on(old: &str) -> Result<String, String> {

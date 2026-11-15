@@ -24,6 +24,11 @@
 //! reports the `AT_REVISION` results. It prints one JSON object per line: `progress`
 //! lines, then `{"ev":"verdict","pass":B,...}`, and exits 0 on a pass.
 //!
+//! `--part world` runs the S15 exit test instead (100 groups spawned and
+//! removed with every over-budget frame attributed to a command, and a group
+//! replaced while paused); its options and rules are in
+//! `nanoprobe_fake_agent::world_exit`.
+//!
 //! Test tooling only: built from source, never released.
 
 use std::collections::BTreeMap;
@@ -140,6 +145,12 @@ fn main() -> ExitCode {
 }
 
 fn run(args: &[String]) -> Result<bool, String> {
+    // The S15 exit test is its own module; see `nanoprobe_fake_agent::world_exit`.
+    match arg(args, "--part").as_deref() {
+        None | Some("commands") => {}
+        Some("world") => return nanoprobe_fake_agent::world_exit::run(args),
+        Some(other) => return Err(format!("--part is commands or world, not {other}")),
+    }
     let need = |name: &str| arg(args, name).ok_or(format!("{name} is required"));
     let token = read_token(need("--token-file")?.as_ref()).map_err(|e| format!("token: {e}"))?;
     let port: u16 = need("--port")?
