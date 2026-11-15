@@ -115,6 +115,14 @@ struct World {
     /// What every 100th enumeration item costs, µs, when set: a
     /// `coalition.getGroups` call.
     enum_step_us: Option<f64>,
+    /// When set, every second dear enumeration step costs this instead of
+    /// `enum_step_us`.
+    enum_step_alt: Option<f64>,
+    /// Dear enumeration steps so far, for the alternation.
+    enum_steps: u64,
+    /// Each enumeration's `ENUM_BEGIN` and `ENUM_END`, on the simulated
+    /// clock.
+    enum_spans: Vec<(Instant, Option<Instant>)>,
     /// What an enumeration item costs, µs, when not the default.
     enum_item_us: Option<f64>,
     /// What closing a batch costs, µs, on average; each close varies from
@@ -136,6 +144,19 @@ struct World {
     alternate: bool,
     /// Existence checks the pumps made.
     checked: u64,
+    /// When set, the host's sweep notes when it read each object.
+    reads: Option<Reads>,
+    /// Frames on which the sweep owed rows and read none, by why: the
+    /// subscribed pump, the minimum batch, the debt, the savings.
+    waits: [u64; 4],
+}
+
+/// When the host's sweep read each object, and every gap between two reads
+/// of one object, seconds, with the instant that closed it.
+#[derive(Default)]
+struct Reads {
+    last: HashMap<u64, Instant>,
+    gaps: Vec<(Instant, f64)>,
 }
 
 impl World {
@@ -301,17 +322,23 @@ fn pump(s: &mut Sampler, rec: &mut Rec, w: &mut World, clock: &mut Clock) {
                 if plan.flag {
                     w.enum_list = w.objects.keys().copied().collect();
                     w.enum_at = 0;
+                    w.enum_spans.push((clock.0, None));
                 }
                 for _ in 0..plan.rows {
                     if w.enum_at >= w.enum_list.len() {
                         s.enumeration_done(rec, clock.0);
+                        if let Some(span) = w.enum_spans.last_mut() {
+                            span.1.get_or_insert(clock.0);
+                        }
                         break;
                     }
                     let object = w.enum_list[w.enum_at];
                     if w.enum_at.is_multiple_of(100)
                         && let Some(us) = w.enum_step_us
                     {
-                        clock.add(us);
+                        w.enum_steps += 1;
+                        let alt = w.enum_steps.is_multiple_of(2);
+                        clock.add(w.enum_step_alt.filter(|_| alt).unwrap_or(us));
                     }
                     w.enum_at += 1;
                     // As the shim's `visit`: one call for a known object,
@@ -337,6 +364,9 @@ fn pump(s: &mut Sampler, rec: &mut Rec, w: &mut World, clock: &mut Clock) {
                 }
                 if !stop && w.enum_at >= w.enum_list.len() && s.enumeration().is_some() {
                     s.enumeration_done(rec, clock.0);
+                    if let Some(span) = w.enum_spans.last_mut() {
+                        span.1.get_or_insert(clock.0);
+                    }
                 }
             }
             Tier::Subscribed | Tier::Positions => {
@@ -543,8 +573,10 @@ fn run_x(
                 let now = clock.0;
                 let rows = std::cell::Cell::new(0u64);
                 let objects = &w.objects;
+                let read_ids = std::cell::RefCell::new(Vec::new());
                 let mut read = |object: u64| {
                     rows.set(rows.get() + 1);
+                    read_ids.borrow_mut().push(object);
                     Ok(objects.get(&object).map(|o| o.pos))
                 };
                 // The sweep's clock: its fixed part, then each row read.
@@ -554,6 +586,18 @@ fn run_x(
                     )
                 });
                 w.swept += rows.get();
+                if let Some(why) = s.sweep_wait() {
+                    w.waits[why as usize] += 1;
+                }
+                if let Some(reads) = w.reads.as_mut() {
+                    for object in read_ids.into_inner() {
+                        if let Some(last) = reads.last.insert(object, end) {
+                            reads
+                                .gaps
+                                .push((end, end.saturating_duration_since(last).as_secs_f64()));
+                        }
+                    }
+                }
                 clock.0 = end;
                 if first_worth.is_none() && s.pump_worth(clock.0) {
                     first_worth = Some(elapsed);
@@ -3499,4 +3543,175 @@ fn a_pending_destroy_makes_a_pump_worth_its_call() {
     assert!(s.pump_worth(soon));
     s.alive(&mut rec, 900_001, false);
     assert!(!s.pump_worth(soon));
+}
+
+/// What [`enum_rank_run`] saw.
+struct RankRun {
+    /// Each 10 s window's largest and median per-row positions gap, s.
+    windows: Vec<(f64, f64)>,
+    /// Each enumeration's begin and end, seconds from the start.
+    spans: Vec<(f64, Option<f64>)>,
+    /// Each birth's wait from its spawn to its row, s, at 1 s resolution.
+    births: Vec<f64>,
+    /// The mean agent share, and the debt the cap forgave, µs.
+    share: f64,
+    forgiven_us: f64,
+    /// Frames the sweep owed rows and read none, by why.
+    waits: [u64; 4],
+}
+
+/// 2,000 rows with the LIVE costs of the enumeration-rank ruling
+/// (2026-11-15): `coalition.getGroups` steps of 687 and 1,140 µs in turn,
+/// a birth 37 µs, the call 23 µs, a pump batch's fixed part 20 µs, a
+/// position row 0.21 µs. Every unit moves, so every row is read on every
+/// position sweep. After a minute's start, `secs` seconds at scale `k`, in
+/// 1 s steps, each with its one system-call frame; five units are born
+/// every 5 s, some of them while an enumeration runs.
+fn enum_rank_run(k: f64, secs: f64, fps: f64) -> RankRun {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / fps);
+    let mut w = world(1960, 40, 20);
+    w.sweep = Some((15.0, 0.21));
+    w.batch_us = 20.0;
+    w.enum_step_us = Some(687.0);
+    w.enum_step_alt = Some(1140.0);
+    w.birth_us = Some(37.0);
+    w.close_us = 6.0;
+    run_x(&mut s, &mut rec, &mut w, 60.0, fps, 165.0, 23.0, 3.0);
+    if k != 1.0 {
+        #[cfg(feature = "faults")]
+        s.set_scale(k).unwrap();
+        #[cfg(not(feature = "faults"))]
+        panic!("a scale below 1 needs the faults feature");
+    }
+    w.reads = Some(Reads::default());
+    w.enum_spans.clear();
+    w.waits = [0; 4];
+    let start = rec.began + Duration::from_nanos(9_090_909);
+    let since = |t: Instant| t.saturating_duration_since(start).as_secs_f64();
+    let mut waiting: Vec<(u64, f64)> = Vec::new();
+    let mut births = Vec::new();
+    let mut next = 50_000u64;
+    let (mut share, mut forgiven_us) = (0.0, 0.0);
+    let steps = secs as usize;
+    for i in 0..steps {
+        rec.began += Duration::from_secs_f64(1.0 / fps);
+        let at = i as f64;
+        if i % 5 == 2 {
+            for _ in 0..5 {
+                next += 1;
+                w.spawn(next, object_kind::UNIT, format!("b{next}"), 5.0);
+                s.birth_waits();
+                waiting.push((next, at));
+            }
+        }
+        let r = run_x(&mut s, &mut rec, &mut w, 1.0, fps, 165.0, 23.0, 3.0);
+        share += r.share / steps as f64;
+        forgiven_us += r.forgiven_us;
+        let now = at + 1.0;
+        waiting.retain(|&(object, born)| {
+            let done = s.slot_of(object).is_some();
+            if done {
+                births.push(now - born);
+            }
+            !done
+        });
+    }
+    births.extend(waiting.iter().map(|&(_, born)| secs - born + 1e6));
+    let reads = w.reads.take().unwrap();
+    let mut buckets: Vec<Vec<f64>> = vec![Vec::new(); (secs / 10.0).ceil() as usize];
+    for (t, gap) in reads.gaps {
+        if let Some(b) = buckets.get_mut((since(t) / 10.0) as usize) {
+            b.push(gap);
+        }
+    }
+    let windows = buckets
+        .into_iter()
+        .map(|mut g| {
+            g.sort_by(f64::total_cmp);
+            let max = g.last().copied().unwrap_or(f64::INFINITY);
+            let median = g.get(g.len() / 2).copied().unwrap_or(f64::INFINITY);
+            (max, median)
+        })
+        .collect();
+    RankRun {
+        windows,
+        spans: w
+            .enum_spans
+            .iter()
+            .map(|&(b, e)| (since(b), e.map(since)))
+            .collect(),
+        births,
+        share,
+        forgiven_us,
+        waits: w.waits,
+    }
+}
+
+/// What the enumeration-rank ruling's pass at k = 1 finds wrong in a run.
+fn rank_failures(r: &RankRun) -> Vec<String> {
+    let mut bad = Vec::new();
+    for (i, &(max, median)) in r.windows.iter().enumerate() {
+        if max > 1.25 || median > 1.05 {
+            bad.push(format!(
+                "window {i}: largest gap {max:.2} s, median {median:.2} s"
+            ));
+        }
+    }
+    if r.spans.len() < 2 {
+        bad.push(format!("enumerations {:?}", r.spans));
+    }
+    let longest = r
+        .spans
+        .iter()
+        .map(|&(b, e)| e.unwrap_or(f64::INFINITY) - b)
+        .fold(0.0f64, f64::max);
+    for pair in r.spans.windows(2) {
+        let ((b0, _), (b1, e1)) = (pair[0], pair[1]);
+        // Within the period plus its own duration of the last one's
+        // `ENUM_BEGIN`, and a second for the run's 1 s steps.
+        if let Some(e1) = e1
+            && e1 - b0 > 60.0 + (e1 - b1) + 1.0
+        {
+            bad.push(format!("enumeration ended late: {:?}", r.spans));
+        }
+    }
+    // The 3a bound: one enumeration period plus that enumeration's duration.
+    let worst = r.births.iter().copied().fold(0.0f64, f64::max);
+    if worst > 60.0 + longest {
+        bad.push(format!("a birth waited {worst:.1} s"));
+    }
+    if r.share > 0.003 {
+        bad.push(format!("share {}", r.share));
+    }
+    if r.forgiven_us != 0.0 {
+        bad.push(format!("forgiven {} µs", r.forgiven_us));
+    }
+    bad
+}
+
+/// The enumeration-rank ruling (2026-11-15), at the whole budget: the
+/// positions sweep keeps its period while the enumeration runs, and births
+/// resolve within one enumeration period plus its duration. On main it
+/// fails: each dear step's debt holds the sweep under its minimum batch, and
+/// positions read up to 1.48 s apart during each enumeration. It does not
+/// show the live 6-27 s stall with no position row.
+#[test]
+#[ignore = "fails on main; the enumeration-rank fix waits on the coordinator"]
+fn positions_keep_their_period_while_a_2000_object_enumeration_runs() {
+    let mut bad = Vec::new();
+    for fps in [110.0, 56.0, 25.0] {
+        let r = enum_rank_run(1.0, 180.0, fps);
+        let worst = r.births.iter().copied().fold(0.0f64, f64::max);
+        eprintln!(
+            "{fps} fps: windows {:?}\nspans {:?}\nwaits {:?}; worst birth {worst:.1} s",
+            r.windows, r.spans, r.waits
+        );
+        bad.extend(
+            rank_failures(&r)
+                .into_iter()
+                .map(|b| format!("{fps} fps: {b}")),
+        );
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
 }

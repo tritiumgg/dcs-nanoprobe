@@ -591,6 +591,20 @@ pub struct Begin {
     pub sample: bool,
 }
 
+/// Why the host's sweep read no row on a frame that owed some.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SweepWait {
+    /// The pump for the subscribed rows read with their attitude goes first.
+    Subscribed,
+    /// The budget paid for rows, but fewer than the sweep's minimum batch.
+    MinBatch,
+    /// The savings would pay for a row, but the frame's slice, cut by the
+    /// repayment of debt, does not.
+    Debt,
+    /// The savings do not yet pay for a row.
+    Fund,
+}
+
 /// An enumeration's `ENUM_END`, held until its misses are resolved.
 struct EndHold {
     /// The enumeration's number.
@@ -833,6 +847,9 @@ pub struct Sampler {
     /// What a full sweep of the rows owed costs, µs: the most the pump
     /// leaves alone for it.
     sweep_need: f64,
+    /// Why this frame's sweep read no row, or `None` when it read rows or
+    /// owed none.
+    sweep_wait: Option<SweepWait>,
     /// When the shim's pump last ran.
     last_pump: Option<Instant>,
     /// Completed sweeps of positions, vitals and ammunition.
@@ -1078,6 +1095,7 @@ impl Sampler {
             sweep_overrun_max: 0.0,
             sweep_forced: 0,
             sweep_need: 0.0,
+            sweep_wait: None,
             last_sweep: None,
             sweeps: 0,
             last_pump: None,
@@ -2426,10 +2444,12 @@ impl Sampler {
             return now;
         }
         self.accrue(now);
+        self.sweep_wait = None;
         // The pump for the subscribed rows read with their attitude runs
         // first: the sweep reads no unsubscribed position until it has. The
         // savings stay as they are.
         if self.sub_wanted() {
+            self.sweep_wait = Some(SweepWait::Subscribed);
             return now;
         }
         let k = self.scale();
@@ -2498,6 +2518,13 @@ impl Sampler {
             now.saturating_duration_since(l).as_secs_f64() >= SWEEP_LATE * self.rates.position_s
         });
         if n == 0 || !(n >= least || (late && n == owed)) {
+            self.sweep_wait = Some(if n > 0 {
+                SweepWait::MinBatch
+            } else if rows_for(fund * k) > 0 {
+                SweepWait::Debt
+            } else {
+                SweepWait::Fund
+            });
             return now;
         }
         // The flush of queued OBJECT records is the frame's time, not the
@@ -4448,6 +4475,11 @@ impl Sampler {
     /// The debt, µs.
     pub fn debt_us(&self) -> f64 {
         self.budget.debt.max(0.0)
+    }
+
+    /// Why this frame's sweep read no row, when it owed rows and read none.
+    pub fn sweep_wait(&self) -> Option<SweepWait> {
+        self.sweep_wait
     }
 
     /// Allowance carried as credit, µs.
