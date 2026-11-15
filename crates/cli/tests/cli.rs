@@ -27,7 +27,17 @@ fn the_binary_inspects_and_tops_a_real_file() {
         out_capacity: CAP,
         in_capacity: CAP,
     };
-    let path = std::env::temp_dir().join(format!("nanoprobe-cli-test-{}.map", std::process::id()));
+    /// Removes the file when the test ends, whether it passes or fails.
+    struct Scratch(std::path::PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let scratch = Scratch(
+        std::env::temp_dir().join(format!("nanoprobe-cli-test-{}.map", std::process::id())),
+    );
+    let path = scratch.0.clone();
     let map = MappedFile::create(&path, header.file_size()).expect("create");
     start(&map, &header, 3);
     let mut out = Producer::new(Ring::outbound(CAP), 0);
@@ -70,5 +80,4 @@ fn the_binary_inspects_and_tops_a_real_file() {
     assert_eq!(usage.status.code(), Some(2));
 
     drop(map);
-    let _ = std::fs::remove_file(&path);
 }

@@ -343,7 +343,16 @@ mod tests {
 
     #[test]
     fn rotates_at_the_cap() {
-        let dir = std::env::temp_dir().join(format!("nanoprobe-log-{}", std::process::id()));
+        /// Removes the folder when the test ends, whether it passes or fails.
+        struct Scratch(std::path::PathBuf);
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let scratch =
+            Scratch(std::env::temp_dir().join(format!("nanoprobe-log-{}", std::process::id())));
+        let dir = scratch.0.clone();
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("agent.log");
@@ -360,6 +369,5 @@ mod tests {
         let old = std::fs::read_to_string(dir.join("agent.log.1")).unwrap();
         assert!(live.len() <= 300 && old.len() <= 300);
         assert!(live.contains("line 9"));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -342,13 +342,36 @@ mod tests {
     /// A password no test input holds by chance.
     const PLANTED: &str = "np-planted-Zq7!x'\"\\pw";
 
-    fn scratch(name: &str) -> PathBuf {
+    /// A scratch folder's path, removed when the test ends, whether it passes
+    /// or fails.
+    struct Scratch(PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    impl std::ops::Deref for Scratch {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<std::path::Path> for Scratch {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    fn scratch(name: &str) -> Scratch {
         let dir = std::env::temp_dir().join(format!(
             "nanoprobe-client-{name}-{}",
             nanoprobe_transport::random_nonzero()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        Scratch(dir)
     }
 
     #[test]
@@ -361,7 +384,6 @@ mod tests {
         std::fs::write(&empty, b"\n").unwrap();
         let e = read_password(&empty).unwrap_err();
         assert!(e.contains("is empty"), "{e}");
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -372,7 +394,6 @@ mod tests {
         assert_eq!(read_password(&file).unwrap(), PLANTED.as_bytes());
         std::fs::write(&file, PLANTED).unwrap();
         assert_eq!(read_password(&file).unwrap(), PLANTED.as_bytes());
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -404,7 +425,6 @@ mod tests {
         std::fs::write(&file, b"\n").unwrap();
         let e = read_password(&file).unwrap_err();
         assert!(!contains(e.as_bytes(), pw));
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

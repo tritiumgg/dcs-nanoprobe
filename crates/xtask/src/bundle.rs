@@ -430,7 +430,9 @@ mod tests {
 
     #[test]
     fn any_32_hex_digit_token_is_redacted_and_the_keyring_file_is_never_collected() {
-        let dir = std::env::temp_dir().join(format!("nanoprobe-keyring-{}", std::process::id()));
+        let scratch =
+            Scratch(std::env::temp_dir().join(format!("nanoprobe-keyring-{}", std::process::id())));
+        let dir = scratch.0.clone();
         let _ = std::fs::remove_dir_all(&dir);
         let ucid = "fedcba9876543210FEDCBA9876543210";
         let lower = "00112233445566778899aabbccddeeff";
@@ -473,6 +475,7 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
+        // The bundle holds no file from the folder, so the folder can go now.
         std::fs::remove_dir_all(&dir).unwrap();
         let files = unzip(&bytes);
         let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();

@@ -49,6 +49,10 @@ run = "cargo build --workspace --all-targets --no-default-features"
 description = "Run the workspace tests on the host"
 run = "cargo test --workspace --no-default-features"
 
+[tasks.tmpleak]
+description = "Run the workspace tests and fail if they leave a temp folder or a process"
+run = "sh tools/tmpleak.sh"
+
 [tasks.fmt]
 description = "Format every crate"
 run = "cargo fmt --all"
@@ -136,7 +140,8 @@ run = [
   "cargo clippy --workspace --all-targets --no-default-features -- -D warnings",
   # The agent's fault injection (spec/faults.md), which no other build enables.
   "cargo clippy -p nanoprobe-agent --all-targets --no-default-features --features faults -- -D warnings",
-  "cargo test --workspace --no-default-features",
+  "sh tools/tmpleak-test.sh",
+  "sh tools/tmpleak.sh",
   "sh tools/luatest.sh",
   "buf lint",
   "sh tools/protobreak.sh",

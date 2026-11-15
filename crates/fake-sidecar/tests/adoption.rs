@@ -372,6 +372,15 @@ async fn key_on_join(hub: &Hub, ch: &Channel, conn: u32) -> String {
     key
 }
 
+/// A scratch folder, removed when the test ends, whether it passes or fails.
+struct Scratch(std::path::PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// Every `events.sqlite` of a campaign under `dir`.
 fn campaign_event_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
@@ -391,7 +400,9 @@ fn campaign_event_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn keys_are_stable_across_a_restart_with_persistence() {
-    let dir = std::env::temp_dir().join(format!("nanoprobe-adoption-{}", std::process::id()));
+    let scratch =
+        Scratch(std::env::temp_dir().join(format!("nanoprobe-adoption-{}", std::process::id())));
+    let dir = scratch.0.clone();
     let _ = std::fs::remove_dir_all(&dir);
     let with_dir = || Config {
         store: Some(StoreFiles::new(dir.clone())),
@@ -425,8 +436,6 @@ async fn keys_are_stable_across_a_restart_with_persistence() {
         "the server store is the one place a ucid is kept"
     );
     assert!(!dir.join("players.json").exists());
-    drop(server);
-    std::fs::remove_dir_all(&dir).expect("cleanup");
 }
 
 /// One agent record that makes two events (a returning player under a new
@@ -434,7 +443,9 @@ async fn keys_are_stable_across_a_restart_with_persistence() {
 /// sidecar goes on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn one_record_with_two_events_is_logged_with_two_sources() {
-    let dir = std::env::temp_dir().join(format!("nanoprobe-two-events-{}", std::process::id()));
+    let scratch =
+        Scratch(std::env::temp_dir().join(format!("nanoprobe-two-events-{}", std::process::id())));
+    let dir = scratch.0.clone();
     let _ = std::fs::remove_dir_all(&dir);
     let (hub, ch) = in_process(
         Config {
@@ -488,5 +499,4 @@ async fn one_record_with_two_events_is_logged_with_two_sources() {
     }
     drop(st);
     drop(c);
-    std::fs::remove_dir_all(&dir).expect("cleanup");
 }
