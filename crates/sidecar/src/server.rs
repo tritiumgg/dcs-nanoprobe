@@ -556,6 +556,65 @@ mod tests {
         assert!(!s.migrate_players_json(d.path()).expect("again"));
     }
 
+    /// A store that holds another secret refuses the file and leaves it in
+    /// place, so nothing is lost.
+    #[test]
+    fn players_json_with_another_secret_is_refused_and_stays() {
+        let d = tempfile::tempdir().expect("dir");
+        let s = ServerStore::open(d.path(), 1).expect("open");
+        s.set_player_secret([1; 32]).expect("secret");
+        let secret = "ab".repeat(32);
+        fs::write(
+            d.path().join(PLAYERS_JSON),
+            format!(r#"{{"secret":"{secret}","players":{{"k":"u"}}}}"#),
+        )
+        .expect("write");
+        assert!(s.migrate_players_json(d.path()).is_err());
+        assert!(d.path().join(PLAYERS_JSON).exists(), "the file stays");
+        assert!(!d.path().join("players.json.migrated").exists());
+        assert_eq!(s.player_secret().expect("secret"), Some([1; 32]));
+        assert!(s.players().expect("players").is_empty());
+    }
+
+    /// A malformed file is an error and writes no secret.
+    #[test]
+    fn a_malformed_players_json_is_an_error_and_writes_nothing() {
+        let d = tempfile::tempdir().expect("dir");
+        let s = ServerStore::open(d.path(), 1).expect("open");
+        for body in [
+            "not json".to_owned(),
+            r#"{"players":{}}"#.to_owned(),
+            r#"{"secret":"abcd"}"#.to_owned(),
+            format!(r#"{{"secret":"{}","players":{{"k":1}}}}"#, "ab".repeat(32)),
+        ] {
+            fs::write(d.path().join(PLAYERS_JSON), body).expect("write");
+            assert!(s.migrate_players_json(d.path()).is_err());
+            assert!(d.path().join(PLAYERS_JSON).exists());
+            assert_eq!(s.player_secret().expect("secret"), None);
+            assert!(s.players().expect("players").is_empty());
+        }
+    }
+
+    /// A file left in place after its rows were written (same secret)
+    /// migrates again without error and is renamed.
+    #[test]
+    fn a_players_json_left_after_its_rows_were_written_migrates_again() {
+        let d = tempfile::tempdir().expect("dir");
+        let secret = "ab".repeat(32);
+        let body = format!(r#"{{"secret":"{secret}","players":{{"k":"u"}}}}"#);
+        fs::write(d.path().join(PLAYERS_JSON), &body).expect("write");
+        let s = ServerStore::open(d.path(), 1).expect("open");
+        s.set_player_secret([0xab; 32]).expect("secret");
+        s.put_player("k", "u").expect("player");
+        assert!(s.migrate_players_json(d.path()).expect("migrate"));
+        assert!(!d.path().join(PLAYERS_JSON).exists());
+        assert!(d.path().join("players.json.migrated").exists());
+        assert_eq!(
+            s.players().expect("players"),
+            vec![("k".into(), "u".into())]
+        );
+    }
+
     #[test]
     fn a_migration_backs_up_the_server_store_first() {
         fn step(tx: &Transaction<'_>) -> rusqlite::Result<()> {

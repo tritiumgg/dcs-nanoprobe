@@ -780,6 +780,28 @@ mod tests {
         })
     }
 
+    /// A log on disk reads older events from its file and newer ones from
+    /// memory, with no gap and no repeat where the two meet.
+    #[test]
+    fn a_log_on_disk_reads_across_the_memory_boundary() {
+        let d = tempfile::tempdir().expect("dir");
+        let file = EventFile::open(&d.path().join("events.sqlite"), 1).expect("file");
+        let mut l = EventLog::open(file, 3).expect("log");
+        for i in 0..10 {
+            l.push(1, pb::Stamp::default(), body(i));
+        }
+        l.commit().expect("commit");
+        let seqs = |after, limit| -> Vec<u64> {
+            l.after(after, limit).iter().map(|e| e.sequence).collect()
+        };
+        assert_eq!(seqs(0, 100), (1..=10).collect::<Vec<u64>>());
+        assert_eq!(seqs(5, 2), vec![6, 7]);
+        assert_eq!(seqs(6, 100), vec![7, 8, 9, 10]);
+        assert_eq!(seqs(7, 100), vec![8, 9, 10]);
+        assert_eq!(seqs(9, 100), vec![10]);
+        assert!(seqs(10, 100).is_empty());
+    }
+
     #[test]
     fn a_log_numbers_and_keeps_the_newest() {
         let mut l = EventLog::new(3);

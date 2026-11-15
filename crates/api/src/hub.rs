@@ -408,13 +408,7 @@ impl Inner {
                         e.order_rev,
                         e.index.map_or_else(|| "end".to_owned(), |i| i.to_string())
                     );
-                    push_once(
-                        &mut slot.events,
-                        id,
-                        stamp,
-                        route_body(&e),
-                        Some(source),
-                    );
+                    push_once(&mut slot.events, id, stamp, route_body(&e), Some(source));
                 }
                 tee.seen
             }

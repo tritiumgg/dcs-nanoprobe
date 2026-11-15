@@ -359,6 +359,59 @@ fn a_removal_the_agent_has_not_confirmed_is_sent_again_after_a_reopen() {
     assert_eq!(w.store.extension_removals().count(), 0);
 }
 
+/// A plain commit writes every fact and the spec but not the sampled state:
+/// the file's units equal memory's in every field except `state`, and a
+/// unit's `state` in the file is the one of the last checkpoint.
+#[test]
+fn a_commit_without_a_checkpoint_leaves_the_sampled_state_at_the_checkpoint() {
+    let mut any_moved = false;
+    for seed in 0..12u64 {
+        let d = temp();
+        let path = d.path().join("store.sqlite");
+        let mut w = World::new_late(3, 1, LostPolicy::Respawn, seed);
+        w.store.save_as(&path, record("a")).expect("save");
+        let mut s = Schedule::new(seed);
+        for _ in 0..60 {
+            w.apply(&s.op_late()).expect("op");
+        }
+        w.store.checkpoint(1, Vec::new()).expect("checkpoint");
+        for _ in 0..90 {
+            w.apply(&s.op_late()).expect("op");
+        }
+        w.store.commit().expect("commit");
+        let file = units(&read_back(&path).1);
+        let memory = units(&w.store);
+        let strip = |u: &Unit| -> Unit {
+            let mut u = u.clone();
+            u.state = Default::default();
+            u
+        };
+        let stripped = |us: &[Unit]| us.iter().map(strip).collect::<Vec<_>>();
+        assert_eq!(stripped(&file), stripped(&memory), "seed {seed}");
+        // A sample alone writes nothing: move every live unit, commit, and
+        // the file still holds the state of the last checkpoint.
+        w.store.checkpoint(2, Vec::new()).expect("checkpoint");
+        let cp: BTreeMap<_, _> = units(&w.store).into_iter().map(|u| (u.id, u)).collect();
+        for u in cp.values().filter(|u| !u.dead) {
+            let mut at = u.state.at;
+            at.x += 111.0;
+            w.store.observe_position(u.id, at);
+            w.store.observe_vitals(u.id, 0.25, 0.75);
+        }
+        w.store.commit().expect("commit");
+        let file = units(&read_back(&path).1);
+        let memory: BTreeMap<_, _> = units(&w.store).into_iter().map(|u| (u.id, u)).collect();
+        any_moved |= memory.values().any(|u| u.state != cp[&u.id].state);
+        for f in &file {
+            assert_eq!(f.state, cp[&f.id].state, "seed {seed}: unit {:?}", f.id);
+        }
+    }
+    assert!(
+        any_moved,
+        "memory's sampled state moved past the checkpoint"
+    );
+}
+
 /// One seed of the deterministic simulation's late schedule, 300 operations
 /// then settling. With `file`, every sidecar restart reads its store back
 /// from the file and keeps nothing else, and writes happen only where the

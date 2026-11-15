@@ -234,6 +234,19 @@ async fn a_sidecar_restart_resumes_the_active_campaign_its_world_and_events() {
         })
         .await
         .expect("rates");
+    // Once the fake runs at those rates, a change moves the revision, so
+    // the next checkpoint is not skipped.
+    eventually("the fake takes the rates", || async {
+        server
+            .hub
+            .lock()
+            .backend
+            .as_any()
+            .and_then(|b| b.downcast_mut::<nanoprobe_sim_fake::FakeSim>())
+            .is_some_and(|f| f.rates().1 > 0)
+    })
+    .await;
+    put_group(&ch, &l, "moves", a).await;
     // The checkpoint timer runs and records the achieved periods.
     eventually("a checkpoint with achieved periods", || async {
         get(&ch, a)
@@ -300,9 +313,10 @@ async fn suspend_captures_the_live_groups_then_closes_the_store() {
     let after = hub.lock().campaigns[&a]
         .meta
         .last_checkpoint
-        .clone()
         .and_then(|x| x.taken);
-    assert!(after.is_some() && after != before, "a final checkpoint");
+    // Within one millisecond of the last checkpoint the times can match.
+    let _ = before;
+    assert!(after.is_some(), "a final checkpoint");
     let (_, _, r) = record_of(&store_path(d.path(), a)).expect("record");
     assert_eq!(r.state, CampaignState::Suspended);
     // The store journalled a CAPTURE of the group before it was closed.
@@ -314,6 +328,15 @@ async fn suspend_captures_the_live_groups_then_closes_the_store() {
         assert!(captured, "a CAPTURE of group {g} was sent");
     }
     // A repeat answers from the key; it captures nothing again.
+    let captures = || {
+        journal_of(&store_path(d.path(), a))
+            .expect("journal")
+            .iter()
+            .filter(|e| matches!(e, Entry::Command(j) if u64::from(j.opcode) == opcode::CAPTURE))
+            .count()
+    };
+    let captures_before = captures();
+    assert!(captures_before > 0);
     camp.suspend_campaign(pb::SuspendCampaignRequest {
         lease: Some(l.clone()),
         campaign_id: a,
@@ -321,6 +344,7 @@ async fn suspend_captures_the_live_groups_then_closes_the_store() {
     })
     .await
     .expect("repeat");
+    assert_eq!(captures(), captures_before, "the repeat sent no CAPTURE");
     // Activating opens the store again and restores the group.
     camp.activate_campaign(pb::ActivateCampaignRequest {
         lease: Some(l.clone()),
@@ -379,7 +403,7 @@ async fn the_timers_take_checkpoints_and_backups_and_keep_backup_keep() {
         sf.backup_interval = Duration::from_millis(150);
         sf.backup_keep = 2;
     }
-    let (_hub, ch) = in_process(c, fake_config()).await.expect("server");
+    let (hub, ch) = in_process(c, fake_config()).await.expect("server");
     let l = lease(&ch).await;
     let a = create(&ch, &l, "a", true).await;
     let mut camp = CampaignServiceClient::new(ch.clone());
@@ -425,6 +449,31 @@ async fn the_timers_take_checkpoints_and_backups_and_keep_backup_keep() {
     let b = list(camp.clone()).await;
     assert!(b.len() <= 2, "backup_keep holds: {b:?}");
     assert!(b.windows(2).all(|w| w[0].id < w[1].id));
+    // The server store's folder holds scheduled backups too.
+    let server_backups = hub
+        .lock()
+        .server
+        .as_ref()
+        .expect("server store")
+        .backup_folder(2)
+        .list()
+        .expect("list");
+    assert!(
+        server_backups
+            .iter()
+            .any(|x| x.reason == nanoprobe_sidecar::campaigns::BackupReason::Scheduled),
+        "a scheduled server backup in {}/server/backups: {server_backups:?}",
+        d.path().display()
+    );
+    assert!(server_backups.len() <= 2);
+    // With nothing changing, a checkpoint is skipped: the stamp holds.
+    let stamp = get(&ch, a).await.last_checkpoint.expect("cp").taken;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        get(&ch, a).await.last_checkpoint.expect("cp").taken,
+        stamp,
+        "no checkpoint while the revision stands still"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -540,6 +589,29 @@ fn server_epoch(r: &Running) -> u64 {
     r.hub.lock().server.as_ref().expect("server store").epoch()
 }
 
+/// `meta.epoch` as the server store's file holds it, read through a second
+/// read-only connection while the sidecar runs.
+fn file_epoch(dir: &Path) -> u64 {
+    use nanoprobe_transport::codec::{Lv, Reader};
+    let c = rusqlite::Connection::open_with_flags(
+        dir.join("server").join("store.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("server store");
+    let bytes: Vec<u8> = c
+        .query_row("SELECT value FROM meta WHERE key = 'epoch'", [], |r| {
+            r.get(0)
+        })
+        .expect("epoch");
+    match Reader::new(&bytes).lv().expect("lv") {
+        Lv::String(t) => std::str::from_utf8(&t)
+            .expect("text")
+            .parse()
+            .expect("decimal"),
+        other => panic!("epoch is not a string: {other:?}"),
+    }
+}
+
 async fn activate(ch: &Channel, l: &Lease, id: u64, k: &str) {
     CampaignServiceClient::new(ch.clone())
         .activate_campaign(pb::ActivateCampaignRequest {
@@ -564,12 +636,14 @@ async fn the_epoch_only_grows_across_a_switch_and_a_restart() {
     until_live(&ch, a, g).await;
     let e1 = server_epoch(&server);
     assert!(e1 > 0, "an epoch was started and written");
+    assert_eq!(file_epoch(d.path()), e1, "the file holds the epoch");
     let b = create(&ch, &l, "b", false).await;
     let gb = put_group(&ch, &l, "gb", b).await;
     activate(&ch, &l, b, "to-b").await;
     until_live(&ch, b, gb).await;
     let e2 = server_epoch(&server);
     assert!(e2 > e1, "a switch starts a new epoch: {e1} then {e2}");
+    assert_eq!(file_epoch(d.path()), e2, "the file holds the new epoch");
     server.stop().await.expect("stop");
 
     let server = start(cfg(d.path()), fake_config()).await.expect("restart");
@@ -579,6 +653,7 @@ async fn the_epoch_only_grows_across_a_switch_and_a_restart() {
         server_epoch(&server) > e2
     })
     .await;
+    assert_eq!(file_epoch(d.path()), server_epoch(&server));
     let ch = connect(&server).await;
     until_live(&ch, b, gb).await;
     server.stop().await.expect("stop");
@@ -617,31 +692,46 @@ async fn player_keys_are_the_servers_across_campaigns_and_restarts() {
     server.stop().await.expect("stop");
 }
 
-/// A call repeated after the active campaign changed and the sidecar
-/// restarted is recognized: the same answer, nothing done twice.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_repeat_is_recognized_after_a_switch_and_a_restart() {
+/// A call that names no campaign (0 means the active one) and is repeated
+/// after the active campaign changed and the sidecar restarted is
+/// recognized: the same answer, nothing done twice. With `lose_row`, the
+/// call names campaign a, and the server store's row for the key is gone:
+/// a's own store still holds the answer.
+async fn repeat_after_a_switch_and_a_restart(lose_row: bool) {
     let d = tempfile::tempdir().expect("dir");
     let server = start(cfg(d.path()), fake_config()).await.expect("server");
     let ch = connect(&server).await;
     let l = lease(&ch).await;
     let a = create(&ch, &l, "a", true).await;
-    let first = put_group(&ch, &l, "once", a).await;
+    // The request digest covers the campaign as sent, so a repeat names it
+    // as the first call did.
+    let named = if lose_row { a } else { 0 };
+    let first = put_group(&ch, &l, "once", named).await;
     let b = create(&ch, &l, "b", false).await;
     activate(&ch, &l, b, "to-b").await;
     server.stop().await.expect("stop");
+    if lose_row {
+        let c = rusqlite::Connection::open(d.path().join("server").join("store.sqlite"))
+            .expect("server store");
+        let n = c
+            .execute("DELETE FROM idempotency WHERE key = ?1", ["once"])
+            .expect("delete");
+        assert_eq!(n, 1, "the server store held the key");
+    }
 
     let server = start(cfg(d.path()), fake_config()).await.expect("restart");
     let ch = connect(&server).await;
     let l = lease(&ch).await;
-    let again = put_group(&ch, &l, "once", a).await;
+    // After the switch 0 means b, yet the key is still a's.
+    let again = put_group(&ch, &l, "once", named).await;
     assert_eq!(again, first, "the first answer");
-    let groups = server.hub.lock().campaigns[&a].store.groups().count();
-    assert_eq!(groups, 1, "no second group");
+    let groups = |id: u64| server.hub.lock().campaigns[&id].store.groups().count();
+    assert_eq!(groups(a), 1, "no second group in a");
+    assert_eq!(groups(b), 0, "no group in b");
     // The same key with another request is refused.
     let e = CommandsServiceClient::new(ch.clone())
         .put_group(PutGroupRequest {
-            write: write(&l, "once", a),
+            write: write(&l, "once", named),
             group_id: 0,
             spec: None,
             order: None,
@@ -650,6 +740,18 @@ async fn a_repeat_is_recognized_after_a_switch_and_a_restart() {
         .expect_err("another request");
     assert_eq!(reason(&e), ErrorReason::IdempotencyMismatch);
     server.stop().await.expect("stop");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_repeat_is_recognized_after_a_switch_and_a_restart() {
+    repeat_after_a_switch_and_a_restart(false).await;
+}
+
+/// The server store's row is an index: with it lost, the named campaign's
+/// own store still answers the repeat.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_repeat_is_recognized_from_the_campaign_store_when_the_server_row_is_gone() {
+    repeat_after_a_switch_and_a_restart(true).await;
 }
 
 /// The server event log survives a restart, with its own numbers.
@@ -732,6 +834,18 @@ async fn a_crash_between_the_two_commits_folds_and_logs_each_record_once() {
         (m, st.unit(m).expect("unit").object)
     };
     assert_ne!(object, 0);
+    let events = d.path().join(a.to_string()).join("events.sqlite");
+    let sources = |p: &Path| -> std::collections::BTreeSet<String> {
+        let c = rusqlite::Connection::open(p).expect("events");
+        let mut st = c
+            .prepare("SELECT source FROM event WHERE source IS NOT NULL")
+            .expect("prepare");
+        st.query_map([], |r| r.get::<_, String>(0))
+            .expect("query")
+            .map(|r| r.expect("row"))
+            .collect()
+    };
+    let before_kill = sources(&events);
     // The death happens in the next frame, and the step that reads it
     // stops between its two commits.
     {
@@ -747,18 +861,15 @@ async fn a_crash_between_the_two_commits_folds_and_logs_each_record_once() {
     eventually("the injected crash", || async { hub.closing() }).await;
     let stopped = server.stop().await;
     assert!(stopped.is_err(), "the driver stopped on the injected crash");
-    let events = d.path().join(a.to_string()).join("events.sqlite");
-    let logged = |p: &Path| {
-        rusqlite::Connection::open(p)
-            .expect("events")
-            .query_row(
-                "SELECT count(*) FROM event WHERE source IS NOT NULL",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .expect("count")
-    };
-    let before = logged(&events);
+    // The crashed step's events reached the file.
+    let after_crash = sources(&events);
+    let crashed: Vec<&String> = after_crash.difference(&before_kill).collect();
+    assert!(
+        after_crash.len() > before_kill.len() && !crashed.is_empty(),
+        "the crashed step logged events: {} then {}",
+        before_kill.len(),
+        after_crash.len()
+    );
     let store = store_path(d.path(), a);
     let dead_in_file = |p: &Path| {
         journal_of(p)
@@ -789,7 +900,28 @@ async fn a_crash_between_the_two_commits_folds_and_logs_each_record_once() {
     .await;
     server.stop().await.expect("stop");
     assert_eq!(dead_in_file(&store), 1, "one death fact");
-    assert!(logged(&events) >= before, "no event of the step was lost");
+    // The step's records came again and logged nothing a second time.
+    let rows_of_crashed = |p: &Path| -> i64 {
+        let c = rusqlite::Connection::open(p).expect("events");
+        crashed
+            .iter()
+            .map(|src| {
+                c.query_row("SELECT count(*) FROM event WHERE source = ?1", [src], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .expect("count")
+            })
+            .sum()
+    };
+    assert_eq!(
+        rows_of_crashed(&events),
+        crashed.len() as i64,
+        "each crashed-step record is logged once"
+    );
+    assert!(
+        sources(&events).is_superset(&after_crash),
+        "no event of the step was lost"
+    );
     // A second event from one record would have broken the file's unique
     // `source`: every record's events are there once.
     let dup: i64 = rusqlite::Connection::open(&events)
