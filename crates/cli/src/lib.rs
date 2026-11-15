@@ -4,11 +4,17 @@
 //! metrics and the unread records of both rings. `top` shows the live state and
 //! its rates. Both open the file read-only and decode private copies of what
 //! they read. `watch` prints a sidecar's world changes or events from its
-//! API, one message per line.
+//! API, one message per line. `doctor` checks an install from outside DCS, and
+//! `install` and `uninstall` add the release to a Saved Games profile and take
+//! it out again.
 
 pub mod args;
+pub mod dcslog;
 pub mod decode;
+pub mod doctor;
 pub mod inspect;
+pub mod profiles;
+pub mod setup;
 pub mod top;
 pub mod util;
 pub mod watch;
@@ -20,7 +26,8 @@ use args::Command;
 use nanoprobe_transport::map::MappedFile;
 
 /// Run the command with `args` (without the program name). Returns the exit
-/// code: 0 on success, 2 for a usage error, 1 when the file cannot be opened.
+/// code: 0 on success, 2 for a usage error or, for `doctor`, nothing to check,
+/// and 1 for a failure.
 pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     let command = match args::parse(args) {
         Ok(c) => c,
@@ -35,6 +42,9 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
             0
         }
         Command::Watch(o) => watch::run(&o, out, err),
+        Command::Doctor(o) => doctor::run(&o.place, &profiles::Env::current(), out, err),
+        Command::Install(o) => setup::run_install(&o, &profiles::Env::current(), out, err),
+        Command::Uninstall(o) => setup::run_uninstall(&o, &profiles::Env::current(), out, err),
         Command::Inspect { path, records } => {
             let map = match open(&path, err) {
                 Some(m) => m,
