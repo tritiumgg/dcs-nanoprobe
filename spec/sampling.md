@@ -177,48 +177,54 @@ than a quarter of a position period's rows and 64.
 
 **Starvation guard.** At a scale of 1, with the sweep not behind, a tier below the
 positions that the pumps could not afford is late and goes right after the subscribed
-rows, with one row, ahead of owed vitals. A tier is late only when the budget is at a scale
-of 1, the pumps could not afford it and the sweep is not behind. The wait is timed from the
-tier's last planned batch, or from its first owed row when none was planned. Ammunition and
-warehouses are late when two rows are owed and the wait passed the pump's 1 s wait. Vitals
-is late when the wait passed 1 vitals period, and takes its rows by the rank. A late tier
-takes at most one row per late interval. With the guard on, the vitals period stays inside
-the 4.5-6.5 s band of the vitals target. A warehouse read whose cost is unmeasured plans one row, and only when
-what is left of the budget exceeds a batch's fixed part by 62.5 µs; warehouse rows are
-still read within about 2 × their period or the pump's 1 s wait.
+rows, with one row, ahead of owed vitals. A tier is late only when the budget is at a
+scale of 1, the pumps could not afford it and the sweep is not behind. The wait is timed
+from the tier's last planned batch, or from its first owed row when none was planned.
+Ammunition and warehouses are late when two rows are owed and the wait passed the pump's 1
+s wait. Vitals is late when the wait passed 1 vitals period, and takes its rows by the
+rank. A late tier takes at most one row per late interval. With the guard on, the vitals
+period stays inside the 4.5-6.5 s band of the vitals target as a rate: the target × the
+sum of `due_vitals` / the sum of `swept_vitals` ("Reporting") over steady windows of at
+least two minutes. One window's rate, like a single reading of the period, can show an
+enumeration's wait ("Achieved period"). A warehouse read whose cost is unmeasured plans
+one row, and only when what is left of the budget exceeds a batch's fixed part by 62.5 µs;
+warehouse rows are still read within about 2 × their period or the pump's 1 s wait.
 
-Births and the enumeration take at most the share `m` of the sampling time while any row
-tier owes rows, from an account of their own. A balance in µs gains `m` × (`A` − `c` − the
-frame's fixed work before the sweep) × `k` on every frame that is not a system-call frame:
-up to 250 µs while births or an enumeration wait, and only up to 0 while none does, so
-that it repays its own deficit. What it gains on a frame leaves that frame's allowance for
-the row tiers (`E` in "Slice"). It loses the time of their batches, and that time is not
-the row tiers' debt (`P` in "Slice"); at `k` = 1 a pump whose batches were all births or
-the enumeration, and that made no existence checks, also pays its call and its closes from
-the balance. Their own time is never the row tiers' debt. Below a scale of 1 a batch also
-costs the balance the share of a whole batch the scale withholds (below), and that charge
-stops at −1,000 µs. Their own time may take the balance below −1,000 µs, down to −`L`,
-the larger of the debt's cap, `overhead_share` × 10⁶ µs, and 1,000 µs (−3,000 µs at
-0.3 %); past it the time is
-forgiven and counted (`maintenance_forgiven_us`), as for a stall inside a step. With
-steps of 687 and 1,140 µs the balance forgives nothing; a nonzero value in a live run
-marks a DCS stall inside a step, and the live measure reports it with its window. One dear
-step, such as a `coalition.getGroups` of 687 or 1,140 µs (PRIOR, S10 and S11), therefore
-keeps births and the enumeration out until the balance has earned its time back, at most
-the bound over their share of a frame (about 2.5 s at 110 frames a second), and leaves the
-positions sweep's slice alone. A burst of such steps, which happens only when no row is
-owed, keeps them out no longer.
+Births and the enumeration take at most the share `m` of the sampling time, whether or not
+a row tier owes rows, from an account of their own. A balance in µs gains `m` × (`A` − `c`
+− the frame's fixed work before the sweep) × `k` on every frame that is not a system-call
+frame: up to 250 µs while births or an enumeration wait, and only up to 0 while none does,
+so that it repays its own deficit. What it gains on a frame leaves that frame's allowance
+for the row tiers (`E` in "Slice"). It loses the time of their batches, and that time is
+not the row tiers' debt (`P` in "Slice"); at `k` = 1 a pump whose batches were all births
+or the enumeration, and that made no existence checks, also pays its call and its closes
+from the balance. Their own time is never the row tiers' debt. Below a scale of 1 a batch
+also costs the balance the share of a whole batch the scale withholds (below), and that
+charge stops at −1,000 µs. Their own time may take the balance below −1,000 µs, down to
+−`L`, the larger of the debt's cap, `overhead_share` × 10⁶ µs, and 1,000 µs (−3,000 µs at
+0.3 %); past it the time is forgiven and counted (`maintenance_forgiven_us`). A batch
+starts only on a balance that pays it (below), so only a step dearer than that balance
+plus `L`, a DCS stall inside it, passes the bound. With steps of 687 and 1,140 µs, or of
+2,000 µs, the balance forgives nothing; a nonzero value in a live run marks a DCS stall
+inside a step, and the live measure reports it with its window. One dear step, such as a
+`coalition.getGroups` of 687 or 1,140 µs (PRIOR, S10 and S11), therefore keeps births and
+the enumeration out until the balance has earned its time back, at most the bound over
+their share of a frame (about 2.5 s at 110 frames a second), and leaves the positions
+sweep's slice alone.
 While a row tier owes rows they take a batch only when the balance covers one batch: the
 smaller of 3 × the measured call and the cost of the rows still owed plus `batch_us`, at
-most the most a frame can reach. When no row is owed they take a batch whatever the
-balance. A batch of births or the enumeration costs the balance the larger of the
-batch's time and its batch cost × (1 − `k`), so at a scale below 1 maintenance yields to
-the tiers: it falls about as `k`^1.7, to about 2 % of its rate at `k` = 1 when `k` = 0.1
-with rows owed. At `k` = 1 nothing changes. While a tier above the positions waits for a
-pump, the sweep takes at most 1 − `m` of a frame, so the pump has room in each frame
-("The sweep"). The row tiers therefore always keep the rest of the sampling time, so
-subscribed positions keep a rate even at a tenth of the slice, where that takes
-precedence over the enumeration's period.
+most the most a frame can reach. When no row is owed they take a batch only while the
+balance is at or above 0. The plan, the pump's worth (below) and the gate below a scale of
+1 apply this one rule, so a pump that comes for births or the enumeration alone comes only
+when the balance pays its first batch, and their time stays within `m` of the sampling
+time. A batch of births or the enumeration costs the balance the larger of the batch's
+time and its batch cost × (1 − `k`), so at a scale below 1 maintenance yields to the
+tiers: it falls about as `k`^1.7, to about 2 % of its rate at `k` = 1 when `k` = 0.1 with
+rows owed. At `k` = 1 nothing changes. While a tier above the positions waits for a pump,
+the sweep takes at most 1 − `m` of a frame, so the pump has room in each frame ("The
+sweep"). The row tiers therefore always keep the rest of the sampling time, so subscribed
+positions keep a rate even at a tenth of the slice, where that takes precedence over the
+enumeration's period.
 
 Births go before a running enumeration. The enumeration finds the objects that births
 added already in the table; the birth of an object the enumeration already added costs
@@ -281,7 +287,7 @@ With the sweep in `frame` the pump is called only when it has work worth its cal
   worth of rows and the rows subscribed, or the oldest owed row is past its period. A
   smaller number waits, so a pump is not called for a few rows; or births or an
   enumeration that is due or running wait and may take a batch ("Tiers": their balance
-  is above 0, or no row is owed);
+  covers one batch while a row is owed, or is at or above 0 while none is);
 - or an existence check that a `S_EVENT_HIT`, `S_EVENT_BDA`, `S_EVENT_KILL` or a death
   event asked for, or a check of a row the last enumeration missed, is queued. It is
   urgent only when it was actually queued, and the pump releases the sweep's reserve for it
@@ -351,7 +357,8 @@ A tier's sweep completes when its cursor has passed every row the table held whe
 sweep began, or when no row after the cursor is due on this sweep. The achieved period
 is the real time between the last two completions, and for the first sweep the time
 from the tier's start to its completion; or, when it is longer, the time since the last
-completion, so a tier that stalls shows its stall as it grows. A tier that has owed
+completion, so a tier that stalls shows its stall as it grows. While an enumeration
+runs, a vitals pass can wait for it; the period then shows the wait. A tier that has owed
 rows and never completed a sweep reports the time since the first sampling frame on
 which it owed them, so a tier that gets no rows shows a period that grows. A period is 0
 only for a tier that has never owed rows. A tier with no rows completes once per target
@@ -467,6 +474,7 @@ message `sampling` and these `data` keys:
 | `us_fixed`, `us_xcall`, `us_pump`, `us_syscall` | Where the window's agent time went, µs: from the start of `frame` to the slice on frames that are not system-call frames; the cross-state calls; the pumps; the system-call frames. With the tiers' times they do not add up to the window's agent time: the rest is the end of each frame |
 | `us_births`, `us_enumeration`, `us_subscribed`, `us_positions`, `us_stopped`, `us_vitals`, `us_ammo`, `us_warehouses` | Each tier's time in the window, µs: its batches from plan to close, and the sweeps for positions |
 | `rows_births`, `rows_enumeration`, `rows_subscribed`, `rows_positions`, `rows_stopped`, `rows_vitals`, `rows_ammo`, `rows_warehouses` | Each tier's rows in the window |
+| `due_vitals`, `swept_vitals` | Vitals rows due in the window at the target period, the rows of one vitals sweep × `window_s` / the target; and the rows the vitals cursor read, without the reads an event mark asked for, which `rows_vitals` includes. The vitals period as a rate is the target × `due_vitals` / `swept_vitals`, each summed over the windows of a span ("Starvation guard") |
 | `idle` | Units and movable statics read once in five position sweeps |
 | `marked_life`, `marked_ammo` | Rows marked for a read of life, and of ammunition, that still wait |
 | `life_sweep_s`, `ammo_sweep_s` | The achieved period of the slow sweep of life and fuel ("Achieved period"); `ammo_sweep_s` is 0, ammunition having none |

@@ -472,8 +472,8 @@ function M.pump()
     -- is the row tiers' debt, so the gate closes and later frames are forced
     -- for the waiting command. A pump that plans the enumeration and reads
     -- none of it never ends it, and the births' and the enumeration's
-    -- balance pays such a pump whole (spec/sampling.md, "Tiers"): with no row
-    -- owed, the gate then stays open and no frame is forced.
+    -- balance pays such a pump whole (spec/sampling.md, "Tiers"): the debt
+    -- stays 0, so the gate does not close for it and no frame is forced.
     local start = os.clock()
     repeat
     until os.clock() - start >= 0.002
@@ -508,7 +508,26 @@ local function never_reached(shim)
 end
 scenario('begin-only-pump', BEGIN_ONLY_SHIM, function(ctx)
   never_reached(BEGIN_ONLY_SHIM)(ctx)
-  S.ok('a forced pump that calls pump_begin and no command() leaves the head command NOT_READY, once')
+  -- With no row owed, births and the enumeration take a batch only on a
+  -- balance that pays it (spec/sampling.md, "Tiers"): the 2 ms pumps keep the
+  -- share and nothing is forgiven. 11 s more gives one 10 s `sampling` window.
+  -- The 2 % on the share is the carry across a window's edges: the 250 µs
+  -- balance and the 150 µs credit, 400 µs in 10 s, 1.3 % of 0.3 %.
+  ctx.run(11)
+  local windows = 0
+  for _, line in ipairs(S.lines(ctx.profile .. 'nanoprobe/logs/agent.log')) do
+    local ok, e = pcall(S.json, line)
+    local d = ok and type(e) == 'table' and e.msg == 'sampling' and e.data
+    if d then
+      windows = windows + 1
+      assert(d.maintenance_forgiven_us == 0,
+        'the balance forgave ' .. tostring(d.maintenance_forgiven_us) .. ' µs with no stall')
+      assert(d.share <= 0.003 * 1.02, 'share ' .. tostring(d.share) .. ' against 0.003')
+    end
+  end
+  assert(windows >= 1, 'no sampling report in the agent log')
+  S.ok('a forced pump that calls pump_begin and no command() leaves the head command NOT_READY, once, '
+    .. 'within the share and with nothing forgiven')
 end)
 
 -- 8. Results the agent bounds: a 1 MiB error message, a return of 10,000 keys,

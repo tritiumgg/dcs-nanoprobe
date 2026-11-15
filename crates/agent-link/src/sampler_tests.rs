@@ -495,6 +495,10 @@ struct Run {
         allow(dead_code, reason = "read by a faults test")
     )]
     tier_rows: [u64; 8],
+    /// From the reports: vitals rows due at the target, and those the
+    /// vitals cursor read (`due_vitals`, `swept_vitals`).
+    vitals_due: f64,
+    vitals_swept: u64,
     /// From the reports: pumps that planned no row.
     empty_pumps: u64,
     /// Seconds from the start to the first frame where the host's gate found
@@ -547,6 +551,7 @@ fn run_x(
     let mut maintenance_forgiven_us = 0.0;
     let (mut sweeps, mut sweep_cut, mut sweep_overruns) = (0, 0, 0);
     let mut tier_rows = [0u64; 8];
+    let (mut vitals_due, mut vitals_swept) = (0.0, 0);
     let mut empty_pumps = 0;
     let (mut first_worth, mut first_pump) = (None, None);
     let mut checks = Vec::new();
@@ -642,6 +647,8 @@ fn run_x(
             sweep_cut += r.sweep_cut;
             sweep_overruns += r.sweep_overruns;
             empty_pumps += r.empty_pumps;
+            vitals_due += r.vitals_due;
+            vitals_swept += r.vitals_swept;
             for (sum, rows) in tier_rows.iter_mut().zip(r.spend.tier_rows) {
                 *sum += rows;
             }
@@ -667,6 +674,8 @@ fn run_x(
         sweep_cut,
         sweep_overruns,
         tier_rows,
+        vitals_due,
+        vitals_swept,
         empty_pumps,
         first_worth,
         first_pump,
@@ -2181,11 +2190,67 @@ fn the_check_queue_stays_bounded_at_2000_rows() {
     assert!(last <= 500, "{last} checks waiting");
 }
 
+/// The vitals band at k = 1 (quorum 2 on maintenance with no row owed,
+/// 2026-11-15): the period is judged as a rate, the target period × the
+/// rows due at it / the rows the vitals cursor read over the window
+/// (`due_vitals` and `swept_vitals`; event-marked reads are in neither). The readings of the
+/// reported period are printed; while an enumeration runs a vitals pass can
+/// wait for it and a reading shows the wait (11 to 14 s in the host runs),
+/// so their maximum is bounded at `VITALS_READING_MAX_S` and a stall that
+/// grows still fails. The bound is three vitals periods: above the waits an
+/// enumeration causes, below what a pass that waits for two causes.
+const VITALS_READING_MAX_S: f64 = 15.0;
+
+/// The vitals period as a rate over a window, and its readings' mean,
+/// median and maximum, printed with `what`; asserts the band and the
+/// readings' maximum.
+fn assert_vitals_band(what: &str, due: f64, read: u64, readings: &mut [f64]) -> f64 {
+    let rate = Rates::default().vitals_s * due / read.max(1) as f64;
+    readings.sort_by(f64::total_cmp);
+    let n = readings.len();
+    let mean = readings.iter().sum::<f64>() / n as f64;
+    let median = if n % 2 == 1 {
+        readings[n / 2]
+    } else {
+        (readings[n / 2 - 1] + readings[n / 2]) / 2.0
+    };
+    let max = readings[n - 1];
+    eprintln!(
+        "{what}: vitals {rate:.2} s as a rate ({read} rows of {due:.0} due); \
+         readings mean {mean:.2} s, median {median:.2} s, maximum {max:.2} s"
+    );
+    assert!(
+        (4.5..=6.5).contains(&rate),
+        "{what}: vitals {rate} s as a rate"
+    );
+    assert!(
+        max <= VITALS_READING_MAX_S,
+        "{what}: a vitals reading of {max} s"
+    );
+    rate
+}
+
+/// The start offsets the band tests run at: where the pump's batches and the
+/// enumeration fall moves with them (the Fable analysis, 2026-11-15).
+const BAND_OFFSETS_S: [f64; 4] = [0.0, 0.37, 1.91, 3.53];
+
 /// 01:38 ruling, item 4: at k = 1 with twenty rows subscribed with their
 /// attitude, every tier holds its target, the pump comes under 5 times a
 /// second, and the mean holds.
 #[test]
 fn at_full_scale_subscribed_attitude_rows_keep_their_period() {
+    attitude_at(BAND_OFFSETS_S[0]);
+}
+
+/// The attitude case at the other start offsets.
+#[test]
+fn at_full_scale_subscribed_attitude_rows_keep_their_period_at_offsets() {
+    for offset in &BAND_OFFSETS_S[1..] {
+        attitude_at(*offset);
+    }
+}
+
+fn attitude_at(offset: f64) {
     let mut s = Sampler::new(Rates::default(), 0.07);
     let mut rec = Rec::new(0.003, 1e6 / 110.0);
     let mut w = world(1960, 40, 20);
@@ -2202,12 +2267,24 @@ fn at_full_scale_subscribed_attitude_rows_keep_their_period() {
     run_x(&mut s, &mut rec, &mut w, 1.0, 110.0, 165.0, 23.0, 3.0);
     s.subscribe(1.0, true, &(1..=20).collect::<Vec<_>>());
     rec.began += Duration::from_nanos(9_090_909);
-    run_x(&mut s, &mut rec, &mut w, 60.0, 110.0, 165.0, 23.0, 3.0);
+    run_x(
+        &mut s,
+        &mut rec,
+        &mut w,
+        60.0 + offset,
+        110.0,
+        165.0,
+        23.0,
+        3.0,
+    );
     rec.began += Duration::from_nanos(9_090_909);
-    // Read each 5 s over two minutes: one reading of a period is scattered
-    // by where the pump's batches fall, so the readings are averaged.
+    // Read each 5 s over two minutes: the positions readings are averaged;
+    // the vitals band is judged as a rate over the two minutes, and its
+    // readings are printed with their maximum bounded (`assert_vitals_band`).
     let (mut pumps, mut empty, mut share) = (0, 0, 0.0f64);
-    let (mut sub_rows, mut pos, mut vit) = (0u64, 0.0, 0.0);
+    let (mut sub_rows, mut pos) = (0u64, 0.0);
+    let mut readings = Vec::new();
+    let (due, swept) = (s.vitals_due, s.vitals_swept);
     for _ in 0..24 {
         let r = run_x(&mut s, &mut rec, &mut w, 5.0, 110.0, 165.0, 23.0, 3.0);
         rec.began += Duration::from_nanos(9_090_909);
@@ -2216,18 +2293,28 @@ fn at_full_scale_subscribed_attitude_rows_keep_their_period() {
         share += r.share / 24.0;
         sub_rows += r.tier_rows[Tier::Subscribed.index()];
         pos += rec.periods[0] / 24.0;
-        vit += rec.periods[1] / 24.0;
+        readings.push(rec.periods[1]);
     }
+    let what = format!("attitude, offset {offset} s");
     // A row's period is the span over the rows read: the pump's partial
     // batches make the reported sweep period scatter below it.
     let sub = 20.0 * 120.0 / sub_rows as f64;
-    assert!((0.99..=1.2).contains(&sub), "subscribed period {sub}");
-    assert!((0.9..=1.2).contains(&pos), "positions {pos}");
-    assert!((4.5..=6.5).contains(&vit), "vitals {vit}");
-    assert!(share <= 0.003, "share {share}");
+    assert!(
+        (0.99..=1.2).contains(&sub),
+        "{what}: subscribed period {sub}"
+    );
+    assert!((0.9..=1.2).contains(&pos), "{what}: positions {pos}");
+    assert_vitals_band(
+        &what,
+        s.vitals_due - due,
+        s.vitals_swept - swept,
+        &mut readings,
+    );
+    assert!(share <= 0.003, "{what}: share {share}");
+    eprintln!("{what}: {:.2} pumps a second", pumps as f64 / 120.0);
     assert!(
         pumps as f64 / 120.0 < 5.0,
-        "{} pumps a second; empty {empty}",
+        "{what}: {} pumps a second; empty {empty}",
         pumps as f64 / 120.0
     );
     // No subscribed row waits more than 1.2 s and a pump's wait (1 s) for a
@@ -2970,6 +3057,18 @@ fn at_a_tenth_the_enumeration_runs_at_a_fraction_of_its_rate() {
 /// interval.
 #[test]
 fn the_starvation_guard_takes_one_row_at_a_time() {
+    guard_rows_at(BAND_OFFSETS_S[0]);
+}
+
+/// The starvation guard's one row at a time at the other start offsets.
+#[test]
+fn the_starvation_guard_takes_one_row_at_a_time_at_offsets() {
+    for offset in &BAND_OFFSETS_S[1..] {
+        guard_rows_at(*offset);
+    }
+}
+
+fn guard_rows_at(offset: f64) {
     let run_with = |guard: bool| {
         let mut s = Sampler::new(Rates::default(), 0.07);
         s.no_guard = !guard;
@@ -2987,7 +3086,16 @@ fn the_starvation_guard_takes_one_row_at_a_time() {
         run_x(&mut s, &mut rec, &mut w, 1.0, 110.0, 165.0, 23.0, 3.0);
         s.subscribe(1.0, true, &(1..=20).collect::<Vec<_>>());
         rec.began += Duration::from_nanos(9_090_909);
-        run_x(&mut s, &mut rec, &mut w, 60.0, 110.0, 165.0, 23.0, 3.0);
+        run_x(
+            &mut s,
+            &mut rec,
+            &mut w,
+            60.0 + offset,
+            110.0,
+            165.0,
+            23.0,
+            3.0,
+        );
         rec.began += Duration::from_nanos(9_090_909);
         let r = run_x(&mut s, &mut rec, &mut w, 180.0, 110.0, 165.0, 23.0, 3.0);
         (tail_mean(&r.samples, 1, 120), r)
@@ -2999,19 +3107,33 @@ fn the_starvation_guard_takes_one_row_at_a_time() {
     // row a pump.
     let rows = r.tier_rows[Tier::Warehouses.index()];
     let without = bare.tier_rows[Tier::Warehouses.index()];
-    eprintln!("warehouse rows in 180 s: {rows} with the guard, {without} without");
+    eprintln!(
+        "offset {offset} s: warehouse rows in 180 s: {rows} with the guard, {without} without"
+    );
     assert!(
         rows > without,
-        "{rows} rows with the guard, {without} without"
+        "offset {offset} s: {rows} rows with the guard, {without} without"
     );
-    assert!(rows <= 180 + 60, "{rows} warehouse rows in 180 s");
-    assert!(rows <= r.pumps as u64, "{rows} rows in {} pumps", r.pumps);
+    assert!(
+        rows <= 180 + 60,
+        "offset {offset} s: {rows} warehouse rows in 180 s"
+    );
+    assert!(
+        rows <= r.pumps as u64,
+        "offset {offset} s: {rows} rows in {} pumps",
+        r.pumps
+    );
 }
 
 /// With the starvation guard the vitals period stays inside its target
-/// band, 4.5 to 6.5 s; it is reported beside the period without the guard.
+/// band, 4.5 to 6.5 s as a rate; it is reported beside the period without
+/// the guard.
 #[test]
 fn the_starvation_guard_keeps_the_vitals_period_in_its_band() {
+    guard_band_at(BAND_OFFSETS_S[0]);
+}
+
+fn guard_band_at(offset: f64) {
     let run_with = |guard: bool| {
         let mut s = Sampler::new(Rates::default(), 0.07);
         s.no_guard = !guard;
@@ -3029,17 +3151,84 @@ fn the_starvation_guard_keeps_the_vitals_period_in_its_band() {
         run_x(&mut s, &mut rec, &mut w, 1.0, 110.0, 165.0, 23.0, 3.0);
         s.subscribe(1.0, true, &(1..=20).collect::<Vec<_>>());
         rec.began += Duration::from_nanos(9_090_909);
-        run_x(&mut s, &mut rec, &mut w, 60.0, 110.0, 165.0, 23.0, 3.0);
+        run_x(
+            &mut s,
+            &mut rec,
+            &mut w,
+            60.0 + offset,
+            110.0,
+            165.0,
+            23.0,
+            3.0,
+        );
         rec.began += Duration::from_nanos(9_090_909);
+        let (due, swept) = (s.vitals_due, s.vitals_swept);
         let r = run_x(&mut s, &mut rec, &mut w, 180.0, 110.0, 165.0, 23.0, 3.0);
-        tail_mean(&r.samples, 1, 120)
+        let tail = &r.samples[r.samples.len().saturating_sub(120)..];
+        let readings: Vec<f64> = tail.iter().map(|p| p[1]).collect();
+        (s.vitals_due - due, s.vitals_swept - swept, readings)
     };
-    let (with, without) = (run_with(true), run_with(false));
-    eprintln!("vitals {with:.2} s with the guard, {without:.2} s without");
-    assert!(
-        (4.5..=6.5).contains(&with),
-        "vitals {with} s with the guard, {without} s without"
+    let (due, read, mut readings) = run_with(true);
+    let (bare_due, bare_read, _) = run_with(false);
+    let without = Rates::default().vitals_s * bare_due / bare_read.max(1) as f64;
+    eprintln!("offset {offset} s: vitals {without:.2} s as a rate without the guard");
+    assert_vitals_band(
+        &format!("starvation guard, offset {offset} s"),
+        due,
+        read,
+        &mut readings,
     );
+}
+
+/// The `sampling` reports' `due_vitals` and `swept_vitals` add up, with the
+/// open window, to what the sampler counted since it began; reads an event
+/// mark asked for are in `rows_vitals` and not in `swept_vitals`.
+#[test]
+fn the_vitals_rate_keys_add_up_and_leave_out_marked_reads() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 110.0);
+    let mut w = world(500, 0, 0);
+    let mut r = run_x(&mut s, &mut rec, &mut w, 30.0, 110.0, 165.0, 23.0, 3.0);
+    let (rows_before, swept_before) = (r.tier_rows[Tier::Vitals.index()], r.vitals_swept);
+    // 40 rows a second marked for a read of their life, for 30 s.
+    let (mut due, mut swept) = (r.vitals_due, r.vitals_swept);
+    let mut rows = rows_before;
+    for i in 0..30u64 {
+        for k in 0..40u64 {
+            s.mark(Some((1001 + (i * 40 + k) % 500) as f64), true);
+        }
+        rec.began += Duration::from_nanos(9_090_909);
+        r = run_x(&mut s, &mut rec, &mut w, 1.0, 110.0, 165.0, 23.0, 3.0);
+        due += r.vitals_due;
+        swept += r.vitals_swept;
+        rows += r.tier_rows[Tier::Vitals.index()];
+    }
+    let open = (s.window.vitals_due, s.window.vitals_swept);
+    assert!(
+        (due + open.0 - s.vitals_due).abs() < 1e-6,
+        "due: reports {due}, open {}, counted {}",
+        open.0,
+        s.vitals_due
+    );
+    assert_eq!(swept + open.1, s.vitals_swept, "swept");
+    let open_rows = s.window.spend.tier_rows[Tier::Vitals.index()];
+    let marked = (rows + open_rows - rows_before) - (s.vitals_swept - swept_before);
+    eprintln!(
+        "1,200 marks: {marked} marked reads, {} swept",
+        s.vitals_swept - swept_before
+    );
+    assert!(
+        (1000..=1200).contains(&marked),
+        "{marked} reads in rows_vitals and not in swept_vitals for 1,200 marks"
+    );
+}
+
+/// The starvation guard's vitals band at the other start offsets.
+#[test]
+fn the_starvation_guard_keeps_the_vitals_period_in_its_band_at_offsets() {
+    for offset in &BAND_OFFSETS_S[1..] {
+        guard_band_at(*offset);
+    }
 }
 
 /// A sampler in a pump that began at `t0` with a budget of 10 µs, and a
@@ -4099,4 +4288,244 @@ fn a_stall_inside_an_enumeration_step_is_forgiven_and_births_resume() {
         );
     }
     assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+/// What [`no_row_run`] saw.
+struct NoRowRun {
+    /// Each 10 s window's agent share and the balance's forgiven time, µs.
+    windows: Vec<(f64, f64)>,
+    /// Each enumeration's begin and end, seconds from the measure's start.
+    spans: Vec<(f64, Option<f64>)>,
+    /// The lowest balance seen at the end of a 1 s step, µs, printed only:
+    /// the balance stops at −`L`, and `maintenance_forgiven_us` 0 is what
+    /// shows it never reached it.
+    lowest_us: f64,
+    /// 1 s steps that ended with a row tier owing rows.
+    owed_steps: usize,
+    /// The second in which the injected stall happened, if one was asked for.
+    stall_s: Option<f64>,
+}
+
+/// 2,000 statics and no unit or airbase, with the LIVE costs of
+/// [`enum_rank_run`]: `coalition.getGroups` steps of 687 and 1,140 µs in
+/// turn, or of `step_us` each when set, a birth 37 µs, the call 23 µs, a
+/// batch's fixed part 20 µs. The vitals, ammunition and warehouse periods
+/// are out of reach, so no row tier owes rows: at the default 5 s, 2,000
+/// statics owe vitals on nearly every frame (145 of 150 steps ended owing
+/// them), which hides the case. The fill resolves the 2,000 births; then
+/// `secs` seconds at k = 1 in 1 s steps, judged in 10 s windows.
+fn no_row_run(fps: f64, secs: f64, step_us: Option<f64>, stall: bool) -> NoRowRun {
+    let rates = Rates {
+        vitals_s: 1e9,
+        ammo_s: 1e9,
+        warehouse_s: 1e9,
+        ..Rates::default()
+    };
+    let mut s = Sampler::new(rates, 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / fps);
+    let mut w = world(0, 2000, 0);
+    w.sweep = Some((15.0, 0.21));
+    w.batch_us = 20.0;
+    w.enum_step_us = Some(step_us.unwrap_or(687.0));
+    w.enum_step_alt = Some(step_us.unwrap_or(1140.0));
+    w.birth_us = Some(37.0);
+    w.close_us = 6.0;
+    run_x(&mut s, &mut rec, &mut w, 60.0, fps, 165.0, 23.0, 3.0);
+    for _ in 0..240 {
+        if w.births.is_empty() {
+            break;
+        }
+        rec.began += Duration::from_secs_f64(1.0 / fps);
+        run_x(&mut s, &mut rec, &mut w, 1.0, fps, 165.0, 23.0, 3.0);
+    }
+    assert!(w.births.is_empty(), "the fill did not resolve");
+    w.enum_spans.clear();
+    let start = rec.began + Duration::from_secs_f64(1.0 / fps);
+    let since = |t: Instant| t.saturating_duration_since(start).as_secs_f64();
+    let mut windows = Vec::new();
+    // The reports come at the sampler's own 10 s windows, which these do
+    // not match: the forgiven time is the reports' sum and the open
+    // window's count, taken at each window's end.
+    let (mut share, mut reported, mut before) = (0.0, 0.0, 0.0);
+    let (mut lowest_us, mut owed_steps, mut stall_s) = (f64::INFINITY, 0, None);
+    for i in 0..secs as usize {
+        rec.began += Duration::from_secs_f64(1.0 / fps);
+        if stall && i == 10 {
+            w.enum_stall = Some(30_000.0);
+        }
+        let armed = w.enum_stall.is_some();
+        let r = run_x(&mut s, &mut rec, &mut w, 1.0, fps, 165.0, 23.0, 3.0);
+        if armed && w.enum_stall.is_none() {
+            stall_s = Some(i as f64);
+        }
+        share += r.share / 10.0;
+        reported += r.maintenance_forgiven_us;
+        lowest_us = lowest_us.min(s.maintenance_us);
+        owed_steps += usize::from(s.rows_owed());
+        if i % 10 == 9 {
+            let total = reported + s.window.maintenance_forgiven_us;
+            windows.push((share, total - before));
+            (share, before) = (0.0, total);
+        }
+    }
+    NoRowRun {
+        windows,
+        spans: w
+            .enum_spans
+            .iter()
+            .map(|&(b, e)| (since(b), e.map(since)))
+            .collect(),
+        lowest_us,
+        owed_steps,
+        stall_s,
+    }
+}
+
+/// The no-row-owed runs' length, s: at 56 fps with 2,000 µs steps the
+/// second enumeration ends about 152 s in, and the check needs a finished
+/// pair of them.
+const NO_ROW_SECS: f64 = 210.0;
+
+/// What the no-row-owed ruling's pass finds wrong in a run.
+fn no_row_failures(r: &NoRowRun) -> Vec<String> {
+    let mut bad = Vec::new();
+    // The stall window is judged apart.
+    let stall_w = r.stall_s.map(|s| (s / 10.0) as usize);
+    for (i, &(share, forgiven)) in r.windows.iter().enumerate() {
+        // The tolerance is the carry across a window's edges: a window may
+        // spend the balance the one before it earned, at most its 250 µs
+        // cap, and the 150 µs credit the debt keeps: 400 µs in 10 s is
+        // 0.004 %, 1.3 % of the 0.3 % target. 2 % is the bound the other
+        // share tests here use.
+        let mean = share - forgiven / 10e6;
+        if mean > 0.003 * 1.02 {
+            bad.push(format!("window {i}: share {mean} without forgiven time"));
+        }
+        if Some(i) == stall_w {
+            // The stall is DCS's time; the balance forgives what passes its
+            // bound and nothing in any other window.
+            if !(20_000.0..=30_000.0).contains(&forgiven) {
+                bad.push(format!("window {i}: the stall forgave {forgiven} µs"));
+            }
+        } else {
+            if forgiven != 0.0 {
+                bad.push(format!("window {i}: the balance forgave {forgiven} µs"));
+            }
+            if share > 0.003 * 1.02 {
+                bad.push(format!("window {i}: share {share}"));
+            }
+        }
+    }
+    // The case holds only while no row is owed.
+    if r.owed_steps > 0 {
+        bad.push(format!("{} steps ended owing rows", r.owed_steps));
+    }
+    if r.spans.len() < 2 {
+        bad.push(format!("enumerations {:?}", r.spans));
+    }
+    for (i, &(_, e)) in r.spans.iter().enumerate() {
+        if e.is_none() && i + 1 < r.spans.len() {
+            bad.push(format!("enumeration {i} did not end: {:?}", r.spans));
+        }
+    }
+    // Each ends within the period plus its own duration of the last one's
+    // `ENUM_BEGIN`, and a second for the run's 1 s steps: its end less its
+    // duration, its begin, is at most 61 s after the last one's. At least one
+    // such pair has ended, so the check judges a finished enumeration.
+    let mut judged = 0;
+    for pair in r.spans.windows(2) {
+        let ((b0, _), (b1, e1)) = (pair[0], pair[1]);
+        if let Some(e1) = e1 {
+            judged += 1;
+            if e1 - b0 > 60.0 + (e1 - b1) + 1.0 {
+                bad.push(format!("enumeration ended late: {:?}", r.spans));
+            }
+        }
+    }
+    if judged == 0 {
+        bad.push(format!("no finished enumeration to judge: {:?}", r.spans));
+    }
+    bad
+}
+
+/// The no-row-owed rulings (2026-11-15): with no row tier owing rows, births
+/// and the enumeration take a batch only while their balance is at or above
+/// 0 (`maintenance_pays`), so every 10 s window keeps `overhead_share`, the
+/// balance forgives nothing and the enumeration keeps its period, at the
+/// LIVE costs and with 2,000 µs maintenance pumps, at 110 and 56 fps.
+#[test]
+fn maintenance_with_no_row_owed_keeps_the_share() {
+    let mut bad = Vec::new();
+    for fps in [110.0, 56.0] {
+        for step in [None, Some(2000.0)] {
+            let r = no_row_run(fps, NO_ROW_SECS, step, false);
+            eprintln!(
+                "{fps} fps, step {step:?}: windows {:?}\nspans {:?}; lowest {:.0} µs; owed steps {}",
+                r.windows, r.spans, r.lowest_us, r.owed_steps
+            );
+            bad.extend(
+                no_row_failures(&r)
+                    .into_iter()
+                    .map(|b| format!("{fps} fps, step {step:?}: {b}")),
+            );
+        }
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+/// A 30 ms stall inside one enumeration step with no row owed: the balance
+/// forgives what passes its bound in the stall's window only.
+#[test]
+fn a_stall_with_no_row_owed_is_forgiven_in_its_window_only() {
+    let mut bad = Vec::new();
+    for fps in [110.0, 56.0] {
+        let r = no_row_run(fps, NO_ROW_SECS, None, true);
+        eprintln!(
+            "{fps} fps: stall at {:?} s; windows {:?}\nspans {:?}",
+            r.stall_s, r.windows, r.spans
+        );
+        if r.stall_s.is_none() {
+            bad.push(format!("{fps} fps: no dear step took the stall"));
+        }
+        bad.extend(
+            no_row_failures(&r)
+                .into_iter()
+                .map(|b| format!("{fps} fps: {b}")),
+        );
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+/// The sampler's host time for two minutes of the attitude case at 2,000
+/// rows (110 fps, k = 1), the best of five runs, to compare two trees:
+/// `cargo test --release -p nanoprobe-agent-link --no-default-features --lib
+/// -- --ignored --nocapture host_time`.
+#[test]
+#[ignore = "a benchmark, run by hand"]
+fn host_time_of_the_attitude_case() {
+    let mut best = f64::MAX;
+    for _ in 0..5 {
+        let mut s = Sampler::new(Rates::default(), 0.07);
+        let mut rec = Rec::new(0.003, 1e6 / 110.0);
+        let mut w = world(1960, 40, 20);
+        w.sweep = Some((15.0, 0.6));
+        halt_four_in_five(&mut w);
+        w.batch_us = 20.0;
+        w.enum_step_us = Some(687.0);
+        w.close_us = 6.0;
+        s.set_campaign(1);
+        for i in 1..=20u64 {
+            w.objects.get_mut(&(1000 + i)).unwrap().name = unit_name(i);
+        }
+        run_x(&mut s, &mut rec, &mut w, 1.0, 110.0, 165.0, 23.0, 3.0);
+        s.subscribe(1.0, true, &(1..=20).collect::<Vec<_>>());
+        let t = std::time::Instant::now();
+        run_x(&mut s, &mut rec, &mut w, 120.0, 110.0, 165.0, 23.0, 3.0);
+        best = best.min(t.elapsed().as_secs_f64());
+    }
+    eprintln!(
+        "host time: {:.1} ms for 13,200 frames, {:.2} µs a frame",
+        best * 1e3,
+        best * 1e6 / 13_200.0
+    );
 }

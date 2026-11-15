@@ -25,7 +25,9 @@
 //!   budget, sampling runs past `k·B` by more than one clock interval in at
 //!   most 1 % of the frames that only swept rows, and the frames over 250 µs
 //!   are at most 1 % of the frames (the agent's exact count, `tail`; the
-//!   histogram's 256 µs bucket edge is reported, not judged).
+//!   histogram's 256 µs bucket edge is reported, not judged). At k = 1 it
+//!   reports, without judging, the vitals period as a rate against its
+//!   4.5-6.5 s band and the pumps a second against 5.
 //!
 //! Everything goes under `bundles/sampling-<name>-<time>/`: every mirror and
 //! oracle dump, the verdicts, the probe's output and the recording, and
@@ -918,7 +920,8 @@ fn part_mirror(
     let (v2000, m) = run.compare("2000")?;
     let at2000 = run.reports(mark)?;
     let (burst_ok, burst_span) = span(&at2000);
-    let (steady_ok, steady_span) = span(&run.reports(steady)?);
+    let settled = run.reports(steady)?;
+    let (steady_ok, steady_span) = span(&settled);
     let reports = run.reports(0)?;
     let lines = run.lines()?;
     run.stop_probe("mirror");
@@ -967,6 +970,7 @@ fn part_mirror(
                                  sum("frames") / sum("pumps").max(1.0))}),
     ];
     checks.splice(1..1, position_checks);
+    checks.extend(k1_rates(&settled, " at 2,000, settled"));
     let ok = checks.iter().all(|c| c["ok"] == json!(true));
     Ok(json!({
         "ok": ok,
@@ -1012,6 +1016,71 @@ fn mean_of(reports: &[Value], key: &str) -> f64 {
         .map(|r| r[key].as_f64().unwrap_or(0.0))
         .sum::<f64>()
         / reports.len() as f64
+}
+
+/// The vitals tier's default target period, s (spec/sampling.md, "Rates").
+/// The runs here leave it at its default; `due_vitals` counts against the
+/// agent's configured target, so a run with another target reports a wrong
+/// rate.
+const VITALS_TARGET_S: f64 = 5.0;
+
+/// Two reported checks over steady reports at k = 1, judged by nothing
+/// (quorum 2 on maintenance with no row owed, 2026-11-15): the vitals band,
+/// 4.5 to 6.5 s, as a rate (the default target × the rows due at it over the
+/// rows the vitals cursor read, `due_vitals` and `swept_vitals`), beside the mean, median and
+/// maximum of the reported `vitals_s`, which shows an enumeration's wait; and
+/// the pumps a second against 5. `what` names the span.
+fn k1_rates(reports: &[Value], what: &str) -> Vec<Value> {
+    let sum = |k: &str| reports.iter().filter_map(|r| r[k].as_f64()).sum::<f64>();
+    let (due, read, window) = (sum("due_vitals"), sum("swept_vitals"), sum("window_s"));
+    let mut readings: Vec<f64> = reports
+        .iter()
+        .filter_map(|r| r["vitals_s"].as_f64())
+        .collect();
+    readings.sort_by(f64::total_cmp);
+    let n = readings.len();
+    let median = match n {
+        0 => 0.0,
+        _ if n % 2 == 1 => readings[n / 2],
+        _ => (readings[n / 2 - 1] + readings[n / 2]) / 2.0,
+    };
+    let shown = format!(
+        "readings: mean {:.2} s, median {median:.2} s, maximum {:.2} s over {n} reports",
+        readings.iter().sum::<f64>() / n.max(1) as f64,
+        readings.last().copied().unwrap_or(0.0),
+    );
+    let has = |k: &str| reports.iter().any(|r| r[k].as_f64().is_some());
+    let vitals = if !(has("due_vitals") && has("swept_vitals")) || due <= 0.0 {
+        format!(
+            "not measured: {read:.0} rows swept, {due:.0} due (`swept_vitals`, `due_vitals`); {shown}"
+        )
+    } else if read <= 0.0 {
+        format!("outside the band: 0 rows swept of {due:.0} due in {window:.0} s; {shown}")
+    } else {
+        let rate = VITALS_TARGET_S * due / read;
+        let band = if (4.5..=6.5).contains(&rate) {
+            "inside"
+        } else {
+            "outside"
+        };
+        format!(
+            "{rate:.2} s as a rate against the default 5 s target, {band} the band: \
+             {read:.0} rows swept of {due:.0} due in {window:.0} s; {shown}"
+        )
+    };
+    let pumps = if window > 0.0 {
+        let rate = sum("pumps") / window;
+        let under = if rate < 5.0 { "under" } else { "not under" };
+        format!("{rate:.2} pumps a second, {under} 5, in {window:.0} s")
+    } else {
+        "no reports".to_string()
+    };
+    vec![
+        json!({"check": format!("vitals band 4.5-6.5 s as a rate at k = 1{what}, reported"),
+               "ok": true, "detail": vitals}),
+        json!({"check": format!("pumps a second under 5 at k = 1{what}, reported"),
+               "ok": true, "detail": pumps}),
+    ]
 }
 
 /// The order of the tiers at k = 0.1, judged over the span of the reports
@@ -1196,6 +1265,16 @@ fn part_tenth(run: &Run, name: &str, shell: &[u8], probe: &Path) -> Result<Value
         } else {
             check(name, c["ok"] == json!(true), c["detail"].to_string());
         }
+    }
+    for c in k1_rates(
+        &k1[positions::settled_from(&k1_timed).min(k1.len())..],
+        ", settled",
+    ) {
+        check(
+            c["check"].as_str().unwrap_or_default(),
+            true,
+            c["detail"].as_str().unwrap_or_default().to_string(),
+        );
     }
     let k1 = &k1[k1.len().saturating_sub(2)..];
     let k01_all: Vec<Value> = reports
@@ -1651,6 +1730,58 @@ mod tests {
             "position_s": periods[0], "vitals_s": periods[1],
             "ammo_s": periods[2], "warehouse_s": periods[3],
         })
+    }
+
+    #[test]
+    fn the_k1_rates_report_the_vitals_band_as_a_rate_and_never_fail() {
+        let r = |due: f64, read: f64, vit: f64| {
+            json!({"window_s": 10.0, "pumps": 30.0, "due_vitals": due,
+                   "swept_vitals": read, "rows_vitals": read + 50.0, "vitals_s": vit})
+        };
+        let reports = [
+            r(370.0, 380.0, 5.1),
+            r(370.0, 360.0, 13.0),
+            r(370.0, 370.0, 5.0),
+        ];
+        let c = k1_rates(&reports, "");
+        assert!(c.iter().all(|c| c["ok"] == json!(true)));
+        let vitals = c[0]["detail"].as_str().unwrap();
+        assert!(
+            vitals.starts_with("5.00 s as a rate against the default 5 s target, inside"),
+            "{vitals}"
+        );
+        assert!(
+            vitals.contains("median 5.10 s, maximum 13.00 s"),
+            "{vitals}"
+        );
+        let pumps = c[1]["detail"].as_str().unwrap();
+        assert!(pumps.starts_with("3.00 pumps a second, under 5"), "{pumps}");
+        let slow = k1_rates(&[r(370.0, 200.0, 9.0)], "");
+        assert!(
+            slow[0]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("outside the band")
+        );
+        let starved = k1_rates(&[r(370.0, 0.0, 30.0)], "");
+        assert!(
+            starved[0]["detail"]
+                .as_str()
+                .unwrap()
+                .starts_with("outside the band: 0 rows swept of 370 due"),
+            "{}",
+            starved[0]["detail"]
+        );
+        let old = k1_rates(
+            &[json!({"window_s": 10.0, "rows_vitals": 300.0, "due_vitals": 370.0})],
+            "",
+        );
+        assert!(
+            old[0]["detail"]
+                .as_str()
+                .unwrap()
+                .starts_with("not measured")
+        );
     }
 
     fn verdicts(k1: &[Value], k01: &[Value], sub: f64) -> Vec<bool> {
