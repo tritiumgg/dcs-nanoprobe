@@ -272,10 +272,18 @@ mod tests {
 
     #[test]
     fn a_token_must_be_64_lower_case_hex_digits() {
-        let dir = std::env::temp_dir().join(format!(
+        /// Removes the folder when the test ends, whether it passes or fails.
+        struct Scratch(std::path::PathBuf);
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let scratch = Scratch(std::env::temp_dir().join(format!(
             "nanoprobe-token-{}",
             nanoprobe_transport::random_nonzero()
-        ));
+        )));
+        let dir = scratch.0.clone();
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("token");
         let good = "0123456789abcdef".repeat(4);
@@ -289,6 +297,7 @@ mod tests {
         );
         std::fs::write(&path, &good[..63]).unwrap();
         assert!(read_token(&path).is_err());
+        // A file that is gone is an error too.
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(read_token(&path).is_err());
     }

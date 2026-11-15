@@ -252,10 +252,32 @@ mod os {
 mod tests {
     use super::*;
 
-    fn temp(name: &str) -> std::path::PathBuf {
+    /// A file's path, removed when the test ends, whether it passes or fails.
+    struct Temp(std::path::PathBuf);
+
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    impl std::ops::Deref for Temp {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<std::path::Path> for Temp {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    fn temp(name: &str) -> Temp {
         let p = std::env::temp_dir().join(format!("nanoprobe-map-{}-{name}", std::process::id()));
         let _ = std::fs::remove_file(&p);
-        p
+        Temp(p)
     }
 
     #[test]

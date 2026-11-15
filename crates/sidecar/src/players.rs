@@ -1699,11 +1699,36 @@ mod tests {
         assert_eq!(r.occupied_units(), BTreeSet::from([EntityId(907)]));
     }
 
-    fn scratch(name: &str) -> PathBuf {
+    /// A scratch folder's path, removed when the test ends, whether it passes
+    /// or fails.
+    struct Scratch(PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    impl std::ops::Deref for Scratch {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<std::path::Path> for Scratch {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    fn scratch(name: &str) -> Scratch {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
-        std::env::temp_dir().join(format!("nanoprobe-{name}-{}-{nanos}", std::process::id()))
+        Scratch(
+            std::env::temp_dir().join(format!("nanoprobe-{name}-{}-{nanos}", std::process::id())),
+        )
     }
 
     #[test]
@@ -1729,7 +1754,6 @@ mod tests {
         let mut c = Keyring::open(&dir).expect("opens");
         c.flush().expect("flush");
         assert_eq!(std::fs::read(&file).expect("read"), before);
-        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     #[test]
@@ -1745,7 +1769,6 @@ mod tests {
                 .expect("read")
                 .contains("leak")
         );
-        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     fn players_result(rows: Vec<Lv>) -> RawRecord {

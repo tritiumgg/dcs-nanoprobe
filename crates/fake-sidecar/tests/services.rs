@@ -684,7 +684,17 @@ fn the_stream_watcher_follows_the_listed_campaign_and_refuses_a_bad_token() {
 #[test]
 fn the_stream_watcher_sends_its_token() {
     const TOKEN: &str = "watcher-0123456789abcdef0123456789abcdef";
-    let dir = std::env::temp_dir().join(format!("nanoprobe-watch-tokens-{}", std::process::id()));
+    /// Removes the folder when the test ends, whether it passes or fails.
+    struct Scratch(std::path::PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let scratch = Scratch(
+        std::env::temp_dir().join(format!("nanoprobe-watch-tokens-{}", std::process::id())),
+    );
+    let dir = scratch.0.clone();
     std::fs::create_dir_all(&dir).expect("dir");
     let path = dir.join("tokens.toml");
     std::fs::write(
@@ -741,5 +751,4 @@ fn the_stream_watcher_sends_its_token() {
         "ended by the stop, not refused: {err}"
     );
     let _ = out;
-    let _ = std::fs::remove_dir_all(&dir);
 }
