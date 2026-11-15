@@ -150,7 +150,7 @@ tokens, a caller sends `authorization: Bearer <token>` as gRPC metadata.
 |---|---|
 | `observer` | Every call that changes nothing: Session `Hello`; the World, Events and Players lists and streams; `GetServerStatus`; `ListLua`; campaign list, get and export; `GetData` |
 | `controller` | The above, the lease calls, and every changing call except those below |
-| `admin` | The above, `EvalLua`, `RegisterLua`, `RemoveLua`, `DeleteCampaign` and `ErasePlayer` |
+| `admin` | The above, `EvalLua`, `RegisterLua`, `RemoveLua`, `DeleteCampaign`, `ErasePlayer`, and every Moderation call (`Kick`, `Ban`, `Unban`, `ListBans`, `MovePlayer`) |
 
 `GetOutcome` needs the role of the call whose outcome it reads.
 

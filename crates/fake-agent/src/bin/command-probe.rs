@@ -29,6 +29,11 @@
 //! replaced while paused); its options and rules are in
 //! `nanoprobe_fake_agent::world_exit`.
 //!
+//! `--part players` runs the S16 live test (menus, marks, drawings, messages,
+//! chat, extensions across a mission load, raw Lua gating, and moderation of a
+//! scripted client); its steps and options are in
+//! `nanoprobe_fake_agent::players_exit`.
+//!
 //! Test tooling only: built from source, never released.
 
 use std::collections::BTreeMap;
@@ -149,7 +154,10 @@ fn run(args: &[String]) -> Result<bool, String> {
     match arg(args, "--part").as_deref() {
         None | Some("commands") => {}
         Some("world") => return nanoprobe_fake_agent::world_exit::run(args),
-        Some(other) => return Err(format!("--part is commands or world, not {other}")),
+        Some("players") => return nanoprobe_fake_agent::players_exit::run(args),
+        Some(other) => {
+            return Err(format!("--part is commands, world or players, not {other}"));
+        }
     }
     let need = |name: &str| arg(args, name).ok_or(format!("{name} is required"));
     let token = read_token(need("--token-file")?.as_ref()).map_err(|e| format!("token: {e}"))?;

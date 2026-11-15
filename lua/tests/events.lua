@@ -102,8 +102,7 @@ for name, f in pairs(shim.FIELDS) do
   assert(s.code == f[1], name .. ': the shim has code ' .. f[1] .. ', the spec ' .. s.code)
   assert(s.value == f[4], name .. ': the shim takes a ' .. f[4] .. ', the spec a ' .. s.value)
   local from = '`event.' .. f[2] .. (f[3] and ('.' .. f[3]) or '') .. '`'
-  -- The spec may add a condition after the source, as `, on a birth only`.
-  assert(s.from == from or s.from:sub(1, #from + 2) == from .. ', ',
+  assert(s.from == from,
     name .. ': the shim reads ' .. from .. ', the spec ' .. s.from)
 end
 

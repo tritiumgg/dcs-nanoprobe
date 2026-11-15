@@ -925,7 +925,9 @@ fn lua_command(d: &mut Driver, opcode: u16, payload: &[u8], in_pump: bool) -> St
             message = "no extension of that name";
             result::LUA_ERROR
         }
-        Admit::Run => match arguments(opcode, &h, body) {
+        Admit::Run => match arguments_with(opcode, &h, body, &|scope, target| {
+            bound_target(&d.sampler, scope, target)
+        }) {
             Some(args) => {
                 d.staged = args;
                 d.outstanding = Some(Outstanding {
@@ -1006,7 +1008,52 @@ fn lv_bytes<'a>(rd: &mut Reader<'a>, body: &'a [u8]) -> Option<&'a [u8]> {
 /// the fields of its layout by name (spec/commands.md, "Handler arguments"),
 /// and the platform names built from the header. `None` when the payload does
 /// not decode.
+#[cfg(test)]
 fn arguments(opcode: u16, h: &CommandHeader, body: &[u8]) -> Option<Vec<u8>> {
+    arguments_with(opcode, h, body, &|_, _| None)
+}
+
+/// What the agent's binding holds for the entity a `GROUP` or `UNIT` scope
+/// names: the DCS group ID, or the slot of the unit's row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Bound {
+    Group(u64),
+    Row(u32),
+}
+
+/// The binding lookup of a command's arguments: by scope code and target.
+type Lookup<'a> = &'a dyn Fn(u32, u64) -> Option<Bound>;
+
+/// What the sampler's rows hold for a `GROUP` (3) or `UNIT` (4) target.
+fn bound_target(sampler: &Sampler, scope: u32, target: u64) -> Option<Bound> {
+    match scope {
+        3 => sampler.group_id_of_entity(target).map(Bound::Group),
+        4 => sampler.slot_of_entity(target).map(Bound::Row),
+        _ => None,
+    }
+}
+
+/// Adds what a bound target is to the arguments: `group_id` for a group,
+/// `row` for a unit. `text` writes the number as text.
+fn push_bound(f: &mut Fields, bound: Option<Bound>, text: bool) {
+    let (key, n) = match bound {
+        Some(Bound::Group(id)) => ("group_id", id),
+        Some(Bound::Row(slot)) => ("row", u64::from(slot)),
+        None => return,
+    };
+    if text {
+        f.text(key, &n.to_string());
+    } else {
+        f.num(key, n as f64);
+    }
+}
+
+fn arguments_with(
+    opcode: u16,
+    h: &CommandHeader,
+    body: &[u8],
+    held: Lookup<'_>,
+) -> Option<Vec<u8>> {
     // A name is built only for an entity in range (spec/world.md, "Names").
     let named = matches!(
         u64::from(opcode),
@@ -1096,7 +1143,10 @@ fn arguments(opcode: u16, h: &CommandHeader, body: &[u8]) -> Option<Vec<u8>> {
             f.num("scope", f64::from(scope));
             f.num("target", target as f64);
             if let Some(name) = name {
-                f.text("name", &name);
+                match held(scope, target) {
+                    bound @ Some(_) => push_bound(&mut f, bound, false),
+                    None => f.text("name", &name),
+                }
             }
             f.text("file", file);
         }
@@ -1124,7 +1174,10 @@ fn arguments(opcode: u16, h: &CommandHeader, body: &[u8]) -> Option<Vec<u8>> {
             f.text("scope", &scope.to_string());
             f.text("target", &target.to_string());
             if let Some(name) = name {
-                f.text("name", &name);
+                match held(scope, target) {
+                    bound @ Some(_) => push_bound(&mut f, bound, true),
+                    None => f.text("name", &name),
+                }
             }
             f.text("file", file);
             f.text("seconds", &format!("{seconds:.4}"));
@@ -1152,7 +1205,7 @@ fn arguments(opcode: u16, h: &CommandHeader, body: &[u8]) -> Option<Vec<u8>> {
             let (x, y, z) = (rd.f64().ok()?, rd.f64().ok()?, rd.f64().ok()?);
             let text = rd.str().ok()?;
             f.text("entity", &h.entity.to_string());
-            scoped(&mut f, scope, target, h, &[1, 2, 3])?;
+            scoped(&mut f, scope, target, h, &[1, 2, 3], held)?;
             f.push("read_only", &Lv::Bool(read_only != 0));
             f.num("x", x);
             f.num("y", y);
@@ -1164,7 +1217,7 @@ fn arguments(opcode: u16, h: &CommandHeader, body: &[u8]) -> Option<Vec<u8>> {
             let shape = rd.u32().ok()?;
             let target = rd.u64().ok()?;
             f.text("entity", &h.entity.to_string());
-            scoped(&mut f, scope, target, h, &[1, 2])?;
+            scoped(&mut f, scope, target, h, &[1, 2], held)?;
             f.num("shape", f64::from(shape));
             f.raw("args", lv_bytes(&mut rd, body)?);
         }
@@ -1176,7 +1229,7 @@ fn arguments(opcode: u16, h: &CommandHeader, body: &[u8]) -> Option<Vec<u8>> {
             let text = rd.str().ok()?;
             f.text("entity", &h.entity.to_string());
             f.text("parent", &parent.to_string());
-            scoped(&mut f, scope, target, h, &[1, 2, 3])?;
+            scoped(&mut f, scope, target, h, &[1, 2, 3], held)?;
             f.push("submenu", &Lv::Bool(submenu != 0));
             f.text("text", text);
         }
@@ -1189,7 +1242,7 @@ fn arguments(opcode: u16, h: &CommandHeader, body: &[u8]) -> Option<Vec<u8>> {
             if !(seconds.is_finite() && (0.0..=MESSAGE_SECONDS_MAX).contains(&seconds)) {
                 return None;
             }
-            scoped(&mut f, scope, target, h, &[1, 2, 3, 4, 5])?;
+            scoped(&mut f, scope, target, h, &[1, 2, 3, 4, 5], held)?;
             f.push("clear", &Lv::Bool(clear != 0));
             f.num("seconds", seconds);
             f.text("text", text);
@@ -1204,7 +1257,13 @@ fn arguments(opcode: u16, h: &CommandHeader, body: &[u8]) -> Option<Vec<u8>> {
             f.num("player", f64::from(player));
             f.text("text", text);
         }
-        op::MISSION_LOAD => f.text("path", rd.str().ok()?),
+        op::MISSION_LOAD => {
+            let path = rd.str().ok()?;
+            if path.is_empty() || path.len() > PATH_BYTES_MAX {
+                return None;
+            }
+            f.text("path", path);
+        }
         op::EVAL => f.raw("source", lv_bytes(&mut rd, body)?),
         op::MODERATE => {
             let action = rd.u32().ok()?;
@@ -1254,6 +1313,8 @@ const MESSAGE_SECONDS_MAX: f64 = 86_400.0;
 const SERVER_PLAYER: u32 = 1;
 /// The longest `CHAT` text, in bytes.
 const CHAT_BYTES_MAX: usize = 1024;
+/// The longest `MISSION_LOAD` path, in bytes.
+const PATH_BYTES_MAX: usize = 1024;
 /// The largest target a Lua number holds exactly.
 const EXACT_TARGET_MAX: u64 = 1 << 53;
 
@@ -1279,8 +1340,9 @@ fn scope_name(scope: u32, target: u64, h: &CommandHeader) -> Option<Option<Strin
 
 /// Adds a scoped command's `scope`, `name` and `target` to its arguments:
 /// `name` is the platform name of a `GROUP` or `UNIT` target and empty
-/// otherwise, `target` is a number for `COALITION` and `COUNTRY` and absent
-/// otherwise. `None` when the scope is not one of `allowed` or the target is
+/// otherwise, `target` is a number for `COALITION`, `GROUP` and `COUNTRY` and
+/// absent otherwise. A `GROUP` or `UNIT` target the agent's binding holds adds
+/// `group_id` or `row` (see [`Bound`]) and its `name` is empty. `None` when the scope is not one of `allowed` or the target is
 /// out of range for it (spec/commands.md, "Handler arguments").
 fn scoped(
     f: &mut Fields,
@@ -1288,16 +1350,19 @@ fn scoped(
     target: u64,
     h: &CommandHeader,
     allowed: &[u32],
+    held: Lookup<'_>,
 ) -> Option<()> {
     if !allowed.contains(&scope) {
         return None;
     }
     let name = scope_name(scope, target, h)?.unwrap_or_default();
+    let bound = held(scope, target);
     f.num("scope", f64::from(scope));
-    if matches!(scope, 2 | 5) {
+    if matches!(scope, 2 | 3 | 5) {
         f.num("target", target as f64);
     }
-    f.text("name", &name);
+    f.text("name", if bound.is_some() { "" } else { &name });
+    push_bound(f, bound, false);
     Some(())
 }
 
@@ -2521,7 +2586,43 @@ mod tests {
         );
         let got = args(op::MARK_SET, &h, &mark(3, 37)).expect("group mark");
         assert!(got.contains(&("name".into(), s("np.g.1z.11"))));
-        assert!(got.iter().all(|(k, _)| k != "target"));
+        assert!(got.contains(&("target".into(), n(37.0))));
+        // A target the binding holds is named by the DCS group ID or the
+        // unit's row, with an empty platform name.
+        let held = |scope: u32, target: u64| match (scope, target) {
+            (3, 37) => Some(Bound::Group(902)),
+            (4, 38) => Some(Bound::Row(5)),
+            _ => None,
+        };
+        let bytes = arguments_with(op::MARK_SET as u16, &h, &mark(3, 37), &held).expect("bound");
+        let Lv::Table(pairs) = Reader::new(&bytes).lv().expect("decodes") else {
+            panic!("not a table");
+        };
+        let get = |k: &str| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == s(k))
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(get("group_id"), Some(n(902.0)));
+        assert_eq!(get("name"), Some(s("")));
+        assert_eq!(get("row"), None);
+        let w = {
+            let mut w = Writer::new();
+            w.u32(4).u32(0).u64(38).f64(5.0).str("hi");
+            w.finish()
+        };
+        let bytes = arguments_with(op::MESSAGE as u16, &h, &w, &held).expect("bound unit");
+        let Lv::Table(pairs) = Reader::new(&bytes).lv().expect("decodes") else {
+            panic!("not a table");
+        };
+        let get = |k: &str| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == s(k))
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!((get("row"), get("group_id")), (Some(n(5.0)), None));
         // A mark takes no UNIT or COUNTRY scope, and no scope outside 1 to 5.
         for scope in [0, 4, 5, 6] {
             assert!(arguments(op::MARK_SET as u16, &h, &mark(scope, 1)).is_none());
@@ -2567,6 +2668,7 @@ mod tests {
                 entity.clone(),
                 ("parent", s("18446744073709551615")),
                 ("scope", n(3.0)),
+                ("target", n(37.0)),
                 ("name", s("np.g.1z.11")),
                 ("submenu", Lv::Bool(true)),
                 ("text", s("Menu")),
@@ -2664,6 +2766,14 @@ mod tests {
             vec![("path", s("Missions/a.miz"))],
         );
         assert!(arguments(op::MISSION_LOAD as u16, &h, &[]).is_none());
+        let path = |p: &str| {
+            let mut w = Writer::new();
+            w.str(p);
+            w.finish()
+        };
+        assert!(arguments(op::MISSION_LOAD as u16, &h, &path("")).is_none());
+        assert!(arguments(op::MISSION_LOAD as u16, &h, &path(&"a".repeat(1025))).is_none());
+        assert!(arguments(op::MISSION_LOAD as u16, &h, &path(&"a".repeat(1024))).is_some());
 
         let mut w = Writer::new();
         w.lv(&s("return 1"));

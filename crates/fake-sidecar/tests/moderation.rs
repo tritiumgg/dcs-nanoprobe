@@ -13,6 +13,7 @@ use nanoprobe_fake_sidecar::{fake_config, in_process, start};
 use nanoprobe_proto::v1alpha1::campaign_service_client::CampaignServiceClient;
 use nanoprobe_proto::v1alpha1::commands_service_client::CommandsServiceClient;
 use nanoprobe_proto::v1alpha1::events_service_client::EventsServiceClient;
+use nanoprobe_proto::v1alpha1::extension_service_client::ExtensionServiceClient;
 use nanoprobe_proto::v1alpha1::moderation_service_client::ModerationServiceClient;
 use nanoprobe_proto::v1alpha1::players_service_client::PlayersServiceClient;
 use nanoprobe_proto::v1alpha1::session_service_client::SessionServiceClient;
@@ -748,9 +749,48 @@ async fn the_moderation_service_works_end_to_end_without_a_ucid() {
     no_ucid("the roster's debug text", &format!("{:?}", g.roster));
     let log = g.server_log.after(0, 10_000).cloned().collect::<Vec<_>>();
     for e in log {
-        no_ucid("the server log", &format!("{:?}", e.encode_to_vec()));
+        let bytes = e.encode_to_vec();
+        for u in UCIDS {
+            assert!(
+                !bytes.windows(u.len()).any(|w| w == u.as_bytes()),
+                "the encoded server log carries a ucid"
+            );
+        }
         no_ucid("the server log", &format!("{e:?}"));
     }
+}
+
+/// Players DCS held before the sidecar attached are found by the hub's own
+/// `PLAYERS` query, and a query whose answer is lost is asked again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_hub_asks_for_the_players_it_missed_and_asks_again_when_the_answer_is_lost() {
+    let (hub, ch) = in_process(cfg(), fake_config()).await.expect("server");
+    keyed(&hub);
+    fake(&hub, |s| {
+        s.seed_client(2, UCID_A, "Ann", 2, "77");
+        s.seed_client(3, UCID_B, "Bo", 1, "");
+        s.lose_next_result();
+    });
+    let l = lease(&ch).await;
+    let _c = campaign(&ch, &l).await;
+    until(|| async { players_now(&ch, false).await.len() == 2 }).await;
+    let listed = players_now(&ch, false).await;
+    let names: Vec<&str> = listed.iter().map(|p| p.name.as_str()).collect();
+    assert!(names.contains(&"Ann") && names.contains(&"Bo"), "{names:?}");
+    // The first answer was lost: the hub asked more than once.
+    assert!(
+        fake(&hub, |s| s.ledger().players_asked) >= 2,
+        "the hub asked once"
+    );
+    // The held slot joins the unit born later.
+    fake(&hub, |s| s.birth_client_unit("77"));
+    until(|| async {
+        players_now(&ch, false)
+            .await
+            .iter()
+            .any(|p| p.key == key_of(UCID_A) && p.unit_id != 0)
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -801,6 +841,23 @@ async fn only_an_admin_moderates() {
     assert_eq!(e.code(), Code::PermissionDenied);
     let e = ctl
         .list_bans(pb::ListBansRequest::default())
+        .await
+        .expect_err("controller");
+    assert_eq!(e.code(), Code::PermissionDenied);
+    // Raw Lua and extension changes are admin calls too.
+    let mut ext = ExtensionServiceClient::with_interceptor(ch.clone(), with(CONTROLLER));
+    let e = ext
+        .eval_lua(pb::EvalLuaRequest::default())
+        .await
+        .expect_err("controller");
+    assert_eq!(e.code(), Code::PermissionDenied);
+    let e = ext
+        .register_lua(pb::RegisterLuaRequest::default())
+        .await
+        .expect_err("controller");
+    assert_eq!(e.code(), Code::PermissionDenied);
+    let e = ext
+        .remove_lua(pb::RemoveLuaRequest::default())
         .await
         .expect_err("controller");
     assert_eq!(e.code(), Code::PermissionDenied);

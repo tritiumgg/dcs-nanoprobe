@@ -17,7 +17,7 @@ use nanoprobe_transport::records::CommandResult;
 use super::{NotReady, Reconciler, rejected_for_now};
 use crate::ids::EntityId;
 use crate::sim::SimAdapter;
-use crate::sim::wire::{Body, opcode};
+use crate::sim::wire::{Body, lv, opcode};
 use crate::store::{Journalled, MarkerKind, MarkerSpec, Outcome, Store, scope};
 
 const HOLD_PIN_SET: u8 = 7;
@@ -268,6 +268,19 @@ impl Reconciler {
                     self.pins.refused.retain(|k, _| {
                         store.marker(*k).is_none_or(|m| m.parent() != id) || held.contains_key(k)
                     });
+                    // A submenu's replacement the shim could not rebuild in
+                    // full names the items it dropped: they are sent again.
+                    if c.opcode == opcode::MENU_SET {
+                        for dropped in res.iter().flat_map(|r| lv::items(&r.value)) {
+                            if let Lv::String(b) = dropped
+                                && let Some(d) = std::str::from_utf8(b)
+                                    .ok()
+                                    .and_then(|t| t.parse::<u64>().ok())
+                            {
+                                self.pins.held.remove(&EntityId(d));
+                            }
+                        }
+                    }
                 }
                 Outcome::Refused => {
                     self.pins.refused.insert(id, (c.rev, c.mission_gen));
@@ -379,7 +392,7 @@ impl Reconciler {
         player: u32,
         text: &str,
     ) -> Option<(u64, u64)> {
-        if !self.effect_ready(store) {
+        if !self.server_ready() {
             return None;
         }
         let key = (self.epoch, self.next_seq);
@@ -418,7 +431,7 @@ impl Reconciler {
         sim: &mut dyn SimAdapter,
         path: &str,
     ) -> Option<(u64, u64)> {
-        if !self.attached || self.epoch == 0 || !self.campaign_sent {
+        if !self.server_ready() {
             return None;
         }
         let key = (self.epoch, self.next_seq);
@@ -467,7 +480,7 @@ impl Reconciler {
         sim: &mut dyn SimAdapter,
         body: Body,
     ) -> Option<(u64, u64)> {
-        if !self.effect_ready(store) {
+        if !self.server_ready() {
             return None;
         }
         let key = (self.epoch, self.next_seq);
@@ -480,7 +493,7 @@ impl Reconciler {
         store: &mut Store,
         sim: &mut dyn SimAdapter,
     ) -> Option<(u64, u64)> {
-        if !self.effect_ready(store) {
+        if !self.server_ready() {
             return None;
         }
         let key = (self.epoch, self.next_seq);
@@ -494,7 +507,7 @@ impl Reconciler {
         store: &mut Store,
         sim: &mut dyn SimAdapter,
     ) -> Option<(u64, u64)> {
-        if !self.effect_ready(store) {
+        if !self.server_ready() {
             return None;
         }
         let key = (self.epoch, self.next_seq);

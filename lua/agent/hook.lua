@@ -383,6 +383,14 @@ local function plain(v)
   end
 end
 
+-- A slot as text: a number is its decimal text, anything but a string is ''.
+local function slot_text(v)
+  if type(v) == 'number' then
+    return string.format('%d', v)
+  end
+  return type(v) == 'string' and v or ''
+end
+
 -- The connection ID of the server itself, which has no player record.
 local SERVER = 1
 
@@ -470,7 +478,7 @@ local HANDLERS = {
         if got and type(info) == 'table' then
           out[#out + 1] = {
             id = id, ucid = plain(info.ucid), name = plain(info.name),
-            side = plain(info.side), slot = plain(info.slot),
+            side = plain(info.side), slot = slot_text(info.slot),
           }
         end
       end
@@ -525,6 +533,31 @@ local HANDLERS = {
     local first = ''
     if scope == 2 or scope == 5 then
       first = a.target .. ', '
+    elseif scope == 3 and a.group_id ~= nil then
+      -- The agent's binding holds the group: its DCS group ID is the mission
+      -- ID the picture function takes.
+      if type(a.group_id) ~= 'string' or #a.group_id > 10 or not a.group_id:find(INT_TEXT) then
+        return DCS_REFUSED, nil, 'the group ID is not formatted'
+      end
+      first = a.group_id .. ', '
+    elseif scope == 4 and a.row ~= nil then
+      -- The agent's binding holds the unit: the shim reads the ID of the
+      -- object in the row.
+      if type(a.row) ~= 'string' or #a.row > 10 or not a.row:find(INT_TEXT) then
+        return DCS_REFUSED, nil, 'the row is not formatted'
+      end
+      local text, err = cross('server', 'return __nanoprobe_shim.row_id(' .. a.row .. ')')
+      if not text then
+        return DCS_REFUSED, nil, err
+      end
+      if text == '' then
+        return NOT_BOUND, nil, 'no object in the row'
+      end
+      local id = tonumber(text)
+      if not id or id ~= math.floor(id) or id < 0 or id >= 2 ^ 53 then
+        return DCS_REFUSED, nil, 'the object has no integer mission ID'
+      end
+      first = string.format('%.0f, ', id)
     elseif scope == 3 or scope == 4 then
       local name = a.name
       if name == '' then
@@ -674,17 +707,11 @@ local function read_player(id)
   if not ok or type(info) ~= 'table' or type(info.ucid) ~= 'string' or info.ucid == '' then
     return nil
   end
-  local slot = info.slot
-  if type(slot) == 'number' then
-    slot = string.format('%d', slot)
-  elseif type(slot) ~= 'string' then
-    slot = ''
-  end
   return {
     client = info.ucid,
     name = type(info.name) == 'string' and info.name or '',
     side = type(info.side) == 'number' and info.side or 0,
-    slot = slot,
+    slot = slot_text(info.slot),
   }
 end
 

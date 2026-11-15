@@ -146,6 +146,11 @@ the sidecar adopts it with a new `EntityId`. It is observed and reported, never
 reconciled, ordered or destroyed by the reconciler. A controller may still send it an
 effect.
 
+The sidecar adopts the units players occupy, and the group of each, with `BIND`
+(spec/commands.md). Other unmanaged objects keep no `EntityId`. An adoption lasts for
+the agent's boot and the mission generation; after a sidecar restart the sidecar reads
+it back from the agent's `OBJECT` records.
+
 ## Positions and theaters
 
 Every position carries the theater (map) it is on, because DCS coordinates mean nothing
@@ -364,7 +369,8 @@ as long as the sidecar process. This file is the server-scoped store's current f
 players.
 
 **Kill attribution.** DCS sends a weapon kill's `KILL` and `SCORE` with the late death
-event, 0 to 83 s after the object stops existing (LIVE, PLAN revision 23), when the
+event, up to 77.1 s after the object stops existing (LIVE,
+docs/results/2026-11-14-e38-life-and-ammunition.md), when the
 victim and maybe the killer have left the agent's table. The sidecar keeps, per mission
 generation, a memory of the rows that left: object ID, `EntityId`, type, coalition, the
 player keys that occupied it, and the time it left. It resolves a late event's object

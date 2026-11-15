@@ -1020,6 +1020,7 @@ end
 -- for each extension with an `on_event` hook. The oldest event goes when the
 -- queue is full, and is counted.
 queue_event = function(event)
+  local queued = false
   for _, e in pairs(M.extensions) do
     if not e.stopped and not e.dead and type(e.hooks.on_event) == 'function' then
       local copy = {}
@@ -1035,7 +1036,12 @@ queue_event = function(event)
       end
       e.q_tail = e.q_tail + 1
       e.q[e.q_tail] = copy
+      queued = true
     end
+  end
+  -- The agent asks for a pump of its own while an extension has events.
+  if queued and type(agent.extension_budget) == 'function' then
+    agent.extension_budget(0, true)
   end
 end
 
@@ -1437,6 +1443,36 @@ local function mission_id(class, name)
   return id
 end
 
+-- The mission ID of the group or unit a scoped command names. The agent
+-- passes what its binding holds for the target: `group_id`, the DCS group ID,
+-- or `row`, the slot of the unit's row, whose object handle gives the ID.
+-- With neither, the platform name in `name` is looked up.
+local function target_id(class, a)
+  if type(a.group_id) == 'number' then
+    return a.group_id
+  end
+  if type(a.row) == 'number' then
+    local o = T.objs[a.row]
+    if not o then
+      return nil, NOT_BOUND, 'no object in the row'
+    end
+    local ok, id = pcall(o.getID, o)
+    id = ok and tonumber(id)
+    if not id then
+      return nil, DCS_REFUSED, 'the object has no mission ID'
+    end
+    return id
+  end
+  return mission_id(class, a.name)
+end
+
+-- The mission ID of the unit in a row, as text, or nothing: the hook asks
+-- for it through the server state.
+function M.row_id(slot)
+  local id = target_id(Unit, { row = tonumber(slot) })
+  return id and string.format('%.0f', id) or ''
+end
+
 -- Marks and drawings share DCS's mark ID space. Each gets an ID from the
 -- shim's counter; a replacement removes the held mark first and adds the new
 -- one under a new ID.
@@ -1482,7 +1518,7 @@ end
 -- Returns nothing for another scope.
 local function scope_group(a)
   if a.scope == 3 then
-    return mission_id(Group, a.name)
+    return target_id(Group, a)
   end
 end
 
@@ -1504,13 +1540,17 @@ local function menu_callback(item)
   return function()
     pcall(function()
       if type(agent.menu) == 'function' then
-        -- The target the record holds: a coalition number, a group's platform
-        -- name, or nothing.
+        -- The target the record holds: a coalition number, a group's
+        -- `EntityId` (else its platform name), or nothing.
         local target
         if item.scope == 2 then
           target = item.target
         elseif item.scope == 3 then
-          target = item.name
+          if item.target ~= nil then
+            target = item.target
+          else
+            target = item.name
+          end
         end
         agent.menu(item.entity, target, item.scope)
       end
@@ -1570,24 +1610,30 @@ local function menu_children(entity)
 end
 
 -- Forget every item held under `entity`, at every depth, without touching
--- DCS: DCS removed them with their submenu.
-local function menu_forget_below(entity)
+-- DCS: DCS removed them with their submenu. The entity of each is added to
+-- `dropped` when there is one.
+local function menu_forget_below(entity, dropped)
   for _, child in ipairs(menu_children(entity)) do
-    menu_forget_below(child.entity)
+    menu_forget_below(child.entity, dropped)
     M.menus[child.entity] = nil
+    if dropped then
+      dropped[#dropped + 1] = child.entity
+    end
   end
 end
 
 -- Add again, under the new path of `entity`, the items held below it, in the
--- order they were first set, at every depth.
-local function menu_readd_below(item)
+-- order they were first set, at every depth. An item DCS refuses is
+-- forgotten with the items below it, and each is added to `dropped`.
+local function menu_readd_below(item, dropped)
   for _, child in ipairs(menu_children(item.entity)) do
     local ok, why = menu_add(child, item.path)
     if ok then
-      menu_readd_below(child)
+      menu_readd_below(child, dropped)
     else
-      child.path = nil
-      menu_forget_below(child.entity)
+      menu_forget_below(child.entity, dropped)
+      M.menus[child.entity] = nil
+      dropped[#dropped + 1] = child.entity
       M.file.write('warn', 'menu item not added again', { entity = child.entity, error = why })
     end
   end
@@ -1707,7 +1753,7 @@ local HANDLERS = {
     elseif scope == 5 then
       call, first = trigger.action.outSoundForCountry, a.target
     elseif scope == 3 or scope == 4 then
-      local id, code, message = mission_id(scope == 3 and Group or Unit, a.name)
+      local id, code, message = target_id(scope == 3 and Group or Unit, a)
       if not id then
         return code, nil, message
       end
@@ -1821,7 +1867,13 @@ local HANDLERS = {
     end
     M.menus[a.entity] = item
     if item.submenu then
-      menu_readd_below(item)
+      -- The entities of the items DCS would not take again: the value of
+      -- the result, so the sidecar sends them again.
+      local dropped = {}
+      menu_readd_below(item, dropped)
+      if #dropped > 0 then
+        return APPLIED, dropped
+      end
     end
     return APPLIED
   end,
@@ -1861,7 +1913,7 @@ local HANDLERS = {
       local call = scope == 2 and trigger.action.outTextForCoalition or trigger.action.outTextForCountry
       ok, err = pcall(call, a.target, text, a.seconds, a.clear)
     elseif scope == 3 or scope == 4 then
-      local id, code, message = mission_id(scope == 3 and Group or Unit, a.name)
+      local id, code, message = target_id(scope == 3 and Group or Unit, a)
       if not id then
         return code, nil, message
       end
@@ -2074,6 +2126,7 @@ end
 -- the callbacks DCS made and the timers that came due, then `on_frame`, each
 -- while the frame's commanded-work budget has time left. The extensions take
 -- turns to go first. Hook time is charged to the budget as it is spent.
+local running = false
 local function run_extensions()
   if type(agent.extension_budget) ~= 'function' then
     return
@@ -2092,14 +2145,18 @@ local function run_extensions()
       e.next_report = now + REPORT_EVERY
       send_stats(e)
     end
+    -- Queued events, waiting callbacks and timers, and an `on_frame` hook
+    -- while the mission runs ask for the next pump. An `on_event` hook with
+    -- an empty queue asks for nothing: `queue_event` asks when it queues.
     if not e.stopped and not e.dead
-      and (type(e.hooks.on_event) == 'function' or type(e.hooks.on_frame) == 'function'
-        or next(e.timers) ~= nil or #e.pending > 0) then
+      and (e.q_head <= e.q_tail or next(e.timers) ~= nil or #e.pending > 0
+        or (running and type(e.hooks.on_frame) == 'function')) then
       active = true
     end
   end
   local left, _, _, lifecycle = agent.extension_budget(charged, active)
   charged = 0
+  running = lifecycle == 3
   local n = #list
   if n == 0 or left <= 0 then
     return

@@ -143,6 +143,7 @@ impl ExtensionService for Extension {
         &self,
         req: Request<RegisterLuaRequest>,
     ) -> Result<Response<RegisterLuaResponse>, Status> {
+        require(&req, Access::Admin)?;
         super::commands::changing!(self, req, "RegisterLua", Need::Campaign, register_lua)
     }
 
@@ -150,6 +151,7 @@ impl ExtensionService for Extension {
         &self,
         req: Request<RemoveLuaRequest>,
     ) -> Result<Response<RemoveLuaResponse>, Status> {
+        require(&req, Access::Admin)?;
         super::commands::changing!(self, req, "RemoveLua", Need::Campaign, remove_lua)
     }
 
@@ -218,7 +220,7 @@ impl ExtensionService for Extension {
         &self,
         req: Request<EvalLuaRequest>,
     ) -> Result<Response<EvalLuaResponse>, Status> {
-        require(&req, Access::Controller)?;
+        require(&req, Access::Admin)?;
         let r = req.into_inner();
         let mut hashed = r.clone();
         hashed.write = unleased(&r.write);

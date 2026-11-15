@@ -131,6 +131,11 @@ for script in "$ROOT"/lua/tests/*.lua; do
             "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" paused
             "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" names
             ;;
+        players_exit.lua)
+            for name in functional-on functional-off mismatch moderation moderation-fails; do
+                "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" "$name"
+            done
+            ;;
         *) "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" ;;
     esac
 done

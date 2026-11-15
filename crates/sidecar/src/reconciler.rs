@@ -1647,15 +1647,17 @@ impl Reconciler {
     }
 
     fn plan(&mut self, store: &mut Store, sim: &mut dyn SimAdapter) {
-        if !self.ready(store) {
-            return;
-        }
-        if !self.campaign_sent {
+        // The campaign is announced as soon as the agent is known, so the
+        // server-scoped commands run with no mission loaded.
+        if self.attached && self.epoch != 0 && !self.campaign_sent {
             let c = store.campaign().0;
             if !self.send(store, sim, EntityId(0), 0, Body::Campaign(c)) {
                 return;
             }
             self.campaign_sent = true;
+        }
+        if !self.ready(store) {
+            return;
         }
         if self.enum_wanted {
             if !self.send(store, sim, EntityId(0), 0, Body::Enumerate) {
@@ -2229,6 +2231,12 @@ impl Reconciler {
 
     fn effect_ready(&self, store: &Store) -> bool {
         self.ready(store) && self.attached && self.campaign_sent
+    }
+
+    /// Whether a server-scoped command can be sent: the agent is attached and
+    /// the campaign announced. No mission needs to run.
+    pub(crate) fn server_ready(&self) -> bool {
+        self.attached && self.epoch != 0 && self.campaign_sent
     }
 
     /// Add to or take from a warehouse's stock: a `WAREHOUSE_ADJUST`, an

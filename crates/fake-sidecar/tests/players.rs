@@ -704,6 +704,7 @@ async fn menu_selections_and_author_events_are_events() {
     let mut events = EventsServiceClient::new(ch.clone());
     let mut menu = None;
     let mut author = None;
+    let mut chat = None;
     for _ in 0..200 {
         let r = events
             .read_events(pb::ReadEventsRequest {
@@ -721,17 +722,22 @@ async fn menu_selections_and_author_events_are_events() {
             match e.body {
                 Some(pb::event::Body::Menu(m)) => menu = Some(m),
                 Some(pb::event::Body::Author(a)) => author = Some(a),
-                Some(pb::event::Body::Player(_)) => {
-                    panic!("a chat from a client the server never saw connect is no event")
-                }
+                Some(pb::event::Body::Player(p)) => chat = Some(p),
                 _ => {}
             }
         }
-        if menu.is_some() && author.is_some() {
+        if menu.is_some() && author.is_some() && chat.is_some() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    // A chat from a client the server never saw connect is an event: the
+    // record names the client.
+    let chat = chat.expect("a chat event");
+    assert_eq!(
+        (chat.name.as_str(), chat.text.as_deref()),
+        ("pilot", Some("hello"))
+    );
     let m = menu.expect("a menu event");
     assert_eq!(m.item_id, item.item_id);
     // Connection 9 is no player the server knows: SELECTOR, no key.

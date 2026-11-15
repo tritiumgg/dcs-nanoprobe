@@ -1770,6 +1770,28 @@ scenario('menus', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   assert(list() == '' and list('g' .. group_id) == '', 'the menus are ' .. list() .. ' and ' .. list('g' .. group_id))
   assert(shim.menus['31'] == nil and shim.menus['34'] == nil and shim.menus['53'] == nil,
     'the shim kept items below a removed submenu')
+  -- A replacement whose held child DCS will not add again forgets the child
+  -- and names it in the value, so the sidecar sends it again.
+  run({
+    menu(70, 1, 0, 1, 0, true, 'R'),
+    menu(71, 1, 70, 1, 0, true, 'S'),
+    menu(72, 1, 71, 1, 0, false, 'T'),
+    menu(73, 1, 70, 1, 0, false, 'U'),
+  }, 'a tree whose child will be refused')
+  local commands = ctx.host.states.server.missionCommands
+  local add = commands.addCommand
+  commands.addCommand = function(text, ...)
+    if text == 'T' then
+      error('mock: refused')
+    end
+    return add(text, ...)
+  end
+  r = run({ menu(70, 2, 0, 1, 0, true, 'R2') }, 'a replacement that loses a child')
+  commands.addCommand = add
+  expect(r[1], APPLIED, 'MENU_SET replacing R')
+  assert(joined(r[1].value or {}) == '72', 'the dropped items are ' .. joined(r[1].value or {}) .. ':\n' .. dump(ctx))
+  assert(list() == 'R2,R2/S,R2/U', 'the menu is ' .. list())
+  assert(shim.menus['72'] == nil and shim.menus['71'] ~= nil, 'the shim holds the dropped item')
   S.ok('MENU_SET and MENU_REMOVE: replacement re-adds held children in order, NOT_BOUND parents, scopes, the callback never raises')
 end, '\n[lua]\nraw = true\n')
 
@@ -2071,6 +2093,12 @@ scenario('players', nil, function(ctx)
   r = run({ { op = 'PLAYERS' } }, 'players again')
   expect(r[1], APPLIED, 'PLAYERS again')
   assert(#r[1].value == 2 and r[1].value[1].id == 2 and r[1].value[2].id == 5, 'PLAYERS did not list both in order')
+  -- A slot DCS gives as a number is decimal text, and a missing one is ''.
+  host:connect(6, { ucid = 'ucid-6', name = 'Foxtrot', side = 2, slot = 12 })
+  host:connect(7, { ucid = 'ucid-7', name = 'Golf', side = 1 })
+  r = run({ { op = 'PLAYERS' } }, 'players with numeric slots')
+  expect(r[1], APPLIED, 'PLAYERS with numeric slots')
+  assert(r[1].value[3].slot == '12' and r[1].value[4].slot == '', 'PLAYERS did not give a slot as text')
 
   -- BANS: the four fields only; an address is left out.
   host.bans = {

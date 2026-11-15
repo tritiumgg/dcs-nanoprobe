@@ -274,8 +274,16 @@ and the layout's parent as decimal text, so no `EntityId` loses digits in a Lua 
 `parent` is `'0'` for the root. `read_only`, `submenu` and `clear` are booleans. `name`
 is the group's platform name for the scope `GROUP` (and the unit's for `MESSAGE`'s
 `UNIT`), built from the header's `campaign` and the `target`; it is empty otherwise.
-`target` is passed as a number for the scopes `COALITION` and `COUNTRY` and is absent
-otherwise. A scope the opcode does not take is `BAD_PAYLOAD`, from the agent.
+`target` is passed as a number for the scopes `COALITION`, `COUNTRY` and `GROUP` and
+is absent otherwise.
+
+When the agent's table holds a row bound to the target entity, the handler gets the
+bound target and `name` is empty: for `GROUP`, `group_id`, the DCS group ID the row
+holds, which the scoped DCS calls take as the group's mission ID; for `UNIT`, `row`, the
+shim's row slot, whose object the shim asks for `getID()`. This is how a scope names
+an adopted unit or group (spec/world.md, "Managed and unmanaged"), which keeps its own
+DCS name. `PICTURE` gets both as decimal text, and its hook handler reads the unit's
+mission ID through the `server` state. With no bound row, the handler resolves `name`. A scope the opcode does not take is `BAD_PAYLOAD`, from the agent.
 
 For `SOUND` and `PICTURE`, `name` is present for the scope `GROUP` or `UNIT` only: the
 platform name built from the header's `campaign` and the `target` (`np!` or `np.`),
@@ -688,7 +696,9 @@ item's `EntityId` under `pcall`: it never raises into DCS.
 
 - A replacement removes the old item first. DCS removes a submenu's items with it, so
   the shim adds the items it holds under that submenu again under the new path, in the
-  order they were first set, at every depth.
+  order they were first set, at every depth. An item DCS refuses to add again is
+  forgotten with every item below it, and the result, still `APPLIED`, has as its value
+  the array of their `EntityId`s as decimal text; the sidecar sends those items again.
 - `MENU_REMOVE` removes the item; for a submenu the shim also forgets every item it
   holds under it. The sidecar removes items before their submenu, so this happens only
   when the store and DCS disagree.
@@ -875,8 +885,8 @@ The agent queues the result, publishes the frame's records, and only then calls 
 load. It handles no further command in that frame. The lifecycle then goes to
 `LOADING`.
 
-The hook's handler checks that `path` is a string of 1 to 1,024 bytes, else
-`DCS_REFUSED` (the hook's checks repeat the agent's, as for `PICTURE`), and answers
+The agent refuses an empty `path` or one over 1,024 bytes with `BAD_PAYLOAD`. The
+hook's handler checks the same again, else `DCS_REFUSED`, as for `PICTURE`, and answers
 `APPLIED`; it hands the path back to the dispatch, which takes no further command, and
 the hook calls `net.load_mission(path)` after `finish`. `net.load_mission` returns at
 once and DCS loads on a later frame (LIVE, docs/results/2026-11-11-server-gate.md). A
@@ -1032,10 +1042,11 @@ and no Lua error crosses a Rust frame that owns a value.
 
 ## Moderation
 
-`MODERATE` runs in the hook's state, where `net` is (LIVE: `net.kick`,
-`net.banlist_add`, `net.banlist_add_by_ucid`, `net.banlist_remove`,
-`net.force_player_slot`, `net.get_player_info` are functions there; their argument
-orders are fixed by E34). The sidecar names a player to the agent by connection ID and
+`MODERATE` runs in the hook's state, where `net` is. `net.kick`, `net.banlist_add`,
+`net.banlist_add_by_ucid`, `net.banlist_remove`, `net.force_player_slot` and
+`net.get_player_info` are functions there (LIVE, `lua/mock/api/hook.txt`, written by
+`lua/probes/tools/api-dump.lua` on DCS 2.9.31.29434 under Wine, 2026-11-11); their
+argument orders are fixed by E34. The sidecar names a player to the agent by connection ID and
 ucid; the API names a player by player key (spec/world.md, "Players").
 
 ### Layout: MODERATE
@@ -1078,9 +1089,12 @@ event in the API's stream with the token that asked for it.
 
 `PLAYERS` has no payload after the header. Its value is an array with one table for each
 connected player but the server, from `net.get_player_list()` and
-`net.get_player_info(id)`: `id`, `ucid`, `name`, `side` and `slot`. The sidecar sends it
-after every `HELLO` and every new mission generation, so a controller that attaches
-reads the slot changes it missed.
+`net.get_player_info(id)`: `id`, `ucid`, `name`, `side` and `slot`. `slot` is text,
+as in a `PLAYER` record: a number DCS gives is written in decimal, and a spectator's is
+empty. While a campaign is active, the sidecar sends it after every `HELLO` and every
+new mission generation, so a controller that attaches reads the slot changes it missed.
+With no campaign active it is not sent; the roster then follows the `PLAYER` records
+alone.
 
 `BANS` has no payload after the header. Its value is what `net.banlist_get()` returns,
 each entry with its `ucid`, `name`, `banned_until` and `reason` fields only; any other

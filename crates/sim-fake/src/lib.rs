@@ -743,6 +743,20 @@ impl FakeSim {
         true
     }
 
+    /// A client DCS already holds when the sidecar attaches: no `PLAYER`
+    /// record is written, so only a `PLAYERS` query finds it.
+    pub fn seed_client(&mut self, id: u32, ucid: &str, name: &str, side: u32, slot: &str) {
+        self.clients.insert(
+            id,
+            FakeClient {
+                ucid: ucid.to_owned(),
+                name: name.to_owned(),
+                side,
+                slot: slot.to_owned(),
+            },
+        );
+    }
+
     /// A client takes a slot (`onPlayerChangeSlot`); an empty `slot` is
     /// spectators.
     pub fn client_slot(&mut self, id: u32, side: u32, slot: &str) {
@@ -2742,7 +2756,7 @@ impl FakeSim {
     fn pin_group(&self, campaign: u64, scope: u32, target: u64, group_ok: bool) -> Option<u64> {
         match scope {
             1 | 2 => Some(0),
-            3 if group_ok => self.group_in(campaign, target),
+            3 if group_ok => self.bound_group(campaign, target),
             _ => None,
         }
     }
@@ -2765,21 +2779,41 @@ impl FakeSim {
         self.result(cmd, rc::APPLIED, 0, "", Lv::Nil);
     }
 
-    /// Whether DCS holds what a `SOUND` or `PICTURE` scope names: a group
-    /// or unit of the campaign for `GROUP` and `UNIT` (never with campaign
-    /// 0), anything for the other scopes.
+    /// Whether DCS holds what a `SOUND` or `PICTURE` scope names: for `GROUP`
+    /// and `UNIT`, what the agent's binding table holds for the entity, else a
+    /// platform object of the campaign (never with campaign 0); anything for
+    /// the other scopes.
     fn scope_held(&self, campaign: u64, scope: u32, target: u64) -> bool {
         match scope {
-            3 => campaign != 0 && self.group_in(campaign, target).is_some(),
+            3 => self.bound_group(campaign, target).is_some(),
             4 => {
-                campaign != 0
-                    && self
-                        .objects
-                        .values()
-                        .any(|x| x.entity == target && x.campaign == campaign)
+                self.table.values().any(|t| target != 0 && t.0 == target)
+                    || campaign != 0
+                        && self
+                            .objects
+                            .values()
+                            .any(|x| x.entity == target && x.campaign == campaign)
             }
             _ => true,
         }
+    }
+
+    /// The DCS group an entity names, as the agent resolves a `GROUP` scope:
+    /// the group its binding table holds for the entity, whatever its name,
+    /// else the campaign's platform group of that entity.
+    fn bound_group(&self, campaign: u64, entity: u64) -> Option<u64> {
+        if entity != 0 {
+            let bound = self
+                .objects
+                .iter()
+                .find(|(o, x)| x.group != 0 && self.table.get(*o).is_some_and(|t| t.1 == entity));
+            if let Some((_, x)) = bound {
+                return Some(x.group);
+            }
+        }
+        (campaign != 0)
+            .then(|| self.group_in(campaign, entity))
+            .flatten()
     }
 
     /// The DCS group of an entity of the active campaign.

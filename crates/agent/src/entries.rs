@@ -2146,12 +2146,20 @@ unsafe fn work_extension_budget(state: *mut State) -> c_int {
         (arg_num(state, 1, 0.0), active)
     };
     let budget = driver::extension_budget(spent, active);
+    // The campaign's decimal text, at most 20 bytes, goes to a stack buffer
+    // and the budget is dropped before any call that can raise: nothing with
+    // a destructor is live across the pushes.
+    let mut text = [0u8; 20];
+    let n = budget.campaign.len().min(text.len());
+    text[..n].copy_from_slice(&budget.campaign.as_bytes()[..n]);
+    let (left_us, raw_lua, lifecycle) = (budget.left_us, budget.raw_lua, budget.lifecycle);
+    drop(budget);
     // SAFETY: a live state with four free slots.
     unsafe {
-        lua::lua_pushnumber(state, budget.left_us);
-        lua::push_str(state, &budget.campaign);
-        lua::lua_pushboolean(state, c_int::from(budget.raw_lua));
-        lua::lua_pushnumber(state, f64::from(budget.lifecycle));
+        lua::lua_pushnumber(state, left_us);
+        lua::lua_pushlstring(state, text.as_ptr().cast(), n);
+        lua::lua_pushboolean(state, c_int::from(raw_lua));
+        lua::lua_pushnumber(state, f64::from(lifecycle));
     }
     4
 }
@@ -2190,13 +2198,16 @@ unsafe fn emit_outcome(state: *mut State) -> Result<(), &'static str> {
     if !driver::raw_lua() {
         return Err("disabled");
     }
-    // SAFETY: a live state; reading a value never raises.
-    let name = match unsafe { scalar(state, 1) } {
-        Lv::String(s) if (1..=driver::EMIT_NAME_MAX).contains(&s.len()) => {
-            String::from_utf8_lossy(&s).into_owned()
-        }
-        _ => return Err("name"),
-    };
+    // SAFETY: a live state; reading a value never raises. The checked value
+    // is dropped here, so nothing owned is live across the calls below that
+    // can raise.
+    let valid = matches!(
+        unsafe { scalar(state, 1) },
+        Lv::String(s) if (1..=driver::EMIT_NAME_MAX).contains(&s.len())
+    );
+    if !valid {
+        return Err("name");
+    }
     *EMIT.lock().unwrap_or_else(|e| e.into_inner()) = None;
     // SAFETY: a live state; the closure runs under `lua_pcall` on copies of
     // the payload and the objects, and the stack has the free slots Lua
@@ -2206,10 +2217,16 @@ unsafe fn emit_outcome(state: *mut State) -> Result<(), &'static str> {
         lua::lua_pushcclosure(state, read_emit, 0);
         lua::lua_pushvalue(state, 2);
         lua::lua_pushvalue(state, 3);
-        let status = lua::lua_pcall(state, 2, 0, 0);
-        lua::lua_settop(state, 0);
-        status != 0
+        lua::lua_pcall(state, 2, 0, 0) != 0
     };
+    // The name is read again, now that no call that can raise follows.
+    // SAFETY: a live state; the name is still argument 1.
+    let name = match unsafe { scalar(state, 1) } {
+        Lv::String(s) => String::from_utf8_lossy(&s).into_owned(),
+        _ => String::new(),
+    };
+    // SAFETY: a live state.
+    unsafe { lua::lua_settop(state, 0) };
     let read = EMIT.lock().unwrap_or_else(|e| e.into_inner()).take();
     match read {
         Some(Ok((objects, payload))) if !failed => driver::emit(&name, &objects, payload),

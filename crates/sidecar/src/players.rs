@@ -630,7 +630,7 @@ impl Roster {
             }
             Input::Object(o) if self.current => self.object(&o, ctx),
             Input::Player(p) => self.player_record(&p, ctx, &mut out),
-            Input::Event(e) if e.id == BIRTH => {
+            Input::Event(e) if e.id == BIRTH && self.current => {
                 let object = e.number(FIELD_INITIATOR).map(|n| n as u64);
                 let mission = e.text(FIELD_INITIATOR_MISSION_ID);
                 if let (Some(object), Some(mission)) = (object, mission)
@@ -639,7 +639,7 @@ impl Roster {
                     self.birth(object, &mission, ctx, &mut out);
                 }
             }
-            Input::Event(e) => self.event(&e),
+            Input::Event(e) if self.current => self.event(&e),
             Input::ObjectGone(g) if self.current => self.object_gone(&g, ctx, &mut out),
             Input::Vitals(rows) => {
                 for v in rows {
@@ -740,6 +740,11 @@ impl Roster {
                 let Some(key) = self.key_for(p) else {
                     return;
                 };
+                if !p.client.is_empty() && !self.players.get(&key).is_some_and(|r| r.connected) {
+                    // A slot change from a client the roster missed joining:
+                    // the join is implied.
+                    self.connect(&key, p.player, p.side, &p.name, ctx, out);
+                }
                 if let Some(rec) = self.players.get_mut(&key) {
                     rec.side = p.side;
                 }
@@ -750,9 +755,16 @@ impl Roster {
                 let Some(key) = self.key_for(p) else {
                     return;
                 };
+                // The record carries the name and side of a player the roster
+                // does not know yet.
+                let known = self.players.get(&key).is_some_and(|r| r.connected);
                 out.push(Note::Chat {
-                    name: self.name_of(&key),
-                    side: self.side_of(&key),
+                    name: if known {
+                        self.name_of(&key)
+                    } else {
+                        p.name.clone()
+                    },
+                    side: if known { self.side_of(&key) } else { p.side },
                     key,
                     text: p.text.clone(),
                 });
@@ -765,11 +777,7 @@ impl Roster {
     /// carries one, else by the connection.
     fn key_for(&mut self, p: &nanoprobe_transport::records::Player) -> Option<String> {
         if !p.client.is_empty() {
-            let key = self.keys.learn(&p.client);
-            if !self.players.get(&key).is_some_and(|r| r.connected) {
-                return None;
-            }
-            return Some(key);
+            return Some(self.keys.learn(&p.client));
         }
         self.conns.get(&p.player).cloned()
     }
@@ -1181,7 +1189,12 @@ impl Roster {
             let key = self.keys.learn(&ucid);
             let side = lv::num_at(row, "side").map_or(0, |n| n as u32);
             let name = lv::str_at(row, "name").unwrap_or_default();
-            let slot = lv::str_at(row, "slot").unwrap_or_default();
+            // DCS gives a slot as text or as a number; a number is the slot
+            // of an unsuffixed seat.
+            let slot = match lv::get(row, "slot") {
+                Some(Lv::Number(n)) => format!("{n:.0}"),
+                _ => lv::str_at(row, "slot").unwrap_or_default(),
+            };
             let known = self
                 .players
                 .get(&key)
@@ -1193,7 +1206,7 @@ impl Roster {
             } else {
                 self.connect(&key, conn, side, &name, ctx, out);
             }
-            let _ = self.see_name(&key, &name, ctx.now);
+            self.rename(&key, &name, ctx, out);
             let seat = seat_of(&slot);
             self.set_slot(&key, &slot, seat, ctx, out);
         }
@@ -1735,10 +1748,108 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
+    fn players_result(rows: Vec<Lv>) -> RawRecord {
+        rec(Input::Result(nanoprobe_transport::records::CommandResult {
+            seq: 0,
+            epoch: 0,
+            campaign: 0,
+            entity: 0,
+            rev: 0,
+            object: 0,
+            cost_us: 0,
+            opcode: opcode::PLAYERS,
+            code: rc::APPLIED as u16,
+            message: String::new(),
+            value: lv::list(rows),
+        }))
+    }
+
+    fn row(id: f64, ucid: &str, name: &str, slot: Lv) -> Lv {
+        lv::obj(vec![
+            ("id", lv::n(id)),
+            ("ucid", lv::s(ucid)),
+            ("name", lv::s(name)),
+            ("side", lv::n(2.0)),
+            ("slot", slot),
+        ])
+    }
+
+    #[test]
+    fn a_players_answer_reads_a_numeric_slot_and_reports_a_new_name() {
+        let mut r = Roster::new(ring());
+        run(&mut r, &[player(pe::CONNECT, 2, "ucid-a", "Ann", "77")]);
+        run(&mut r, &[birth(5, "77")]);
+        let n = run(
+            &mut r,
+            &[players_result(vec![row(
+                2.0,
+                "ucid-a",
+                "Anna",
+                lv::n(77.0),
+            )])],
+        );
+        assert!(
+            matches!(&n[..], [Note::Rename { from, .. }] if from == "Ann"),
+            "{n:?}"
+        );
+        // The number reads as the same slot: the seat stays held.
+        assert_eq!(r.players_of(5).len(), 1);
+    }
+
+    #[test]
+    fn a_chat_or_slot_from_a_client_not_yet_known_is_kept() {
+        let mut r = Roster::new(ring());
+        let n = run(
+            &mut r,
+            &[{
+                let mut c = Player {
+                    event: pe::CHAT,
+                    player: 3,
+                    side: 1,
+                    client: "ucid-z".into(),
+                    name: "Zed".into(),
+                    ..Player::default()
+                };
+                c.text = "hello".into();
+                rec(Input::Player(c))
+            }],
+        );
+        assert!(
+            matches!(&n[..], [Note::Chat { name, side: 1, text, .. }] if name == "Zed" && text == "hello"),
+            "{n:?}"
+        );
+        let n = run(&mut r, &[player(pe::SLOT, 4, "ucid-y", "Yan", "9")]);
+        assert!(matches!(&n[0], Note::Connect { .. }), "{n:?}");
+    }
+
+    #[test]
+    fn a_birth_replayed_from_an_earlier_generation_joins_nothing() {
+        let mut r = Roster::new(ring());
+        let fr = |gen_: u32, replay: u32| {
+            rec(Input::Frame(Frame {
+                mission_gen: gen_,
+                replay,
+                ..Frame::default()
+            }))
+        };
+        run(&mut r, &[fr(2, 0)]);
+        run(&mut r, &[player(pe::CONNECT, 2, "ucid-a", "Ann", "77")]);
+        let n = run(&mut r, &[fr(1, 1), birth(5, "77")]);
+        assert!(n.is_empty(), "{n:?}");
+        assert!(r.players_of(5).is_empty());
+        let n = run(&mut r, &[fr(2, 1), birth(6, "77")]);
+        assert!(matches!(&n[..], [Note::Enter { .. }]), "{n:?}");
+    }
+
     #[test]
     fn with_persistence_off_no_file_is_written() {
         let mut k = Keyring::generate();
         k.learn("ucid-a");
+        assert!(k.file.is_none(), "a generated keyring has no file");
         k.flush().expect("nothing to write");
+        assert!(
+            !Path::new(KEYRING_FILE).exists(),
+            "no keyring file in the working directory"
+        );
     }
 }

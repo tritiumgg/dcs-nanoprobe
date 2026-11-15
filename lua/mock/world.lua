@@ -148,6 +148,7 @@ function Sim:clear()
   -- F10 menu trees by scope key (`all`, `c<coalition>`, `g<group ID>`), and
   -- the text calls of trigger.action.outText and its forms.
   self.menus, self.messages = {}, {}
+  self.actions, self.next_action = {}, 0
   self.orders = {}
   -- Controller options by group ID, then option number.
   self.options = {}
@@ -1135,6 +1136,14 @@ local function scripting(host, name)
       end
       local node = { name = item_name, func = func, arg = arg, children = submenu and {} or nil }
       parent.children[#parent.children + 1] = node
+      -- DCS numbers the actions the radio panel selects by index. The
+      -- mock counts the commands in the order they were added (UNVERIFIED).
+      if not submenu then
+        sim.actions = sim.actions or {}
+        sim.next_action = (sim.next_action or 0) + 1
+        node.index = sim.next_action
+        sim.actions[node.index] = node
+      end
       local out = {}
       for i, part in ipairs(path or {}) do
         out[i] = part
@@ -1151,6 +1160,7 @@ local function scripting(host, name)
       for i, child in ipairs(parent and parent.children or {}) do
         if child.name == path[#path] then
           table.remove(parent.children, i)
+          child.removed = true
           return
         end
       end
@@ -1190,6 +1200,18 @@ local function scripting(host, name)
         remove('removeItemForGroup', 'g' .. number('removeItemForGroup', group), path)
       end,
     })
+    -- The action the radio panel runs for an index: ED's panel calls
+    -- missionCommands.doAction(index) (ED-CODE). An index with no live
+    -- command does nothing.
+    rawset(state.missionCommands, 'doAction', function(index)
+      if type(index) ~= 'number' then
+        error('mock: missionCommands.doAction takes a number', 2)
+      end
+      local node = sim.actions and sim.actions[index]
+      if node and not node.removed then
+        node.func(node.arg)
+      end
+    end)
     -- The items of a scope key, depth first, as `Name/Name` strings.
     function sim:menu_list(key)
       local out = {}
@@ -1275,6 +1297,18 @@ local function scripting(host, name)
   if name == 'server' then
     rawset(state.world, 'getAirbases', airbases)
     rawset(state.world, 'searchObjects', search)
+    -- The marks and drawings on the map, as a list of panels. The field
+    -- names are UNVERIFIED: the mock gives id, text, pos and coalition.
+    rawset(state.world, 'getMarkPanels', function()
+      local out = {}
+      for id, mark in pairs(sim.marks) do
+        out[#out + 1] = { id = id, text = mark.text, pos = mark.point, coalition = mark.coalition }
+      end
+      table.sort(out, function(a, b)
+        return a.id < b.id
+      end)
+      return out
+    end)
     rawset(state.DCS, 'getUnitPositionByObjectId', W.position(sim))
     state.Export = ns(name, 'Export', {
       LoGetWorldObjects = function()

@@ -54,7 +54,8 @@ fn who(a: Option<&pb::Audience>, field: &str) -> Result<Who, Status> {
 }
 
 /// The scope code and target a mark, drawing or menu item is set for. A
-/// group is one the campaign holds; DCS need not hold it yet.
+/// group is one the campaign holds or an adopted one; DCS need not hold it
+/// yet.
 fn pin_scope(
     g: &Inner,
     c: u64,
@@ -67,8 +68,15 @@ fn pin_scope(
         Who::Coalition(n) => Ok((scope::COALITION, u64::from(n))),
         Who::Group(id) if group_ok => {
             let store = &g.campaigns.get(&c).expect("resolved campaign").store;
+            // An adopted group, one of the mission's own, has no row in the
+            // store; the agent binds it.
+            let adopted = g.active == Some(c)
+                && g.rec
+                    .as_ref()
+                    .is_some_and(|r| r.adopted().values().any(|b| b.group.0 == id));
             match store.group(EntityId(id)) {
                 Some(x) if !x.removed && x.kind == Kind::Group => Ok((scope::GROUP, id)),
+                _ if adopted => Ok((scope::GROUP, id)),
                 _ => Err(not_found(id)),
             }
         }
