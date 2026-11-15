@@ -61,9 +61,21 @@ fn dead_event(object: u64, category: f64) -> nanoprobe_transport::records::Event
     }
 }
 
-/// The campaign a platform name gives, 0 for any other name.
-fn name_campaign(name: &str) -> u64 {
-    ids::parse(name).map_or(0, |p| p.campaign.0)
+/// `campaign` if a platform name carries its tag, 0 for any other name.
+fn name_campaign(name: &str, campaign: u64) -> u64 {
+    match ids::parse(name) {
+        Some(p) if campaign != 0 && ids::of_campaign(&p, ids::CampaignId(campaign)) => campaign,
+        _ => 0,
+    }
+}
+
+/// The entity a platform name gives under `campaign`, by its tag, as the
+/// agent binds a row (spec/world.md, "Names"); 0 for any other name.
+fn name_entity(name: &str, campaign: u64) -> u64 {
+    match ids::parse(name) {
+        Some(p) if name_campaign(name, campaign) != 0 => p.entity.0,
+        _ => 0,
+    }
 }
 
 /// The fake's settings.
@@ -537,6 +549,12 @@ impl FakeSim {
         self.applied_order.get(&entity).copied().unwrap_or(0)
     }
 
+    /// The binding the agent holds for a row: `(entity, group entity)`, 0s
+    /// for a row it does not bind or does not hold.
+    pub fn binding(&self, object: u64) -> (u64, u64) {
+        self.table.get(&object).copied().unwrap_or((0, 0))
+    }
+
     /// The DCS objects alive in the world: object ID, the campaign its name
     /// gives and the unit entity it carries (0 and 0 for an unmanaged one).
     pub fn objects(&self) -> Vec<(u64, u64, u64)> {
@@ -884,10 +902,16 @@ impl FakeSim {
         self.orphans.extend(self.groups.keys().copied());
         // Every row's payload is encoded again under the new binding.
         self.sent.clear();
+        // The agent binds a row again from its names, by the campaign's tag.
         for (object, b) in self.table.iter_mut() {
             *b = match self.objects.get(object) {
-                Some(o) if o.campaign == c && c != 0 => (o.entity, o.group_entity),
-                _ => (0, 0),
+                Some(o) => (
+                    name_entity(&o.name, c),
+                    self.groups
+                        .get(&o.group)
+                        .map_or(0, |g| name_entity(&g.name, c)),
+                ),
+                None => (0, 0),
             };
         }
     }
@@ -922,11 +946,10 @@ impl FakeSim {
                     },
                 },
             );
-            let bound = if campaign == self.campaign {
-                (*u, group)
-            } else {
-                (0, 0)
-            };
+            let bound = (
+                name_entity(&self.objects[&id].name, self.campaign),
+                name_entity(&gname, self.campaign),
+            );
             self.table.insert(id, bound);
             members.push(id);
         }
@@ -1326,7 +1349,7 @@ impl FakeSim {
                     group: 0,
                     entity,
                     group_entity: 0,
-                    campaign: name_campaign(name),
+                    campaign: name_campaign(name, self.campaign),
                     kind: object_kind::STATIC,
                     at: Position { object: gid, ..at },
                 },
@@ -1363,7 +1386,7 @@ impl FakeSim {
             FGroup {
                 name: name.to_owned(),
                 entity,
-                campaign: name_campaign(name),
+                campaign: name_campaign(name, self.campaign),
                 members,
                 route: Vec::new(),
                 attack: None,
@@ -2023,7 +2046,7 @@ impl FakeSim {
             FGroup {
                 name: name.to_owned(),
                 entity: h.entity,
-                campaign: name_campaign(name),
+                campaign: name_campaign(name, self.campaign),
                 members: members.clone(),
                 route: Vec::new(),
                 attack: None,

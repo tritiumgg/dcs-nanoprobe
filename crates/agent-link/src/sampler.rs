@@ -4807,52 +4807,23 @@ pub fn euler(x: [f64; 3], y: [f64; 3]) -> Option<(f64, f64, f64)> {
 }
 
 /// The `EntityId` a platform name gives under `campaign`, or 0
-/// (spec/world.md, "Names"). The name's kind letter must match: `u` for a
-/// unit, `s` for a static, `g` for a group.
+/// (spec/world.md, "Names"). The name's tag must be the campaign's and its
+/// marker must match the kind: `.` a unit, `#` a static, `!` a group.
 pub fn name_entity(name: &str, campaign: u64, kind: u32) -> u64 {
-    if campaign == 0 || name.len() > 28 {
+    use nanoprobe_transport::names::{self, Kind};
+    if campaign == 0 {
         return 0;
     }
-    let letter = match kind {
-        object_kind::UNIT => "u",
-        object_kind::STATIC => "s",
-        object_kind::GROUP => "g",
+    let want = match kind {
+        object_kind::UNIT => Kind::Unit,
+        object_kind::STATIC => Kind::Static,
+        object_kind::GROUP => Kind::Group,
         _ => return 0,
     };
-    let mut parts = name.split('.');
-    let (Some("np"), Some(k), Some(c), Some(e), None) = (
-        parts.next(),
-        parts.next(),
-        parts.next(),
-        parts.next(),
-        parts.next(),
-    ) else {
-        return 0;
-    };
-    if k != letter {
-        return 0;
-    }
-    match (base36(c), base36(e)) {
-        (Some(c), Some(e)) if c == campaign && e != 0 => e,
+    match names::parse(name) {
+        Some(p) if p.kind == want && p.tag == names::tag_of(campaign) => p.entity,
         _ => 0,
     }
-}
-
-/// A base-36 number in lower case with no leading zeros, below 2^53.
-fn base36(s: &str) -> Option<u64> {
-    if s.is_empty() || (s.len() > 1 && s.starts_with('0')) {
-        return None;
-    }
-    let mut v: u64 = 0;
-    for c in s.bytes() {
-        let d = match c {
-            b'0'..=b'9' => c - b'0',
-            b'a'..=b'z' => c - b'a' + 10,
-            _ => return None,
-        };
-        v = v.checked_mul(36)?.checked_add(u64::from(d))?;
-    }
-    (v < 1 << 53).then_some(v)
 }
 
 /// The cost of one clock read, µs: the mean of 64 reads.

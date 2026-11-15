@@ -91,6 +91,25 @@
 //! `DESTROYED` came exactly once for each old unit; the enumeration holds
 //! exactly G's units under G's name, and none of the old object IDs anywhere; and each new unit's `OBJECT` came.
 //!
+//! # The naming check: `--scenario names`
+//!
+//! The probe creates one group of `--units` `M-113`s and one `Hangar A`
+//! static, and waits until both are `live` and every unit's and the static's
+//! `OBJECT` came. It prints phase `spawned` with the names DCS reported. With
+//! `--control-dir` it waits there for `checked`, so the caller can read DCS.
+//! It then restarts the sidecar: a new link session and a new reconciler from
+//! the kept store, with no memory of the binding. It waits for a full
+//! enumeration that begins after the new `HELLO` and prints phase
+//! `rebound`. Then it removes both entities and waits for every
+//! `OBJECT_GONE` with `DESTROYED`.
+//!
+//! The run passes when: every name DCS reported is the platform name of the
+//! campaign's tag (spec/world.md, "Names"), with the entity and the group's
+//! name the agent bound it to; after the restart the enumeration reports
+//! every unit and the static again under the same names and entities, both
+//! entities stay `live`, and no spawn is sent; the reconciler counted no
+//! `foreign_name`; and every object went `DESTROYED` at the removal.
+//!
 //! Test tooling only: built from source, never released.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -475,6 +494,9 @@ fn opts(args: &[String]) -> Result<Opts, String> {
     if !(o.commanded_ms > 0.0 && o.commanded_ms <= 1000.0) {
         return Err("--commanded-ms is above 0 and at most 1000".into());
     }
+    if o.scenario == "names" && o.campaign == 0 {
+        return Err("--scenario names needs a campaign".into());
+    }
     if o.scenario == "paused" && o.control_dir.is_none() {
         return Err("--scenario paused needs --control-dir".into());
     }
@@ -483,6 +505,7 @@ fn opts(args: &[String]) -> Result<Opts, String> {
 
 struct Ctx {
     o: Opts,
+    cfg: Config,
     map: PathBuf,
     store: Store,
     rec: Reconciler,
@@ -610,8 +633,9 @@ pub fn run(args: &[String]) -> Result<bool, String> {
         },
         &store,
     );
-    let sim = LinkSim::start(cfg, Default::default());
+    let sim = LinkSim::start(cfg.clone(), Default::default());
     let mut c = Ctx {
+        cfg,
         deadline: Instant::now() + Duration::from_secs(o.seconds),
         o,
         map,
@@ -624,12 +648,199 @@ pub fn run(args: &[String]) -> Result<bool, String> {
     match c.o.scenario.as_str() {
         "groups" => groups(&mut c),
         "paused" => paused(&mut c),
-        other => Err(format!("--scenario is groups or paused, not {other}")),
+        "names" => names(&mut c),
+        other => Err(format!(
+            "--scenario is groups, paused or names, not {other}"
+        )),
     }
 }
 
 fn unit_name(c: &Ctx, id: EntityId) -> String {
     name(NameKind::Unit, CampaignId(c.o.campaign), id)
+}
+
+// ---------------------------------------------------------------------------
+// The naming check.
+
+fn names(c: &mut Ctx) -> Result<bool, String> {
+    use nanoprobe_transport::layout::opcode;
+    c.wait_ready()?;
+    let theater = c
+        .store
+        .loaded()
+        .map(|l| l.theater.clone())
+        .unwrap_or_default();
+    let at = |dx: f64, dz: f64| UnitState {
+        at: Point {
+            x: c.o.origin.0 + dx,
+            y: 0.0,
+            z: c.o.origin.1 + dz,
+        },
+        ..UnitState::default()
+    };
+    let units = (0..c.o.units)
+        .map(|u| NewUnit::new("M-113", at(0.0, u as f64 * 20.0)))
+        .collect();
+    let group = c
+        .store
+        .create_group(NewGroup {
+            theater: theater.clone(),
+            country: 2,
+            category: 2,
+            coalition: 2,
+            units,
+            authority: Authority::Sim,
+            label: "names group".into(),
+            extra: lv::obj(vec![("task", lv::s("Ground Nothing"))]),
+        })
+        .map_err(|e| format!("store: {e:?}"))?;
+    let mut hangar = NewUnit::new("Hangar A", at(400.0, 0.0));
+    hangar.extra = lv::obj(vec![("category", lv::s("Fortifications"))]);
+    let stat = c
+        .store
+        .create_static(NewGroup {
+            theater,
+            country: 2,
+            category: 0,
+            coalition: 2,
+            units: vec![hangar],
+            authority: Authority::Sim,
+            label: "names static".into(),
+            extra: Lv::Nil,
+        })
+        .map_err(|e| format!("store: {e:?}"))?;
+    let campaign = CampaignId(c.o.campaign);
+    let gname = name(NameKind::Group, campaign, group);
+    // Platform name -> (entity, group name the OBJECT must carry).
+    let mut expected: BTreeMap<String, (u64, String)> = BTreeMap::new();
+    for m in &c.store.group(group).expect("group").members {
+        expected.insert(name(NameKind::Unit, campaign, *m), (m.0, gname.clone()));
+    }
+    let sname = name(NameKind::Static, campaign, stat);
+    expected.insert(sname.clone(), (stat.0, String::new()));
+    let both_live = |c: &Ctx| {
+        [group, stat]
+            .iter()
+            .all(|i| c.store.group(*i).is_some_and(|g| g.state == State::Live))
+    };
+    let seen_all = |objects: &[Object]| {
+        let seen: BTreeSet<&str> = objects.iter().map(|o| o.name.as_str()).collect();
+        expected.keys().all(|n| seen.contains(n.as_str()))
+    };
+    c.until("both live and every OBJECT", |c| {
+        both_live(c) && seen_all(&c.log.objects)
+    })?;
+    // What DCS reported under the platform's names, first and after the restart.
+    let judge = |objects: &[Object]| -> (bool, Vec<String>) {
+        let mut ok = true;
+        let mut seen = Vec::new();
+        for (n, (entity, gn)) in &expected {
+            let found: Vec<&Object> = objects.iter().filter(|o| &o.name == n).collect();
+            let good = !found.is_empty()
+                && found
+                    .iter()
+                    .all(|o| o.entity == *entity && &o.group_name == gn);
+            ok &= good;
+            if let Some(o) = found.last() {
+                seen.push(format!(
+                    "{}|{}|{}|{}",
+                    o.name, o.group_name, o.entity, o.group_entity
+                ));
+            }
+        }
+        (ok, seen)
+    };
+    let (first_ok, first) = judge(&c.log.objects);
+    println!(
+        "{{\"ev\":\"phase\",\"name\":\"spawned\",\"group\":{},\"static\":{},\"objects\":{}}}",
+        json_string(&gname),
+        json_string(&sname),
+        str_list(&first)
+    );
+    // With a control folder, the caller reads DCS while the objects exist.
+    if c.o.control_dir.is_some() {
+        wait_file(c, "checked", true)?;
+    }
+    // The sidecar restarts: a new link session and a reconciler that knows
+    // only the store.
+    let spawns = |c: &Ctx, from: usize| {
+        c.log.results[from..]
+            .iter()
+            .filter(|r| {
+                matches!(
+                    u64::from(r.result.opcode),
+                    opcode::GROUP_SPAWN | opcode::STATIC_SPAWN
+                )
+            })
+            .count()
+    };
+    let last = c.sim.last_numbers();
+    let old = std::mem::replace(&mut c.sim, LinkSim::start(c.cfg.clone(), last));
+    drop(old);
+    c.rec = Reconciler::new(
+        RecConfig {
+            materialize_per_frame: c.o.per_step.max(1),
+            ..RecConfig::default()
+        },
+        &c.store,
+    );
+    let results_at = c.log.results.len();
+    let enums_at = c.log.enums.len();
+    c.wait_ready()?;
+    c.until("a full enumeration after the restart", |c| {
+        c.log.enums[enums_at..].iter().any(|e| e.ended)
+    })?;
+    let run = c.log.enums[enums_at..]
+        .iter()
+        .find(|e| e.ended)
+        .expect("checked")
+        .objects
+        .clone();
+    let (again_ok, again) = judge(&run);
+    let live_after = both_live(c);
+    let respawned = spawns(c, results_at);
+    let foreign = c.rec.counters().foreign;
+    println!(
+        "{{\"ev\":\"phase\",\"name\":\"rebound\",\"objects\":{},\"live\":{live_after},\
+         \"spawns\":{respawned},\"foreign\":{foreign}}}",
+        str_list(&again)
+    );
+    let objects: BTreeSet<u64> = c
+        .log
+        .objects
+        .iter()
+        .filter(|o| expected.contains_key(&o.name))
+        .map(|o| o.object)
+        .collect();
+    for id in [group, stat] {
+        c.store
+            .remove_entity(id)
+            .map_err(|e| format!("store: {e:?}"))?;
+    }
+    c.until("every OBJECT_GONE after the removal", |c| {
+        let gone: BTreeSet<u64> = c
+            .log
+            .gone
+            .iter()
+            .filter(|g| g.reason == gone_reason::DESTROYED)
+            .map(|g| g.object)
+            .collect();
+        objects.iter().all(|o| gone.contains(o))
+    })?;
+    let tag = nanoprobe_sidecar::ids::tag(campaign);
+    let forms = expected
+        .keys()
+        .all(|n| nanoprobe_sidecar::ids::parse(n).is_some_and(|p| p.tag == tag))
+        && nanoprobe_sidecar::ids::parse(&gname).is_some_and(|p| p.tag == tag);
+    let pass = forms && first_ok && again_ok && live_after && respawned == 0 && foreign == 0;
+    println!(
+        "{{\"ev\":\"verdict\",\"pass\":{pass},\"scenario\":\"names\",\"tag\":{},\
+         \"forms\":{forms},\"bound\":{first_ok},\"rebound\":{again_ok},\"live_after\":{live_after},\
+         \"spawns_after_restart\":{respawned},\"foreign\":{foreign},\"removed\":{}}}",
+        json_string(tag.as_str()),
+        objects.len()
+    );
+    Ok(pass)
 }
 
 // ---------------------------------------------------------------------------

@@ -1687,3 +1687,88 @@ fn kills_lost_with_a_dcs_restart_settle_under_the_inferred_mark_rule() {
     );
     assert!(!w.store.held(nanoprobe_sidecar::ids::EntityId(3)));
 }
+
+/// Naming step (spec/world.md, "Names"): after a sidecar restart, with the
+/// agent's binding gone, the rows bind again by the campaign tag in their
+/// platform names alone, every group stays live and nothing is spawned again.
+/// A row of another tag stays unbound and is `foreign_name`; a row of a
+/// never-seen campaign with the same tag binds, which is the known limit.
+#[test]
+fn a_restarted_sidecar_rebinds_from_names_alone() {
+    use nanoprobe_sidecar::sim::wire::opcode;
+
+    use nanoprobe_sidecar::ids::{CampaignId, tag};
+
+    let mut w = World::new(2, 1, LostPolicy::Respawn);
+    w.settle().unwrap();
+    let ids: Vec<_> = w.store.groups().map(|g| g.id).collect();
+    let campaign = w.store.campaign().0;
+    // In DCS too: a group of another campaign, whose tag differs, and one of
+    // a campaign never seen that shares the active campaign's tag (the known
+    // limit). Entities far above the store's keep them apart from its own.
+    let other = campaign + 1;
+    assert_ne!(tag(CampaignId(other)), tag(CampaignId(campaign)));
+    let mut twin = campaign + 2;
+    while tag(CampaignId(twin)) != tag(CampaignId(campaign)) {
+        twin += 1;
+    }
+    let before_objects: Vec<u64> = w.sim.objects().iter().map(|o| o.0).collect();
+    w.sim.add_campaign_group(other, 9_001, &[9_002]);
+    let with_other: Vec<u64> = w.sim.objects().iter().map(|o| o.0).collect();
+    w.sim.add_campaign_group(twin, 9_101, &[9_102]);
+    let new_of = |from: &[u64], to: &[u64]| -> Vec<u64> {
+        to.iter().filter(|o| !from.contains(o)).copied().collect()
+    };
+    let other_rows = new_of(&before_objects, &with_other);
+    let twin_rows = new_of(
+        &with_other,
+        &w.sim.objects().iter().map(|o| o.0).collect::<Vec<_>>(),
+    );
+    let spawned = |w: &World, id| {
+        commands(w, id, opcode::GROUP_SPAWN) + commands(w, id, opcode::STATIC_SPAWN)
+    };
+    let before: Vec<_> = ids.iter().map(|&id| spawned(&w, id)).collect();
+    w.apply(&Op::Detach).unwrap();
+    // A switch away and back discards the agent's binding: a row binds again
+    // only when its name carries the campaign's tag.
+    w.sim.set_campaign(campaign + 1);
+    w.sim.set_campaign(campaign);
+    w.rec = nanoprobe_sidecar::reconciler::Reconciler::new(
+        nanoprobe_sidecar::reconciler::Config {
+            on_lost: LostPolicy::Respawn,
+            ..Default::default()
+        },
+        &w.store,
+    );
+    w.sim.attach(99);
+    w.settle().unwrap();
+    for (i, &id) in ids.iter().enumerate() {
+        assert_eq!(
+            w.store.group(id).unwrap().state,
+            State::Live,
+            "group {id:?}"
+        );
+        assert_eq!(spawned(&w, id), before[i], "group {id:?} was spawned again");
+    }
+    // Every row of the store's entities is bound again, by its name.
+    for g in w.store.groups() {
+        for m in &g.members {
+            let row = w
+                .sim
+                .objects()
+                .into_iter()
+                .find(|&(_, c, e)| c == campaign && e == m.0)
+                .expect("a row of the unit");
+            assert_eq!(w.sim.binding(row.0).0, m.0, "unit {m:?}");
+        }
+    }
+    // The other campaign's row stays unbound and is reported foreign.
+    for o in &other_rows {
+        assert_eq!(w.sim.binding(*o), (0, 0));
+    }
+    assert!(w.rec.counters().foreign > 0);
+    // The never-seen campaign with the same tag binds as the active one's.
+    for o in &twin_rows {
+        assert_eq!(w.sim.binding(*o), (9_102, 9_101));
+    }
+}

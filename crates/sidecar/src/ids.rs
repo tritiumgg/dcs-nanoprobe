@@ -19,23 +19,26 @@ impl fmt::Display for EntityId {
     }
 }
 
-/// The `<kind>` part of a platform name.
+pub use nanoprobe_transport::names::Tag;
+use nanoprobe_transport::names::{self, Kind};
+
+/// The kind of a platform name: its DCS namespace.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NameKind {
-    /// `g`
+    /// `np!`
     Group,
-    /// `u`
+    /// `np.`
     Unit,
-    /// `s`
+    /// `np#`
     Static,
 }
 
 impl NameKind {
-    fn letter(self) -> char {
+    fn kind(self) -> Kind {
         match self {
-            NameKind::Group => 'g',
-            NameKind::Unit => 'u',
-            NameKind::Static => 's',
+            NameKind::Group => Kind::Group,
+            NameKind::Unit => Kind::Unit,
+            NameKind::Static => Kind::Static,
         }
     }
 }
@@ -43,84 +46,61 @@ impl NameKind {
 /// A parsed platform name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlatformName {
-    /// The kind letter.
+    /// The namespace marker.
     pub kind: NameKind,
-    /// The campaign it names.
-    pub campaign: CampaignId,
+    /// The tag of the campaign it names.
+    pub tag: Tag,
     /// The entity it names.
     pub entity: EntityId,
 }
 
-fn base36(mut v: u64, out: &mut String) {
-    let mut digits = [0u8; 13];
-    let mut n = 0;
-    loop {
-        let d = (v % 36) as u8;
-        digits[n] = if d < 10 { b'0' + d } else { b'a' + d - 10 };
-        n += 1;
-        v /= 36;
-        if v == 0 {
-            break;
-        }
-    }
-    for &d in digits[..n].iter().rev() {
-        out.push(d as char);
-    }
+/// A campaign's tag (spec/world.md, "Names").
+pub fn tag(campaign: CampaignId) -> Tag {
+    names::tag_of(campaign.0)
 }
 
-fn parse_base36(s: &str) -> Option<u64> {
-    if s.is_empty() || s.len() > 11 || s.starts_with('0') {
-        return None;
+/// The ID of a new campaign (spec/world.md, "Identities" and "Names"): the
+/// creation time `now_ms`, or one more than the newest of `existing` if that
+/// is larger, then moved forward until no campaign of `existing` has its tag.
+pub fn new_campaign(now_ms: u64, existing: &[CampaignId]) -> CampaignId {
+    let newest = existing.iter().map(|c| c.0).max().unwrap_or(0);
+    let mut id = now_ms.max(newest + 1).max(1);
+    let taken: std::collections::HashSet<Tag> = existing.iter().map(|&c| tag(c)).collect();
+    // Each step lands on a free tag with probability at least
+    // 1 - existing/62^3, so this ends after a few steps.
+    while taken.contains(&names::tag_of(id)) {
+        id += 1;
     }
-    let mut v: u64 = 0;
-    for c in s.bytes() {
-        let d = match c {
-            b'0'..=b'9' => c - b'0',
-            b'a'..=b'z' => c - b'a' + 10,
-            _ => return None,
-        };
-        v = v.checked_mul(36)?.checked_add(u64::from(d))?;
-    }
-    (v <= MAX_ID).then_some(v)
+    debug_assert!(id <= MAX_ID);
+    CampaignId(id)
 }
 
-/// The DCS name of a platform object: `np.<kind>.<campaign>.<entity>`.
+/// The DCS name of a platform object: `np<marker><tag><entity>`.
 pub fn name(kind: NameKind, campaign: CampaignId, entity: EntityId) -> String {
     debug_assert!(campaign.0 != 0 && campaign.0 <= MAX_ID);
     debug_assert!(entity.0 != 0 && entity.0 <= MAX_ID);
-    let mut s = String::with_capacity(28);
-    s.push_str("np.");
-    s.push(kind.letter());
-    s.push('.');
-    base36(campaign.0, &mut s);
-    s.push('.');
-    base36(entity.0, &mut s);
-    s
+    names::name(kind.kind(), tag(campaign), entity.0)
 }
 
 /// Parse a platform name. Anything not exactly in the form, including a zero
 /// or a leading zero, is not a platform name.
 pub fn parse(name: &str) -> Option<PlatformName> {
-    let mut parts = name.split('.');
-    if parts.next()? != "np" {
-        return None;
-    }
-    let kind = match parts.next()? {
-        "g" => NameKind::Group,
-        "u" => NameKind::Unit,
-        "s" => NameKind::Static,
-        _ => return None,
-    };
-    let campaign = parse_base36(parts.next()?)?;
-    let entity = parse_base36(parts.next()?)?;
-    if parts.next().is_some() {
-        return None;
-    }
+    let p = names::parse(name)?;
     Some(PlatformName {
-        kind,
-        campaign: CampaignId(campaign),
-        entity: EntityId(entity),
+        kind: match p.kind {
+            Kind::Group => NameKind::Group,
+            Kind::Unit => NameKind::Unit,
+            Kind::Static => NameKind::Static,
+        },
+        tag: p.tag,
+        entity: EntityId(p.entity),
     })
+}
+
+/// Whether a parsed name belongs to `campaign`: its tag is the campaign's.
+/// No name belongs to campaign 0, which means none.
+pub fn of_campaign(p: &PlatformName, campaign: CampaignId) -> bool {
+    campaign.0 != 0 && p.tag == tag(campaign)
 }
 
 #[cfg(test)]
@@ -128,50 +108,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_spec_example_parses() {
-        let n = parse("np.u.m3k9x2a1.1z").unwrap();
-        assert_eq!(n.kind, NameKind::Unit);
-        assert_eq!(n.entity, EntityId(71));
-        assert_eq!(
-            name(NameKind::Unit, n.campaign, n.entity),
-            "np.u.m3k9x2a1.1z"
-        );
-    }
-
-    #[test]
-    fn names_round_trip_and_fit() {
-        for (c, e) in [(1, 1), (MAX_ID, MAX_ID), (1_763_000_000_000, 36), (35, 37)] {
-            for k in [NameKind::Group, NameKind::Unit, NameKind::Static] {
-                let s = name(k, CampaignId(c), EntityId(e));
-                assert!(s.len() <= 28, "{s}");
-                assert!(
-                    s.bytes()
-                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.')
-                );
-                let p = parse(&s).unwrap();
-                assert_eq!((p.kind, p.campaign.0, p.entity.0), (k, c, e));
-            }
+    fn names_carry_the_campaign_tag() {
+        let c = CampaignId(1_763_000_000_000);
+        assert_eq!(tag(c).as_str(), "jqW");
+        assert_eq!(name(NameKind::Unit, c, EntityId(73)), "np.jqW1B");
+        assert_eq!(name(NameKind::Group, c, EntityId(72)), "np!jqW1A");
+        assert_eq!(name(NameKind::Static, c, EntityId(74)), "np#jqW1C");
+        for (k, e) in [
+            (NameKind::Group, 1),
+            (NameKind::Unit, MAX_ID),
+            (NameKind::Static, 62),
+        ] {
+            let p = parse(&name(k, c, EntityId(e))).unwrap();
+            assert_eq!((p.kind, p.entity), (k, EntityId(e)));
+            assert!(of_campaign(&p, c));
         }
     }
 
     #[test]
-    fn other_names_do_not_parse() {
-        for s in [
-            "",
-            "np",
-            "np.g.1",
-            "np.g.1.0",
-            "np.g.0.1",
-            "np.g.01.1",
-            "np.x.1.1",
-            "np.g.1.1.1",
-            "NP.g.1.1",
-            "np.g.1.A",
-            "np.g.1.-1",
-            "np.g.zzzzzzzzzzz.1",
-            "Ground-1",
-        ] {
-            assert_eq!(parse(s), None, "{s}");
+    fn a_name_of_another_tag_is_foreign() {
+        let (a, b) = (CampaignId(1_763_000_000_000), CampaignId(1_700_000_000_000));
+        let p = parse(&name(NameKind::Unit, b, EntityId(5))).unwrap();
+        assert!(!of_campaign(&p, a));
+        assert!(of_campaign(&p, b));
+        // Campaign 0's hash is `nwl`, and still no name is campaign 0's.
+        assert!(!of_campaign(&parse("np.nwl1").unwrap(), CampaignId(0)));
+    }
+
+    #[test]
+    fn a_new_campaign_never_shares_a_tag_or_an_id() {
+        assert_eq!(
+            new_campaign(1_763_000_000_000, &[]),
+            CampaignId(1_763_000_000_000)
+        );
+        // A clock behind the newest campaign still gives a newer ID.
+        assert_eq!(new_campaign(5, &[CampaignId(9)]), CampaignId(10));
+        // The tag of the creation millisecond is taken: the ID moves forward.
+        let now = 1_763_000_000_000;
+        let mut clash = 1;
+        while tag(CampaignId(clash)) != tag(CampaignId(now)) {
+            clash += 1;
+        }
+        let id = new_campaign(now, &[CampaignId(clash)]);
+        assert!(id.0 > now);
+        assert_ne!(tag(id), tag(CampaignId(clash)));
+        // Many campaigns: every new one gets a tag none of them has.
+        let mut all: Vec<CampaignId> = Vec::new();
+        for _ in 0..2_000 {
+            let id = new_campaign(now, &all);
+            assert!(all.iter().all(|c| tag(*c) != tag(id) && *c != id));
+            all.push(id);
         }
     }
 }
