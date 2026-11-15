@@ -716,8 +716,12 @@ dependencies = [
 name = "nanoprobe-cli"
 version = "0.1.0"
 dependencies = [
+ "libc",
+ "nanoprobe-agent-link",
+ "nanoprobe-install",
  "nanoprobe-proto",
  "nanoprobe-transport",
+ "serde_json",
  "tokio",
  "tonic",
 ]
@@ -759,6 +763,16 @@ dependencies = [
  "nanoprobe-proto",
  "tokio",
  "tonic",
+]
+
+[[package]]
+name = "nanoprobe-install"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "nanoprobe-agent-link",
+ "sha2",
+ "toml",
 ]
 
 [[package]]
@@ -1797,6 +1811,7 @@ dependencies = [
  "hmac",
  "nanoprobe-agent-link",
  "nanoprobe-fake-agent",
+ "nanoprobe-install",
  "nanoprobe-transport",
  "prost",
  "prost-types",

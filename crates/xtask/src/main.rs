@@ -12,7 +12,6 @@ mod commands;
 mod eval;
 mod faults;
 mod hello;
-mod install;
 mod link;
 mod live;
 mod meter;
@@ -34,6 +33,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use install::Profile;
+use nanoprobe_install as install;
 use profile::Target;
 
 const USAGE: &str = "\

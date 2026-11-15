@@ -1,8 +1,11 @@
-//! Deploy, rollback and undeploy, as `spec/install.md` lays them out.
+//! Deploy, rollback and undeploy, as `spec/install.md` lays them out, and the
+//! release's install and uninstall, which add the `autoexec.cfg` merge.
 //!
 //! The logic runs against [`Profile`], a small file-system interface rooted at
 //! a Saved Games profile, so the same code serves a local folder and a
 //! container over SSH. Paths given to a [`Profile`] are relative and use `/`.
+
+pub mod autoexec;
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -27,8 +30,12 @@ const DEV_LUA: &str = "nanoprobe/dev/lua";
 pub const ROOT: &str = "nanoprobe";
 const MANIFEST: &str = "nanoprobe/manifest.txt";
 const RECORD: &str = "nanoprobe/install.txt";
-const LOGS: &str = "nanoprobe/logs";
-const VERSIONS: &str = "nanoprobe/versions";
+/// The platform's logs.
+pub const LOGS: &str = "nanoprobe/logs";
+/// The version folders.
+pub const VERSIONS: &str = "nanoprobe/versions";
+/// The kill switch.
+pub const DISABLE: &str = "nanoprobe/disable";
 /// The build the running hook loaded, which the hook writes at start.
 pub const RUNNING: &str = "nanoprobe/running.txt";
 /// The agent's settings (spec/config.md).
@@ -37,6 +44,16 @@ pub const AGENT_TOML: &str = "nanoprobe/agent.toml";
 pub const TOKEN: &str = "nanoprobe/token";
 /// The loader's parent folders, outermost first.
 const LOADER_DIRS: [&str; 2] = ["Scripts", "Scripts/Hooks"];
+/// The folders `install.txt` may list: the loader's, and the one the
+/// `autoexec.cfg` merge creates.
+const CREATED_DIRS: [&str; 3] = ["Scripts", "Scripts/Hooks", autoexec::CONFIG];
+/// The version folder's files other than the DLL, in a package and in this
+/// repository's `lua/agent/`.
+pub const VERSION_LUA: [&str; 3] = ["hook.lua", "log.lua", "shim.lua"];
+/// The agent DLL's name in a package's `payload/` folder.
+pub const PACKAGE_DLL: &str = "nanoprobe_agent.dll";
+/// The loader's name in a package's `payload/` folder.
+pub const PACKAGE_LOADER: &str = "nanoprobe-hook.lua";
 
 /// File operations on one Saved Games profile.
 pub trait Profile {
@@ -100,6 +117,24 @@ pub struct Payload {
 }
 
 impl Payload {
+    /// The payload in a release package's `payload/` folder: the loader, the
+    /// DLL and the version's Lua files under `lua/`.
+    pub fn from_package(dir: &Path) -> Result<Payload, String> {
+        let read = |path: PathBuf| {
+            std::fs::read(&path).map_err(|e| format!("could not read {}: {e}", path.display()))
+        };
+        let mut files = Vec::new();
+        for name in VERSION_LUA {
+            files.push((format!("lua/{name}"), read(dir.join("lua").join(name))?));
+        }
+        Ok(Payload {
+            loader: read(dir.join(PACKAGE_LOADER))?,
+            dll: read(dir.join(PACKAGE_DLL))?,
+            files,
+            dev: None,
+        })
+    }
+
     /// The payload from this repository's Lua files and a built DLL.
     pub fn from_repository(repo: &Path, dll: &Path, dev: bool) -> Result<Payload, String> {
         let read = |path: PathBuf| {
@@ -479,10 +514,13 @@ pub fn rollback(profile: &dyn Profile) -> Result<Manifest, String> {
     Ok(new)
 }
 
-/// Remove everything deploy installed. Returns whether anything was there.
+/// Remove everything deploy and install put in the profile, the
+/// `autoexec.cfg` block included. Returns whether anything was there.
 pub fn undeploy(profile: &dyn Profile) -> Result<bool, String> {
     let record = profile.read(RECORD)?;
-    let installed = record.is_some() || profile.is_dir(ROOT)? || profile.read(LOADER)?.is_some();
+    let merged = autoexec::remove(profile)?;
+    let installed =
+        merged || record.is_some() || profile.is_dir(ROOT)? || profile.read(LOADER)?.is_some();
 
     profile.remove_file(LOADER)?;
     profile.remove_file(DEV_LOADER)?;
@@ -494,13 +532,51 @@ pub fn undeploy(profile: &dyn Profile) -> Result<bool, String> {
         .as_deref()
         .unwrap_or("")
         .lines()
-        .filter(|dir| LOADER_DIRS.contains(dir))
+        .filter(|dir| CREATED_DIRS.contains(dir))
         .collect();
     created.sort_by_key(|dir| std::cmp::Reverse(dir.len()));
     for dir in created {
         profile.remove_empty_dir(dir)?;
     }
     Ok(installed)
+}
+
+/// What [`install`] did.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Installed {
+    /// The deploy.
+    pub deployed: Deployed,
+    /// The token.
+    pub configured: Configured,
+    /// The `autoexec.cfg` block.
+    pub merged: autoexec::Merged,
+}
+
+/// The release's install: deploy `payload`, create the token when there is
+/// none, and merge the `autoexec.cfg` block. Running it again with the same
+/// payload changes nothing.
+pub fn install(profile: &dyn Profile, payload: &Payload) -> Result<Installed, String> {
+    // A damaged block stops install before it writes anything.
+    autoexec::check(profile)?;
+    let config_existed = profile.is_dir(autoexec::CONFIG)?;
+    let deployed = deploy(profile, payload)?;
+    if !config_existed {
+        let mut record = profile.read(RECORD)?.unwrap_or_default();
+        let listed = String::from_utf8_lossy(&record)
+            .lines()
+            .any(|line| line == autoexec::CONFIG);
+        if !listed {
+            record.extend_from_slice(format!("{}\n", autoexec::CONFIG).as_bytes());
+            profile.write(RECORD, &record)?;
+        }
+    }
+    let configured = configure(profile, None)?;
+    let merged = autoexec::merge(profile)?;
+    Ok(Installed {
+        deployed,
+        configured,
+        merged,
+    })
 }
 
 /// SHA-256 of `bytes` in lower-case hex.
@@ -578,6 +654,10 @@ impl Profile for Local {
         temp.push(".partial");
         let temp = PathBuf::from(temp);
         std::fs::write(&temp, bytes).map_err(|e| io_error(&temp, e))?;
+        // A file written again keeps its permissions, such as a user's 0600.
+        if let Ok(old) = std::fs::metadata(&path) {
+            std::fs::set_permissions(&temp, old.permissions()).map_err(|e| io_error(&temp, e))?;
+        }
         std::fs::rename(&temp, &path).map_err(|e| io_error(&path, e))
     }
 

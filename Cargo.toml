@@ -9,6 +9,7 @@ members = [
     "crates/cli",
     "crates/fake-agent",
     "crates/fake-sidecar",
+    "crates/install",
     "crates/proto",
     "crates/sidecar",
     "crates/sim-fake",
