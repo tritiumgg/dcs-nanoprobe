@@ -139,6 +139,15 @@ fn unit(u: &Unit, theater: &str) -> pb::Unit {
         life_max: (u.captured.life0 > 0.0).then_some(u.captured.life0),
         life: life(u),
         fuel: sampled(u.state.fuel, u),
+        left: if u.dead {
+            pb::UnitLeft::Unspecified
+        } else if u.removed {
+            pb::UnitLeft::Removed
+        } else if u.missing {
+            pb::UnitLeft::Missing
+        } else {
+            pb::UnitLeft::Unspecified
+        } as i32,
         ..pb::Unit::default()
     }
 }
@@ -688,5 +697,43 @@ mod tests {
         assert!(!f.passes(&s, s.group(g).expect("g")));
         assert!(f.kind_passes(&s, s.group(g).expect("g")));
         assert!(Filter::new(None, true).is_err());
+    }
+}
+
+#[cfg(test)]
+mod left_tests {
+    use nanoprobe_sidecar::ids::CampaignId;
+    use nanoprobe_sidecar::store::{LeftAs, NewGroup, NewUnit};
+    use nanoprobe_transport::codec::Lv;
+
+    use super::*;
+
+    #[test]
+    fn a_unit_shows_how_it_left() {
+        let mut s = Store::new(CampaignId(1), 10);
+        let g = s
+            .create_group(NewGroup {
+                theater: "Caucasus".into(),
+                country: 2,
+                category: 2,
+                coalition: 2,
+                units: (0..4)
+                    .map(|_| NewUnit::new("M-113", Default::default()))
+                    .collect(),
+                authority: nanoprobe_sidecar::store::Authority::Sim,
+                label: String::new(),
+                extra: Lv::Nil,
+            })
+            .expect("group");
+        let m = s.group(g).expect("g").members.clone();
+        s.left(m[1], 11, LeftAs::Missing);
+        s.left(m[2], 12, LeftAs::Removed);
+        s.left(m[3], 13, LeftAs::Missing);
+        s.death(m[3]).expect("death");
+        let left = |u| unit(s.unit(u).expect("unit"), "Caucasus").left;
+        assert_eq!(left(m[0]), pb::UnitLeft::Unspecified as i32, "alive");
+        assert_eq!(left(m[1]), pb::UnitLeft::Missing as i32);
+        assert_eq!(left(m[2]), pb::UnitLeft::Removed as i32);
+        assert_eq!(left(m[3]), pb::UnitLeft::Unspecified as i32, "dead");
     }
 }

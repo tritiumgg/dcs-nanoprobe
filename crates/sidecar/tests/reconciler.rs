@@ -6,7 +6,7 @@
 
 use nanoprobe_sidecar::lifecycle::State;
 use nanoprobe_sidecar::store::LostPolicy;
-use nanoprobe_sim_fake::harness::{Op, Violation, World};
+use nanoprobe_sim_fake::harness::{CAMPAIGN, Op, Violation, World};
 use proptest::prelude::*;
 
 fn op() -> impl Strategy<Value = Op> {
@@ -116,7 +116,7 @@ fn with_no_faults_every_group_goes_live_and_takes_its_order() {
 }
 
 #[test]
-fn a_silently_removed_group_is_lost_then_spawned_again_after_a_mission_load() {
+fn a_silently_removed_group_stays_lost_after_a_mission_load() {
     let mut w = World::new(1, 0, LostPolicy::Report);
     w.settle().unwrap();
     let units: Vec<u64> = w
@@ -130,9 +130,12 @@ fn a_silently_removed_group_is_lost_then_spawned_again_after_a_mission_load() {
     }
     w.settle().unwrap();
     assert_eq!(w.store.groups().next().unwrap().state, State::Lost);
+    // DCS gave no death and no proof of a removal: each member may be dead,
+    // so a restore does not re-create them (spec/persistence.md, "Restore").
     w.apply(&Op::LoadMission).unwrap();
     w.settle().unwrap();
-    assert_eq!(w.store.groups().next().unwrap().state, State::Live);
+    assert_eq!(w.store.groups().next().unwrap().state, State::Lost);
+    assert!(w.units_in_dcs().iter().all(|(_, e)| *e == 0));
 }
 
 #[test]
@@ -1637,4 +1640,50 @@ mod extension_answers {
         w.rec.step(&mut w.store, &mut w.sim);
         assert_eq!(count(&w, opcode::STATIC_DESTROY), d + 1, "one resend");
     }
+}
+
+/// Regression: kills while another campaign held the agent, then a DCS
+/// restart. The members' OBJECT_GONE records were lost with the restart, so
+/// their marks are inferred at an enumeration's end, not journalled, and
+/// clear at the new generation: the restart spawns them again. That is the
+/// cost the S18 ruling accepts (an inferred mark can name a member DCS never
+/// bound). The schedule must still settle with every invariant held.
+#[test]
+fn kills_lost_with_a_dcs_restart_settle_under_the_inferred_mark_rule() {
+    let ops = [
+        Op::Order(0),
+        Op::KillRemoved(0),
+        Op::Frames(1),
+        Op::Kill(0),
+        Op::ForeignCampaign,
+        Op::Kill(423),
+        Op::Reattach,
+        Op::Kill(21352),
+        Op::Kill(1272),
+        Op::FixSpec(37),
+        Op::RestartDcs,
+        Op::Authority(37099, false),
+        Op::RefuseDestroys(5),
+        Op::Kill(29656),
+        Op::Kill(38785),
+        Op::Kill(56337),
+    ];
+    let mut w = World::new(2, 2, LostPolicy::Report);
+    let first_boot = w.sim.agent_boot();
+    for op in &ops {
+        w.apply(op).unwrap();
+    }
+    w.settle().unwrap();
+    // Members 2 and 3 of group 1 died in DCS before the restart, and the
+    // restart spawned them again: their marks were inferred, not reported.
+    let deaths = &w.sim.ledger().deaths;
+    assert!(deaths.contains(&(CAMPAIGN, 2)) && deaths.contains(&(CAMPAIGN, 3)));
+    assert!(
+        w.sim
+            .ledger()
+            .spawns
+            .iter()
+            .any(|s| s.0 > first_boot && s.2 == 1 && s.4.contains(&2) && s.4.contains(&3))
+    );
+    assert!(!w.store.held(nanoprobe_sidecar::ids::EntityId(3)));
 }

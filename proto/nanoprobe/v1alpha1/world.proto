@@ -67,6 +67,21 @@ message Unit {
   repeated string occupants = 12;
   Stamp sampled = 13;
   optional double life_max = 14;
+  // How the unit left DCS without a death fact, if it did. While the mark
+  // stands, no spawn includes the unit. A death fact or the unit being found
+  // again releases it. A mark the agent reported outlives a mission load
+  // until the controller removes the group; a mark inferred at an
+  // enumeration's end clears at the load (spec/world.md, "Respawn gate").
+  UnitLeft left = 15;
+}
+
+enum UnitLeft {
+  // It has not left, or it is dead.
+  UNIT_LEFT_UNSPECIFIED = 0;
+  // DCS no longer has it and the cause is unknown: it may be dead.
+  UNIT_LEFT_MISSING = 1;
+  // DCS no longer has it and the read showed a removal, not a kill.
+  UNIT_LEFT_REMOVED = 2;
 }
 
 message Group {

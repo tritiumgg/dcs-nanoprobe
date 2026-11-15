@@ -94,6 +94,10 @@ pub enum Trigger {
     /// The authority moved to the campaign, or the entity's theater is not
     /// loaded, and no spawn of it is unanswered.
     Withdraw,
+    /// Every member without a death fact left DCS in an earlier generation
+    /// with no death fact, so none may be spawned (spec/persistence.md,
+    /// "Restore").
+    HeldOut,
     /// The destroy that ends a dematerialization was refused or unknown as
     /// many times as the limit allows.
     DestroyFailed,
@@ -154,6 +158,7 @@ pub fn next(state: State, trigger: Trigger) -> Option<State> {
         (S::Lost, T::PolicyDead) => S::Dead,
         (S::Unspawnable, T::SpecChanged) => S::Virtual,
         (S::Materializing, T::Withdraw) => S::Virtual,
+        (S::Materializing, T::HeldOut) => S::Lost,
         (S::Dematerializing, T::DestroyFailed) => S::Lost,
         _ => return None,
     })
@@ -172,6 +177,7 @@ mod tests {
             (S::Materializing, T::SpawnApplied, S::Live),
             (S::Materializing, T::SpawnRefused, S::Unspawnable),
             (S::Materializing, T::SpawnUnknown, S::Materializing),
+            (S::Materializing, T::HeldOut, S::Lost),
             (
                 S::Materializing,
                 T::NewGeneration { same_theater: true },

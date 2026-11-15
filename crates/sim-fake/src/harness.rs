@@ -912,6 +912,25 @@ impl World {
         let policy =
             |g: &nanoprobe_sidecar::store::Group| g.on_lost.unwrap_or(self.rec_cfg.on_lost);
         let (boot, mission_gen) = (self.sim.agent_boot(), self.sim.mission_gen());
+        // Every member without a death fact left DCS, dead or removed, and
+        // the sidecar holds no death fact for it: none may be spawned (spec/persistence.md,
+        // "Restore").
+        let held_out = |g: &nanoprobe_sidecar::store::Group| {
+            let mut living = g
+                .members
+                .iter()
+                .filter(|m| !self.store.unit(**m).expect("unit").dead);
+            living.clone().next().is_some()
+                && living.all(|m| {
+                    let u = self.store.unit(*m).expect("unit");
+                    (u.missing || u.removed)
+                        && (ledger.deaths.contains(&(campaign, m.0))
+                            || ledger
+                                .removed
+                                .iter()
+                                .any(|&(_, _, c, e)| c == campaign && e == m.0))
+                })
+        };
         if self
             .store
             .loaded()
@@ -1015,7 +1034,8 @@ impl World {
                             g.members.iter().any(|m| {
                                 let k = (boot, mission_gen, campaign, m.0);
                                 ledger.removed.contains(&k) || ledger.unreported.contains(&k)
-                            }) || (g.error.as_deref().is_some_and(|e| e.starts_with("destroy failed"))
+                            }) || held_out(g)
+                                || (g.error.as_deref().is_some_and(|e| e.starts_with("destroy failed"))
                                 && ledger
                                     .failed_destroys
                                     .get(&(boot, mission_gen, campaign, g.id.0)).copied().unwrap_or(0)

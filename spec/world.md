@@ -166,7 +166,7 @@ a group of one.
 | `live` | In DCS, at least one member alive |
 | `dematerializing` | Leaving DCS: a capture-and-destroy, or for a static a capture and then a destroy, was sent, and the destroy is not yet applied |
 | `dead` | Every member has a death fact. Final. |
-| `lost` | Missing from DCS with no death fact, in the same mission generation |
+| `lost` | Missing from DCS with no death fact, or held: every member without a death fact is held across a mission generation (see "Respawn gate") |
 | `unspawnable` | DCS refused the spawn. Not retried. |
 
 | From | To | When |
@@ -175,6 +175,7 @@ a group of one.
 | `materializing` | `live` | The spawn's outcome is `applied` |
 | `materializing` | `unspawnable` | The spawn's outcome is `refused` (spec/errors.md) |
 | `materializing` | `materializing` | The spawn's outcome is `unknown` or `not_sent`, or the mission generation changes: the spawn is sent again |
+| `materializing` | `lost` | Every member without a death fact is held (see "Respawn gate"), so no member may be spawned. Never `dead`: only death facts, or the author's lost policy `dead`, make a group `dead`. |
 | `materializing` | `virtual` | The authority is the campaign, or the entity's theater is not loaded, no spawn of it is unanswered, and none was `unknown` in this generation (DCS may hold it; the spawn is sent again, answered `AT_REVISION`, and the group leaves through `live`) |
 | `live`, `materializing`, `dematerializing`, `lost`, `virtual` | `dead` | The last member's death fact arrives (see the conditions below) |
 | `live` | `dematerializing` | The authority moves to the campaign |
@@ -193,8 +194,10 @@ a group of one.
   script's handler raised first. The default policy is to report and wait for the next
   full enumeration.
 - A member that is missing without a death fact, while another member is still found,
-  is reported as missing and the group stays `live`. A missing member has no death
-  fact, so the next spawn of the group includes it.
+  is reported as missing and the group stays `live`. No spawn includes it while it is
+  marked: a mark the agent reported (`OBJECT_GONE` `MISSING` or `REMOVED`) holds the
+  member across mission generations until a death fact arrives or the controller
+  removes the group (see "Respawn gate").
 - After a DCS restart every `live` group is spawned again from its last captured state,
   on the same path as a first materialization.
 - A spawn sent again at a revision the agent applied in this mission generation is
@@ -240,8 +243,9 @@ a group of one.
 ## Respawn gate
 
 The respawn policy (`on_lost`, spec/config.md) does not respawn a `lost` group while
-any member that is not found left DCS as `MISSING` or `REMOVED` in this mission
-generation and no death fact explains it.
+any member that is not found is marked `MISSING` or `REMOVED` and no death fact
+explains it: a mark from this mission generation, or one the agent reported in an
+`OBJECT_GONE` in an earlier generation (below).
 
 `MISSING` means DCS no longer has the object and the cause is unknown, so a death
 event may still follow. `REMOVED` means DCS no longer has it and the read shows a
@@ -250,11 +254,27 @@ removal, not a kill. A scripted kill that is removed before the slow sweep can r
 and no enumeration opens it. A death fact for the member releases its hold: the member
 is dead, and the spawn leaves it out (a dead member is never spawned again). A member
 that is found again holds nothing either. A group that the gate holds stays `lost`,
-appears in the reconciler's held set and is counted. A mission generation change
-clears the marks. A weapon kill is never respawned as a `MISSING` or `REMOVED` member.
-A group that a script removed is not respawned either; the policy then acts as
-report, and a mission change materializes it again. A member with a death fact never
-holds the gate, and a revived member holds nothing.
+appears in the reconciler's held set and is counted.
+
+A mission generation change keeps every mark the agent reported in an `OBJECT_GONE`
+(`MISSING` or `REMOVED`) and resets only the member's DCS object ID: a death event can
+no longer arrive for an object of the old generation (UNVERIFIED: that the
+agent's memory of rows that left ends with the mission; the fake sim models it so), so the member may be dead. Such
+a member is *held*: no spawn includes it and it is never the lead of an order
+(spec/persistence.md, "Restore"). A mark inferred at an enumeration's end, with no
+`OBJECT_GONE`, clears at the generation change: it can name a member DCS never bound,
+such as one whose `OBJECT` was lost in a `GAP`. A group whose members are all dead or
+held, with at least one held, goes from `materializing` to `lost` and stays there; the
+platform never makes it `dead` without death facts, and only the author's lost policy
+`dead` moves it on. Only the controller releases a hold: removing the group
+(`RemoveEntity`) drops its members' marks. A call that resolves one member as dead or
+restores it is step S19's. The API shows a member's mark as `Unit.left`, whether it
+was reported or inferred.
+
+A weapon kill is never respawned as a `MISSING` or `REMOVED` member. A group that a
+script removed is not re-created by the policy or by a mission change; the policy then
+acts as report. A member with a death fact never holds the gate, and a revived member
+holds nothing.
 
 ## Route progress
 
@@ -279,7 +299,8 @@ the waypoint (spec/sampling.md). No script runs in DCS for it.
 
 ## Events and the store
 
-Events are numbered per campaign and kept in the campaign's store. While no campaign
+Events are numbered per campaign and kept in the campaign's event history
+(spec/persistence.md, "Event history"). While no campaign
 is active, events still happen: players connect and chat, and a plain mission runs.
 Those events go to a log in the server-scoped store, with its own sequence numbers and
 the retention of spec/config.md. The Events service reads it when the request asks for

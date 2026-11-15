@@ -17,6 +17,13 @@ use crate::intents::{self, Intent};
 use crate::lifecycle::{self, State, Trigger};
 use crate::stock::{Item, Stock};
 
+mod disk;
+
+pub use disk::{
+    CampaignRecord, CampaignState, Checkpoint, DiskError, MIGRATIONS, Migration, REVISION_RESERVE,
+    SCHEMA, TierPeriod, backup_file, ident_of, record_of, schema_of, state_of,
+};
+
 /// Who simulates a managed entity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Authority {
@@ -333,7 +340,8 @@ pub enum Entry {
         unit: EntityId,
     },
     /// A unit left DCS as `MISSING` or `REMOVED`: it holds its group's
-    /// respawn gate for the mission generation.
+    /// respawn gate and stays out of spawns, across mission generations too,
+    /// until a death fact or the group's removal releases it.
     Left {
         /// The unit.
         unit: EntityId,
@@ -476,6 +484,7 @@ pub struct Store {
     countries: Option<BTreeMap<u32, u32>>,
     sample_time: f64,
     route_events: Vec<RouteEvent>,
+    disk: disk::Slot,
 }
 
 /// A route event: a waypoint of a group's order reached, or the route done.
@@ -570,6 +579,7 @@ impl Store {
             countries: None,
             sample_time: 0.0,
             route_events: Vec::new(),
+            disk: disk::Slot::default(),
         }
     }
 
@@ -641,6 +651,17 @@ impl Store {
         }
         self.set_authority(id, Authority::Campaign)?;
         self.group_mut(id)?.removed = true;
+        // The controller's removal releases every member's mark: it is the
+        // one way out of a mark kept across a generation (spec/world.md,
+        // "Respawn gate").
+        let members = self.groups[&id].members.clone();
+        for m in members {
+            if let Some(u) = self.units.get_mut(&m) {
+                u.missing = false;
+                u.removed = false;
+                u.left_logged = false;
+            }
+        }
         self.journal(Entry::Removed { entity: id });
         self.touch(id);
         Ok(())
@@ -859,9 +880,28 @@ impl Store {
         }
     }
 
-    /// Append an entry to the journal.
+    /// Append an entry to the journal. A store on disk writes itself before
+    /// a command is sent, and when a result, a fact or a command epoch
+    /// arrives (spec/persistence.md, "Writes"). A loaded mission is written
+    /// with the transitions it causes, by the next write.
     pub fn journal(&mut self, e: Entry) {
+        // A new entry kind that must survive a sidecar crash on its own
+        // belongs in this list.
+        let write = matches!(
+            e,
+            Entry::Command(_)
+                | Entry::Outcome { .. }
+                | Entry::Epoch(_)
+                | Entry::Death { .. }
+                | Entry::Left { .. }
+                | Entry::Revived { .. }
+                | Entry::StaleDeath { .. }
+                | Entry::ClassifierFault { .. }
+        );
         self.journal.push(e);
+        if write && self.disk.0.is_some() {
+            self.commit_or_stop();
+        }
     }
 
     /// The journal, oldest first.
@@ -1291,7 +1331,11 @@ impl Store {
     }
 
     /// Mark a unit missing or found. A dead unit stays as it is. A unit
-    /// that is found is no longer `removed` either.
+    /// that is found is no longer `removed` either. A store on disk writes
+    /// the change at once: a mark holds the member out of spawns, so a
+    /// sidecar that restarted without a new mark could respawn a dead member,
+    /// and one that restarted without a cleared mark could hold out a living
+    /// one.
     pub fn set_missing(&mut self, unit: EntityId, missing: bool) {
         if let Some(u) = self.units.get_mut(&unit)
             && !u.dead
@@ -1303,6 +1347,9 @@ impl Store {
                 u.left_logged = false;
             }
             self.touch(unit);
+            if self.disk.0.is_some() {
+                self.commit_or_stop();
+            }
         }
     }
 
@@ -1386,27 +1433,33 @@ impl Store {
         })
     }
 
-    /// Clear every unit's marks of the mission generation: missing, removed
-    /// and the DCS object ID. A new mission generation.
-    pub fn clear_missing(&mut self) {
+    /// A new mission generation: every unit's DCS object ID is forgotten.
+    /// A member the agent reported gone as `MISSING` or `REMOVED`, with no
+    /// death fact, keeps its mark, so no restore re-creates it
+    /// (spec/persistence.md, "Restore"). A mark inferred at an
+    /// enumeration's end clears: it can name a member DCS never bound.
+    pub fn new_generation(&mut self) {
         self.break_samples();
-        let marked: Vec<EntityId> = self
-            .units
-            .values()
-            .filter(|u| u.missing || u.removed || u.object != 0)
-            .map(|u| u.id)
-            .collect();
-        for id in marked {
-            let u = self.units.get_mut(&id).expect("unit");
-            let changed = u.missing || u.removed;
-            u.missing = false;
-            u.removed = false;
-            u.left_logged = false;
+        let mut cleared = Vec::new();
+        for u in self.units.values_mut() {
             u.object = 0;
-            if changed {
-                self.touch(id);
+            if !u.left_logged && (u.missing || u.removed) {
+                u.missing = false;
+                u.removed = false;
+                cleared.push(u.id);
             }
         }
+        for id in cleared {
+            self.touch(id);
+        }
+    }
+
+    /// Whether a member is held out of spawns: it left DCS with no death
+    /// fact (spec/world.md, "Respawn gate").
+    pub fn held(&self, unit: EntityId) -> bool {
+        self.units
+            .get(&unit)
+            .is_some_and(|u| !u.dead && (u.missing || u.removed))
     }
 
     /// Set the model time of the position samples that follow: the last
@@ -1430,7 +1483,7 @@ impl Store {
 
     /// A sampled position. Updates the grid and the group's order progress
     /// when the unit is its lead. The lead is the first member that is not
-    /// dead.
+    /// dead or held.
     pub fn observe_position(&mut self, unit: EntityId, at: Point) {
         let Some(u) = self.units.get_mut(&unit) else {
             return;
@@ -1445,7 +1498,14 @@ impl Store {
             return;
         };
         self.grid.set(unit, &g.theater, at.x, at.z);
-        let lead = g.members.iter().find(|m| !self.units[*m].dead).copied();
+        let lead = g
+            .members
+            .iter()
+            .find(|m| {
+                let u = &self.units[*m];
+                !u.dead && !u.missing && !u.removed
+            })
+            .copied();
         if lead == Some(unit)
             && let Some(order) = &g.order
         {
@@ -1652,7 +1712,26 @@ mod tests {
         s.set_missing(m[1], false);
         assert!(!s.gate_shut(a));
         assert!(s.left(m[2], 9, LeftAs::Missing));
-        s.clear_missing();
+        // The mark outlives the generation: the member may be dead.
+        s.new_generation();
+        assert!(s.gate_shut(a));
+        assert_eq!(s.unit(m[2]).unwrap().object, 0);
+    }
+
+    #[test]
+    fn only_journalled_marks_outlive_a_generation_and_removal_releases_them() {
+        let mut s = Store::new(CampaignId(1), 10);
+        let a = s.create_group(spec(3)).unwrap();
+        let m = s.group(a).unwrap().members.clone();
+        // An enumeration's end inferred this mark; no OBJECT_GONE named it.
+        s.set_missing(m[0], true);
+        assert!(s.left(m[1], 8, LeftAs::Removed));
+        s.new_generation();
+        assert!(!s.held(m[0]), "an inferred mark clears");
+        assert!(s.held(m[1]), "a journalled mark is kept");
+        // Only the controller releases it.
+        s.remove_entity(a).unwrap();
+        assert!(!s.held(m[1]));
         assert!(!s.gate_shut(a));
     }
 
