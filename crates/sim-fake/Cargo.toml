@@ -15,3 +15,7 @@ workspace = true
 [dependencies]
 nanoprobe-sidecar = { path = "../sidecar" }
 nanoprobe-transport = { path = "../transport" }
+
+[dev-dependencies]
+rusqlite = "0.42"
+tempfile = "3.27.0"

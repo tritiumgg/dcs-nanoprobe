@@ -25,6 +25,8 @@ use nanoprobe_proto::v1alpha1::{
     world_change,
 };
 use nanoprobe_sidecar::ids::EntityId;
+use nanoprobe_sidecar::lifecycle::State;
+use nanoprobe_sidecar::store::Entry;
 use nanoprobe_sim_fake::FakeSim;
 use tokio_stream::StreamExt;
 use tonic::transport::Channel;
@@ -235,11 +237,24 @@ async fn a_watch_from_a_listed_revision_sees_a_death_in_between() {
         rev = m.revision;
         assert_eq!(m.entities.len(), 1);
     }
-    // The group dies after the list and before the watch.
+    // The group dies after the list and before the watch: in the store, and
+    // in DCS too, or a later OBJECT for the living unit revives it.
     {
         let mut h = hub.lock();
         let store = &mut h.campaigns.get_mut(&c).expect("c").store;
         store.death(EntityId(g.unit_ids[0])).expect("death");
+        let sim = h
+            .backend
+            .as_any()
+            .and_then(|a| a.downcast_mut::<FakeSim>())
+            .expect("the fake sim");
+        let object = sim
+            .objects()
+            .into_iter()
+            .find(|(_, camp, e)| *camp == c && *e == g.unit_ids[0])
+            .map(|(o, _, _)| o)
+            .expect("DCS holds the unit");
+        sim.kill(object);
     }
     let mut w = WorldServiceClient::new(ch.clone())
         .watch_world(WatchWorldRequest {
@@ -544,8 +559,9 @@ async fn lost_policies_take_effect() {
     vanish(&hub, c, &a.unit_ids);
     vanish(&hub, c, &b.unit_ids);
     // B, with the default, is marked dead. A's members left with no death
-    // fact, so the respawn gate holds A as `lost` for this mission generation
-    // (spec/world.md "Respawn gate"); the next mission load materializes it.
+    // fact, so the respawn gate holds A as `lost`, and a mission load does
+    // not re-create members that may be dead (spec/persistence.md,
+    // "Restore").
     until_state(&hub, c, b.group_id, EntityState::Dead).await;
     let lost_rev = until_state(&hub, c, a.group_id, EntityState::Lost).await;
     {
@@ -569,7 +585,7 @@ async fn lost_policies_take_effect() {
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    // The reload returns A by the generation change, not by the policy.
+    // The reload does not return A: its members keep their marks.
     {
         let mut g = hub.lock();
         g.backend
@@ -578,8 +594,28 @@ async fn lost_policies_take_effect() {
             .expect("the fake sim")
             .load_mission();
     }
-    let again = until_state(&hub, c, a.group_id, EntityState::Live).await;
+    // The load takes A through `materializing` back to `lost`.
+    let held_out = |hub: &Hub| {
+        hub.lock().campaigns[&c].store.entries().iter().any(|e| {
+            matches!(e, Entry::Transition { entity, from: State::Materializing, to: State::Lost, .. }
+                if entity.0 == a.group_id)
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while !held_out(&hub) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("A held out after the load");
+    let (state, again) = group_of(&hub, c, a.group_id).expect("a");
+    assert_eq!(state, EntityState::Lost);
     assert!(again >= rev_a);
+    assert!(
+        hub.lock().campaigns[&c]
+            .store
+            .gate_shut(EntityId(a.group_id))
+    );
     assert_eq!(
         group_of(&hub, c, b.group_id).map(|(s, _)| s),
         Some(EntityState::Dead)

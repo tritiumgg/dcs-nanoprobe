@@ -20,8 +20,12 @@
 //! [`Ledger`] records the ground truth that the reconciler's tests check
 //! against.
 //!
-//! What the fake does not model: pause and the pending-destroy set (a
-//! destroy is immediate), `CONTROL_LOST`, the commanded-work budget in time
+//! Pause ([`FakeSim::pause`]) stops model time and movement; the agent still
+//! takes commands. A destroy while paused is pending (spec/commands.md): the
+//! rows leave as `DESTROYED` at once, and the objects stay in DCS until the
+//! resume. `BURST` lifts the per-frame command limit while paused.
+//!
+//! What the fake does not model: `CONTROL_LOST`, the commanded-work budget in time
 //! (it takes a fixed number of commands per frame), effects, and every
 //! opcode the reconciler does not write, which it answers `UNKNOWN_OPCODE`.
 
@@ -158,6 +162,10 @@ pub struct Ledger {
     /// campaign, entity. A kill whose death event is late is here too: it
     /// left as `MISSING` or `REMOVED` first.
     pub removed: BTreeSet<(u64, u32, u64, u64)>,
+    /// `BURST` commands taken: whether on, and whether DCS was paused.
+    pub bursts: Vec<(bool, bool)>,
+    /// The most commands the agent took in one frame.
+    pub most_per_frame: usize,
     /// Unit entities that left DCS without a death event yet, in a
     /// generation: removed, or killed with the event late, and not revived.
     /// Agent boot, generation, campaign, entity. A group with one that the
@@ -335,6 +343,10 @@ pub struct FakeSim {
     rates_received: u32,
     /// The DCS object an `AttackUnit` task names, by DCS group.
     attack_unit: BTreeMap<u64, u64>,
+    /// Objects whose destroy is pending until the resume, by object ID.
+    pending: BTreeMap<u64, FObject>,
+    /// The restore burst (spec/commands.md, `BURST`).
+    burst: bool,
 }
 
 impl FakeSim {
@@ -394,6 +406,8 @@ impl FakeSim {
             rates: Rates::default(),
             rates_received: 0,
             attack_unit: BTreeMap::new(),
+            pending: BTreeMap::new(),
+            burst: false,
         };
         f.load_mission();
         f
@@ -703,11 +717,49 @@ impl FakeSim {
         self.load_mission_on(&t);
     }
 
+    /// Pause the simulation: model time and movement stop, the agent still
+    /// runs its pump. Only a running mission pauses.
+    pub fn pause(&mut self) {
+        if self.alive && self.lifecycle == lc::RUNNING as u32 {
+            self.lifecycle = lc::PAUSED as u32;
+            self.lifecycle_record();
+        }
+    }
+
+    /// Resume a paused simulation: the objects whose destroy is pending go,
+    /// with no event, and the burst turns off.
+    pub fn resume(&mut self) {
+        if self.alive && self.paused() {
+            self.lifecycle = lc::RUNNING as u32;
+            self.pending.clear();
+            self.burst = false;
+            self.lifecycle_record();
+        }
+    }
+
+    /// Whether the simulation is paused.
+    pub fn paused(&self) -> bool {
+        self.lifecycle == lc::PAUSED as u32
+    }
+
+    /// Objects whose destroy waits for the resume: object ID and unit
+    /// entity.
+    pub fn pending_destroys(&self) -> Vec<(u64, u64)> {
+        self.pending.iter().map(|(o, x)| (*o, x.entity)).collect()
+    }
+
+    /// Whether the restore burst is on.
+    pub fn burst(&self) -> bool {
+        self.burst
+    }
+
     /// Start a mission load on another theater.
     pub fn load_mission_on(&mut self, theater: &str) {
         if !self.alive {
             return;
         }
+        self.pending.clear();
+        self.burst = false;
         self.theater = theater.to_owned();
         self.mission_gen_ += 1;
         self.groups.clear();
@@ -1413,7 +1465,10 @@ impl FakeSim {
             return;
         }
         self.frame += 1;
-        self.model_time += 0.1;
+        let paused = self.paused();
+        if !paused {
+            self.model_time += 0.1;
+        }
         if !self.attached {
             // The events queue for the next attach.
             self.fire_late();
@@ -1422,10 +1477,13 @@ impl FakeSim {
             let s = self.stamp();
             self.frame_record(&s, false);
             self.fire_late();
-            for _ in 0..self.cfg.commands_per_frame {
+            // The burst lifts the limit from the command after it on.
+            let mut taken = 0;
+            while (self.burst && paused) || taken < self.cfg.commands_per_frame {
                 let Some((pos, op, payload)) = self.inbound.pop_front() else {
                     break;
                 };
+                taken += 1;
                 self.in_head = pos;
                 if let Ok(Some(c)) = Command::decode(op, &payload)
                     && !c.body.is_control()
@@ -1437,8 +1495,11 @@ impl FakeSim {
                 }
                 self.handle(op, &payload);
             }
+            self.ledger.most_per_frame = self.ledger.most_per_frame.max(taken);
         }
-        self.move_groups();
+        if !paused {
+            self.move_groups();
+        }
         if self.attached {
             if self.run.is_none() && self.frame >= self.next_enum {
                 self.start_enumeration();
@@ -1578,6 +1639,11 @@ impl FakeSim {
                 Body::Rates(r) => {
                     self.rates = r;
                     self.rates_received += 1;
+                }
+                Body::Burst(on) => {
+                    let paused = self.paused();
+                    self.ledger.bursts.push((on, paused));
+                    self.burst = on && paused;
                 }
                 _ => {}
             }
@@ -1976,8 +2042,13 @@ impl FakeSim {
             g.campaign,
             g.entity,
         ));
+        let paused = self.paused();
         for m in g.members {
-            self.objects.remove(&m);
+            if let Some(o) = self.objects.remove(&m)
+                && paused
+            {
+                self.pending.insert(m, o);
+            }
             self.gone(m, gone_reason::DESTROYED);
         }
     }
