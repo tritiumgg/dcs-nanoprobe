@@ -473,9 +473,7 @@ impl Inner {
         for (group, source) in reads {
             self.log(group, source);
         }
-        // A pair learned in this step is written to the keyring file. A
-        // failed write is tried again at the next step.
-        let _ = self.roster.flush_keys();
+        self.save_keys();
         self.drive_players();
         // With no campaign active the agent must hold none: it idles, and
         // its records stamp campaign 0 (plan 4.6, "Suspend").
@@ -497,6 +495,20 @@ impl Inner {
         }
         self.timers(cfg);
         self.settle(None);
+    }
+
+    /// Write the player keys learned since the last step to the server
+    /// store. A failed write is tried again at the next step.
+    fn save_keys(&mut self) {
+        let Some(server) = self.server.as_ref() else {
+            return;
+        };
+        for (key, ucid) in self.roster.keyring().unsaved() {
+            if server.put_player(&key, &ucid).is_err() {
+                return;
+            }
+            self.roster.keyring_mut().saved(&key);
+        }
     }
 
     /// What the roster and the moderation calls need after a step: the
@@ -664,6 +676,10 @@ impl Inner {
         server
             .migrate_players_json(&sf.dir)
             .map_err(|e| format!("the server store in {}: {e}", sf.dir.display()))?;
+        self.roster = Roster::new(
+            keyring_of(&server)
+                .map_err(|e| format!("the server store in {}: {e}", sf.dir.display()))?,
+        );
         let mut log = EventFile::open(&server.events_path(), 0)
             .and_then(|f| EventLog::open(f, cfg.events_keep))
             .map_err(|e| format!("the server event log: {e}"))?;
@@ -1338,6 +1354,25 @@ fn retain(l: &mut EventLog, campaign: u64, retention: Duration) -> Result<(), Di
 }
 
 /// Append an event unless one made from the same `source` is in the log.
+/// The server's keyring: the secret the server store keeps, made and kept
+/// on first use, and every pair it holds. A secret that cannot be read
+/// stops the server: a new one would give every player a new key.
+fn keyring_of(server: &ServerStore) -> Result<Keyring, nanoprobe_sidecar::store::DiskError> {
+    let secret = match server.player_secret()? {
+        Some(s) => s,
+        None => {
+            let s = Keyring::generate().secret();
+            server.set_player_secret(s)?;
+            s
+        }
+    };
+    let mut keys = Keyring::from_secret(secret);
+    for (key, ucid) in server.players()? {
+        keys.restore(&key, &ucid);
+    }
+    Ok(keys)
+}
+
 fn push_once(
     log: &mut EventLog,
     campaign: u64,
@@ -1489,12 +1524,9 @@ impl Hub {
                 idem: Idem::new(cfg.idempotency_keep),
                 server_log: EventLog::new(cfg.events_keep),
                 link: Link::default(),
-                roster: Roster::new(match &cfg.store_dir {
-                    // A keyring file that cannot be read stops the server: a
-                    // new secret would give every player a new key.
-                    Some(dir) => Keyring::open(dir).expect("the keyring file is readable"),
-                    None => Keyring::generate(),
-                }),
+                // With persistence on, `load` replaces it with the server
+                // store's keyring.
+                roster: Roster::new(Keyring::generate()),
                 moderation: Vec::new(),
                 players_cmd: None,
                 on_lost: LostPolicy::Report,

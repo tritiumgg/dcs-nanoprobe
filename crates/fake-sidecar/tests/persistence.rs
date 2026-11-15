@@ -668,12 +668,14 @@ async fn player_keys_are_the_servers_across_campaigns_and_restarts() {
     let ch = connect(&server).await;
     let l = lease(&ch).await;
     create(&ch, &l, "a", true).await;
-    {
-        let g = server.hub.lock();
-        let s = g.server.as_ref().expect("server store");
-        s.set_player_secret([7; 32]).expect("secret");
-        s.put_player("k1", "ucid-1").expect("player");
-    }
+    // The server store made the secret at start; a key the roster learns
+    // reaches it within a step.
+    let (secret, key) = {
+        let mut g = server.hub.lock();
+        let secret = g.server.as_ref().expect("server store").player_secret();
+        (secret.expect("secret"), g.roster.learn("ucid-1"))
+    };
+    assert!(secret.is_some(), "made at the first start");
     let b = create(&ch, &l, "b", false).await;
     activate(&ch, &l, b, "to-b").await;
     let read = |r: &Running| {
@@ -684,11 +686,40 @@ async fn player_keys_are_the_servers_across_campaigns_and_restarts() {
             s.players().expect("players"),
         )
     };
-    let want = (Some([7; 32]), vec![("k1".to_owned(), "ucid-1".to_owned())]);
-    assert_eq!(read(&server), want);
+    let want = (secret, vec![(key.clone(), "ucid-1".to_owned())]);
+    eventually("the key in the server store", || async {
+        read(&server) == want
+    })
+    .await;
     server.stop().await.expect("stop");
     let server = start(cfg(d.path()), fake_config()).await.expect("restart");
     assert_eq!(read(&server), want);
+    assert_eq!(server.hub.lock().roster.keyring().key_of("ucid-1"), key);
+    assert_eq!(server.hub.lock().roster.ucid_of(&key), Some("ucid-1"));
+    server.stop().await.expect("stop");
+}
+
+/// A `players.json` from before the server store is read into it at the
+/// first start, renamed, and its keys are the roster's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_players_json_is_migrated_at_start_and_its_keys_kept() {
+    let d = tempfile::tempdir().expect("dir");
+    let secret = "07".repeat(32);
+    let key = nanoprobe_sidecar::players::Keyring::from_secret([7; 32]).key_of("ucid-1");
+    std::fs::write(
+        d.path().join("players.json"),
+        format!(r#"{{"secret":"{secret}","players":{{"{key}":"ucid-1"}}}}"#),
+    )
+    .expect("write");
+    let server = start(cfg(d.path()), fake_config()).await.expect("server");
+    assert!(!d.path().join("players.json").exists());
+    assert!(d.path().join("players.json.migrated").exists());
+    {
+        let g = server.hub.lock();
+        assert_eq!(g.roster.ucid_of(&key), Some("ucid-1"));
+        assert_eq!(g.roster.keyring().key_of("ucid-1"), key);
+        assert!(g.roster.keyring().unsaved().is_empty());
+    }
     server.stop().await.expect("stop");
 }
 

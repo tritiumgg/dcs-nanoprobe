@@ -366,13 +366,12 @@ Those events go to the server event log (spec/persistence.md, "The server store"
 its own sequence numbers and the retention of spec/config.md. The Events service reads
 it when the request asks for the server log.
 
-**The server-scoped player file.** The player-key secret and the key-to-ucid pairs
-("Players") are kept in `players.json`, directly in the store's
-directory beside the campaign folders. It is written whole to a temporary file and
-renamed into place, with mode 0600. Campaign backups do not include it, and no
-diagnostics bundle reads it. With persistence off it is not written, and the keys last
-as long as the sidecar process. This file is the server-scoped store's current form for
-players.
+**Where player keys are kept.** The player-key secret and the key-to-ucid pairs
+("Players") are kept in the server store (spec/persistence.md, "The server store"). A
+pair learned in a step is written there by the end of the step; a failed write is
+tried again at the next. Campaign backups do not include the server store, and no
+diagnostics bundle reads it. With persistence off nothing is written, and the keys last
+as long as the sidecar process.
 
 **Kill attribution.** DCS sends a weapon kill's `KILL` and `SCORE` with the late death
 event, up to 77.1 s after the object stops existing (LIVE,
