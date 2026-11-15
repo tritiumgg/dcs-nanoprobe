@@ -469,6 +469,8 @@ impl Rig {
         self.sim
             .send(op, &payload)
             .map_err(|_| "the link detached before a command was sent".to_owned())?;
+        // A command is held until the flush; this tool keeps no store.
+        self.sim.flush();
         Ok(seq)
     }
 
