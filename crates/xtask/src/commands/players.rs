@@ -11,9 +11,10 @@
 //!
 //! - `menus_set`: the command item's callback in the server state, as ED's
 //!   radio panel runs it, `missionCommands.doAction(index)`
-//!   (`lua/experiments/s16/exit-menu-pick.lua`). DCS's numbering is
-//!   UNVERIFIED, so it tries index 1, 2, ... up to 40 and stops when the probe
-//!   prints a `MENU` record for the item. When the call is not there or
+//!   (`lua/experiments/s16/exit-menu-pick.lua`). DCS's numbering counts
+//!   from 0 (LIVE: a mission's only item was index 0); the order of several
+//!   items is UNVERIFIED, so it tries index 0, 1, ... up to 40 and stops when
+//!   the probe prints a `MENU` record for the item. When the call is not there or
 //!   raises, it answers `unreachable` and the probe reports the step as skipped.
 //! - `marks_set` and `marks_removed`: `world.getMarkPanels()` in the server
 //!   state (`lua/experiments/s16/exit-marks-read.lua`).
@@ -291,7 +292,7 @@ pub(super) fn answer_file(run: &Run, file: &str, text: &str) -> Result<(), Strin
 /// Select the command item by action index in the server state, one index
 /// after another, until the probe prints a `MENU` record for it.
 fn pick_menu(run: &Run, command: u64, notes: &mut Vec<Value>) -> Result<String, String> {
-    for index in 1..=MAX_INDEX {
+    for index in 0..=MAX_INDEX {
         let value = match run.eval("server", "s16-menu-pick", &pick_source(index), 30) {
             Ok(v) => v,
             Err(e) => {
@@ -316,9 +317,9 @@ fn pick_menu(run: &Run, command: u64, notes: &mut Vec<Value>) -> Result<String, 
             return Ok(format!("index={index}"));
         }
     }
-    notes.push(json!({"menu_pick": "none", "tried": MAX_INDEX}));
+    notes.push(json!({"menu_pick": "none", "tried": MAX_INDEX + 1}));
     Ok(format!(
-        "unreachable: no action index from 1 to {MAX_INDEX} selected the item"
+        "unreachable: no action index from 0 to {MAX_INDEX} selected the item"
     ))
 }
 

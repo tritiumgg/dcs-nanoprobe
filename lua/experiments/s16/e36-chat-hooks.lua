@@ -62,12 +62,22 @@ local observer = {
     lines.observed = (lines.observed or 0) + 1
   end,
 }
-DCS.setUserCallbacks(replacer)
-DCS.setUserCallbacks(observer)
+-- The install order. Fill `<order>` with `observer-first` to install the
+-- observer first: DCS called the later set first (LIVE, S16 attempt 1), so
+-- that order puts the replacer ahead of the observer.
+local ORDER = '<order>'
+if ORDER == 'observer-first' then
+  DCS.setUserCallbacks(observer)
+  DCS.setUserCallbacks(replacer)
+else
+  DCS.setUserCallbacks(replacer)
+  DCS.setUserCallbacks(observer)
+end
 E.track.defer('chat callbacks off', function()
   live = false
 end)
-E.observe('installed', 'replacer then observer', { info = true })
+E.observe('installed', ORDER == 'observer-first' and 'observer then replacer' or 'replacer then observer',
+  { info = true })
 
 local started = DCS.getRealTime()
 return E.wait(function()

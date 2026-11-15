@@ -827,11 +827,12 @@ fn marks(r: &mut Rig) -> Result<(), String> {
     if let Err(e) = r.expect("MARK_SET", MARK, 1, mark, 0) {
         return Err(r.fail("mark_set", &e));
     }
-    // A circle: the centre, the radius, a color, a fill color, a line type,
-    // read only and a message (`trigger.action.markupToAll`, shape 2).
+    // A line: two points, a color, a fill color, a line type, read only and
+    // a message (`trigger.action.markupToAll`, shape 1). DCS refused a circle's
+    // radius at parameter 5 (LIVE): it takes points there.
     let args = lv_array(vec![
         point(1500.0, 0.0, 1000.0),
-        Lv::Number(300.0),
+        point(1800.0, 0.0, 1300.0),
         lv_array(vec![
             Lv::Number(1.0),
             Lv::Number(0.0),
@@ -851,7 +852,7 @@ fn marks(r: &mut Rig) -> Result<(), String> {
     r.cleanup.push((DRAWING, Body::DrawingRemove));
     let drawing = Body::DrawingSet {
         scope: ALL,
-        shape: 2,
+        shape: 1,
         target: 0,
         args,
     };

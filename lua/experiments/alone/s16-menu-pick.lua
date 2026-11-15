@@ -33,29 +33,31 @@ local function gui(code)
   return text, ran
 end
 
--- Route 1: read the numbers.
-local ACTIONS = gui([[
-local env = Input.getEnvTable()
-local a = env and env.Actions
-if type(a) ~= 'table' then return 'no Actions: ' .. type(a) end
-local function n(k) return tostring(a[k]) end
-return n('iCommandToggleCommandMenu') .. '|' .. n('ICommandMenuItem10') .. '|' .. n('ICommandMenuItem1')
-]])
-E.observe('actions_raw', ACTIONS, { info = true })
-local toggle, other, first = tostring(ACTIONS):match('^([^|]+)|([^|]+)|([^|]+)$')
-local numbers = { tonumber(toggle), tonumber(other), tonumber(first) }
-if not (numbers[1] and numbers[2] and numbers[3]) then
-  local hint = gui([[
-local env = Input.getEnvTable()
-local out = {}
-for k in pairs(env and env.Actions or {}) do
-  if type(k) == 'string' and k:lower():find('menu', 1, true) and #out < 30 then out[#out + 1] = k end
+-- Route 1: read the numbers. On a client, net.dostring_in answers nothing
+-- for any state (LIVE, S16), and the hook state has no `Input` global, but
+-- `require('Input')` gives ED's module there (LIVE, S16).
+local actions
+do
+  local ok, Input = pcall(require, 'Input')
+  local env = ok and type(Input) == 'table' and type(Input.getEnvTable) == 'function'
+    and Input.getEnvTable()
+  actions = type(env) == 'table' and type(env.Actions) == 'table' and env.Actions or nil
 end
-table.sort(out)
-return table.concat(out, ',')
-]])
+local numbers = actions and {
+  tonumber(actions.iCommandToggleCommandMenu),
+  tonumber(actions.ICommandMenuItem10),
+  tonumber(actions.ICommandMenuItem1),
+} or {}
+if not (numbers[1] and numbers[2] and numbers[3]) then
+  local names = {}
+  for k in pairs(actions or {}) do
+    if type(k) == 'string' and k:lower():find('menu', 1, true) and #names < 30 then
+      names[#names + 1] = k
+    end
+  end
+  table.sort(names)
   E.observe('route1', 'the numbers were not found', { info = true })
-  E.observe('menu_action_names', hint, { info = true })
+  E.observe('menu_action_names', table.concat(names, ','), { info = true })
 else
   E.observe('route1_numbers', { toggle = numbers[1], item10 = numbers[2], item1 = numbers[3] }, { info = true })
   E.observe('has_LoSetCommand', type(Export) == 'table' and type(Export.LoSetCommand) == 'function', { info = true })
