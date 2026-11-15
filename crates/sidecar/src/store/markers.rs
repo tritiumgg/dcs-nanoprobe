@@ -391,8 +391,11 @@ impl Store {
         &self.markers.ext_floor
     }
 
-    /// Set the revision floors read back from a store file.
+    /// Set the revision floors read back from a store file. Each is a tombstone,
+    /// so the agent may still hold the extension: the removal is pending until
+    /// the agent confirms it.
     pub(super) fn set_extension_floors(&mut self, floors: BTreeMap<String, u64>) {
+        self.markers.ext_removed = floors.keys().cloned().collect();
         self.markers.ext_floor = floors;
     }
 

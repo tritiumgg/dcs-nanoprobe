@@ -10,7 +10,7 @@ use nanoprobe_api::auth::token_hash;
 use nanoprobe_api::config::Config;
 use nanoprobe_api::hub::Hub;
 use nanoprobe_fake_sidecar::{fake_config, in_process, start};
-use nanoprobe_proto::errors::reason;
+use nanoprobe_proto::errors::{detail, reason};
 use nanoprobe_proto::v1alpha1::campaign_service_client::CampaignServiceClient;
 use nanoprobe_proto::v1alpha1::commands_service_client::CommandsServiceClient;
 use nanoprobe_proto::v1alpha1::events_service_client::EventsServiceClient;
@@ -138,6 +138,11 @@ async fn until_effects(ch: &Channel, l: &Lease, c: u64) {
 
 fn keyed(hub: &Hub) {
     hub.lock().roster = Roster::new(Keyring::from_secret(SECRET));
+}
+
+/// The field an error's detail names.
+fn field(e: &tonic::Status) -> String {
+    detail(e).expect("error detail").field
 }
 
 fn key_of(ucid: &str) -> String {
@@ -582,13 +587,16 @@ async fn the_moderation_service_works_end_to_end_without_a_ucid() {
         .ban(pb::BanRequest {
             write: write(&l, "ban-offline", c),
             target: Some(pb::ban_request::Target::Ucid(UCID_D.into())),
-            seconds: 0.0,
+            seconds: 60.0,
             reason: "known abuser".into(),
         })
         .await
         .expect_err("ban of an offline ucid");
     assert_eq!(e.code(), Code::Unimplemented);
     assert_eq!(reason(&e), ErrorReason::Unverified);
+    assert_eq!(field(&e), "target");
+    // The refused call did not teach the keyring the ucid.
+    assert!(hub.lock().roster.ucid_of(&fresh).is_none());
     assert!(e.message().contains("E34"), "{e}");
     out += e.message();
     fake(&hub, |s| s.connect_client(5, UCID_D, "Di", 1));
@@ -605,6 +613,7 @@ async fn the_moderation_service_works_end_to_end_without_a_ucid() {
         .expect_err("ban of seconds 0");
     assert_eq!(e.code(), Code::Unimplemented);
     assert_eq!(reason(&e), ErrorReason::Unverified);
+    assert_eq!(field(&e), "seconds");
     let r = m
         .ban(pb::BanRequest {
             write: write(&l, "ban-new", c),
@@ -686,6 +695,7 @@ async fn the_moderation_service_works_end_to_end_without_a_ucid() {
             "ban with no target",
             m.ban(pb::BanRequest {
                 write: write(&l, "k2", c),
+                seconds: 60.0,
                 ..pb::BanRequest::default()
             })
             .await

@@ -3,9 +3,10 @@
 //!
 //! A player is named by key. The roster maps the key to the ucid and the DCS
 //! connection ID the `MODERATE` command carries; the ucid goes to the agent
-//! and no further. A ucid enters the API only as an admin's input, to ban or
-//! unban one the server never saw. Each applied call is a `ModerationEvent`
-//! with the role of the caller's token.
+//! and no further. A ucid enters the API only as an admin's input, to ban a
+//! connected player or to unban one; a ban of a player who is not connected is
+//! refused with `UNVERIFIED`. Each applied call is a `ModerationEvent` with the
+//! role of the caller's token.
 
 use std::sync::Arc;
 
@@ -68,14 +69,20 @@ fn target(
             Ok((k.to_owned(), ucid))
         }
         (None, Some(u)) => {
-            if u.is_empty() || u.len() > 128 || !u.bytes().all(|b| b.is_ascii_graphic()) {
-                return Err(invalid("ucid", "a ucid is 1 to 128 printable characters"));
-            }
+            check_ucid(u)?;
             let k = g.roster.learn(u);
             Ok((k, u.to_owned()))
         }
         (None, None) => Err(invalid("target", "name a player key or a ucid")),
     }
+}
+
+/// Refuse a ucid that is not 1 to 128 printable characters.
+fn check_ucid(u: &str) -> Result<(), Status> {
+    if u.is_empty() || u.len() > 128 || !u.bytes().all(|b| b.is_ascii_graphic()) {
+        return Err(invalid("ucid", "a ucid is 1 to 128 printable characters"));
+    }
+    Ok(())
 }
 
 /// The refusal for a path E34 did not verify on DCS.
@@ -243,17 +250,22 @@ impl ModerationService for Moderation {
                 if !(r.seconds.is_finite() && r.seconds >= 0.0) {
                     return Err(invalid("seconds", "finite, at least 0"));
                 }
-                let (key, ucid) = match &r.target {
-                    Some(pb::ban_request::Target::PlayerKey(k)) => target(g, Some(k), None)?,
-                    Some(pb::ban_request::Target::Ucid(u)) => target(g, None, Some(u))?,
-                    None => target(g, None, None)?,
-                };
                 if r.seconds == 0.0 {
                     return Err(unverified(
                         "seconds",
                         "a ban of DCS's default length (seconds 0)",
                     ));
                 }
+                // The refusals come before the keyring learns a ucid, so a
+                // refused call writes nothing.
+                let (key, ucid) = match &r.target {
+                    Some(pb::ban_request::Target::PlayerKey(k)) => target(g, Some(k), None)?,
+                    Some(pb::ban_request::Target::Ucid(u)) => {
+                        check_ucid(u)?;
+                        (g.roster.keyring().key_of(u), u.to_owned())
+                    }
+                    None => target(g, None, None)?,
+                };
                 // A player who is connected is banned by connection, which
                 // also removes them; any other by ucid.
                 let conn = g.roster.conn_of(&key).unwrap_or(0);
@@ -263,6 +275,7 @@ impl ModerationService for Moderation {
                         "a ban of a player who is not connected (net.banlist_add_by_ucid)",
                     ));
                 }
+                g.roster.learn(&ucid);
                 moderate(
                     g,
                     c,

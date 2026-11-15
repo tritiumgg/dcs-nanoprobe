@@ -30,11 +30,13 @@ author keeps state through capture and restore (spec/world.md).
 |---|---|---|
 | `meta` | `key TEXT PRIMARY KEY`, `value BLOB` | One per key below |
 | `entity` | `id INTEGER`, `kind TEXT`, `body BLOB`; the key is `id` and `kind` | One per group or static (`kind` is `group`) and one per unit (`unit`). A static is its own unit, so its `EntityId` has both rows. |
-| `extension` | `name TEXT PRIMARY KEY`, `body BLOB` | One per registered Lua extension |
+| `extension` | `name TEXT PRIMARY KEY`, `body BLOB` | One per registered Lua extension, and one tombstone per removed one |
 | `journal` | `seq INTEGER PRIMARY KEY`, `body BLOB` | One per journal entry, in order, from 1 |
 | `checkpoint` | `seq INTEGER PRIMARY KEY`, `body BLOB` | One per checkpoint, in order, from 1 |
 
-A removed extension keeps its `extension` row as a tombstone: `removed` is true, the body holds no source, and `spec_rev` is the highest revision the extension had. A registration of the name after a reopen gets a revision above it.
+A removed extension keeps its `extension` row as a tombstone: `removed` is true, the
+body holds no source, and `spec_rev` is the highest revision the extension had. A
+registration of the name after a reopen gets a revision above it.
 
 Every `body` and every `meta` value is one `lv` value (spec/transport.md, "Encodings"):
 a table with string keys, except `schema`, which is a number. A `u64` (an `EntityId`,
@@ -120,7 +122,9 @@ periods; the targets are not shown.
 1. Read `meta.schema`. A version newer than the sidecar's is refused: the sidecar does
    not open the campaign and reports the version it found.
 2. An older version is migrated (below).
-3. Load `meta`, the entities, the extensions and the journal into memory.
+3. Load `meta`, the entities, the extensions and the journal into memory. A tombstone
+   is not an extension: it sets the name's revision floor and the agent's pending
+   removal, so `EXTENSION_REMOVE` is sent until the agent confirms it.
 
 The spatial grid and the change list a watch resumes from are not stored. The grid is
 rebuilt from the units' last positions. A watch that resumes from before the open gets

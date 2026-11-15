@@ -72,7 +72,7 @@ to end, 17 of 17 steps.
 
 | Experiment | Rule | Runs | Verdict | Key facts |
 |---|---|---|---|---|
-| E34 moderation calls | Each does what it says, or the gap is recorded and the API leaves it out | 2 | Met in part | Kick with a reason, ban by connection, unban, move to spectators. A ban survives a DCS restart. A ban by ucid and a move into a slot were not run; the API refuses both. LIVE. |
+| E34 moderation calls | Each does what it says, or the gap is recorded and the API leaves it out | 2 | Met in part | Kick with a reason, ban by connection, unban, move to spectators. A ban survives a DCS restart. A ban of a player who is not connected, a ban of seconds 0 and a move into a slot were not run; the API refuses all three with UNIMPLEMENTED/UNVERIFIED. LIVE. |
 | E35 slot gating | Out within 1 s with a controller that answers at once, no crash | 2 | Met | 16.8 ms and 27.6 ms from the client's `SLOT` record to the result. No aircraft spawned. LIVE. |
 | E36 chat | Recorded; the owner chooses the chat design | 3 attempts | Recorded | A returned value ends the chain for sets installed before it. LIVE. |
 | Frame before start | Recorded | 1 | Recorded | No frame before `onSimulationStart`. LIVE. |
@@ -88,7 +88,8 @@ unless stated.
   disconnect showed reason `np-s16-kick`, code 104 (`ERR_KICKED`). Run 1 showed the same.
   The same player rejoined as connection 2.
 - Ban: `BAN` for 180 s applied and a `DISCONNECT` record came. The client showed reason
-  `np-s16-ban`, code 101. The rejoin failed and no `CONNECT` record came. The client's code on the refused join is not recorded.
+  `np-s16-ban`, code 101. The rejoin failed and no `CONNECT` record came. The client's
+  code on the refused join is not recorded.
 - Ban list: `BANS` listed the client among 1. `UNBAN` applied, `BANS` no longer listed the
   client, and the rejoin worked.
 - Move to spectators: `MODERATE SLOT` applied and a `SLOT` record showed side 0 and an empty
