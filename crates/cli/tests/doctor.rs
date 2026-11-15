@@ -60,14 +60,43 @@ fn hook_loaded(wall: &str, session: &str) -> String {
     )
 }
 
-/// A DCS start of session `id` in dcs.log, running `build`.
+/// The UTC date and time one minute from now, as dcs.log stamps them
+/// (`YYYY-MM-DD HH:MM:SS`). Call it after the install: the doctor treats a log
+/// that opened at or before the install as older than it.
+fn after_install() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 60;
+    let (days, rest) = (i64::try_from(secs / 86_400).unwrap(), secs % 86_400);
+    // Civil date from days since the epoch (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}",
+        rest / 3_600,
+        rest % 3_600 / 60,
+        rest % 60
+    )
+}
+
+/// A DCS start of session `id` in dcs.log, running `build`, after the install.
 fn dcs_log(root: &Path, id: &str, build: &str) {
+    let at = after_install();
     write(
         &root.join("Logs/dcs.log"),
         &format!(
-            "=== Log opened UTC 2026-11-15 10:00:00\n\
-             2026-11-15 10:00:01.000 INFO    EDCORE (Main): made-up line\n\
-             2026-11-15 10:00:02.000 INFO    NANOPROBE (Main): session {id} build {build}\n"
+            "=== Log opened UTC {at}\n\
+             {at}.000 INFO    EDCORE (Main): made-up line\n\
+             {at}.000 INFO    NANOPROBE (Main): session {id} build {build}\n"
         ),
     );
 }
@@ -224,17 +253,20 @@ fn the_log_and_capabilities_report_failures() {
     let scratch = Scratch::new("log");
     let root = scratch.0.join("DCS");
     good(&root);
+    let at = after_install();
     write(
         &root.join("Logs/dcs.log"),
-        "=== Log opened UTC 2026-11-15 11:00:00\n\
-         2026-11-15 11:00:01.000 ERROR   NANOPROBE (Main): loader: no manifest at x\n",
+        &format!(
+            "=== Log opened UTC {at}\n\
+             {at}.000 ERROR   NANOPROBE (Main): loader: no manifest at x\n"
+        ),
     );
     let report = check(&root);
     assert!(report.has(Mark::Fail, "loader: no manifest"), "{report}");
 
     write(
         &root.join("Logs/dcs.log"),
-        "=== Log opened UTC 2026-11-15 11:00:00\n2026-11-15 11:00:01.000 INFO    EDCORE (Main): x\n",
+        &format!("=== Log opened UTC {at}\n{at}.000 INFO    EDCORE (Main): x\n"),
     );
     assert!(check(&root).has(Mark::Fail, "did not run the loader"));
 
