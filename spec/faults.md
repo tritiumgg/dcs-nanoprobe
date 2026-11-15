@@ -36,8 +36,8 @@ first, that no urgent row waits.
 The first applies to a maintenance pump: births are pending, or the enumeration is due or
 running. The step is chosen as follows. While rows are owed and the maintenance balance is
 under a batch, the step is the cheapest owed row; with no row to read the pump is held
-back. Otherwise the step is the enumeration's measured cost when it is due or running, and
-the births' cost if not (0 while unmeasured). The budget is checked only when the sampler
+back. Otherwise the step is the births' measured cost when births are pending, and the
+enumeration's cost if not (0 while unmeasured). The budget is checked only when the sampler
 is in debt, or when the balance is short and no row tier with a measured cost is owed credit and no stopped row waits. It must pay the step,
 a batch's fixed part and the close with twice its deviation; if it does not, the pump is
 held back. In every other case the pump goes, so with no debt a measured step still goes

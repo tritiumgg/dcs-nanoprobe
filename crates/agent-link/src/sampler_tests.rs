@@ -146,9 +146,9 @@ struct World {
     checked: u64,
     /// When set, the host's sweep notes when it read each object.
     reads: Option<Reads>,
-    /// Frames on which the sweep owed rows and read none, by why: the
-    /// subscribed pump, the minimum batch, the debt, the savings.
-    waits: [u64; 4],
+    /// Frames on which the sweep owed rows and read none, by why, in
+    /// [`SweepWait`]'s order.
+    waits: [u64; 5],
 }
 
 /// When the host's sweep read each object, and every gap between two reads
@@ -1024,7 +1024,7 @@ fn a_fixed_cost_per_batch_does_not_slow_the_positions() {
 /// LIVE, S10: a 2,000-object spawn brought births at 37 µs each, which
 /// ranked first and took every pump for over a minute: positions and the
 /// enumeration stalled. Births now take at most half the sampling time while
-/// rows are owed, and a running enumeration goes before them.
+/// rows are owed, and go before a running enumeration.
 #[test]
 fn a_birth_burst_leaves_the_positions_and_the_enumeration_their_turn() {
     let mut s = Sampler::new(Rates::default(), 0.07);
@@ -1908,12 +1908,14 @@ fn every_tier_holds(cases: &[(Sweep, f64, f64, Option<f64>, bool)]) {
             "sweep {sweep:?}, batch {batch}, call {call}, step {step:?}, attitude {attitude}"
         );
         let mut p = rec.periods;
+        // A vitals sweep that repays rows after a hold reads under its
+        // period, so one reading scatters (4.2 to 5.4 s in one run): the
+        // mean of the last minute stands for them.
+        p[1] = tail_mean(&r.samples, 1, 60);
         if attitude {
             // The pump reads the subscribed rows in batches of its own, so
-            // the vitals sweep's single readings scatter: the mean of the
-            // last minute stands for them.
+            // the positions' single readings scatter too.
             p[0] = tail_mean(&r.samples, 0, 60);
-            p[1] = tail_mean(&r.samples, 1, 60);
         }
         assert!(
             (0.9..1.2).contains(&p[0]),
@@ -2118,7 +2120,10 @@ fn the_call_estimate_returns_to_the_true_cost_under_a_reserving_sweep() {
 /// and `coalition.getGroups` steps of 687 µs. Every tier holds its target,
 /// the enumeration runs at 60 s plus its duration at most, the pump comes
 /// under about 5 times a second, and the estimate of the fixed part reads
-/// within 25 % of the true 20 µs.
+/// within 25 % of the true 20 µs. Births go before the enumeration, so the
+/// 2,000 births of the fill resolve at 37 µs each before the first
+/// enumeration reads on: that one lasts about 106 s, and the reported period
+/// holds it until two more have run. The measure starts after them.
 #[test]
 fn the_live_cost_storm_case_holds_every_tier_at_k_1() {
     let mut s = Sampler::new(Rates::default(), 0.07);
@@ -2130,7 +2135,8 @@ fn the_live_cost_storm_case_holds_every_tier_at_k_1() {
     w.enum_step_us = Some(687.0);
     w.birth_us = Some(37.0);
     w.close_us = 6.0;
-    run_x(&mut s, &mut rec, &mut w, 60.0, 110.0, 165.0, 23.0, 3.0);
+    run_x(&mut s, &mut rec, &mut w, 240.0, 110.0, 165.0, 23.0, 3.0);
+    assert!(w.births.is_empty(), "the fill did not resolve");
     rec.began += Duration::from_nanos(9_090_909);
     let r = run_x(&mut s, &mut rec, &mut w, 180.0, 110.0, 165.0, 23.0, 3.0);
     let p = rec.periods;
@@ -3153,6 +3159,15 @@ fn cycle_capped(stall_s: f64, enumeration: bool, one_sweep: bool) -> Cycle {
     run_x(&mut s, &mut rec, &mut w, 1.0, 110.0, 165.0, 23.0, 3.0);
     s.subscribe(1.0, false, &(1..=50).collect::<Vec<_>>());
     run_after(&mut s, &mut rec, &mut w, 0.0, 89.0);
+    // Births go before the enumeration, so the fill's 2,000 births at 37 µs
+    // each can outlast the first 90 s: the baseline comes after them.
+    for _ in 0..30 {
+        if w.births.is_empty() {
+            break;
+        }
+        run_after(&mut s, &mut rec, &mut w, 0.0, 10.0);
+    }
+    assert!(w.births.is_empty(), "the fill did not resolve");
     let sub_before = s.subscribed_period();
     if enumeration {
         s.enum_due = true;
@@ -3551,20 +3566,29 @@ struct RankRun {
     windows: Vec<(f64, f64)>,
     /// Each enumeration's begin and end, seconds from the start.
     spans: Vec<(f64, Option<f64>)>,
-    /// Each birth's wait from its spawn to its row, s, at 1 s resolution.
+    /// Each resolved birth's wait from its spawn to its row, s, at 1 s
+    /// resolution, and the births still waiting at the end.
     births: Vec<f64>,
+    waiting: usize,
+    /// Moving units the sweep never read in the measure.
+    unread: usize,
+    /// The longest a row read in the measure went unread at its end, s.
+    open_max: f64,
+    /// The measure's length, s, and its frames.
+    secs: f64,
+    frames: u64,
     /// The mean agent share, and the debt the cap forgave, µs.
     share: f64,
     forgiven_us: f64,
     /// Frames the sweep owed rows and read none, by why.
-    waits: [u64; 4],
+    waits: [u64; 5],
 }
 
 /// 2,000 rows with the LIVE costs of the enumeration-rank ruling
 /// (2026-11-15): `coalition.getGroups` steps of 687 and 1,140 µs in turn,
 /// a birth 37 µs, the call 23 µs, a pump batch's fixed part 20 µs, a
 /// position row 0.21 µs. Every unit moves, so every row is read on every
-/// position sweep. After a minute's start, `secs` seconds at scale `k`, in
+/// position sweep. After the fill, `secs` seconds at scale `k`, in
 /// 1 s steps, each with its one system-call frame; five units are born
 /// every 5 s, some of them while an enumeration runs.
 fn enum_rank_run(k: f64, secs: f64, fps: f64) -> RankRun {
@@ -3577,7 +3601,23 @@ fn enum_rank_run(k: f64, secs: f64, fps: f64) -> RankRun {
     w.enum_step_alt = Some(1140.0);
     w.birth_us = Some(37.0);
     w.close_us = 6.0;
+    // The fill: 2,000 births, which go before the enumeration, at 37 µs
+    // each. The measure starts once they have resolved.
     run_x(&mut s, &mut rec, &mut w, 60.0, fps, 165.0, 23.0, 3.0);
+    for _ in 0..240 {
+        if w.births.is_empty() {
+            break;
+        }
+        rec.began += Duration::from_secs_f64(1.0 / fps);
+        run_x(&mut s, &mut rec, &mut w, 1.0, fps, 165.0, 23.0, 3.0);
+    }
+    assert!(w.births.is_empty(), "the fill did not resolve");
+    // The fill's tail, the new rows' first life reads and their checks, is
+    // the fill's own window (S11 judges it apart): 10 s more before the
+    // measure. At 110 fps it reads one gap of 1.26 s about 4 s after the
+    // last birth.
+    rec.began += Duration::from_secs_f64(1.0 / fps);
+    run_x(&mut s, &mut rec, &mut w, 10.0, fps, 165.0, 23.0, 3.0);
     if k != 1.0 {
         #[cfg(feature = "faults")]
         s.set_scale(k).unwrap();
@@ -3586,7 +3626,7 @@ fn enum_rank_run(k: f64, secs: f64, fps: f64) -> RankRun {
     }
     w.reads = Some(Reads::default());
     w.enum_spans.clear();
-    w.waits = [0; 4];
+    w.waits = [0; 5];
     let start = rec.began + Duration::from_nanos(9_090_909);
     let since = |t: Instant| t.saturating_duration_since(start).as_secs_f64();
     let mut waiting: Vec<(u64, f64)> = Vec::new();
@@ -3617,7 +3657,6 @@ fn enum_rank_run(k: f64, secs: f64, fps: f64) -> RankRun {
             !done
         });
     }
-    births.extend(waiting.iter().map(|&(_, born)| secs - born + 1e6));
     let reads = w.reads.take().unwrap();
     let mut buckets: Vec<Vec<f64>> = vec![Vec::new(); (secs / 10.0).ceil() as usize];
     for (t, gap) in reads.gaps {
@@ -3625,6 +3664,22 @@ fn enum_rank_run(k: f64, secs: f64, fps: f64) -> RankRun {
             b.push(gap);
         }
     }
+    // A row not read again by the end has an open gap, so a hold at the end
+    // of the run counts too. It joins the largest gap only: cut off by the
+    // end, it would pull the last window's median down.
+    let end = rec.began + Duration::from_secs_f64(1.0 / fps);
+    let open_max = reads
+        .last
+        .values()
+        .map(|&last| end.saturating_duration_since(last).as_secs_f64())
+        .fold(0.0f64, f64::max);
+    let unread = w
+        .objects
+        .iter()
+        .filter(|(o, x)| {
+            x.kind == object_kind::UNIT && x.speed > 0.0 && !reads.last.contains_key(o)
+        })
+        .count();
     let windows = buckets
         .into_iter()
         .map(|mut g| {
@@ -3642,6 +3697,11 @@ fn enum_rank_run(k: f64, secs: f64, fps: f64) -> RankRun {
             .map(|&(b, e)| (since(b), e.map(since)))
             .collect(),
         births,
+        waiting: waiting.len(),
+        unread,
+        open_max,
+        secs,
+        frames: (secs * fps) as u64,
         share,
         forgiven_us,
         waits: w.waits,
@@ -3658,13 +3718,26 @@ fn rank_failures(r: &RankRun) -> Vec<String> {
             ));
         }
     }
+    if r.unread > 0 {
+        bad.push(format!("{} moving units never read", r.unread));
+    }
+    if r.open_max > 1.25 {
+        bad.push(format!("a row unread for {:.2} s at the end", r.open_max));
+    }
     if r.spans.len() < 2 {
         bad.push(format!("enumerations {:?}", r.spans));
+    }
+    // An enumeration still running at the end is late once it has run a
+    // period; one before the last must have ended.
+    for (i, &(b, e)) in r.spans.iter().enumerate() {
+        if e.is_none() && (i + 1 < r.spans.len() || r.secs - b > 60.0) {
+            bad.push(format!("enumeration {i} did not end: {:?}", r.spans));
+        }
     }
     let longest = r
         .spans
         .iter()
-        .map(|&(b, e)| e.unwrap_or(f64::INFINITY) - b)
+        .filter_map(|&(b, e)| e.map(|e| e - b))
         .fold(0.0f64, f64::max);
     for pair in r.spans.windows(2) {
         let ((b0, _), (b1, e1)) = (pair[0], pair[1]);
@@ -3678,8 +3751,22 @@ fn rank_failures(r: &RankRun) -> Vec<String> {
     }
     // The 3a bound: one enumeration period plus that enumeration's duration.
     let worst = r.births.iter().copied().fold(0.0f64, f64::max);
-    if worst > 60.0 + longest {
-        bad.push(format!("a birth waited {worst:.1} s"));
+    if worst > 60.0 + longest || r.waiting > 0 {
+        bad.push(format!(
+            "a birth waited {worst:.1} s; {} still wait",
+            r.waiting
+        ));
+    }
+    // The sweep never waits on births or the enumeration. What debt it
+    // still waits on is the row tiers' own: the sweep's and the call of a
+    // pump that read rows. It stays under 1 % of frames (43 of 19,800 at
+    // 110 fps in the run of record).
+    let debt = r.waits[SweepWait::Debt as usize];
+    if debt * 100 > r.frames {
+        bad.push(format!(
+            "the sweep waited on debt on {debt} of {} frames",
+            r.frames
+        ));
     }
     if r.share > 0.003 {
         bad.push(format!("share {}", r.share));
@@ -3692,12 +3779,12 @@ fn rank_failures(r: &RankRun) -> Vec<String> {
 
 /// The enumeration-rank ruling (2026-11-15), at the whole budget: the
 /// positions sweep keeps its period while the enumeration runs, and births
-/// resolve within one enumeration period plus its duration. On main it
-/// fails: each dear step's debt holds the sweep under its minimum batch, and
-/// positions read up to 1.48 s apart during each enumeration. It does not
-/// show the live 6-27 s stall with no position row.
+/// resolve within one enumeration period plus its duration. Before the
+/// births' and the enumeration's own account it failed: each dear step's
+/// debt held the sweep under its minimum batch, and positions read up to
+/// 1.48 s apart during each enumeration at 110 and 56 fps. It did not show
+/// the live 6-27 s stall with no position row.
 #[test]
-#[ignore = "fails on main; the enumeration-rank fix waits on the coordinator"]
 fn positions_keep_their_period_while_a_2000_object_enumeration_runs() {
     let mut bad = Vec::new();
     for fps in [110.0, 56.0, 25.0] {
@@ -3714,4 +3801,151 @@ fn positions_keep_their_period_while_a_2000_object_enumeration_runs() {
         );
     }
     assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+/// Each reason the sweep reads no row reaches `sweep_wait` and the
+/// window's counts, and a frame that owes nothing records none.
+#[test]
+fn every_sweep_wait_is_recorded_and_counted() {
+    let frame = |set: &dyn Fn(&mut Sampler)| {
+        let (mut s, mut rec, _w) = table(500);
+        let t = rec.began + Duration::from_secs(10);
+        rec.began = t;
+        rec.syscall = false;
+        s.accrue(t);
+        set(&mut s);
+        s.slice(&rec, t);
+        // Not late: the minimum batch applies.
+        s.last_sweep = Some(t);
+        s.sweep(&mut rec, t, &mut |_| Ok(Some([1.0, 0.0, 0.0])), || t);
+        (s.sweep_wait(), s.sweep_waits)
+    };
+    let owed = |s: &mut Sampler| s.tiers[Tier::Positions.index()].credit = 500.0;
+    // Nothing owed: no reason, whatever else holds.
+    let (why, counts) = frame(&|s| s.tiers[Tier::Positions.index()].credit = 0.0);
+    assert_eq!((why, counts), (None, [0; 5]));
+    let (why, counts) = frame(&|s| {
+        s.tiers[Tier::Positions.index()].credit = 0.0;
+        s.sub_attitude = true;
+        s.sub_slots = vec![0, 1, 2];
+        s.tiers[Tier::Subscribed.index()].credit = 3.0;
+    });
+    assert_eq!(
+        (why, counts),
+        (None, [0; 5]),
+        "the subscribed pump, nothing owed"
+    );
+    type Set<'a> = &'a dyn Fn(&mut Sampler);
+    let cases: [(SweepWait, Set); 6] = [
+        (SweepWait::Subscribed, &|s| {
+            owed(s);
+            s.sub_attitude = true;
+            s.sub_slots = vec![0, 1, 2];
+            s.tiers[Tier::Subscribed.index()].credit = 3.0;
+        }),
+        // A row of 1 µs: the frame's 27 µs buy fewer than 64.
+        (SweepWait::MinBatch, &|s| {
+            owed(s);
+            s.sweep_row_us = 1.0;
+        }),
+        // A fixed part no saving reaches.
+        (SweepWait::Fund, &|s| {
+            owed(s);
+            s.sweep_batch_us = 1000.0;
+        }),
+        // Rows of 20 µs: the savings buy five, the slice less the repayment
+        // none, the whole slice one.
+        (SweepWait::Debt, &|s| {
+            owed(s);
+            s.sweep_row_us = 20.0;
+            s.sweep_fund = 100.0;
+            s.budget.debt = 1000.0;
+        }),
+        // Rows of 30 µs and no debt: the savings buy three, the slice none.
+        (SweepWait::Slice, &|s| {
+            owed(s);
+            s.sweep_row_us = 30.0;
+            s.sweep_fund = 100.0;
+        }),
+        // Rows of 60 µs in debt: the slice would pay none even without the
+        // repayment, so the debt is not to blame.
+        (SweepWait::Slice, &|s| {
+            owed(s);
+            s.sweep_row_us = 60.0;
+            s.sweep_fund = 100.0;
+            s.budget.debt = 1000.0;
+        }),
+    ];
+    for (want, set) in cases {
+        let (why, counts) = frame(set);
+        assert_eq!(why, Some(want));
+        let mut expect = [0; 5];
+        expect[want as usize] = 1;
+        assert_eq!(counts, expect, "{want:?}");
+    }
+}
+
+/// Births go before a running enumeration (the enumeration-rank ruling):
+/// with both waiting and the balance paying a batch, the pump's first batch
+/// is births; with no birth waiting, it is the enumeration.
+#[test]
+fn births_go_before_a_running_enumeration() {
+    let first = |births: usize| {
+        let (mut s, mut rec, _w) = table(50);
+        let t = rec.began + Duration::from_secs(10);
+        rec.began = t;
+        rec.syscall = false;
+        s.accrue(t);
+        s.enumeration = Some(1);
+        s.set_pending(births, 0);
+        s.maintenance_us = 250.0;
+        s.slice(&rec, t);
+        assert!(s.begin(&rec, t).sample);
+        let mut slots = Vec::new();
+        s.plan(&mut rec, || t, &mut slots).map(|p| p.tier)
+    };
+    assert_eq!(first(5), Some(Tier::Births));
+    assert_eq!(first(0), Some(Tier::Enumeration));
+}
+
+/// The births' and the enumeration's balance pays their own time, below
+/// the −1,000 µs floor if need be, down to the debt's bound; past it the
+/// time is forgiven and counted. None of it reaches the row tiers' debt.
+/// The floor stops the scale's surcharge.
+#[test]
+fn the_balance_pays_its_own_time_past_the_floor_and_down_to_its_bound() {
+    let (mut s, rec, _w) = table(50);
+    let t = rec.began + Duration::from_secs(10);
+    let mut rec = rec;
+    rec.began = t;
+    rec.syscall = false;
+    s.slice(&rec, t);
+    s.budget.debt = 0.0;
+    // A step of 1,140 µs from a balance of 69 µs.
+    s.maintenance_us = 69.0;
+    s.maintenance_paid = 0.0;
+    s.pay_maintenance(1140.0, 1140.0);
+    assert!(
+        (s.maintenance_us + 1071.0).abs() < 1e-9,
+        "{}",
+        s.maintenance_us
+    );
+    assert_eq!(s.maintenance_paid, 1140.0);
+    // The frame took the step's time: none of it is the row tiers' debt.
+    let end = t + Duration::from_micros(1140);
+    s.end_frame(&mut rec, end);
+    assert_eq!(s.debt_us(), 0.0, "the step reached the debt");
+    // The scale's surcharge stops at the floor; the time itself does not.
+    s.maintenance_us = -900.0;
+    s.pay_maintenance(50.0, 300.0);
+    assert_eq!(s.maintenance_us, -1000.0);
+    s.maintenance_us = -990.0;
+    s.pay_maintenance(50.0, 300.0);
+    assert_eq!(s.maintenance_us, -1040.0);
+    // A stall of 30 ms inside a step: the balance stops at the debt's
+    // bound, one second's budget, and the rest is forgiven.
+    s.maintenance_us = 0.0;
+    s.pay_maintenance(30_000.0, 30_000.0);
+    assert_eq!(s.maintenance_us, -3000.0);
+    assert_eq!(s.window.maintenance_forgiven_us, 27_000.0);
 }
