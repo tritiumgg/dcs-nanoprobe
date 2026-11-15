@@ -36,9 +36,6 @@ mod disk {
     pub struct Slot(pub(super) Option<std::convert::Infallible>);
 
     impl super::Store {
-        /// Never called: the slot is always empty.
-        pub(super) fn commit_or_stop(&mut self) {}
-
         /// Nothing to write: the store is in memory.
         pub fn commit(&mut self) -> Result<(), std::convert::Infallible> {
             Ok(())
