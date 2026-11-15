@@ -1008,7 +1008,9 @@ impl Reconciler {
                 continue;
             };
             let Some(p) = ids::parse(&name) else { continue };
-            if p.campaign != campaign || store.unit(p.entity).is_none_or(|u| u.group != group) {
+            if !ids::of_campaign(&p, campaign)
+                || store.unit(p.entity).is_none_or(|u| u.group != group)
+            {
                 continue;
             }
             let u = store.unit(p.entity).expect("unit");
@@ -1069,7 +1071,7 @@ impl Reconciler {
         let campaign = store.campaign();
         let named = ids::parse(&o.name);
         if let Some(n) = named
-            && n.campaign != campaign
+            && !ids::of_campaign(&n, campaign)
         {
             self.counters.foreign += 1;
             return None;
@@ -2334,7 +2336,7 @@ fn unit_names(group: &Lv, campaign: CampaignId, key: &str) -> Vec<EntityId> {
                 .into_iter()
                 .filter_map(|t| lv::str_at(t, "name"))
                 .filter_map(|n| ids::parse(&n))
-                .filter(|p| p.campaign == campaign)
+                .filter(|p| ids::of_campaign(p, campaign))
                 .map(|p| p.entity)
                 .collect()
         })
@@ -2386,13 +2388,13 @@ mod tests {
 
     #[test]
     fn further_keys_join_a_table_and_never_replace_the_platform_s() {
-        let base = lv::obj(vec![("name", lv::s("np.u.1.2")), ("type", lv::s("M-113"))]);
+        let base = lv::obj(vec![("name", lv::s("np.blp2")), ("type", lv::s("M-113"))]);
         let extra = lv::obj(vec![
             ("name", lv::s("mine")),
             ("livery_id", lv::s("desert")),
         ]);
         let t = with_extra(base.clone(), &extra);
-        assert_eq!(lv::str_at(&t, "name").as_deref(), Some("np.u.1.2"));
+        assert_eq!(lv::str_at(&t, "name").as_deref(), Some("np.blp2"));
         assert_eq!(lv::str_at(&t, "livery_id").as_deref(), Some("desert"));
         assert_eq!(with_extra(base.clone(), &Lv::Nil), base);
         assert_eq!(with_extra(base.clone(), &Lv::Number(1.0)), base);

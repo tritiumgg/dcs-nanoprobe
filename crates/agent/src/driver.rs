@@ -19,6 +19,7 @@ use nanoprobe_transport::layout::{
     HandlerState, kind, lifecycle, opcode as op, opcode_row, result,
 };
 use nanoprobe_transport::log::{Level, Value};
+use nanoprobe_transport::names::{self, Kind};
 use nanoprobe_transport::records::{Airbase, Bind, CommandHeader, Event, Log, Subscribe};
 
 use crate::state;
@@ -924,27 +925,9 @@ fn lua_command(d: &mut Driver, opcode: u16, payload: &[u8], in_pump: bool) -> St
 }
 
 /// The platform name of an entity (spec/world.md, "Names"):
-/// `np.<kind>.<campaign base 36>.<entity base 36>`.
-fn platform_name(kind: char, campaign: u64, entity: u64) -> String {
-    fn base36(mut v: u64, out: &mut String) {
-        const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
-        let mut buf = [0u8; 13];
-        let mut at = buf.len();
-        loop {
-            at -= 1;
-            buf[at] = DIGITS[(v % 36) as usize];
-            v /= 36;
-            if v == 0 {
-                break;
-            }
-        }
-        out.extend(buf[at..].iter().map(|&b| b as char));
-    }
-    let mut name = format!("np.{kind}.");
-    base36(campaign, &mut name);
-    name.push('.');
-    base36(entity, &mut name);
-    name
+/// `np<marker><campaign tag><entity base 62>`.
+fn platform_name(kind: Kind, campaign: u64, entity: u64) -> String {
+    names::name(kind, names::tag_of(campaign), entity)
 }
 
 /// The fields of one handler's arguments table: encoded `lv` pairs, built by
@@ -1006,9 +989,25 @@ fn lv_bytes<'a>(rd: &mut Reader<'a>, body: &'a [u8]) -> Option<&'a [u8]> {
 /// and the platform names built from the header. `None` when the payload does
 /// not decode.
 fn arguments(opcode: u16, h: &CommandHeader, body: &[u8]) -> Option<Vec<u8>> {
+    // A name is built only for an entity in range (spec/world.md, "Names").
+    let named = matches!(
+        u64::from(opcode),
+        op::GROUP_SPAWN
+            | op::GROUP_ORDER
+            | op::GROUP_DESTROY
+            | op::GROUP_CAPTURE_DESTROY
+            | op::GROUP_OPTION
+            | op::STATIC_SPAWN
+            | op::STATIC_DESTROY
+            | op::DAMAGE
+            | op::CAPTURE
+    );
+    if named && !(1..=names::MAX_ENTITY).contains(&h.entity) {
+        return None;
+    }
     let mut rd = Reader::new(body);
     let mut f = Fields::default();
-    let group = || platform_name('g', h.campaign, h.entity);
+    let group = || platform_name(Kind::Group, h.campaign, h.entity);
     match u64::from(opcode) {
         op::EXTENSION_SET | op::EXTENSION_INVOKE => {
             let key = if u64::from(opcode) == op::EXTENSION_SET {
@@ -1041,10 +1040,10 @@ fn arguments(opcode: u16, h: &CommandHeader, body: &[u8]) -> Option<Vec<u8>> {
             f.num("country", f64::from(rd.u32().ok()?));
             rd.skip(4).ok()?;
             rd.str().ok()?;
-            f.text("name", &platform_name('s', h.campaign, h.entity));
+            f.text("name", &platform_name(Kind::Static, h.campaign, h.entity));
             f.raw("static", lv_bytes(&mut rd, body)?);
         }
-        op::STATIC_DESTROY => f.text("name", &platform_name('s', h.campaign, h.entity)),
+        op::STATIC_DESTROY => f.text("name", &platform_name(Kind::Static, h.campaign, h.entity)),
         op::AIRBASE_OWNER => {
             f.num("coalition", f64::from(rd.u32().ok()?));
             rd.skip(4).ok()?;
@@ -1065,7 +1064,7 @@ fn arguments(opcode: u16, h: &CommandHeader, body: &[u8]) -> Option<Vec<u8>> {
             if !life.is_finite() || !(0.0..=100.0).contains(&life) {
                 return None;
             }
-            f.text("name", &platform_name('u', h.campaign, h.entity));
+            f.text("name", &platform_name(Kind::Unit, h.campaign, h.entity));
             // Text Rust formats, so no Lua locale reads it (spec/commands.md,
             // "Layout: DAMAGE").
             f.text("life_percent", &format!("{life:.4}"));
@@ -1119,7 +1118,10 @@ fn arguments(opcode: u16, h: &CommandHeader, body: &[u8]) -> Option<Vec<u8>> {
         }
         op::CAPTURE => {
             f.text("name", &group());
-            f.text("static_name", &platform_name('s', h.campaign, h.entity));
+            f.text(
+                "static_name",
+                &platform_name(Kind::Static, h.campaign, h.entity),
+            );
         }
         _ => {}
     }
@@ -1144,7 +1146,7 @@ fn scope_name(scope: u32, target: u64, h: &CommandHeader) -> Option<Option<Strin
         1 => Some(None),
         2 | 5 => (target <= u64::from(u32::MAX)).then_some(None),
         3 | 4 if target < EXACT_TARGET_MAX => {
-            let kind = if scope == 3 { 'g' } else { 'u' };
+            let kind = if scope == 3 { Kind::Group } else { Kind::Unit };
             Some(Some(if h.campaign == 0 {
                 String::new()
             } else {
@@ -1869,22 +1871,47 @@ mod tests {
     }
 
     #[test]
-    fn names_are_base36_without_leading_zeros() {
-        assert_eq!(platform_name('g', 0, 0), "np.g.0.0");
-        assert_eq!(platform_name('u', 71, 71), "np.u.1z.1z");
-        assert_eq!(platform_name('s', 36, 35), "np.s.10.z");
+    fn names_carry_the_campaign_tag_and_the_entity_in_base_62() {
+        assert_eq!(names::tag_of(71).as_str(), "enP");
+        assert_eq!(platform_name(Kind::Group, 71, 36), "np!enPa");
+        assert_eq!(platform_name(Kind::Unit, 71, 61), "np.enPz");
+        assert_eq!(platform_name(Kind::Static, 71, 62), "np#enP10");
         assert_eq!(
-            platform_name('g', u64::MAX, u64::MAX),
-            "np.g.3w5e11264sgsf.3w5e11264sgsf"
+            platform_name(Kind::Unit, 71, (1 << 53) - 1).len(),
+            names::MAX_LEN
+        );
+    }
+
+    #[test]
+    fn an_entity_out_of_range_is_a_bad_payload() {
+        for e in [0, names::MAX_ENTITY + 1, u64::MAX] {
+            assert_eq!(
+                arguments(op::STATIC_DESTROY as u16, &header(71, e), &[]),
+                None,
+                "{e}"
+            );
+            assert_eq!(
+                arguments(op::GROUP_DESTROY as u16, &header(71, e), &[]),
+                None,
+                "{e}"
+            );
+        }
+        assert!(
+            arguments(
+                op::STATIC_DESTROY as u16,
+                &header(71, names::MAX_ENTITY),
+                &[]
+            )
+            .is_some()
         );
     }
 
     #[test]
     fn every_layout_decodes_into_its_fields() {
         let h = header(71, 36);
-        let group = table(vec![("name", s("np.g.1z.10"))]);
+        let group = table(vec![("name", s("np!enPa"))]);
         let mut w = Writer::new();
-        w.u32(2).u32(3).str("np.g.1z.10").lv(&group);
+        w.u32(2).u32(3).str("np!enPa").lv(&group);
         expect(
             op::GROUP_SPAWN,
             &h,
@@ -1892,7 +1919,7 @@ mod tests {
             vec![
                 ("country", n(2.0)),
                 ("category", n(3.0)),
-                ("name", s("np.g.1z.10")),
+                ("name", s("np!enPa")),
                 ("group", group),
             ],
         );
@@ -1903,10 +1930,10 @@ mod tests {
             op::GROUP_ORDER,
             &h,
             &w.finish(),
-            vec![("name", s("np.g.1z.10")), ("task", task)],
+            vec![("name", s("np!enPa")), ("task", task)],
         );
         for opcode in [op::GROUP_DESTROY, op::GROUP_CAPTURE_DESTROY] {
-            expect(opcode, &h, &[], vec![("name", s("np.g.1z.10"))]);
+            expect(opcode, &h, &[], vec![("name", s("np!enPa"))]);
         }
         let mut w = Writer::new();
         w.u32(9).pad(4).lv(&Lv::Bool(true));
@@ -1915,7 +1942,7 @@ mod tests {
             &h,
             &w.finish(),
             vec![
-                ("name", s("np.g.1z.10")),
+                ("name", s("np!enPa")),
                 ("option", n(9.0)),
                 ("value", Lv::Bool(true)),
             ],
@@ -1929,11 +1956,11 @@ mod tests {
             &w.finish(),
             vec![
                 ("country", n(1.0)),
-                ("name", s("np.s.1z.10")),
+                ("name", s("np#enPa")),
                 ("static", stat),
             ],
         );
-        expect(op::STATIC_DESTROY, &h, &[], vec![("name", s("np.s.1z.10"))]);
+        expect(op::STATIC_DESTROY, &h, &[], vec![("name", s("np#enPa"))]);
         let mut w = Writer::new();
         w.u32(2).pad(4).str("Batumi");
         expect(
@@ -1962,7 +1989,7 @@ mod tests {
             op::DAMAGE,
             &h,
             &w.finish(),
-            vec![("name", s("np.u.1z.10")), ("life_percent", s("10.5000"))],
+            vec![("name", s("np.enPa")), ("life_percent", s("10.5000"))],
         );
         for life in [0.0, 100.0] {
             let mut w = Writer::new();
@@ -1973,7 +2000,7 @@ mod tests {
             op::CAPTURE,
             &h,
             &[],
-            vec![("name", s("np.g.1z.10")), ("static_name", s("np.s.1z.10"))],
+            vec![("name", s("np!enPa")), ("static_name", s("np#enPa"))],
         );
     }
 
@@ -2031,7 +2058,7 @@ mod tests {
             &sound(1, 0, odd),
             vec![("scope", n(1.0)), ("target", n(0.0)), ("file", s(odd))],
         );
-        for (scope, name) in [(3, "np.g.1z.10"), (4, "np.u.1z.10")] {
+        for (scope, name) in [(3, "np!enPa"), (4, "np.enPa")] {
             expect(
                 op::SOUND,
                 &h,
@@ -2096,10 +2123,10 @@ mod tests {
         );
         want[0].1 = s("4");
         want[1].1 = s("36");
-        want.push(("name", s("np.u.1z.10")));
+        want.push(("name", s("np.enPa")));
         expect(op::PICTURE, &h, &picture(4, 36, 12.5, 60.0, "Key_1"), want);
         let mut want = all("3", "36");
-        want.push(("name", s("np.g.1z.10")));
+        want.push(("name", s("np!enPa")));
         expect(op::PICTURE, &h, &picture(3, 36, 12.5, 60.0, "Key_1"), want);
         // Out of range, not finite, a bad scope, or a file that is not safe.
         for (scope, seconds, size, file) in [

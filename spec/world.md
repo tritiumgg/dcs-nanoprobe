@@ -7,7 +7,7 @@ destroys groups; state lives on units. The model follows that.
 
 | Identity | Type | Assigned by | Rules |
 |---|---|---|---|
-| Campaign ID | `u64` | The sidecar, when a campaign is created | The wall-clock time of creation in milliseconds since the Unix epoch, or one more than the newest campaign's ID if that is larger. So an ID is never used twice on a server, even when the stores are lost or in memory only. Never 0. Below 2^53. |
+| Campaign ID | `u64` | The sidecar, when a campaign is created | The wall-clock time of creation in milliseconds since the Unix epoch, or one more than the newest campaign's ID if that is larger, then moved forward until its tag is free ("Names"). So an ID is never used twice on a server, even when the stores are lost or in memory only. Never 0. Below 2^53. |
 | `EntityId` | `u64` | The sidecar, from one counter per campaign | Starts at 1. Never reused within a campaign. 0 means none. Below 2^53. |
 | DCS object ID | `u64` | DCS | The numeric ID of a unit, static or group in one DCS process. The agent and the binding use it; the public API never shows it. |
 | Mission generation | `u32` | The agent | 0 before the first mission load in the process, then one more at each load (spec/log.md, `gen`). |
@@ -47,28 +47,77 @@ Every group, unit and static the platform creates has a DCS name that encodes it
 identity:
 
 ```
-np.<kind>.<campaign>.<entity>
+np!<tag><entity>    a group
+np.<tag><entity>    a unit
+np#<tag><entity>    a static
 ```
 
 | Part | Value |
 |---|---|
 | `np` | The platform's marker |
-| `<kind>` | `g` group, `u` unit, `s` static |
-| `<campaign>` | The campaign ID in base 36, lower case, no leading zeros |
-| `<entity>` | The `EntityId` in base 36, lower case, no leading zeros |
+| `!`, `.`, `#` | The DCS namespace: group, unit, static |
+| `<tag>` | The campaign's tag: 3 base-62 characters, leading zeros kept |
+| `<entity>` | The `EntityId` in base 62, no leading zeros |
 
-Example: `np.u.m3k9x2a1.1z` is unit 71 of the campaign created at that millisecond. A
-name is at most 28 characters, all of them in `[a-z0-9.]`.
+Base 62 uses the digits `0-9A-Za-z`, in that order of value: `0` is 0, `A` is 10, `a`
+is 36, `z` is 61. There is no separator between the tag and the entity; the tag is
+always 3 characters. A name is 7 to 15 characters, all of them in `[0-9A-Za-z!.#]`:
+`np`, the marker, the tag and 1 to 9 entity digits (`EntityId` is below 2^53).
 
-Why this form (docs/results/2026-11-11-first-dll-and-spikes.md, E21):
+Example: in campaign 1,763,000,000,000 (tag `jqW`), `np!jqW1A` is group 72, `np.jqW1B`
+is unit 73 and `np#jqW1C` is static 74.
+
+### The campaign tag
+
+The tag is a fixed function of the campaign ID. Stored campaigns depend on it, so it
+never changes:
+
+1. Take the campaign ID as an unsigned 64-bit integer `x`.
+2. Apply the SplitMix64 output function, all arithmetic modulo 2^64:
+   `z = x + 0x9E3779B97F4A7C15`; `z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9`;
+   `z = (z ^ (z >> 27)) * 0x94D049BB133111EB`; `z = z ^ (z >> 31)`.
+3. Take `v = z mod 238,328` (62^3).
+4. Write `v` as 3 base-62 digits, most significant first: `v / 3,844`, `(v / 62) mod 62`,
+   `v mod 62`.
+
+Test vectors, checked by the shared codec's tests: `x = 0` gives `z =
+0xE220A8397B1DCDAF` and tag `nwl`; 1 gives `blp`; 7 gives `hGx`; 1,700,000,000,000 gives
+`ncp`; 1,763,000,000,000 gives `jqW`; 1,763,020,000,000 gives `nEd`; 2^53 - 1 gives
+`pzz`.
+
+When the sidecar creates a campaign, it takes the ID from the Identities rule, then
+moves it forward by one until no campaign in its stores has the same tag. The ID is then
+later than the creation millisecond by that many steps.
+
+The agent and the sidecar build and parse names with one codec, in the transport crate.
+The agent builds a name from the command header's `campaign` and an `EntityId`; the
+sidecar reads the tag from a name and compares it with the active campaign's.
+
+Known limits:
+
+- A tag can equal the tag of a campaign the stores have never held, for example one from
+  another server or from lost stores, with probability 1 in 238,328 per pair.
+- The check at creation covers only the campaigns the stores hold. A deleted campaign's
+  tag can be given to a new campaign.
+
+In both cases the other campaign's objects, in a mission DCS still runs or one saved
+with them, read as the active campaign's.
+
+Why this form (docs/results/2026-11-11-first-dll-and-spikes.md, E21;
+docs/results/2026-11-15-s15-world-commands.md, E21b; docs/results/2026-11-15-e21c-farp-name.md,
+E21c):
 
 - Unit names and static names are one namespace in DCS. A new object with a taken name
   removes the old holder without an event (LIVE). `EntityId` is unique across kinds
   within a campaign, so no two platform objects share a name.
-- Group names are a separate namespace (LIVE). The kind letter keeps a group's name
-  apart from its units' names anyway.
+- Group names are a separate namespace (LIVE). The marker keeps a group's name apart
+  from its units' names anyway, and a static's apart from a unit's of the same entity.
+- DCS names are case-sensitive, and names in this character set and with a leading
+  `.`, `#` or `!` after `np` are accepted, found by name and read back exactly (LIVE,
+  E21b on the Wine server, E21c on a Windows client). So base 62 holds a name in about
+  half the characters of base 36, and players read shorter names in the unit dialog.
 - Players see unit and group names in the unit dialog (LIVE, observed by the owner on
-  a client; not read by a script). A name holds only numbers, never
+  a client; not read by a script). A name holds only the tag and the entity, never
   a player name, an author's label or anything else a player should not see. An
   author's label is stored in the sidecar and shown through the API.
 - After a DCS restart the sidecar rebuilds the binding from names alone.
@@ -76,8 +125,8 @@ Why this form (docs/results/2026-11-11-first-dll-and-spikes.md, E21):
 Rules:
 
 - The shell writer never puts a name in this form into a mission.
-- An object found in the world whose name parses with a campaign ID other than the
-  active one is never bound to an entity of the active campaign. It is reported as
+- An object found in the world whose name parses with a tag other than the active
+  campaign's is never bound to an entity of the active campaign. It is reported as
   unmanaged with the warning `foreign_name`. This happens after a campaign is
   suspended while DCS keeps running its mission, between a campaign switch and the
   mission load that follows it, and when a mission was saved with platform objects in

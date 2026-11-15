@@ -665,7 +665,7 @@ scenario('world', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
     return { name = name, units = list }
   end
   local USA, RUSSIA = 2, 0
-  local G, U1, U2, U3 = 'np.g.7.1', 'np.u.7.2', 'np.u.7.3', 'np.u.7.4'
+  local G, U1, U2, U3 = 'np!hGx1', 'np.hGx2', 'np.hGx3', 'np.hGx4'
 
   -- Spawn, order, option; a second order at the same revision is AT_REVISION
   -- until a new spawn clears the order.
@@ -755,12 +755,12 @@ scenario('world', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   expect(r[3], NOT_BOUND, 'CAPTURE of nothing')
 
   -- Statics.
-  local S1 = 'np.s.7.5'
+  local S1 = 'np#hGx5'
   r = run({
     { op = 'STATIC_SPAWN', entity = 5, rev = 1, country = USA, name = S1,
       static = { name = S1, type = 'Barrier', x = 500, y = 600, heading = 0 } },
     { op = 'CAPTURE', entity = 5 },
-    { op = 'STATIC_SPAWN', entity = 6, rev = 1, country = USA, name = 'np.s.7.6', static = { type = 'x' } },
+    { op = 'STATIC_SPAWN', entity = 6, rev = 1, country = USA, name = 'np#hGx6', static = { type = 'x' } },
     { op = 'STATIC_DESTROY', entity = 5 },
     { op = 'STATIC_DESTROY', entity = 5 },
   }, 'statics')
@@ -775,9 +775,9 @@ scenario('world', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   expect(r[5], APPLIED, 'STATIC_DESTROY of nothing')
 
   -- A 30-unit group with a dozen ammo rows each is captured, not TOO_LARGE.
-  local BIG, names = 'np.g.7.9', {}
+  local BIG, names = 'np!hGx9', {}
   for i = 1, 30 do
-    names[i] = 'np.u.7.big' .. i
+    names[i] = 'np.hGxbig' .. i
   end
   r = run({
     { op = 'GROUP_SPAWN', entity = 9, rev = 1, country = USA, category = 2, name = BIG,
@@ -792,8 +792,8 @@ scenario('world', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
 
   -- A group of a type DCS does not know is refused.
   r = run({
-    { op = 'GROUP_SPAWN', entity = 8, rev = 1, country = USA, category = 2, name = 'np.g.7.8',
-      group = group('np.g.7.8', 'Nonesuch', { 'np.u.7.9' }) },
+    { op = 'GROUP_SPAWN', entity = 8, rev = 1, country = USA, category = 2, name = 'np!hGx8',
+      group = group('np!hGx8', 'Nonesuch', { 'np.hGx9' }) },
   }, 'a refused spawn')
   expect(r[1], DCS_REFUSED, 'GROUP_SPAWN of a type DCS lacks')
 
@@ -831,23 +831,23 @@ scenario('world', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
 
   -- Damage runs in the hook: the unit's ID from the server state, then the
   -- setter in the mission state (the server state has no `net`).
-  local spawn = group('np.g.7.a', 'M-113', { 'np.u.7.b' })
+  local spawn = group('np!hGxA', 'M-113', { 'np.hGxB' })
   r = run({
-    { op = 'GROUP_SPAWN', entity = 10, rev = 1, country = USA, category = 2, name = 'np.g.7.a', group = spawn },
+    { op = 'GROUP_SPAWN', entity = 10, rev = 1, country = USA, category = 2, name = 'np!hGxA', group = spawn },
     { op = 'DAMAGE', entity = 11, life_percent = 50 },
     { op = 'DAMAGE', entity = 77, life_percent = 50 },
     { op = 'DAMAGE', entity = 11, life_percent = 150 },
   }, 'damage')
   expect(r[1], APPLIED, 'GROUP_SPAWN for damage')
   expect(r[2], APPLIED, 'DAMAGE')
-  assert(math.abs(sim.by_name['np.u.7.b'].life - 1.5) < 1e-6,
-    'the unit has life ' .. sim.by_name['np.u.7.b'].life .. ', not 1.5')
+  assert(math.abs(sim.by_name['np.hGxB'].life - 1.5) < 1e-6,
+    'the unit has life ' .. sim.by_name['np.hGxB'].life .. ', not 1.5')
   expect(r[3], NOT_BOUND, 'DAMAGE of no unit')
   expect(r[4], 19, 'DAMAGE with a life over 100')
   assert(sim.life_calls == 1 and sim.dead_checks == 1,
     'the mission state was called ' .. tostring(sim.life_calls) .. ' times, with ' .. tostring(sim.dead_checks)
     .. ' dead checks: a missing unit and a bad life make none')
-  sim.dead_ids = { [sim.by_name['np.u.7.b'].mission_id] = true }
+  sim.dead_ids = { [sim.by_name['np.hGxB'].mission_id] = true }
   r = run({ { op = 'DAMAGE', entity = 11, life_percent = 20 } }, 'damage of a dead unit')
   expect(r[1], NOT_BOUND, 'DAMAGE of a dead unit')
   assert(sim.life_calls == 1, 'the setter ran on a dead unit')
@@ -902,9 +902,9 @@ scenario('world-gone', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   end
   ctx.run(0.5)
   gen = host.states.server.__nanoprobe_shim.agent.status().gen
-  local G = 'np.g.7.1'
+  local G = 'np!hGx1'
   run({ { op = 'GROUP_SPAWN', entity = 1, rev = 1, country = 2, category = 2, name = G,
-    group = group(G, { 'np.u.7.2', 'np.u.7.3' }) } }, 'spawn')
+    group = group(G, { 'np.hGx2', 'np.hGx3' }) } }, 'spawn')
   -- Frames for the births to reach the agent's table.
   ctx.run(1.0)
   local old = units(G)
@@ -933,11 +933,11 @@ scenario('world-gone', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
 
   -- A spawn under the name of a group the agent holds rows for.
   run({ { op = 'GROUP_SPAWN', entity = 1, rev = 2, country = 2, category = 2, name = G,
-    group = group(G, { 'np.u.7.2', 'np.u.7.3' }) } }, 'respawn')
+    group = group(G, { 'np.hGx2', 'np.hGx3' }) } }, 'respawn')
   ctx.run(1.0)
   local before = units(G)
   local events = run({ { op = 'GROUP_SPAWN', entity = 1, rev = 3, country = 2, category = 2, name = G,
-    group = group(G, { 'np.u.7.4' }) } }, 'replace')
+    group = group(G, { 'np.hGx4' }) } }, 'replace')
   check(events, before, 1, 'a replacing GROUP_SPAWN')
   -- The new unit's row is not gone.
   for _, e in ipairs(events) do
@@ -965,7 +965,7 @@ scenario('world-gone', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   assert(n == 1 and #sim.groups[G].units == 1, 'a resume leaves ' .. n .. ' groups, not the one new group')
 
   -- A STATIC_SPAWN under the name of a static the agent holds a row for.
-  local S1 = 'np.s.7.9'
+  local S1 = 'np#hGx9'
   run({ { op = 'STATIC_SPAWN', entity = 9, rev = 1, country = 2, name = S1,
     static = { name = S1, type = 'Barrier', x = 500, y = 600, heading = 0 } } }, 'static spawn')
   ctx.run(1.0)
@@ -1042,7 +1042,7 @@ scenario('destroyed-overflow', MANY, function(ctx)
     end
     return checks(...)
   end
-  local S1 = 'np.s.7.9'
+  local S1 = 'np#hGx9'
   ctx.script(json({ campaign = 7, commands = {
     { op = 'STATIC_SPAWN', gen = gen, entity = 9, rev = 1, country = 2, name = S1,
       static = { name = S1, type = 'Barrier', x = 500, y = 600, heading = 0 } },
@@ -1068,8 +1068,8 @@ local function hook_world(ctx)
   local host = ctx.host
   host:load_mission('first', { paused = true })
   local sim = host.sim
-  sim:add_group(2, 2, { name = 'np.g.7.1', units = {
-    { name = 'np.u.7.2', type = 'M-113', x = 10, y = 20, heading = 0 } } })
+  sim:add_group(2, 2, { name = 'np!hGx1', units = {
+    { name = 'np.hGx2', type = 'M-113', x = 10, y = 20, heading = 0 } } })
   ctx.run(0.5)
   -- The mission generation: 1 for the first load.
   local gen = 1
@@ -1102,7 +1102,7 @@ scenario('hook-order', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   end
   assert(table.concat(order, ',') == '1,2,3,4', 'the results came in order ' .. table.concat(order, ','))
   assert(sim.airbases[1].coalition == 1 and sim.life_calls == 2, 'the commands did not all run')
-  assert(math.abs(sim.by_name['np.u.7.2'].life - 3) < 1e-6, 'the last damage did not set the life')
+  assert(math.abs(sim.by_name['np.hGx2'].life - 3) < 1e-6, 'the last damage did not set the life')
   S.ok('commands for the shim and the hook run in ring order and each gets one RESULT')
 end, '\n[lua]\nraw = true\n')
 
@@ -1190,12 +1190,12 @@ scenario('hook-no-shim', nil, function(ctx)
   local sim, gen = hook_world(ctx)
   run_script(ctx, gen, { { op = 'DAMAGE', entity = 2, life_percent = 50 } }, 'DAMAGE with no shim')
   assert(ctx.result(1).code == APPLIED, 'DAMAGE with no shim answered ' .. tostring(ctx.result(1).code_name))
-  assert(math.abs(sim.by_name['np.u.7.2'].life - 1.5) < 1e-6, 'the life was not set')
+  assert(math.abs(sim.by_name['np.hGx2'].life - 1.5) < 1e-6, 'the life was not set')
   S.ok('DAMAGE runs in the hook with no shim loaded')
 end)
 
 -- SOUND (shim) and PICTURE and PICTURE_STOP (hook), every scope, with the
--- world holding group 1 (`np.g.7.1`) and its unit, entity 2 (`np.u.7.2`).
+-- world holding group 1 (`np!hGx1`) and its unit, entity 2 (`np.hGx2`).
 -- `campaign` 0 is a script that announces no campaign.
 local function effect_world(ctx)
   local sim, gen = hook_world(ctx)
@@ -1232,8 +1232,8 @@ end
 scenario('sound', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   local sim, run, expect = effect_world(ctx)
   local NOT_BOUND = 18
-  local group_id = sim.groups['np.g.7.1'].id
-  local unit_id = sim.by_name['np.u.7.2'].mission_id
+  local group_id = sim.groups['np!hGx1'].id
+  local unit_id = sim.by_name['np.hGx2'].mission_id
   local odd = 'a"b\\c\'d ]] é'
   local r
   -- Campaign 0, before any campaign is announced (the agent keeps it): an
@@ -1300,8 +1300,8 @@ end, '\n[lua]\nraw = true\n')
 scenario('picture', nil, function(ctx)
   local sim, run, expect = effect_world(ctx)
   local NOT_BOUND = 18
-  local group_id = sim.groups['np.g.7.1'].id
-  local unit_id = sim.by_name['np.u.7.2'].mission_id
+  local group_id = sim.groups['np!hGx1'].id
+  local unit_id = sim.by_name['np.hGx2'].mission_id
   local function shown(i)
     local p = sim.pictures and sim.pictures[i]
     assert(p, 'no picture call ' .. i)
