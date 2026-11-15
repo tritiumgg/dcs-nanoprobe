@@ -792,6 +792,7 @@ dependencies = [
  "nanoprobe-transport",
  "prost",
  "prost-types",
+ "rusqlite",
  "tempfile",
  "tokio",
  "tokio-stream",

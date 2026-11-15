@@ -789,7 +789,7 @@ async fn the_moderation_service_works_end_to_end_without_a_ucid() {
     );
     let g = hub.lock();
     no_ucid("the roster's debug text", &format!("{:?}", g.roster));
-    let log = g.server_log.after(0, 10_000).cloned().collect::<Vec<_>>();
+    let log = g.server_log.after(0, 10_000);
     for e in log {
         let bytes = e.encode_to_vec();
         for u in UCIDS {
