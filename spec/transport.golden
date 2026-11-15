@@ -346,12 +346,16 @@ codes opcode
   51 SMOKE class=effect campaign=active gen=bound state=server payload=layout
   52 FLARE class=effect campaign=active gen=bound state=server payload=layout
   53 ILLUMINATION class=effect campaign=active gen=bound state=server payload=layout
-  54 DAMAGE class=effect entity=unit campaign=active gen=bound state=server payload=layout
+  54 DAMAGE class=effect entity=unit campaign=active gen=bound state=hook payload=layout
   55 CHAT class=effect campaign=any state=hook payload=layout
   56 MISSION_LOAD class=effect campaign=any state=hook payload=layout
   57 EXTENSION_INVOKE class=effect campaign=active state=server payload=layout
   58 EVAL class=effect campaign=active state=server payload=layout
+  59 WAREHOUSE_ADJUST class=effect campaign=active gen=bound state=server payload=layout
+  60 PICTURE class=effect campaign=any state=hook payload=layout
+  61 PICTURE_STOP class=effect campaign=any state=hook payload=none
   64 CAPTURE class=query entity=group_or_static campaign=active gen=bound state=server payload=none
+  65 COUNTRIES class=query campaign=any gen=bound state=server payload=none
 codes result
   0 APPLIED class=success
   2 AT_REVISION class=success
@@ -412,6 +416,9 @@ layout AIRBASE_OWNER fixed=8
 layout WAREHOUSE_SET fixed=0
   + str airbase
   + lv stock
+layout WAREHOUSE_ADJUST fixed=0
+  + str airbase
+  + lv delta
 layout MARK_SET fixed=40
   0x0000 u32 scope
   0x0004 u32 read_only
@@ -436,6 +443,7 @@ codes scope
   2 COALITION
   3 GROUP
   4 UNIT
+  5 COUNTRY
 layout EXTENSION_SET fixed=0
   + str name
   + lv source
@@ -456,6 +464,17 @@ layout SOUND fixed=16
   0x0000 u32 scope
   0x0004 pad[4] reserved
   0x0008 u64 target
+  + str file
+layout PICTURE fixed=48
+  0x0000 u32 scope
+  0x0004 u32 clear_view
+  0x0008 u64 target
+  0x0010 f64 seconds
+  0x0018 f64 size
+  0x0020 u32 horizontal
+  0x0024 u32 vertical
+  0x0028 u32 size_units
+  0x002c pad[4] reserved
   + str file
 layout SMOKE fixed=32
   0x0000 f64 x
@@ -488,4 +507,4 @@ layout EXTENSION_INVOKE fixed=0
   + lv args
 layout EVAL fixed=0
   + lv source
-hash eb35af4b697b8158
+hash a263521028bfa6cb

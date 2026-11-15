@@ -22,7 +22,7 @@ entities by `EntityId` within a campaign.
 
 | Kind | Identity | Created by the platform | Carries |
 |---|---|---|---|
-| Group | `EntityId` | yes | The spec: country, category, members, and the order. The unit of spawn, order, materialize and destroy. |
+| Group | `EntityId` | yes | The spec: country, category and members; its controller options; and the order. The unit of spawn, order, materialize and destroy. |
 | Unit | `EntityId`, a member of one group | with its group | Observed state: position, attitude, life, fuel, ammunition. Dies alone. |
 | Static | `EntityId` | yes | A spec and observed state. Spawned and destroyed alone. |
 | Airbase | theater and DCS name | no | Owner (coalition) |
@@ -31,7 +31,15 @@ entities by `EntityId` within a campaign.
 | Extension | name | yes | A registered Lua chunk (spec/commands.md, "Extensions") |
 
 The platform never creates or destroys an airbase or a warehouse. Their owner and stock
-are settable.
+are settable. The store keeps a desired owner only for an airbase the controller set,
+and a desired count only for a warehouse item the controller set. The reconciler sends
+`AIRBASE_OWNER` or `WAREHOUSE_SET` when the agent's latest sample differs from it, once
+per desired revision and mission generation. A capture by DCS or stock DCS uses is a
+fact: a sample replaces a desired value only when the previous sample matched it, the
+item (or owner) has no `AIRBASE_OWNER` or `WAREHOUSE_SET` waiting for its result, and
+the new value is not one an `AIRBASE_OWNER` or `WAREHOUSE_SET` the sidecar applied set.
+An applied `WAREHOUSE_ADJUST` changes the desired counts of the items it names, clamped
+at 0, and is never sent again.
 
 ## Names
 
@@ -122,7 +130,7 @@ A group with a death fact for a member is never respawned with that member.
 |---|---|---|
 | Store revision | campaign | Any change to the store. Stamps every change the World service reports. |
 | `spec_rev` | group, static, mark, drawing, menu item, extension | Its spec changes, or a `lost` group or static is respawned, whose spec may be the same |
-| `order_rev` | group | Its order changes, or the target group of a sent or applied attack order gets new DCS object IDs. The new revision is taken when the target's spawn resolves `applied`, and the order is compiled after it. Not on a mission generation change, after which every order is sent again. |
+| `order_rev` | group | Its order changes, or the target of a sent or applied attack order (a group, a unit's group, or a static) gets new DCS object IDs. The new revision is taken when the target's spawn resolves `applied`, and the order is compiled after it. Not on a mission generation change, after which every order is sent again. |
 
 A group's spec is its country, coalition, category, extra keys of its DCS table, and
 its units: each one's type, skill and extra keys. A static's is its country,
@@ -130,9 +138,21 @@ coalition, type and extra keys. Positions and state are not spec; a spawn takes 
 last known ones. The author's label and components are not spec either: they never
 reach DCS, and a change to them moves only the store revision.
 
+A group's controller options, by DCS option ID, are kept with the group and are not
+spec: a change moves only the store revision. The reconciler sends `GROUP_OPTION` for
+each option the group's current spawn has not applied, after the group's order
+(spec/commands.md).
+
 The agent holds `applied_spec_rev` and `applied_order_rev` per entity it applied
 (spec/commands.md). The sidecar re-sends a spec or an order only when the agent's
 applied revision is behind.
+
+## Removal
+
+Removing a managed group or static takes it out of the campaign for good. The store
+keeps a removed entity, marked removed, under campaign authority: the API no longer
+reports it, its `EntityId` is never given again, and the reconciler destroys any object
+of it that DCS still holds, as drift.
 
 ## Lifecycle
 
@@ -236,6 +256,27 @@ A group that a script removed is not respawned either; the policy then acts as
 report, and a mission change materializes it again. A member with a death fact never
 holds the gate, and a revived member holds nothing.
 
+## Route progress
+
+The sidecar follows each group's route from its position samples. A waypoint counts as
+reached when a sample of the group's lead unit lies within 50 m of it on the map plane,
+when the segment between two consecutive samples passes within 50 m of it, or when the
+group is seen at a later waypoint, which reaches every waypoint before it. A segment
+counts only between two samples of the same lead unit at most 60 s of model time
+apart, with no `HELLO`, new mission, death or new order between them. The lead unit
+is the first member that is not dead. Progress never goes back. For each waypoint reached the sidecar writes a `WAYPOINT_REACHED`
+event with the group, the order revision, the waypoint's index, the model time of the
+sample that showed it, and whether that position was observed or written by the
+controller. When the last waypoint is reached it also writes one `ROUTE_COMPLETE`
+event with the group, the order revision, the sample's model time and the same flag.
+A route belongs to a group, so both events are per group, never per unit.
+
+The index counts the waypoints of the order as the controller gave them, from 0, and
+stays the same when the remaining route is compiled again after a restore or a
+re-route at the same order revision. A new order revision starts again from 0. The
+event is as current as the position samples: one position period after DCS reaches
+the waypoint (spec/sampling.md). No script runs in DCS for it.
+
 ## Events and the store
 
 Events are numbered per campaign and kept in the campaign's store. While no campaign
@@ -264,7 +305,7 @@ are strings and whose numbers are doubles. The sidecar converts both ways by one
 
 So a sparse table such as pylons 1, 3 and 5 is an object with the keys `"1"`, `"3"` and
 `"5"`. A string key that looks like an integer cannot be sent. That no DCS table the
-platform handles has one is UNVERIFIED (step S15).
+platform handles has one is UNVERIFIED (step S18 checks the tables it restores).
 
 ## Players
 
