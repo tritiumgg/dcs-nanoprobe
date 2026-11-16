@@ -105,7 +105,7 @@ dir = "logs"
 level = "info"
 
 [missions]
-dir = ""                    # the mission folder as the sidecar opens it
+dir = ""                    # the mission folder as the sidecar opens it: templates, and shells/
 dcs_dir = ""                # the same folder as DCS opens it
 ```
 
@@ -119,7 +119,7 @@ dcs_dir = ""                # the same folder as DCS opens it
 | `[health]` | Limits, not expectations (spec/errors.md, "Health"). A mission load has no fixed duration; `loading_limit_s` is only when to call a silent DCS hung. |
 | `on_lost` | An author may override it per group through the API. |
 | `destroy_retries` | At least 1. A dematerializing entity whose destroy is refused or unknown this many times goes `lost` with the error (spec/world.md). A destroy of an entity DCS should not hold is tried again after the next full enumeration. |
-| `[missions] dir`, `dcs_dir` | One folder, named once per side, as `map_path` is: inside the Saved Games profile, such as `<profile>/nanoprobe/missions`. A theater's mission is `<theater>.miz`, the theater's name exactly as `LIFECYCLE` carries it. A name of more than 64 bytes, or with a byte other than `A`-`Z`, `a`-`z`, `0`-`9`, `_` and `-`, has no mission file. The file name must match in case, also on a file system that ignores case. Activating a campaign loads its theater's file with a `MISSION_LOAD` of `dcs_dir` joined to the file name. A key left empty, or a missing file, refuses the activation (spec/persistence.md, "Campaign operations"). The sidecar refuses to start when `dcs_dir` joined to a 64-byte theater name and `.miz` is over 1,024 bytes, the agent's path limit. |
+| `[missions] dir`, `dcs_dir` | One folder, named once per side, as `map_path` is: inside the Saved Games profile, such as `<profile>/nanoprobe/missions`. It holds the shared template of each theater as `<theater>.miz`, the theater's name exactly as `LIFECYCLE` carries it, and the sidecar writes each campaign's shell under `shells/` (spec/persistence.md, "Mission shells"). A theater name of more than 64 bytes, or with a byte other than `A`-`Z`, `a`-`z`, `0`-`9`, `_` and `-`, has no template. The file name must match in case, also on a file system that ignores case. Activating or reloading a campaign writes its shell and loads it with a `MISSION_LOAD` of `dcs_dir` joined to `shells/<campaign ID>.<slot>.miz`. A key left empty, or no template for the theater, refuses the call (spec/persistence.md, "Campaign operations"). The sidecar refuses to start when `dcs_dir` joined to `shells/`, 20 digits and `.a.miz` is over 1,024 bytes, the agent's path limit. The sidecar writes nothing else in the folder. |
 
 Relative paths are relative to the folder that holds `sidecar.toml`.
 

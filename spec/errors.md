@@ -74,7 +74,7 @@ Every failed call returns a gRPC status whose details hold one `ErrorDetail`: a
 | `FAILED_PRECONDITION` | `LEASE_HELD` | Another controller holds the lease |
 | `FAILED_PRECONDITION` | `RAW_LUA_OFF` | The call needs raw Lua, which the agent has off |
 | `FAILED_PRECONDITION` | `THEATER_NOT_LOADED` | The entity's theater is not the loaded one |
-| `FAILED_PRECONDITION` | none (`UNSPECIFIED`), `field` `theater` | An activation, or a `CreateCampaign` that activates, whose theater has no mission file (spec/config.md, `[missions]`). Nothing is created, suspended, opened or sent |
+| `FAILED_PRECONDITION` | none (`UNSPECIFIED`), `field` `theater` | An activation, a `CreateCampaign` that activates, or a `Reload`, whose theater has no template or whose shell cannot be written (spec/config.md, `[missions]`; the message starts `no template for theater`). Nothing is created, suspended, opened or sent |
 | `FAILED_PRECONDITION` | `UNMANAGED_ENTITY` | The call changes a spec or order of an unmanaged entity |
 | `FAILED_PRECONDITION` | `CONFIRMATION_REQUIRED` | A delete without its confirmation field |
 | `ABORTED` | `LEASE_LOST` | The caller's lease epoch is not the current one |
@@ -88,6 +88,7 @@ Every failed call returns a gRPC status whose details hold one `ErrorDetail`: a
 | `UNAVAILABLE` | none (`UNSPECIFIED`) | The server is stopping. A stream ends with it, and a changing call that arrives is refused with it; the client connects again and resumes from its last revision or sequence number |
 | `UNIMPLEMENTED` | `UNVERIFIED` | A call path not yet verified on DCS; permanent until a release verifies it. The detail's `field` names the field |
 | `UNIMPLEMENTED` | none (`UNSPECIFIED`) | The call is in the schema and this server does not build it yet. The detail's `field` names the method |
+| `RESOURCE_EXHAUSTED` | `SPACE_LOW` | The store's file system has less free space than the campaign holds there (its store, the store's WAL and its events file), plus a template being set: a backup, a read copy and `SetCampaignTemplate` are refused. A store write that fails still stops the sidecar |
 | `INTERNAL` | `INTERNAL` | A fault in the sidecar |
 
 A set-state call succeeds when the desired state is journalled. It does not wait for
@@ -203,3 +204,8 @@ then reports. The event goes to the active campaign's history, or to the server 
 The sidecar takes no action on a verdict. Starting, stopping and restarting DCS belong
 to the host. The health command's exit code is 0 for `healthy` and differs for each
 other verdict (spec/config.md).
+
+The status also reports the free bytes on the store's file system, and whether they
+are below what the active campaign holds there (spec/persistence.md, "Free space").
+Space is not part of the verdict or of the health command's exit code: a full disk must
+not make a watchdog restart DCS.

@@ -76,6 +76,7 @@ of the `Event` message of the package named in the events file's `meta`
 | `inflight` | `epoch INTEGER`, `seq INTEGER`, `body BLOB`; the key is `epoch` and `seq` | One per command sent with no outcome yet |
 | `idempotency` | `key TEXT PRIMARY KEY`, `at_ms INTEGER`, `request_hash BLOB`, `response BLOB` | One per changing call answered on this campaign |
 | `checkpoint` | `seq INTEGER PRIMARY KEY`, `body BLOB` | The last checkpoint, one row |
+| `template` | `theater TEXT PRIMARY KEY`, `body BLOB` | One per theater the campaign has its own template for: the `.miz` file's bytes (plan revision 35). A schema 1 file without the table gains it at open. |
 
 A removed extension keeps its `extension` row as a tombstone: `removed` is true, the
 body holds no source, and `spec_rev` is the highest revision the extension had. A
@@ -88,7 +89,7 @@ registration of the name after a reopen gets a revision above it.
 | `schema` | The schema version, a number. 1 is this document. |
 | `campaign_id` | The campaign ID. It must equal the folder's name. |
 | `campaign` | The campaign record: ID, name, state (`active`, `suspended`, `finished`), theaters, the theater to load, clock, created time, the author's component schema versions, and the outcome of a finished campaign. Its `state` key keeps its layout in every schema version, so the state is read before a migration. The platform schema version is `schema`. |
-| `world` | The next `EntityId`, the store revision, whether the store is open, the loaded mission (agent boot, mission generation, theater), the last agent record folded in (agent boot and record number) with the stamp it was read under (agent boot, mission generation, campaign), which records delivered again before their next `FRAME` keep, the desired airbase owners and warehouse stocks with their revisions, the sample rates the controller set, the mission load an activation owes (the file as DCS opens it, and the command's epoch and sequence number once sent; absent when none is owed), the agent's country-to-coalition map, the model time of the last samples, and the route events not yet published. |
+| `world` | The next `EntityId`, the store revision, whether the store is open, the loaded mission (agent boot, mission generation, theater), the last agent record folded in (agent boot and record number) with the stamp it was read under (agent boot, mission generation, campaign), which records delivered again before their next `FRAME` keep, the desired airbase owners and warehouse stocks with their revisions, the sample rates the controller set, the mission load an activation or a reload owes (the shell as DCS opens it, the start written into it, and the command's epoch and sequence number once sent; absent when none is owed), the start written into the running mission's shell, the model time of that generation's first sample with its agent boot and generation, the shell slot of the last load applied, the next mission's settings (`SetNextMission`), the agent's country-to-coalition map, the model time of the last samples, and the route events not yet published. |
 
 An entity body carries every field of its row in spec/world.md: for a group or static
 its spec, order and revisions, lifecycle state, authority, lost policy, error, and the
@@ -251,15 +252,7 @@ newest `pre_migration` backup of each schema version, outside `backup_keep`; old
 `pre_migration` backups of the same version are deleted. A backup's number counts up
 from 1 and is never reused in the folder, so a deleted number does not come back.
 
-There is no restore call; S19 builds an offline restore. To restore a backup by hand:
-stop the sidecar; delete the campaign's `store.sqlite-wal` and `store.sqlite-shm` if they
-are there (an unclean stop leaves them, and SQLite would replay them onto the copied
-file); copy `backups/<n>/store.sqlite` over the campaign's `store.sqlite`; start the
-sidecar; and activate the campaign. Two hazards remain with a hand restore: the
-restored store's next `EntityId` is the backup's, so entities made after the backup
-have their IDs given again to new entities, which the event history and controllers
-already know; and a WAL file left in place corrupts the restored copy. The event
-history is not rolled back: `events.sqlite` keeps the events after the backup.
+There is no restore call; a backup is restored offline (see "Restore a backup").
 
 The event history is not copied into each backup: `backups/events.sqlite` is one copy,
 extended at each backup with the events it lacks (`INSERT ... WHERE seq > ` its newest
@@ -354,19 +347,22 @@ What each operation of the Campaign service does to the files:
 
 | Operation | Files |
 |---|---|
-| Create | A new folder with its store (the campaign record, state `suspended`, or `active` when the call activates it, and an empty world) and its events file. A call that activates a campaign whose theater has no mission file is refused before the folder is made. |
-| Activate | A finished campaign is refused (`FAILED_PRECONDITION`) before anything is opened or migrated. So is a theater with no mission file (spec/config.md, `[missions]`), before anything is suspended, opened or sent: the active campaign stays active. The active campaign, if any, is suspended first. Then the target's store is opened (and migrated), its state set to `active`, and its mission loaded: the load is owed in `meta.world` from the activation's commit, before the call answers, and the `MISSION_LOAD` is sent once the agent is attached and knows the campaign. The commit that folds in its result clears it: `APPLIED` clears it; `NOT_SENT` keeps it owed and it is sent again; any other outcome is logged and clears it. If the open fails, no campaign is active. Exactly one campaign is active per DCS instance. |
-| Suspend | The driver captures every group and static DCS holds (`CAPTURE`) and waits up to `result_wait_s` for the results, which the store takes as they arrive. Then it tells the agent there is no active campaign (`CAMPAIGN` 0), takes a final checkpoint, sets the state to `suspended`, clears an owed mission load, and closes the store cleanly. DCS keeps running whatever it has, unmanaged. A repeat of the call under its answered key captures nothing. |
+| Create | A new folder with its store (the campaign record, state `suspended`, or `active` when the call activates it, and an empty world) and its events file. A call that activates a campaign whose theater has no template is refused before the folder is made. |
+| Activate | A finished campaign is refused (`FAILED_PRECONDITION`) before anything is opened or migrated. The campaign's shell is written first (see "Mission shells"); a theater with no template, or a shell that cannot be written, is refused before anything is suspended, opened or sent: the active campaign stays active. The active campaign, if any, is suspended first. Then the target's store is opened (and migrated), its state set to `active`, and its mission loaded: the load is owed in `meta.world` from the activation's commit, before the call answers, and the `MISSION_LOAD` is sent once the agent is attached and knows the campaign. The commit that folds in its result clears it: `APPLIED` clears it; `NOT_SENT` keeps it owed and it is sent again with the same file; any other outcome is logged and clears it. If the open fails, no campaign is active. Exactly one campaign is active per DCS instance. |
+| Reload | `Reload` on the active campaign. No active campaign, an owed load, or no template for the theater is refused first. The driver captures every group DCS holds, as Suspend does; then writes the shell for the next mission's theater (the loaded one when it names none), and commits a checkpoint and the owed load together. The call answers `PENDING`; the load then runs as an activation's does, with the same spawning hold. A theater change is a reload whose shell is on another theater: entities on a theater that is not loaded stay `virtual` and return when it is loaded again. |
+| Suspend | The driver captures every group and static DCS holds (`CAPTURE`) and waits up to `result_wait_s` for the results, which the store takes as they arrive. Then it tells the agent there is no active campaign (`CAMPAIGN` 0), writes the campaign clock into the record, takes a final checkpoint, sets the state to `suspended`, clears an owed mission load, and closes the store cleanly. DCS keeps running whatever it has, unmanaged. A repeat of the call under its answered key captures nothing. |
 | Finish | As suspend, with state `finished` and the outcome record. A finished store is read-only: it is never activated or migrated again, only read. |
-| Backup | A backup with reason `manual` (`BackupCampaign`). `ListCampaignBackups` reads the folder without opening the store. |
-| Delete | The folder is removed. Never automatic. |
+| Set a template | `SetCampaignTemplate` writes or removes a row of the `template` table. Refused: a theater that is not one of the campaign's (`INVALID_FIELD`), a file over 16 MiB, one whose `theatre` member does not name the theater exactly, one whose `mission` or `warehouses` does not parse with the fields the shell writer changes, one that places a group, unit or static whose name reads as a platform name (spec/world.md, "Names"), and, under "Free space", one the file system has no room for. |
+| Backup | A backup with reason `manual` (`BackupCampaign`), refused under "Free space". `ListCampaignBackups` reads the folder without opening the store. |
+| Export | `ExportCampaign` streams the campaign's store and event history as JSON lines (see "Export"). |
+| Delete | `DeleteCampaign` (admin), with the campaign's name to confirm, on a campaign that is not active and has no backup running: its store is closed and its folder and shells removed. Never automatic. |
 
 A switch of the active campaign (`ActivateCampaign`, or `CreateCampaign` that
 activates) captures and suspends the active one as Suspend does.
 
 ### Sidecar start and stop
 
-At start the sidecar takes the lock, opens the server store, and lists the folders. It
+At start the sidecar takes the lock, opens the server store, and lists the folders. It removes the read copies under each campaign's `.read/` and the temporary files in `[missions] dir`'s `shells/` that a stopped sidecar left. It
 reads each campaign's record and checkpoint without opening its store, and opens its
 events file, applying the retention. A folder whose store or events file cannot be read
 is skipped; its ID is never given to a new campaign. A campaign whose record is
@@ -385,9 +381,82 @@ when it is activated. It stays open until the campaign is suspended or finished.
 open of a store writes it (it marks the store open), so an open that is not followed by
 a close counts as an unclean stop. A clean stop of the sidecar closes every open store;
 the active one takes a checkpoint first and keeps its state `active`. A stop after a
-panic closes nothing. A read-only open, for reading a finished campaign through the
-World and Events services, is S19's; until then the sidecar opens no finished store,
-and those services show a finished campaign's world as empty.
+panic closes nothing. A read opens no store (see "Reading a campaign that is not open").
+
+### Mission shells
+
+A campaign's mission is a shell the sidecar writes from a template (plan 4.4): the
+campaign's own template for the theater (the `template` table), else the shared one,
+`<theater>.miz` in `[missions] dir` (spec/config.md). The shell is a copy of the
+template with only these values changed, every other byte of every member kept:
+
+| Member | Value | From |
+|---|---|---|
+| `mission` | `date` (`Day`, `Month`, `Year`) and `start_time` | `NextMission.start` when set, else the campaign clock, else the template's own |
+| `mission` | `weather` | `NextMission.weather` when set, else the template's |
+| `warehouses` | `airports[<id>].dynamicSpawn`, `allowHotStart` | `NextMission.dynamic_spawn`, by the airport ID in the template's `warehouses`; airports not named keep the template's flags. An ID the template does not hold is `INVALID_FIELD` |
+
+Airbase owners and warehouse stocks are not written into the file: the reconciler sets
+them after the new mission starts, as after any generation change. Units placed in a
+template stay unmanaged (spec/world.md, "Managed and unmanaged").
+
+Each campaign has two shell slots, `shells/<campaign ID>.a.miz` and `.b.miz`. A shell
+goes to the slot the owed load, else the last applied load, did not name, through a
+temporary file that is flushed and renamed, so a file DCS may still hold is never
+rewritten. The owed load names its slot, and a resend after `NOT_SENT` loads the file
+already written.
+
+`NextMission` is kept in `meta.world` until `SetNextMission` replaces it whole. Its
+`start` is used once: the commit that owes the load sets the campaign clock to it and
+clears it. The campaign clock is the start written into the running mission's shell
+plus the model time since that generation's first sample; with no mission of its own
+running it is the clock in the campaign record, which suspend, finish, checkpoints and
+every shell write update. Dates and times are the mission's own calendar time, carried
+in Timestamp fields with no time-zone conversion.
+
+### Reading a campaign that is not open
+
+A read of a campaign whose store is not open, finished or suspended, opens no store: the
+sidecar takes a consistent copy of it with `VACUUM INTO` under `.read/` in the
+campaign's folder, migrates the copy if it is older, opens it, and serves the World
+lists from it. The copy is dropped once no read named the campaign for 60 s, or when the
+campaign's own store opens. A copy is refused under "Free space". Watches stay on the
+active campaign.
+
+### Export
+
+`ExportCampaign` streams JSON lines, each a whole object with a `kind`: a `header` line
+(export format 1, the campaign ID, the store's schema version, and the Protobuf package
+of the events), then `meta` (each key, its value decoded), `entity` (each row, kind and
+body decoded), `extension`, `journal`, `inflight` and `checkpoint` rows, then `event`
+rows with the event's Protobuf encoding in base 64 (`event_b64`). A stored body is
+decoded to JSON by the rule of spec/world.md, "Lua tables in the API"; a string that is
+not UTF-8 is `{"bytes_b64": ...}`. The store is read in one read transaction on a
+connection of its own, so the lines come from one snapshot while the driver goes on
+writing; the events run up to the newest at the export's start. It works on a campaign
+in any state.
+
+### Free space
+
+The status reports the free bytes on the file system that holds `[store] dir`. A
+campaign holds its store, the store's WAL and its events file there. A backup, a read
+copy, and `SetCampaignTemplate` (with the template's size added) are refused with
+`SPACE_LOW` when the free bytes are fewer than that; a scheduled backup is then skipped,
+logged, and tried one interval later. A failed store write still stops the sidecar.
+
+### Restore a backup
+
+`nanoprobe restore --store <dir> --campaign <id> --backup <n>`, with the sidecar
+stopped, restores backup `n` over a campaign's store. It takes the store dir's lock, so
+it refuses while a sidecar runs. It copies the current store, with its WAL applied, to
+`restore-<unix ms>/store.sqlite` in the campaign's folder; removes the store's WAL
+files; copies the backup in under a temporary name and renames it over the store. Then
+the restored store's next `EntityId` is the larger of the two copies', and its revision
+the larger of the two plus 2^32, so no ID or revision handed out before is given again;
+it is marked closed, its record is `suspended` unless the backup is `finished`, and its
+commands in flight, its owed mission load and a start set for the next shell are
+cleared. The event history is not rolled back: `events.sqlite` keeps the events after
+the backup.
 
 ### Timers
 

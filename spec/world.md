@@ -327,9 +327,13 @@ such as one whose `OBJECT` was lost in a `GAP`. A group whose members are all de
 held, with at least one held, goes from `materializing` to `lost` and stays there; the
 platform never makes it `dead` without death facts, and only the author's lost policy
 `dead` moves it on. Only the controller releases a hold: removing the group
-(`RemoveEntity`) drops its members' marks. A call that resolves one member as dead or
-restores it is step S19's. The API shows a member's mark as `Unit.left`, whether it
-was reported or inferred.
+(`RemoveEntity`) drops its members' marks, and `ResolveMember` releases one member.
+`DEAD` writes a death fact for it; `RESTORE` clears its mark, so the group's next spawn
+includes it and the group stays `lost` until that spawn. Either is journalled as
+`resolve`, makes no event, and shows in a world watch; it changes only the store, so it
+also works on a suspended campaign. A unit that is not held is refused with
+`FAILED_PRECONDITION`. The API shows a member's mark as `Unit.left`, whether it was
+reported or inferred.
 
 A weapon kill is never respawned as a `MISSING` or `REMOVED` member. A group that a
 script removed is not re-created by the policy or by a mission change; the policy then
