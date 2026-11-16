@@ -116,8 +116,10 @@ not the volume's size.
 
 ### On a client
 
-Whether the removal reaches a connected client, and what a client sees removed for a
-static, an aircraft or scenery, is open: it needs the Windows PC as a client.
+For a destroyed static, a `world.removeJunk` sphere on it leaves its ruin on a connected
+client's screen, and `Object.destroy` on the dead static removes it (LIVE, a person at a
+Windows client; docs/results/2026-11-16-person-tests-2.md, section 4). What a client sees
+for an aircraft or scenery is open.
 
 ## Per wreck
 
@@ -152,8 +154,9 @@ each row's target.
 Result: neither works per wreck, by the rule. `Object.destroy` on a cold ground wreck
 leaves the junk DCS clears afterward: the count matches the control's. On a burning
 wreck it removes the junk but cancels the death events the platform needs
-(spec/records.md). On an aircraft it raises. On a dead static it removes the static's
-object; whether the ruin a client sees goes too is open. A sphere of any radius tried,
+(spec/records.md). On an aircraft it raises. On a dead static it removes the ruin a
+client sees ("On a client"); whether `getByName` still finds the static afterward differs
+between this run and docs/results/2026-11-16-person-tests-2.md. A sphere of any radius tried,
 1 m included, also removed a dead neighbor 10 m away. So the platform offers no
 per-wreck form. A controller that wants a wreck gone a set time after a death sends a
 small sphere at the wreck's position then, and accepts that wrecks within about 30 m go
@@ -211,7 +214,10 @@ band (4.11 s as a rate) and pumps a second (5.52), which main fails too
 
 ## Open
 
-- What a client sees.
+- What a client sees for an aircraft wreck or scenery, and for a client who joins after a
+  clear.
+- Why `getByName` no longer found a destroyed static after `Object.destroy` in run 2 and
+  still found one in docs/results/2026-11-16-person-tests-2.md.
 - What is removed around a dead static and an aircraft: the counts are LIVE, the objects
   are not readable from scripting.
 - The cost of one call with thousands of junk objects is extrapolated from 312.
