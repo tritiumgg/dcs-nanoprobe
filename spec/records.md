@@ -715,6 +715,9 @@ The sidecar builds the API's player events from these records:
 | enter unit, leave unit | `SLOT` joined to a `S_EVENT_BIRTH`, and the end of that occupancy (spec/world.md, "Players") |
 | rename | a `CONNECT` or `SLOT` whose name differs from the last one seen for the client |
 
+An `AMMO` record of a unit that players occupy makes a loadout event, which is not a
+player event (spec/world.md, "Ammunition").
+
 ### Codes: player_event
 
 | Code | Name |

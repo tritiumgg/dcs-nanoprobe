@@ -253,6 +253,8 @@ pub enum Note {
         side: u32,
         /// The unit's `EntityId`, 0 for none.
         unit: u64,
+        /// The DCS object ID of the unit.
+        object: u64,
         /// The seat.
         seat: u32,
     },
@@ -470,6 +472,15 @@ impl Roster {
             .collect();
         seats.sort();
         seats.into_iter().map(|(_, k)| k.to_owned()).collect()
+    }
+
+    /// The type name the table holds for a DCS object, when it has one.
+    pub fn type_of(&self, object: u64) -> Option<&str> {
+        self.mem
+            .rows
+            .get(&object)
+            .map(|r| r.type_name.as_str())
+            .filter(|t| !t.is_empty())
     }
 
     /// The key a menu record's player is, when DCS names one the roster
@@ -868,6 +879,7 @@ impl Roster {
                     name: self.name_of(&o.key),
                     side: o.side,
                     unit: o.unit,
+                    object: o.object,
                     seat: o.seat,
                 });
                 self.history.push_back(o);

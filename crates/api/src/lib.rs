@@ -13,6 +13,7 @@ pub mod events;
 pub mod hub;
 pub mod idem;
 pub mod lease;
+pub mod loadouts;
 pub mod lua;
 pub mod real;
 pub mod server;

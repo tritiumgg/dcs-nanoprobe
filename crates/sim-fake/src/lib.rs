@@ -833,6 +833,16 @@ impl FakeSim {
     /// As [`FakeSim::birth_client_unit`], in the DCS group `group` (0 for
     /// none), of the type `type_name`.
     pub fn birth_client_unit_in(&mut self, mission_id: &str, group: u64, type_name: &str) -> u64 {
+        let id = self.place_client_unit_in(mission_id, group, type_name);
+        self.birth_event(id, Some(mission_id));
+        id
+    }
+
+    /// As [`FakeSim::birth_client_unit_in`] without the `S_EVENT_BIRTH`: the
+    /// unit's `OBJECT` record is queued and the birth is sent later with
+    /// [`FakeSim::birth_event`]. A record queued between the two reaches the
+    /// sidecar before the birth that seats the player.
+    pub fn place_client_unit_in(&mut self, mission_id: &str, group: u64, type_name: &str) -> u64 {
         let id = self.next_object;
         self.next_object += 1;
         self.objects.insert(
@@ -855,7 +865,6 @@ impl FakeSim {
         let o = self.object_record(id, 0);
         self.sent.insert(id);
         self.queued_out.push(o);
-        self.birth_event(id, Some(mission_id));
         id
     }
 

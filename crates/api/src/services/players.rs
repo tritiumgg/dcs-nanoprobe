@@ -291,7 +291,14 @@ impl PlayersService for Players {
                     .occupancies()
                     .filter(|o| o.key == p.key && o.to.is_none())
                     .min_by_key(|o| o.seat);
+                // The loadout of the seat's unit, when the unit has an ID.
+                let loadout = seat
+                    .filter(|o| o.unit != 0)
+                    .and_then(|o| g.loadouts.get(o.object));
                 pb::Player {
+                    ammo: loadout
+                        .map_or_else(Default::default, |l| l.ammo.clone().into_iter().collect()),
+                    ammo_read: loadout.map(crate::convert::ammo_read),
                     key: p.key.clone(),
                     name: p.name().to_owned(),
                     connected: p.connected,

@@ -164,7 +164,7 @@ pub fn loadout(a: &Ammo, at: &pb::Stamp) -> Loadout {
 }
 
 /// The API's read of a unit's ammunition: its cause and stamps.
-fn ammo_read(l: &Loadout) -> pb::AmmoRead {
+pub fn ammo_read(l: &Loadout) -> pb::AmmoRead {
     let wall = std::time::Duration::try_from_secs_f64(l.read.wall_s)
         .ok()
         .and_then(|d| {

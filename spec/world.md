@@ -428,8 +428,35 @@ rearm, because DCS sends no event for one (LIVE, E38,
 docs/results/2026-11-14-e38-life-and-ammunition.md): the loadout is the one at the last
 birth or takeoff. The sidecar keeps it in memory with the unit. It is not stored on
 disk, not part of a capture and not carried by a restore, and a new mission generation
-clears it. A unit the store holds shows it. The units the sidecar adopts have no entity
-in the store (above, "Managed and unmanaged"), so the API shows no `Unit` for them.
+clears it. A unit the store holds shows it on its `Unit`. The units the sidecar adopts
+have no entity in the store (above, "Managed and unmanaged"), so the API shows no `Unit`
+for them, and the World service lists store units only.
+
+**Players.** A player's aircraft is usually an adopted unit, so the loadout also reaches
+the API through the player. `Player.ammo` and `Player.ammo_read` (fields 8 and 9) carry
+the loadout of the unit in `Player.unit_id`: the same type-name counts and the same read
+as `Unit.ammo` and `Unit.ammo_read`, summed by type name when a record repeats a type.
+They are empty and absent when no read was made and when `unit_id` is 0. They clear when
+the player leaves the unit and at a new mission generation or agent boot. A managed unit
+a player occupies shows the same loadout on its `Unit` and on the `Player`. The sidecar
+keeps the table by DCS object ID in memory. Nothing of it is stored on disk.
+
+**Loadout event.** Each `AMMO` record of a unit that players occupy, managed or adopted,
+makes one `LoadoutEvent` (field 12 of `Event.body`). It carries the unit's `EntityId`,
+its group's, the unit's type name, the keys of its occupants by seat, the counts and the
+read. It is journalled after the `S_EVENT_BIRTH` or `S_EVENT_TAKEOFF` world event that
+caused the read, and it is not made when the roster names no player in the unit. An
+`EventFilter` passes it on `player_key`, when one of its `player_keys` matches, and on
+`dcs_ids`, by the cause: `S_EVENT_BIRTH` (15) for a birth read, `S_EVENT_TAKEOFF` (3) for
+a takeoff read.
+
+**Reads before the bind.** An `AMMO` record can reach the sidecar before the sidecar
+holds an `EntityId` for its object, such as one read before the player's slot joins the
+birth that adopts the unit. The sidecar holds the read by DCS object ID until the
+object is bound in the same agent boot and mission generation, then applies it: the
+`Player` fields, the store's unit when it has one, and the `LoadoutEvent`. It holds at
+most 64 reads. A newer read of an object replaces its held one, a full table drops its
+oldest read, and a new mission generation or agent boot drops them all.
 
 ## Lua tables in the API
 

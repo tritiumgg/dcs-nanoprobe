@@ -1104,6 +1104,983 @@ pub mod session_service_server {
         const NAME: &'static str = SERVICE_NAME;
     }
 }
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Unit {
+    #[prost(uint64, tag = "1")]
+    pub id: u64,
+    #[prost(uint64, tag = "2")]
+    pub group_id: u64,
+    /// The DCS type name.
+    #[prost(string, tag = "3")]
+    pub r#type: ::prost::alloc::string::String,
+    /// The author's label.
+    #[prost(string, tag = "4")]
+    pub label: ::prost::alloc::string::String,
+    #[prost(bool, tag = "5")]
+    pub alive: bool,
+    #[prost(message, optional, tag = "6")]
+    pub position: ::core::option::Option<Position>,
+    /// As DCS sampled it. A unit DCS has not sampled has a heading derived from
+    /// its movement, with pitch and roll 0, or no attitude if it has not moved.
+    #[prost(message, optional, tag = "7")]
+    pub attitude: ::core::option::Option<Attitude>,
+    /// Meters per second, derived from position changes.
+    #[prost(double, tag = "8")]
+    pub speed: f64,
+    /// DCS's own life value. Its scale depends on the unit type; life_max is the
+    /// value the unit started with.
+    #[prost(double, optional, tag = "9")]
+    pub life: ::core::option::Option<f64>,
+    /// A player-occupied unit's ammunition by weapon type name, as `getAmmo`
+    /// listed it at the read that `ammo_read` names. Empty for an AI unit, for a
+    /// unit with no read yet, and for one with no ammunition. DCS sends no event
+    /// for a rearm, so a rearm is not read (spec/world.md, "Ammunition").
+    #[prost(btree_map = "string, uint32", tag = "11")]
+    pub ammo: ::prost::alloc::collections::BTreeMap<::prost::alloc::string::String, u32>,
+    /// The read that gave `ammo`: its cause and the stamps it was read under.
+    /// Absent when no read was made.
+    #[prost(message, optional, tag = "16")]
+    pub ammo_read: ::core::option::Option<AmmoRead>,
+    /// Player keys of the occupants, by seat.
+    #[prost(string, repeated, tag = "12")]
+    pub occupants: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(message, optional, tag = "13")]
+    pub sampled: ::core::option::Option<Stamp>,
+    #[prost(double, optional, tag = "14")]
+    pub life_max: ::core::option::Option<f64>,
+    /// How the unit left DCS without a death fact, if it did. While the mark
+    /// stands, no spawn includes the unit. A death fact or the unit being found
+    /// again releases it. A mark the agent reported outlives a mission load
+    /// until the controller removes the group; a mark inferred at an
+    /// enumeration's end clears at the load (spec/world.md, "Respawn gate").
+    #[prost(enumeration = "UnitLeft", tag = "15")]
+    pub left: i32,
+}
+/// The read of a player-occupied unit's ammunition.
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct AmmoRead {
+    #[prost(enumeration = "AmmoReadCause", tag = "1")]
+    pub cause: i32,
+    /// When the read was made.
+    #[prost(message, optional, tag = "2")]
+    pub read: ::core::option::Option<Stamp>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Group {
+    #[prost(uint64, tag = "1")]
+    pub id: u64,
+    #[prost(string, tag = "2")]
+    pub label: ::prost::alloc::string::String,
+    #[prost(bool, tag = "3")]
+    pub managed: bool,
+    #[prost(enumeration = "EntityState", tag = "4")]
+    pub state: i32,
+    #[prost(enumeration = "Coalition", tag = "5")]
+    pub coalition: i32,
+    /// The DCS country number.
+    #[prost(uint32, tag = "6")]
+    pub country: u32,
+    #[prost(enumeration = "GroupCategory", tag = "7")]
+    pub category: i32,
+    #[prost(message, repeated, tag = "8")]
+    pub units: ::prost::alloc::vec::Vec<Unit>,
+    /// Changes when the spec changes, and when a lost group is spawned again,
+    /// whose spec may be the same (spec/world.md, "Revisions").
+    #[prost(uint64, tag = "9")]
+    pub spec_revision: u64,
+    /// The spec revision DCS has applied.
+    #[prost(uint64, tag = "15")]
+    pub applied_spec_revision: u64,
+    /// Changes when the order changes, and when the target of a sent or applied
+    /// attack order gets new DCS object IDs (spec/world.md, "Revisions").
+    #[prost(uint64, tag = "10")]
+    pub order_revision: u64,
+    /// The order revision DCS has been given.
+    #[prost(uint64, tag = "11")]
+    pub applied_order_revision: u64,
+    /// The engine's error for an unspawnable group.
+    #[prost(string, tag = "12")]
+    pub last_error: ::prost::alloc::string::String,
+    /// The theater the group is on.
+    #[prost(string, tag = "13")]
+    pub theater: ::prost::alloc::string::String,
+    /// Author components by name.
+    #[prost(btree_map = "string, message", tag = "14")]
+    pub components: ::prost::alloc::collections::BTreeMap<
+        ::prost::alloc::string::String,
+        ::prost_types::Struct,
+    >,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Static {
+    #[prost(uint64, tag = "1")]
+    pub id: u64,
+    #[prost(string, tag = "2")]
+    pub label: ::prost::alloc::string::String,
+    #[prost(bool, tag = "3")]
+    pub managed: bool,
+    #[prost(string, tag = "4")]
+    pub r#type: ::prost::alloc::string::String,
+    #[prost(enumeration = "Coalition", tag = "5")]
+    pub coalition: i32,
+    #[prost(uint32, tag = "6")]
+    pub country: u32,
+    #[prost(bool, tag = "7")]
+    pub alive: bool,
+    #[prost(message, optional, tag = "8")]
+    pub position: ::core::option::Option<Position>,
+    #[prost(double, tag = "9")]
+    pub heading: f64,
+    #[prost(double, optional, tag = "10")]
+    pub life: ::core::option::Option<f64>,
+    #[prost(enumeration = "EntityState", tag = "11")]
+    pub state: i32,
+    /// The engine's error for an unspawnable static.
+    #[prost(string, tag = "12")]
+    pub last_error: ::prost::alloc::string::String,
+    /// Changes when the spec changes, and when a lost static is spawned again,
+    /// whose spec may be the same (spec/world.md, "Revisions").
+    #[prost(uint64, tag = "13")]
+    pub spec_revision: u64,
+    #[prost(uint64, tag = "14")]
+    pub applied_spec_revision: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Airbase {
+    #[prost(string, tag = "1")]
+    pub theater: ::prost::alloc::string::String,
+    /// The DCS name.
+    #[prost(string, tag = "2")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(enumeration = "Coalition", tag = "3")]
+    pub owner: i32,
+    /// Stock by item name. Absent until sampled.
+    #[prost(btree_map = "string, double", tag = "4")]
+    pub stock: ::prost::alloc::collections::BTreeMap<
+        ::prost::alloc::string::String,
+        f64,
+    >,
+}
+/// A map mark the controller set.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Mark {
+    #[prost(uint64, tag = "1")]
+    pub id: u64,
+    #[prost(message, optional, tag = "2")]
+    pub audience: ::core::option::Option<Audience>,
+    #[prost(message, optional, tag = "3")]
+    pub position: ::core::option::Option<Position>,
+    #[prost(string, tag = "4")]
+    pub text: ::prost::alloc::string::String,
+    #[prost(bool, tag = "5")]
+    pub read_only: bool,
+    #[prost(uint64, tag = "6")]
+    pub spec_revision: u64,
+    /// The revision DCS has applied, and the error if DCS refused the last one.
+    #[prost(uint64, tag = "7")]
+    pub applied_spec_revision: u64,
+    #[prost(string, tag = "8")]
+    pub last_error: ::prost::alloc::string::String,
+}
+/// A map drawing the controller set.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Drawing {
+    #[prost(uint64, tag = "1")]
+    pub id: u64,
+    #[prost(message, optional, tag = "2")]
+    pub audience: ::core::option::Option<Audience>,
+    /// The DCS shape ID.
+    #[prost(uint32, tag = "3")]
+    pub shape: u32,
+    #[prost(message, optional, tag = "4")]
+    pub args: ::core::option::Option<::prost_types::ListValue>,
+    #[prost(uint64, tag = "5")]
+    pub spec_revision: u64,
+    #[prost(uint64, tag = "6")]
+    pub applied_spec_revision: u64,
+    #[prost(string, tag = "7")]
+    pub last_error: ::prost::alloc::string::String,
+}
+/// An F10 menu item the controller set.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MenuItem {
+    #[prost(uint64, tag = "1")]
+    pub id: u64,
+    /// The parent submenu, 0 for the root.
+    #[prost(uint64, tag = "2")]
+    pub parent_id: u64,
+    #[prost(message, optional, tag = "3")]
+    pub audience: ::core::option::Option<Audience>,
+    #[prost(string, tag = "4")]
+    pub text: ::prost::alloc::string::String,
+    #[prost(bool, tag = "5")]
+    pub submenu: bool,
+    #[prost(uint64, tag = "6")]
+    pub spec_revision: u64,
+    #[prost(uint64, tag = "7")]
+    pub applied_spec_revision: u64,
+    #[prost(string, tag = "8")]
+    pub last_error: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Entity {
+    #[prost(oneof = "entity::Kind", tags = "1, 2, 3, 4, 5, 6")]
+    pub kind: ::core::option::Option<entity::Kind>,
+}
+/// Nested message and enum types in `Entity`.
+pub mod entity {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Kind {
+        #[prost(message, tag = "1")]
+        Group(super::Group),
+        #[prost(message, tag = "2")]
+        Static(super::Static),
+        #[prost(message, tag = "3")]
+        Airbase(super::Airbase),
+        #[prost(message, tag = "4")]
+        Mark(super::Mark),
+        #[prost(message, tag = "5")]
+        Drawing(super::Drawing),
+        #[prost(message, tag = "6")]
+        MenuItem(super::MenuItem),
+    }
+}
+/// What a list or a watch covers. Empty covers everything.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct WorldFilter {
+    /// The campaign to read, 0 for the active one. An archived campaign is
+    /// listed, never watched.
+    #[prost(uint64, tag = "1")]
+    pub campaign_id: u64,
+    #[prost(enumeration = "Coalition", repeated, tag = "2")]
+    pub coalitions: ::prost::alloc::vec::Vec<i32>,
+    /// Units are listed inside their groups: ENTITY_KIND_UNIT here fails with
+    /// INVALID_FIELD.
+    #[prost(enumeration = "EntityKind", repeated, tag = "3")]
+    pub kinds: ::prost::alloc::vec::Vec<i32>,
+    /// Only entities within radius of center.
+    #[prost(message, optional, tag = "4")]
+    pub center: ::core::option::Option<Position>,
+    #[prost(double, tag = "5")]
+    pub radius: f64,
+    /// Leave unmanaged entities out.
+    #[prost(bool, tag = "6")]
+    pub managed_only: bool,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListWorldRequest {
+    #[prost(message, optional, tag = "1")]
+    pub filter: ::core::option::Option<WorldFilter>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListWorldResponse {
+    /// The same in every message of one list. Watch from it.
+    #[prost(uint64, tag = "1")]
+    pub revision: u64,
+    #[prost(message, repeated, tag = "2")]
+    pub entities: ::prost::alloc::vec::Vec<Entity>,
+    /// The campaign the revision belongs to. A watch that continues from this
+    /// list names it, not 0.
+    #[prost(uint64, tag = "3")]
+    pub campaign_id: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct WatchWorldRequest {
+    #[prost(message, optional, tag = "1")]
+    pub filter: ::core::option::Option<WorldFilter>,
+    /// Send changes after this revision. Fails with REVISION_EXPIRED when the
+    /// store no longer keeps the changes since it. The first message may also
+    /// carry the last state of an entity that changed since this revision and
+    /// no longer passes the filter, such as one that died or left the area; a
+    /// consumer that does not hold it drops it.
+    #[prost(uint64, tag = "2")]
+    pub since_revision: u64,
+    #[prost(enumeration = "RateClass", tag = "3")]
+    pub rate: i32,
+    /// The shortest time between two position updates of one unit. A period
+    /// under the server's cap is served at the cap.
+    #[prost(message, optional, tag = "4")]
+    pub min_period: ::core::option::Option<::prost_types::Duration>,
+}
+/// Positions of many units, columnar.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PositionBatch {
+    #[prost(string, tag = "1")]
+    pub theater: ::prost::alloc::string::String,
+    #[prost(uint64, repeated, tag = "2")]
+    pub unit_id: ::prost::alloc::vec::Vec<u64>,
+    #[prost(double, repeated, tag = "3")]
+    pub north: ::prost::alloc::vec::Vec<f64>,
+    #[prost(double, repeated, tag = "4")]
+    pub east: ::prost::alloc::vec::Vec<f64>,
+    #[prost(double, repeated, tag = "5")]
+    pub alt: ::prost::alloc::vec::Vec<f64>,
+    #[prost(message, optional, tag = "6")]
+    pub sampled: ::core::option::Option<Stamp>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct WorldChange {
+    #[prost(oneof = "world_change::Change", tags = "1, 2, 3")]
+    pub change: ::core::option::Option<world_change::Change>,
+}
+/// Nested message and enum types in `WorldChange`.
+pub mod world_change {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Change {
+        /// An entity appeared or changed anything but a position.
+        #[prost(message, tag = "1")]
+        Upsert(super::Entity),
+        /// An entity left the store.
+        #[prost(uint64, tag = "2")]
+        RemovedId(u64),
+        #[prost(message, tag = "3")]
+        Positions(super::PositionBatch),
+    }
+}
+/// A watch that names campaign 0 follows the campaign active when it starts
+/// and ends with CAMPAIGN_NOT_ACTIVE when another becomes active.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct WatchWorldResponse {
+    /// The store revision after these changes.
+    #[prost(uint64, tag = "1")]
+    pub revision: u64,
+    #[prost(message, repeated, tag = "2")]
+    pub changes: ::prost::alloc::vec::Vec<WorldChange>,
+    /// The campaign the revision belongs to.
+    #[prost(uint64, tag = "3")]
+    pub campaign_id: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct QueryAreaRequest {
+    #[prost(message, optional, tag = "1")]
+    pub filter: ::core::option::Option<WorldFilter>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct QueryAreaResponse {
+    #[prost(uint64, tag = "1")]
+    pub revision: u64,
+    #[prost(message, repeated, tag = "2")]
+    pub entities: ::prost::alloc::vec::Vec<Entity>,
+    #[prost(uint64, tag = "3")]
+    pub campaign_id: u64,
+}
+/// The lifecycle of a managed group or static (spec/world.md).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum EntityState {
+    Unspecified = 0,
+    Virtual = 1,
+    Materializing = 2,
+    Live = 3,
+    Dematerializing = 4,
+    Dead = 5,
+    Lost = 6,
+    Unspawnable = 7,
+}
+impl EntityState {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "ENTITY_STATE_UNSPECIFIED",
+            Self::Virtual => "ENTITY_STATE_VIRTUAL",
+            Self::Materializing => "ENTITY_STATE_MATERIALIZING",
+            Self::Live => "ENTITY_STATE_LIVE",
+            Self::Dematerializing => "ENTITY_STATE_DEMATERIALIZING",
+            Self::Dead => "ENTITY_STATE_DEAD",
+            Self::Lost => "ENTITY_STATE_LOST",
+            Self::Unspawnable => "ENTITY_STATE_UNSPAWNABLE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "ENTITY_STATE_UNSPECIFIED" => Some(Self::Unspecified),
+            "ENTITY_STATE_VIRTUAL" => Some(Self::Virtual),
+            "ENTITY_STATE_MATERIALIZING" => Some(Self::Materializing),
+            "ENTITY_STATE_LIVE" => Some(Self::Live),
+            "ENTITY_STATE_DEMATERIALIZING" => Some(Self::Dematerializing),
+            "ENTITY_STATE_DEAD" => Some(Self::Dead),
+            "ENTITY_STATE_LOST" => Some(Self::Lost),
+            "ENTITY_STATE_UNSPAWNABLE" => Some(Self::Unspawnable),
+            _ => None,
+        }
+    }
+}
+/// How often a subscription wants positions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum RateClass {
+    Unspecified = 0,
+    /// The default tier rate.
+    Normal = 1,
+    /// As fast as the cap allows.
+    Fast = 2,
+    /// Only when the store checkpoints.
+    Slow = 3,
+}
+impl RateClass {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "RATE_CLASS_UNSPECIFIED",
+            Self::Normal => "RATE_CLASS_NORMAL",
+            Self::Fast => "RATE_CLASS_FAST",
+            Self::Slow => "RATE_CLASS_SLOW",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "RATE_CLASS_UNSPECIFIED" => Some(Self::Unspecified),
+            "RATE_CLASS_NORMAL" => Some(Self::Normal),
+            "RATE_CLASS_FAST" => Some(Self::Fast),
+            "RATE_CLASS_SLOW" => Some(Self::Slow),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum AmmoReadCause {
+    Unspecified = 0,
+    /// The unit's birth: a player took its slot.
+    Birth = 1,
+    /// The unit's takeoff.
+    Takeoff = 2,
+}
+impl AmmoReadCause {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "AMMO_READ_CAUSE_UNSPECIFIED",
+            Self::Birth => "AMMO_READ_CAUSE_BIRTH",
+            Self::Takeoff => "AMMO_READ_CAUSE_TAKEOFF",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "AMMO_READ_CAUSE_UNSPECIFIED" => Some(Self::Unspecified),
+            "AMMO_READ_CAUSE_BIRTH" => Some(Self::Birth),
+            "AMMO_READ_CAUSE_TAKEOFF" => Some(Self::Takeoff),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum UnitLeft {
+    /// It has not left, or it is dead.
+    Unspecified = 0,
+    /// DCS no longer has it and the cause is unknown: it may be dead.
+    Missing = 1,
+    /// DCS no longer has it and the read showed a removal, not a kill.
+    Removed = 2,
+}
+impl UnitLeft {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "UNIT_LEFT_UNSPECIFIED",
+            Self::Missing => "UNIT_LEFT_MISSING",
+            Self::Removed => "UNIT_LEFT_REMOVED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "UNIT_LEFT_UNSPECIFIED" => Some(Self::Unspecified),
+            "UNIT_LEFT_MISSING" => Some(Self::Missing),
+            "UNIT_LEFT_REMOVED" => Some(Self::Removed),
+            _ => None,
+        }
+    }
+}
+/// Generated client implementations.
+pub mod world_service_client {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    use tonic::codegen::http::Uri;
+    /// The world of one campaign, active or archived. A call that names campaign
+    /// 0 while no campaign is active fails with NO_ACTIVE_CAMPAIGN.
+    #[derive(Debug, Clone)]
+    pub struct WorldServiceClient<T> {
+        inner: tonic::client::Grpc<T>,
+    }
+    impl WorldServiceClient<tonic::transport::Channel> {
+        /// Attempt to create a new client by connecting to a given endpoint.
+        pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
+        where
+            D: TryInto<tonic::transport::Endpoint>,
+            D::Error: Into<StdError>,
+        {
+            let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
+            Ok(Self::new(conn))
+        }
+    }
+    impl<T> WorldServiceClient<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::Body>,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
+    {
+        pub fn new(inner: T) -> Self {
+            let inner = tonic::client::Grpc::new(inner);
+            Self { inner }
+        }
+        pub fn with_origin(inner: T, origin: Uri) -> Self {
+            let inner = tonic::client::Grpc::with_origin(inner, origin);
+            Self { inner }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> WorldServiceClient<InterceptedService<T, F>>
+        where
+            F: tonic::service::Interceptor,
+            T::ResponseBody: Default,
+            T: tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+                Response = http::Response<
+                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
+                >,
+            >,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+        {
+            WorldServiceClient::new(InterceptedService::new(inner, interceptor))
+        }
+        /// Compress requests with the given encoding.
+        ///
+        /// This requires the server to support it otherwise it might respond with an
+        /// error.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.send_compressed(encoding);
+            self
+        }
+        /// Enable decompressing responses.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.accept_compressed(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_encoding_message_size(limit);
+            self
+        }
+        /// A snapshot at one revision.
+        pub async fn list_world(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListWorldRequest>,
+        ) -> std::result::Result<
+            tonic::Response<tonic::codec::Streaming<super::ListWorldResponse>>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nanoprobe.v1alpha1.WorldService/ListWorld",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("nanoprobe.v1alpha1.WorldService", "ListWorld"));
+            self.inner.server_streaming(req, path, codec).await
+        }
+        /// Changes since a revision. A consumer that falls behind is ended with
+        /// CONSUMER_TOO_SLOW and lists again.
+        pub async fn watch_world(
+            &mut self,
+            request: impl tonic::IntoRequest<super::WatchWorldRequest>,
+        ) -> std::result::Result<
+            tonic::Response<tonic::codec::Streaming<super::WatchWorldResponse>>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nanoprobe.v1alpha1.WorldService/WatchWorld",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("nanoprobe.v1alpha1.WorldService", "WatchWorld"),
+                );
+            self.inner.server_streaming(req, path, codec).await
+        }
+        /// Entities near a point.
+        pub async fn query_area(
+            &mut self,
+            request: impl tonic::IntoRequest<super::QueryAreaRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::QueryAreaResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nanoprobe.v1alpha1.WorldService/QueryArea",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("nanoprobe.v1alpha1.WorldService", "QueryArea"));
+            self.inner.unary(req, path, codec).await
+        }
+    }
+}
+/// Generated server implementations.
+pub mod world_service_server {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    /// Generated trait containing gRPC methods that should be implemented for use with WorldServiceServer.
+    #[async_trait]
+    pub trait WorldService: std::marker::Send + std::marker::Sync + 'static {
+        /// Server streaming response type for the ListWorld method.
+        type ListWorldStream: tonic::codegen::tokio_stream::Stream<
+                Item = std::result::Result<super::ListWorldResponse, tonic::Status>,
+            >
+            + std::marker::Send
+            + 'static;
+        /// A snapshot at one revision.
+        async fn list_world(
+            &self,
+            request: tonic::Request<super::ListWorldRequest>,
+        ) -> std::result::Result<tonic::Response<Self::ListWorldStream>, tonic::Status>;
+        /// Server streaming response type for the WatchWorld method.
+        type WatchWorldStream: tonic::codegen::tokio_stream::Stream<
+                Item = std::result::Result<super::WatchWorldResponse, tonic::Status>,
+            >
+            + std::marker::Send
+            + 'static;
+        /// Changes since a revision. A consumer that falls behind is ended with
+        /// CONSUMER_TOO_SLOW and lists again.
+        async fn watch_world(
+            &self,
+            request: tonic::Request<super::WatchWorldRequest>,
+        ) -> std::result::Result<tonic::Response<Self::WatchWorldStream>, tonic::Status>;
+        /// Entities near a point.
+        async fn query_area(
+            &self,
+            request: tonic::Request<super::QueryAreaRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::QueryAreaResponse>,
+            tonic::Status,
+        >;
+    }
+    /// The world of one campaign, active or archived. A call that names campaign
+    /// 0 while no campaign is active fails with NO_ACTIVE_CAMPAIGN.
+    #[derive(Debug)]
+    pub struct WorldServiceServer<T> {
+        inner: Arc<T>,
+        accept_compression_encodings: EnabledCompressionEncodings,
+        send_compression_encodings: EnabledCompressionEncodings,
+        max_decoding_message_size: Option<usize>,
+        max_encoding_message_size: Option<usize>,
+    }
+    impl<T> WorldServiceServer<T> {
+        pub fn new(inner: T) -> Self {
+            Self::from_arc(Arc::new(inner))
+        }
+        pub fn from_arc(inner: Arc<T>) -> Self {
+            Self {
+                inner,
+                accept_compression_encodings: Default::default(),
+                send_compression_encodings: Default::default(),
+                max_decoding_message_size: None,
+                max_encoding_message_size: None,
+            }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> InterceptedService<Self, F>
+        where
+            F: tonic::service::Interceptor,
+        {
+            InterceptedService::new(Self::new(inner), interceptor)
+        }
+        /// Enable decompressing requests with the given encoding.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.accept_compression_encodings.enable(encoding);
+            self
+        }
+        /// Compress responses with the given encoding, if the client supports it.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.send_compression_encodings.enable(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.max_decoding_message_size = Some(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.max_encoding_message_size = Some(limit);
+            self
+        }
+    }
+    impl<T, B> tonic::codegen::Service<http::Request<B>> for WorldServiceServer<T>
+    where
+        T: WorldService,
+        B: Body + std::marker::Send + 'static,
+        B::Error: Into<StdError> + std::marker::Send + 'static,
+    {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: http::Request<B>) -> Self::Future {
+            match req.uri().path() {
+                "/nanoprobe.v1alpha1.WorldService/ListWorld" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListWorldSvc<T: WorldService>(pub Arc<T>);
+                    impl<
+                        T: WorldService,
+                    > tonic::server::ServerStreamingService<super::ListWorldRequest>
+                    for ListWorldSvc<T> {
+                        type Response = super::ListWorldResponse;
+                        type ResponseStream = T::ListWorldStream;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::ResponseStream>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListWorldRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as WorldService>::list_world(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListWorldSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.server_streaming(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/nanoprobe.v1alpha1.WorldService/WatchWorld" => {
+                    #[allow(non_camel_case_types)]
+                    struct WatchWorldSvc<T: WorldService>(pub Arc<T>);
+                    impl<
+                        T: WorldService,
+                    > tonic::server::ServerStreamingService<super::WatchWorldRequest>
+                    for WatchWorldSvc<T> {
+                        type Response = super::WatchWorldResponse;
+                        type ResponseStream = T::WatchWorldStream;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::ResponseStream>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::WatchWorldRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as WorldService>::watch_world(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = WatchWorldSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.server_streaming(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/nanoprobe.v1alpha1.WorldService/QueryArea" => {
+                    #[allow(non_camel_case_types)]
+                    struct QueryAreaSvc<T: WorldService>(pub Arc<T>);
+                    impl<
+                        T: WorldService,
+                    > tonic::server::UnaryService<super::QueryAreaRequest>
+                    for QueryAreaSvc<T> {
+                        type Response = super::QueryAreaResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::QueryAreaRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as WorldService>::query_area(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = QueryAreaSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                _ => {
+                    Box::pin(async move {
+                        let mut response = http::Response::new(
+                            tonic::body::Body::default(),
+                        );
+                        let headers = response.headers_mut();
+                        headers
+                            .insert(
+                                tonic::Status::GRPC_STATUS,
+                                (tonic::Code::Unimplemented as i32).into(),
+                            );
+                        headers
+                            .insert(
+                                http::header::CONTENT_TYPE,
+                                tonic::metadata::GRPC_CONTENT_TYPE,
+                            );
+                        Ok(response)
+                    })
+                }
+            }
+        }
+    }
+    impl<T> Clone for WorldServiceServer<T> {
+        fn clone(&self) -> Self {
+            let inner = self.inner.clone();
+            Self {
+                inner,
+                accept_compression_encodings: self.accept_compression_encodings,
+                send_compression_encodings: self.send_compression_encodings,
+                max_decoding_message_size: self.max_decoding_message_size,
+                max_encoding_message_size: self.max_encoding_message_size,
+            }
+        }
+    }
+    /// Generated gRPC service name
+    pub const SERVICE_NAME: &str = "nanoprobe.v1alpha1.WorldService";
+    impl<T> tonic::server::NamedService for WorldServiceServer<T> {
+        const NAME: &'static str = SERVICE_NAME;
+    }
+}
 /// Every field but sequence and stamp is optional: DCS does not always send
 /// the same fields for one event type.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1116,7 +2093,7 @@ pub struct Event {
     /// The campaign the sequence number belongs to, 0 for the server log.
     #[prost(uint64, tag = "9")]
     pub campaign_id: u64,
-    #[prost(oneof = "event::Body", tags = "3, 4, 5, 6, 7, 8, 10, 11")]
+    #[prost(oneof = "event::Body", tags = "3, 4, 5, 6, 7, 8, 10, 11, 12")]
     pub body: ::core::option::Option<event::Body>,
 }
 /// Nested message and enum types in `Event`.
@@ -1139,6 +2116,8 @@ pub mod event {
         Route(super::RouteEvent),
         #[prost(message, tag = "11")]
         Moderation(super::ModerationEvent),
+        #[prost(message, tag = "12")]
+        Loadout(super::LoadoutEvent),
     }
 }
 /// A DCS world event.
@@ -1261,6 +2240,30 @@ pub struct MenuEvent {
     pub player_keys: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(enumeration = "MenuAttribution", tag = "3")]
     pub attribution: i32,
+}
+/// The ammunition of a unit a player occupies, read at the unit's birth or
+/// takeoff. One event per read, for a unit the store holds and for an adopted
+/// one. It follows the world event that caused the read (spec/world.md,
+/// "Ammunition").
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct LoadoutEvent {
+    /// The unit the players occupy.
+    #[prost(uint64, tag = "1")]
+    pub unit_id: u64,
+    #[prost(uint64, tag = "2")]
+    pub group_id: u64,
+    /// The unit's type name.
+    #[prost(string, tag = "3")]
+    pub r#type: ::prost::alloc::string::String,
+    /// The players in the unit, by seat.
+    #[prost(string, repeated, tag = "4")]
+    pub player_keys: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Counts by weapon type name; rows of one type are added up.
+    #[prost(btree_map = "string, uint32", tag = "5")]
+    pub ammo: ::prost::alloc::collections::BTreeMap<::prost::alloc::string::String, u32>,
+    /// The cause of the read and the stamps it was made under.
+    #[prost(message, optional, tag = "6")]
+    pub read: ::core::option::Option<AmmoRead>,
 }
 /// A moderation call DCS applied.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -3901,983 +4904,6 @@ pub mod campaign_service_server {
     /// Generated gRPC service name
     pub const SERVICE_NAME: &str = "nanoprobe.v1alpha1.CampaignService";
     impl<T> tonic::server::NamedService for CampaignServiceServer<T> {
-        const NAME: &'static str = SERVICE_NAME;
-    }
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct Unit {
-    #[prost(uint64, tag = "1")]
-    pub id: u64,
-    #[prost(uint64, tag = "2")]
-    pub group_id: u64,
-    /// The DCS type name.
-    #[prost(string, tag = "3")]
-    pub r#type: ::prost::alloc::string::String,
-    /// The author's label.
-    #[prost(string, tag = "4")]
-    pub label: ::prost::alloc::string::String,
-    #[prost(bool, tag = "5")]
-    pub alive: bool,
-    #[prost(message, optional, tag = "6")]
-    pub position: ::core::option::Option<Position>,
-    /// As DCS sampled it. A unit DCS has not sampled has a heading derived from
-    /// its movement, with pitch and roll 0, or no attitude if it has not moved.
-    #[prost(message, optional, tag = "7")]
-    pub attitude: ::core::option::Option<Attitude>,
-    /// Meters per second, derived from position changes.
-    #[prost(double, tag = "8")]
-    pub speed: f64,
-    /// DCS's own life value. Its scale depends on the unit type; life_max is the
-    /// value the unit started with.
-    #[prost(double, optional, tag = "9")]
-    pub life: ::core::option::Option<f64>,
-    /// A player-occupied unit's ammunition by weapon type name, as `getAmmo`
-    /// listed it at the read that `ammo_read` names. Empty for an AI unit, for a
-    /// unit with no read yet, and for one with no ammunition. DCS sends no event
-    /// for a rearm, so a rearm is not read (spec/world.md, "Ammunition").
-    #[prost(btree_map = "string, uint32", tag = "11")]
-    pub ammo: ::prost::alloc::collections::BTreeMap<::prost::alloc::string::String, u32>,
-    /// The read that gave `ammo`: its cause and the stamps it was read under.
-    /// Absent when no read was made.
-    #[prost(message, optional, tag = "16")]
-    pub ammo_read: ::core::option::Option<AmmoRead>,
-    /// Player keys of the occupants, by seat.
-    #[prost(string, repeated, tag = "12")]
-    pub occupants: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    #[prost(message, optional, tag = "13")]
-    pub sampled: ::core::option::Option<Stamp>,
-    #[prost(double, optional, tag = "14")]
-    pub life_max: ::core::option::Option<f64>,
-    /// How the unit left DCS without a death fact, if it did. While the mark
-    /// stands, no spawn includes the unit. A death fact or the unit being found
-    /// again releases it. A mark the agent reported outlives a mission load
-    /// until the controller removes the group; a mark inferred at an
-    /// enumeration's end clears at the load (spec/world.md, "Respawn gate").
-    #[prost(enumeration = "UnitLeft", tag = "15")]
-    pub left: i32,
-}
-/// The read of a player-occupied unit's ammunition.
-#[derive(Clone, Copy, PartialEq, ::prost::Message)]
-pub struct AmmoRead {
-    #[prost(enumeration = "AmmoReadCause", tag = "1")]
-    pub cause: i32,
-    /// When the read was made.
-    #[prost(message, optional, tag = "2")]
-    pub read: ::core::option::Option<Stamp>,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct Group {
-    #[prost(uint64, tag = "1")]
-    pub id: u64,
-    #[prost(string, tag = "2")]
-    pub label: ::prost::alloc::string::String,
-    #[prost(bool, tag = "3")]
-    pub managed: bool,
-    #[prost(enumeration = "EntityState", tag = "4")]
-    pub state: i32,
-    #[prost(enumeration = "Coalition", tag = "5")]
-    pub coalition: i32,
-    /// The DCS country number.
-    #[prost(uint32, tag = "6")]
-    pub country: u32,
-    #[prost(enumeration = "GroupCategory", tag = "7")]
-    pub category: i32,
-    #[prost(message, repeated, tag = "8")]
-    pub units: ::prost::alloc::vec::Vec<Unit>,
-    /// Changes when the spec changes, and when a lost group is spawned again,
-    /// whose spec may be the same (spec/world.md, "Revisions").
-    #[prost(uint64, tag = "9")]
-    pub spec_revision: u64,
-    /// The spec revision DCS has applied.
-    #[prost(uint64, tag = "15")]
-    pub applied_spec_revision: u64,
-    /// Changes when the order changes, and when the target of a sent or applied
-    /// attack order gets new DCS object IDs (spec/world.md, "Revisions").
-    #[prost(uint64, tag = "10")]
-    pub order_revision: u64,
-    /// The order revision DCS has been given.
-    #[prost(uint64, tag = "11")]
-    pub applied_order_revision: u64,
-    /// The engine's error for an unspawnable group.
-    #[prost(string, tag = "12")]
-    pub last_error: ::prost::alloc::string::String,
-    /// The theater the group is on.
-    #[prost(string, tag = "13")]
-    pub theater: ::prost::alloc::string::String,
-    /// Author components by name.
-    #[prost(btree_map = "string, message", tag = "14")]
-    pub components: ::prost::alloc::collections::BTreeMap<
-        ::prost::alloc::string::String,
-        ::prost_types::Struct,
-    >,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct Static {
-    #[prost(uint64, tag = "1")]
-    pub id: u64,
-    #[prost(string, tag = "2")]
-    pub label: ::prost::alloc::string::String,
-    #[prost(bool, tag = "3")]
-    pub managed: bool,
-    #[prost(string, tag = "4")]
-    pub r#type: ::prost::alloc::string::String,
-    #[prost(enumeration = "Coalition", tag = "5")]
-    pub coalition: i32,
-    #[prost(uint32, tag = "6")]
-    pub country: u32,
-    #[prost(bool, tag = "7")]
-    pub alive: bool,
-    #[prost(message, optional, tag = "8")]
-    pub position: ::core::option::Option<Position>,
-    #[prost(double, tag = "9")]
-    pub heading: f64,
-    #[prost(double, optional, tag = "10")]
-    pub life: ::core::option::Option<f64>,
-    #[prost(enumeration = "EntityState", tag = "11")]
-    pub state: i32,
-    /// The engine's error for an unspawnable static.
-    #[prost(string, tag = "12")]
-    pub last_error: ::prost::alloc::string::String,
-    /// Changes when the spec changes, and when a lost static is spawned again,
-    /// whose spec may be the same (spec/world.md, "Revisions").
-    #[prost(uint64, tag = "13")]
-    pub spec_revision: u64,
-    #[prost(uint64, tag = "14")]
-    pub applied_spec_revision: u64,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct Airbase {
-    #[prost(string, tag = "1")]
-    pub theater: ::prost::alloc::string::String,
-    /// The DCS name.
-    #[prost(string, tag = "2")]
-    pub name: ::prost::alloc::string::String,
-    #[prost(enumeration = "Coalition", tag = "3")]
-    pub owner: i32,
-    /// Stock by item name. Absent until sampled.
-    #[prost(btree_map = "string, double", tag = "4")]
-    pub stock: ::prost::alloc::collections::BTreeMap<
-        ::prost::alloc::string::String,
-        f64,
-    >,
-}
-/// A map mark the controller set.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct Mark {
-    #[prost(uint64, tag = "1")]
-    pub id: u64,
-    #[prost(message, optional, tag = "2")]
-    pub audience: ::core::option::Option<Audience>,
-    #[prost(message, optional, tag = "3")]
-    pub position: ::core::option::Option<Position>,
-    #[prost(string, tag = "4")]
-    pub text: ::prost::alloc::string::String,
-    #[prost(bool, tag = "5")]
-    pub read_only: bool,
-    #[prost(uint64, tag = "6")]
-    pub spec_revision: u64,
-    /// The revision DCS has applied, and the error if DCS refused the last one.
-    #[prost(uint64, tag = "7")]
-    pub applied_spec_revision: u64,
-    #[prost(string, tag = "8")]
-    pub last_error: ::prost::alloc::string::String,
-}
-/// A map drawing the controller set.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct Drawing {
-    #[prost(uint64, tag = "1")]
-    pub id: u64,
-    #[prost(message, optional, tag = "2")]
-    pub audience: ::core::option::Option<Audience>,
-    /// The DCS shape ID.
-    #[prost(uint32, tag = "3")]
-    pub shape: u32,
-    #[prost(message, optional, tag = "4")]
-    pub args: ::core::option::Option<::prost_types::ListValue>,
-    #[prost(uint64, tag = "5")]
-    pub spec_revision: u64,
-    #[prost(uint64, tag = "6")]
-    pub applied_spec_revision: u64,
-    #[prost(string, tag = "7")]
-    pub last_error: ::prost::alloc::string::String,
-}
-/// An F10 menu item the controller set.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct MenuItem {
-    #[prost(uint64, tag = "1")]
-    pub id: u64,
-    /// The parent submenu, 0 for the root.
-    #[prost(uint64, tag = "2")]
-    pub parent_id: u64,
-    #[prost(message, optional, tag = "3")]
-    pub audience: ::core::option::Option<Audience>,
-    #[prost(string, tag = "4")]
-    pub text: ::prost::alloc::string::String,
-    #[prost(bool, tag = "5")]
-    pub submenu: bool,
-    #[prost(uint64, tag = "6")]
-    pub spec_revision: u64,
-    #[prost(uint64, tag = "7")]
-    pub applied_spec_revision: u64,
-    #[prost(string, tag = "8")]
-    pub last_error: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct Entity {
-    #[prost(oneof = "entity::Kind", tags = "1, 2, 3, 4, 5, 6")]
-    pub kind: ::core::option::Option<entity::Kind>,
-}
-/// Nested message and enum types in `Entity`.
-pub mod entity {
-    #[derive(Clone, PartialEq, ::prost::Oneof)]
-    pub enum Kind {
-        #[prost(message, tag = "1")]
-        Group(super::Group),
-        #[prost(message, tag = "2")]
-        Static(super::Static),
-        #[prost(message, tag = "3")]
-        Airbase(super::Airbase),
-        #[prost(message, tag = "4")]
-        Mark(super::Mark),
-        #[prost(message, tag = "5")]
-        Drawing(super::Drawing),
-        #[prost(message, tag = "6")]
-        MenuItem(super::MenuItem),
-    }
-}
-/// What a list or a watch covers. Empty covers everything.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct WorldFilter {
-    /// The campaign to read, 0 for the active one. An archived campaign is
-    /// listed, never watched.
-    #[prost(uint64, tag = "1")]
-    pub campaign_id: u64,
-    #[prost(enumeration = "Coalition", repeated, tag = "2")]
-    pub coalitions: ::prost::alloc::vec::Vec<i32>,
-    /// Units are listed inside their groups: ENTITY_KIND_UNIT here fails with
-    /// INVALID_FIELD.
-    #[prost(enumeration = "EntityKind", repeated, tag = "3")]
-    pub kinds: ::prost::alloc::vec::Vec<i32>,
-    /// Only entities within radius of center.
-    #[prost(message, optional, tag = "4")]
-    pub center: ::core::option::Option<Position>,
-    #[prost(double, tag = "5")]
-    pub radius: f64,
-    /// Leave unmanaged entities out.
-    #[prost(bool, tag = "6")]
-    pub managed_only: bool,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ListWorldRequest {
-    #[prost(message, optional, tag = "1")]
-    pub filter: ::core::option::Option<WorldFilter>,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ListWorldResponse {
-    /// The same in every message of one list. Watch from it.
-    #[prost(uint64, tag = "1")]
-    pub revision: u64,
-    #[prost(message, repeated, tag = "2")]
-    pub entities: ::prost::alloc::vec::Vec<Entity>,
-    /// The campaign the revision belongs to. A watch that continues from this
-    /// list names it, not 0.
-    #[prost(uint64, tag = "3")]
-    pub campaign_id: u64,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct WatchWorldRequest {
-    #[prost(message, optional, tag = "1")]
-    pub filter: ::core::option::Option<WorldFilter>,
-    /// Send changes after this revision. Fails with REVISION_EXPIRED when the
-    /// store no longer keeps the changes since it. The first message may also
-    /// carry the last state of an entity that changed since this revision and
-    /// no longer passes the filter, such as one that died or left the area; a
-    /// consumer that does not hold it drops it.
-    #[prost(uint64, tag = "2")]
-    pub since_revision: u64,
-    #[prost(enumeration = "RateClass", tag = "3")]
-    pub rate: i32,
-    /// The shortest time between two position updates of one unit. A period
-    /// under the server's cap is served at the cap.
-    #[prost(message, optional, tag = "4")]
-    pub min_period: ::core::option::Option<::prost_types::Duration>,
-}
-/// Positions of many units, columnar.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct PositionBatch {
-    #[prost(string, tag = "1")]
-    pub theater: ::prost::alloc::string::String,
-    #[prost(uint64, repeated, tag = "2")]
-    pub unit_id: ::prost::alloc::vec::Vec<u64>,
-    #[prost(double, repeated, tag = "3")]
-    pub north: ::prost::alloc::vec::Vec<f64>,
-    #[prost(double, repeated, tag = "4")]
-    pub east: ::prost::alloc::vec::Vec<f64>,
-    #[prost(double, repeated, tag = "5")]
-    pub alt: ::prost::alloc::vec::Vec<f64>,
-    #[prost(message, optional, tag = "6")]
-    pub sampled: ::core::option::Option<Stamp>,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct WorldChange {
-    #[prost(oneof = "world_change::Change", tags = "1, 2, 3")]
-    pub change: ::core::option::Option<world_change::Change>,
-}
-/// Nested message and enum types in `WorldChange`.
-pub mod world_change {
-    #[derive(Clone, PartialEq, ::prost::Oneof)]
-    pub enum Change {
-        /// An entity appeared or changed anything but a position.
-        #[prost(message, tag = "1")]
-        Upsert(super::Entity),
-        /// An entity left the store.
-        #[prost(uint64, tag = "2")]
-        RemovedId(u64),
-        #[prost(message, tag = "3")]
-        Positions(super::PositionBatch),
-    }
-}
-/// A watch that names campaign 0 follows the campaign active when it starts
-/// and ends with CAMPAIGN_NOT_ACTIVE when another becomes active.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct WatchWorldResponse {
-    /// The store revision after these changes.
-    #[prost(uint64, tag = "1")]
-    pub revision: u64,
-    #[prost(message, repeated, tag = "2")]
-    pub changes: ::prost::alloc::vec::Vec<WorldChange>,
-    /// The campaign the revision belongs to.
-    #[prost(uint64, tag = "3")]
-    pub campaign_id: u64,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct QueryAreaRequest {
-    #[prost(message, optional, tag = "1")]
-    pub filter: ::core::option::Option<WorldFilter>,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct QueryAreaResponse {
-    #[prost(uint64, tag = "1")]
-    pub revision: u64,
-    #[prost(message, repeated, tag = "2")]
-    pub entities: ::prost::alloc::vec::Vec<Entity>,
-    #[prost(uint64, tag = "3")]
-    pub campaign_id: u64,
-}
-/// The lifecycle of a managed group or static (spec/world.md).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
-pub enum EntityState {
-    Unspecified = 0,
-    Virtual = 1,
-    Materializing = 2,
-    Live = 3,
-    Dematerializing = 4,
-    Dead = 5,
-    Lost = 6,
-    Unspawnable = 7,
-}
-impl EntityState {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    ///
-    /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::Unspecified => "ENTITY_STATE_UNSPECIFIED",
-            Self::Virtual => "ENTITY_STATE_VIRTUAL",
-            Self::Materializing => "ENTITY_STATE_MATERIALIZING",
-            Self::Live => "ENTITY_STATE_LIVE",
-            Self::Dematerializing => "ENTITY_STATE_DEMATERIALIZING",
-            Self::Dead => "ENTITY_STATE_DEAD",
-            Self::Lost => "ENTITY_STATE_LOST",
-            Self::Unspawnable => "ENTITY_STATE_UNSPAWNABLE",
-        }
-    }
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "ENTITY_STATE_UNSPECIFIED" => Some(Self::Unspecified),
-            "ENTITY_STATE_VIRTUAL" => Some(Self::Virtual),
-            "ENTITY_STATE_MATERIALIZING" => Some(Self::Materializing),
-            "ENTITY_STATE_LIVE" => Some(Self::Live),
-            "ENTITY_STATE_DEMATERIALIZING" => Some(Self::Dematerializing),
-            "ENTITY_STATE_DEAD" => Some(Self::Dead),
-            "ENTITY_STATE_LOST" => Some(Self::Lost),
-            "ENTITY_STATE_UNSPAWNABLE" => Some(Self::Unspawnable),
-            _ => None,
-        }
-    }
-}
-/// How often a subscription wants positions.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
-pub enum RateClass {
-    Unspecified = 0,
-    /// The default tier rate.
-    Normal = 1,
-    /// As fast as the cap allows.
-    Fast = 2,
-    /// Only when the store checkpoints.
-    Slow = 3,
-}
-impl RateClass {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    ///
-    /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::Unspecified => "RATE_CLASS_UNSPECIFIED",
-            Self::Normal => "RATE_CLASS_NORMAL",
-            Self::Fast => "RATE_CLASS_FAST",
-            Self::Slow => "RATE_CLASS_SLOW",
-        }
-    }
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "RATE_CLASS_UNSPECIFIED" => Some(Self::Unspecified),
-            "RATE_CLASS_NORMAL" => Some(Self::Normal),
-            "RATE_CLASS_FAST" => Some(Self::Fast),
-            "RATE_CLASS_SLOW" => Some(Self::Slow),
-            _ => None,
-        }
-    }
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
-pub enum AmmoReadCause {
-    Unspecified = 0,
-    /// The unit's birth: a player took its slot.
-    Birth = 1,
-    /// The unit's takeoff.
-    Takeoff = 2,
-}
-impl AmmoReadCause {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    ///
-    /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::Unspecified => "AMMO_READ_CAUSE_UNSPECIFIED",
-            Self::Birth => "AMMO_READ_CAUSE_BIRTH",
-            Self::Takeoff => "AMMO_READ_CAUSE_TAKEOFF",
-        }
-    }
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "AMMO_READ_CAUSE_UNSPECIFIED" => Some(Self::Unspecified),
-            "AMMO_READ_CAUSE_BIRTH" => Some(Self::Birth),
-            "AMMO_READ_CAUSE_TAKEOFF" => Some(Self::Takeoff),
-            _ => None,
-        }
-    }
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
-pub enum UnitLeft {
-    /// It has not left, or it is dead.
-    Unspecified = 0,
-    /// DCS no longer has it and the cause is unknown: it may be dead.
-    Missing = 1,
-    /// DCS no longer has it and the read showed a removal, not a kill.
-    Removed = 2,
-}
-impl UnitLeft {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    ///
-    /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::Unspecified => "UNIT_LEFT_UNSPECIFIED",
-            Self::Missing => "UNIT_LEFT_MISSING",
-            Self::Removed => "UNIT_LEFT_REMOVED",
-        }
-    }
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "UNIT_LEFT_UNSPECIFIED" => Some(Self::Unspecified),
-            "UNIT_LEFT_MISSING" => Some(Self::Missing),
-            "UNIT_LEFT_REMOVED" => Some(Self::Removed),
-            _ => None,
-        }
-    }
-}
-/// Generated client implementations.
-pub mod world_service_client {
-    #![allow(
-        unused_variables,
-        dead_code,
-        missing_docs,
-        clippy::wildcard_imports,
-        clippy::let_unit_value,
-    )]
-    use tonic::codegen::*;
-    use tonic::codegen::http::Uri;
-    /// The world of one campaign, active or archived. A call that names campaign
-    /// 0 while no campaign is active fails with NO_ACTIVE_CAMPAIGN.
-    #[derive(Debug, Clone)]
-    pub struct WorldServiceClient<T> {
-        inner: tonic::client::Grpc<T>,
-    }
-    impl WorldServiceClient<tonic::transport::Channel> {
-        /// Attempt to create a new client by connecting to a given endpoint.
-        pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
-        where
-            D: TryInto<tonic::transport::Endpoint>,
-            D::Error: Into<StdError>,
-        {
-            let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
-            Ok(Self::new(conn))
-        }
-    }
-    impl<T> WorldServiceClient<T>
-    where
-        T: tonic::client::GrpcService<tonic::body::Body>,
-        T::Error: Into<StdError>,
-        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
-        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
-    {
-        pub fn new(inner: T) -> Self {
-            let inner = tonic::client::Grpc::new(inner);
-            Self { inner }
-        }
-        pub fn with_origin(inner: T, origin: Uri) -> Self {
-            let inner = tonic::client::Grpc::with_origin(inner, origin);
-            Self { inner }
-        }
-        pub fn with_interceptor<F>(
-            inner: T,
-            interceptor: F,
-        ) -> WorldServiceClient<InterceptedService<T, F>>
-        where
-            F: tonic::service::Interceptor,
-            T::ResponseBody: Default,
-            T: tonic::codegen::Service<
-                http::Request<tonic::body::Body>,
-                Response = http::Response<
-                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
-                >,
-            >,
-            <T as tonic::codegen::Service<
-                http::Request<tonic::body::Body>,
-            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
-        {
-            WorldServiceClient::new(InterceptedService::new(inner, interceptor))
-        }
-        /// Compress requests with the given encoding.
-        ///
-        /// This requires the server to support it otherwise it might respond with an
-        /// error.
-        #[must_use]
-        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.inner = self.inner.send_compressed(encoding);
-            self
-        }
-        /// Enable decompressing responses.
-        #[must_use]
-        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.inner = self.inner.accept_compressed(encoding);
-            self
-        }
-        /// Limits the maximum size of a decoded message.
-        ///
-        /// Default: `4MB`
-        #[must_use]
-        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
-            self.inner = self.inner.max_decoding_message_size(limit);
-            self
-        }
-        /// Limits the maximum size of an encoded message.
-        ///
-        /// Default: `usize::MAX`
-        #[must_use]
-        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
-            self.inner = self.inner.max_encoding_message_size(limit);
-            self
-        }
-        /// A snapshot at one revision.
-        pub async fn list_world(
-            &mut self,
-            request: impl tonic::IntoRequest<super::ListWorldRequest>,
-        ) -> std::result::Result<
-            tonic::Response<tonic::codec::Streaming<super::ListWorldResponse>>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/nanoprobe.v1alpha1.WorldService/ListWorld",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("nanoprobe.v1alpha1.WorldService", "ListWorld"));
-            self.inner.server_streaming(req, path, codec).await
-        }
-        /// Changes since a revision. A consumer that falls behind is ended with
-        /// CONSUMER_TOO_SLOW and lists again.
-        pub async fn watch_world(
-            &mut self,
-            request: impl tonic::IntoRequest<super::WatchWorldRequest>,
-        ) -> std::result::Result<
-            tonic::Response<tonic::codec::Streaming<super::WatchWorldResponse>>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/nanoprobe.v1alpha1.WorldService/WatchWorld",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("nanoprobe.v1alpha1.WorldService", "WatchWorld"),
-                );
-            self.inner.server_streaming(req, path, codec).await
-        }
-        /// Entities near a point.
-        pub async fn query_area(
-            &mut self,
-            request: impl tonic::IntoRequest<super::QueryAreaRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::QueryAreaResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/nanoprobe.v1alpha1.WorldService/QueryArea",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("nanoprobe.v1alpha1.WorldService", "QueryArea"));
-            self.inner.unary(req, path, codec).await
-        }
-    }
-}
-/// Generated server implementations.
-pub mod world_service_server {
-    #![allow(
-        unused_variables,
-        dead_code,
-        missing_docs,
-        clippy::wildcard_imports,
-        clippy::let_unit_value,
-    )]
-    use tonic::codegen::*;
-    /// Generated trait containing gRPC methods that should be implemented for use with WorldServiceServer.
-    #[async_trait]
-    pub trait WorldService: std::marker::Send + std::marker::Sync + 'static {
-        /// Server streaming response type for the ListWorld method.
-        type ListWorldStream: tonic::codegen::tokio_stream::Stream<
-                Item = std::result::Result<super::ListWorldResponse, tonic::Status>,
-            >
-            + std::marker::Send
-            + 'static;
-        /// A snapshot at one revision.
-        async fn list_world(
-            &self,
-            request: tonic::Request<super::ListWorldRequest>,
-        ) -> std::result::Result<tonic::Response<Self::ListWorldStream>, tonic::Status>;
-        /// Server streaming response type for the WatchWorld method.
-        type WatchWorldStream: tonic::codegen::tokio_stream::Stream<
-                Item = std::result::Result<super::WatchWorldResponse, tonic::Status>,
-            >
-            + std::marker::Send
-            + 'static;
-        /// Changes since a revision. A consumer that falls behind is ended with
-        /// CONSUMER_TOO_SLOW and lists again.
-        async fn watch_world(
-            &self,
-            request: tonic::Request<super::WatchWorldRequest>,
-        ) -> std::result::Result<tonic::Response<Self::WatchWorldStream>, tonic::Status>;
-        /// Entities near a point.
-        async fn query_area(
-            &self,
-            request: tonic::Request<super::QueryAreaRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::QueryAreaResponse>,
-            tonic::Status,
-        >;
-    }
-    /// The world of one campaign, active or archived. A call that names campaign
-    /// 0 while no campaign is active fails with NO_ACTIVE_CAMPAIGN.
-    #[derive(Debug)]
-    pub struct WorldServiceServer<T> {
-        inner: Arc<T>,
-        accept_compression_encodings: EnabledCompressionEncodings,
-        send_compression_encodings: EnabledCompressionEncodings,
-        max_decoding_message_size: Option<usize>,
-        max_encoding_message_size: Option<usize>,
-    }
-    impl<T> WorldServiceServer<T> {
-        pub fn new(inner: T) -> Self {
-            Self::from_arc(Arc::new(inner))
-        }
-        pub fn from_arc(inner: Arc<T>) -> Self {
-            Self {
-                inner,
-                accept_compression_encodings: Default::default(),
-                send_compression_encodings: Default::default(),
-                max_decoding_message_size: None,
-                max_encoding_message_size: None,
-            }
-        }
-        pub fn with_interceptor<F>(
-            inner: T,
-            interceptor: F,
-        ) -> InterceptedService<Self, F>
-        where
-            F: tonic::service::Interceptor,
-        {
-            InterceptedService::new(Self::new(inner), interceptor)
-        }
-        /// Enable decompressing requests with the given encoding.
-        #[must_use]
-        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.accept_compression_encodings.enable(encoding);
-            self
-        }
-        /// Compress responses with the given encoding, if the client supports it.
-        #[must_use]
-        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.send_compression_encodings.enable(encoding);
-            self
-        }
-        /// Limits the maximum size of a decoded message.
-        ///
-        /// Default: `4MB`
-        #[must_use]
-        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
-            self.max_decoding_message_size = Some(limit);
-            self
-        }
-        /// Limits the maximum size of an encoded message.
-        ///
-        /// Default: `usize::MAX`
-        #[must_use]
-        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
-            self.max_encoding_message_size = Some(limit);
-            self
-        }
-    }
-    impl<T, B> tonic::codegen::Service<http::Request<B>> for WorldServiceServer<T>
-    where
-        T: WorldService,
-        B: Body + std::marker::Send + 'static,
-        B::Error: Into<StdError> + std::marker::Send + 'static,
-    {
-        type Response = http::Response<tonic::body::Body>;
-        type Error = std::convert::Infallible;
-        type Future = BoxFuture<Self::Response, Self::Error>;
-        fn poll_ready(
-            &mut self,
-            _cx: &mut Context<'_>,
-        ) -> Poll<std::result::Result<(), Self::Error>> {
-            Poll::Ready(Ok(()))
-        }
-        fn call(&mut self, req: http::Request<B>) -> Self::Future {
-            match req.uri().path() {
-                "/nanoprobe.v1alpha1.WorldService/ListWorld" => {
-                    #[allow(non_camel_case_types)]
-                    struct ListWorldSvc<T: WorldService>(pub Arc<T>);
-                    impl<
-                        T: WorldService,
-                    > tonic::server::ServerStreamingService<super::ListWorldRequest>
-                    for ListWorldSvc<T> {
-                        type Response = super::ListWorldResponse;
-                        type ResponseStream = T::ListWorldStream;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::ResponseStream>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::ListWorldRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as WorldService>::list_world(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = ListWorldSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.server_streaming(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/nanoprobe.v1alpha1.WorldService/WatchWorld" => {
-                    #[allow(non_camel_case_types)]
-                    struct WatchWorldSvc<T: WorldService>(pub Arc<T>);
-                    impl<
-                        T: WorldService,
-                    > tonic::server::ServerStreamingService<super::WatchWorldRequest>
-                    for WatchWorldSvc<T> {
-                        type Response = super::WatchWorldResponse;
-                        type ResponseStream = T::WatchWorldStream;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::ResponseStream>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::WatchWorldRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as WorldService>::watch_world(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = WatchWorldSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.server_streaming(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/nanoprobe.v1alpha1.WorldService/QueryArea" => {
-                    #[allow(non_camel_case_types)]
-                    struct QueryAreaSvc<T: WorldService>(pub Arc<T>);
-                    impl<
-                        T: WorldService,
-                    > tonic::server::UnaryService<super::QueryAreaRequest>
-                    for QueryAreaSvc<T> {
-                        type Response = super::QueryAreaResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::QueryAreaRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as WorldService>::query_area(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = QueryAreaSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                _ => {
-                    Box::pin(async move {
-                        let mut response = http::Response::new(
-                            tonic::body::Body::default(),
-                        );
-                        let headers = response.headers_mut();
-                        headers
-                            .insert(
-                                tonic::Status::GRPC_STATUS,
-                                (tonic::Code::Unimplemented as i32).into(),
-                            );
-                        headers
-                            .insert(
-                                http::header::CONTENT_TYPE,
-                                tonic::metadata::GRPC_CONTENT_TYPE,
-                            );
-                        Ok(response)
-                    })
-                }
-            }
-        }
-    }
-    impl<T> Clone for WorldServiceServer<T> {
-        fn clone(&self) -> Self {
-            let inner = self.inner.clone();
-            Self {
-                inner,
-                accept_compression_encodings: self.accept_compression_encodings,
-                send_compression_encodings: self.send_compression_encodings,
-                max_decoding_message_size: self.max_decoding_message_size,
-                max_encoding_message_size: self.max_encoding_message_size,
-            }
-        }
-    }
-    /// Generated gRPC service name
-    pub const SERVICE_NAME: &str = "nanoprobe.v1alpha1.WorldService";
-    impl<T> tonic::server::NamedService for WorldServiceServer<T> {
         const NAME: &'static str = SERVICE_NAME;
     }
 }
@@ -8774,7 +8800,7 @@ pub mod moderation_service_server {
         const NAME: &'static str = SERVICE_NAME;
     }
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Player {
     /// Constant across sessions, names and campaigns.
     #[prost(string, tag = "1")]
@@ -8790,6 +8816,17 @@ pub struct Player {
     pub unit_id: u64,
     #[prost(uint32, tag = "6")]
     pub seat: u32,
+    /// The ammunition of the unit in `unit_id`, by weapon type name, as the last
+    /// birth or takeoff read gave it. It is the same loadout that `Unit.ammo`
+    /// shows for a unit the store holds, and it also covers an adopted unit,
+    /// which has no `Unit`. Empty when no read was made, when `unit_id` is 0 and
+    /// after the player leaves the unit. A new mission generation clears it
+    /// (spec/world.md, "Ammunition").
+    #[prost(btree_map = "string, uint32", tag = "8")]
+    pub ammo: ::prost::alloc::collections::BTreeMap<::prost::alloc::string::String, u32>,
+    /// The read that gave `ammo`. Absent when `ammo` has no read.
+    #[prost(message, optional, tag = "9")]
+    pub ammo_read: ::core::option::Option<AmmoRead>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Occupancy {
