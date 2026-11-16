@@ -114,3 +114,19 @@ client sees of a kick, a ban or a slot move; arms, then reports on the next run)
 `s16-chat.lua` (sends chat lines) and `s16-slot-race.lua` (E35: takes a slot and
 asks to spawn in one step). A rejoin is `cargo xtask client join`, which runs
 `e30-join.lua`.
+
+## Warehouse
+
+How a player's actions change a warehouse's inventory. The server needs a mission with
+limited warehouses, packed with `cargo xtask miz <mission> <out> --limited-airport ID
+--limited-warehouse ID`. The client joins with `cargo xtask client join`.
+
+`run.sh <server> <action> [slot] [seconds] [stock]` fills the placeholders of `step.lua`
+and runs it in the server's hook state. The action is `list`, `stock`, `slot`, `deslot`,
+`kill` or `none`; `stock` is the count the `stock` action sets (default 100), and it copies
+names only from a warehouse that lists a count of 1,000,000 or more. A `slot` only assigns
+the slot: the client enters its aircraft with `alone/e31-spawn.lua`. `cargo xtask eval
+<server> server farp-spawn.lua` adds a FARP 2 km north of the first airdrome whose
+inventory lists an aircraft, and reads its warehouse. `lua/tests/warehouse_experiments.lua` rehearses
+`step.lua` on the mock. The results are in
+`docs/results/2026-11-16-warehouse-player-deltas.md`.
