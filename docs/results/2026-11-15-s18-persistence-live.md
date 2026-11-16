@@ -83,7 +83,7 @@ host.
 Ten groups of two M-113, live. A reload: the mission started paused (`DCS.getPause()`
 true) and the restore spawned all ten while paused, one group per entity. Two groups were
 dematerialized while paused. They went `virtual`, and DCS still listed both under their
-names (DCS does not apply a destroy while paused, as S15 saw). Both were materialized
+names (DCS lets destroyed objects go only at the resume: PRIOR, docs/results/2026-11-15-s15-world-commands.md, "Paused replace"). Both were materialized
 again, the sidecar was killed at once and started again from its store, and every group
 went live while DCS stayed paused: one group per entity during the pause, ten DCS groups.
 After 10 s of model time: one group per entity, ten DCS groups.
