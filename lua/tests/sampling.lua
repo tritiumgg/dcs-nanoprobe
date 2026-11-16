@@ -138,14 +138,53 @@ local function main()
   end
   start_probe()
 
+  -- The agent times its sampling in wall time, the frames pass model time,
+  -- and the loops below count process time (os.clock). On a loaded Mac a
+  -- process second is several wall seconds, and the agent would sample at a
+  -- rate that the model time of the frames does not show. So a frame's model
+  -- time is its nominal step times the wall seconds per process second, read
+  -- from the ticks of os.time (Lua 5.1 has no finer wall clock). Within one
+  -- loop, at every tick, the model time is also brought to what the nominal
+  -- pace gives in the wall time since the loop's first tick.
+  local seen, seen_cpu, ratio = os.time(), nil, 1
+  local peak = 1
+  local function pacer(dt)
+    -- A loop starts from a new baseline: the time since the last loop was
+    -- spent outside the frames (a child process), not starved.
+    seen, seen_cpu = os.time(), nil
+    -- Model seconds per wall second at the nominal pace: a frame of `dt` every 10 ms.
+    local speed = dt / 0.01
+    local anchor, anchor_model, owed = nil, nil, 0
+    return function()
+      local t = os.time()
+      if t ~= seen then
+        local cpu = now()
+        if seen_cpu ~= nil and cpu > seen_cpu then
+          ratio = math.min(30, math.max(1, (t - seen) / (cpu - seen_cpu)))
+          peak = math.max(peak, ratio)
+        end
+        seen, seen_cpu = t, cpu
+        if anchor == nil then
+          anchor, anchor_model = t, host.model
+        else
+          owed = math.min(10, math.max(0, speed * (t - anchor) - (host.model - anchor_model)))
+        end
+      end
+      local step = dt * ratio + owed
+      owed = 0
+      return step
+    end
+  end
+
   -- Frames at about 100 a second until `done`, or `seconds`.
   local function run(seconds, done)
     local deadline = now() + seconds
     local next_frame = now()
+    local stretch = pacer(0.01)
     while now() < deadline do
       if now() >= next_frame then
         next_frame = next_frame + 0.01
-        host:frame(0.01)
+        host:frame(stretch())
         if done and done() then
           return true
         end
@@ -193,7 +232,8 @@ local function main()
 
   -- At a tenth of the slice the rates are meant to fall: old samples are
   -- reported, not failed on.
-  local function compare(label)
+  local function compare_once(label)
+    peak = 1
     local m = dump()
     -- At 500 every sample is held to its target, as in the live run.
     local cmd = string.format('%s sampling compare %s %s%s%s --recording %s', S.quote(XTASK), S.quote(oracle),
@@ -203,7 +243,23 @@ local function main()
     local verdict = p:read('*a')
     p:close()
     local v = S.json(verdict)
-    assert(v.matches, label .. ': the mirror does not match the oracle: ' .. verdict)
+    v.text = verdict
+    return v, m
+  end
+
+  local function compare(label)
+    local v, m
+    -- The agent's periods are wall time. When the machine starved this
+    -- process while it measured (a process second took over 1.5 wall
+    -- seconds at some tick), a mismatch says nothing about the agent: measure again,
+    -- up to three times. The verdict's bounds are the same on every try.
+    for _ = 1, 3 do
+      v, m = compare_once(label)
+      if v.matches or peak <= 1.5 then
+        break
+      end
+    end
+    assert(v.matches, label .. ': the mirror does not match the oracle: ' .. v.text)
     return v, m
   end
 
@@ -337,10 +393,11 @@ local function main()
     local function run_model(seconds, done)
       local deadline = now() + seconds
       local next_frame = now()
+      local stretch = pacer(DT)
       while now() < deadline do
         if now() >= next_frame then
           next_frame = next_frame + 0.01
-          host:frame(DT)
+          host:frame(stretch())
           if done and done() then
             return true
           end
@@ -534,7 +591,21 @@ local function main()
     for kind, f in pairs(fliers) do
       air_ids[f.name] = { id = f.id, stage = 'edge' }
     end
-    local a, atext = verdict(profile .. 'air.json', { units = air_ids, ended = host.model, seconds = 0 })
+    -- The enumeration that finds the aircraft gone comes on the agent's own
+    -- clock: run frames until every aircraft has its record, not for a time.
+    local a, atext
+    for _ = 1, 30 do
+      a, atext = verdict(profile .. 'air.json', { units = air_ids, ended = host.model, seconds = 0 })
+      local done = true
+      for _, f in pairs(fliers) do
+        local u = a.units and a.units[f.name]
+        done = done and u ~= nil and #u.records >= 1
+      end
+      if done then
+        break
+      end
+      run_model(1)
+    end
     for kind, expect in pairs({ crash = 'DEAD', lost = 'DEAD', none = 'MISSING' }) do
       local u = assert(a.units[fliers[kind].name], 'the verdict lacks ' .. kind .. ': ' .. atext)
       assert(#u.records == 1 and u.records[1].reason == expect,
@@ -596,13 +667,26 @@ local function main()
       end
     end
     assert(alone >= 2, 'too few frames ran the static list: ' .. alone)
-    local longest = 0
-    for _, line in ipairs(S.lines(profile .. 'nanoprobe/logs/agent.log')) do
-      local ok, e = pcall(S.json, line)
-      local d = ok and type(e) == 'table' and e.msg == 'sampling' and e.data
-      if d and d.enum_step_max_us and d.enum_step_max_us > longest then
-        longest = d.enum_step_max_us
+    -- The `sampling` report that holds the step comes on the agent's own
+    -- clock: run frames until a report shows it, not for a time.
+    local function longest_step()
+      local longest = 0
+      for _, line in ipairs(S.lines(profile .. 'nanoprobe/logs/agent.log')) do
+        local ok, e = pcall(S.json, line)
+        local d = ok and type(e) == 'table' and e.msg == 'sampling' and e.data
+        if d and d.enum_step_max_us and d.enum_step_max_us > longest then
+          longest = d.enum_step_max_us
+        end
       end
+      return longest
+    end
+    local longest = longest_step()
+    for _ = 1, 30 do
+      if longest >= slow_s * 1e6 * 0.9 then
+        break
+      end
+      run_model(1)
+      longest = longest_step()
     end
     assert(longest >= slow_s * 1e6 * 0.9, 'enum_step_max_us ' .. longest .. ' is below the static list\'s ' .. slow_s * 1e6)
     S.ok('the static list runs in a batch of its own, and enum_step_max_us reports its time')
