@@ -33,6 +33,7 @@ use crate::sim::wire::{Body, Command, Input, Object, ObjectGone, Seen, gone_reas
 use crate::sim::{RawRecord, SimAdapter};
 use crate::stock::{Item, Stock};
 mod adopt;
+mod debris;
 mod players;
 
 use crate::store::{
@@ -312,6 +313,10 @@ pub struct Reconciler {
     countries_held: bool,
     /// Results of effects and queries, by (epoch, seq), for the API.
     effects: BTreeMap<(u64, u64), EffectResult>,
+    /// Whole-map `CLEAR_DEBRIS` clears whose tiles are answering (`debris.rs`).
+    debris_batches: Vec<debris::Batch>,
+    /// Clears of one volume in flight, by (epoch, seq) (`debris.rs`).
+    debris_single: BTreeSet<(u64, u64)>,
     /// Spawn nothing: an activation's mission load is owed or the mission it
     /// loads has not been recorded yet (spec/persistence.md, "Campaign
     /// operations").
@@ -402,6 +407,8 @@ impl Reconciler {
             adopted: adopt::Adopted::default(),
             countries_held: false,
             effects: BTreeMap::new(),
+            debris_batches: Vec::new(),
+            debris_single: BTreeSet::new(),
             hold: false,
             campaign_sent: false,
             burst: false,
@@ -784,6 +791,9 @@ impl Reconciler {
             seq: c.seq,
             outcome,
         });
+        if c.opcode == opcode::CLEAR_DEBRIS && self.fold_debris(c.epoch, c.seq, outcome, res) {
+            return;
+        }
         if matches!(
             c.opcode,
             opcode::EXTENSION_INVOKE
@@ -800,6 +810,7 @@ impl Reconciler {
                 | opcode::MODERATE
                 | opcode::PLAYERS
                 | opcode::BANS
+                | opcode::CLEAR_DEBRIS
         ) {
             self.effects.insert(
                 (c.epoch, c.seq),
@@ -840,7 +851,8 @@ impl Reconciler {
             | opcode::MISSION_LOAD
             | opcode::MODERATE
             | opcode::PLAYERS
-            | opcode::BANS => return,
+            | opcode::BANS
+            | opcode::CLEAR_DEBRIS => return,
             opcode::EXTENSION_REMOVE => {
                 self.extension_removed(store, c, outcome, res);
                 return;

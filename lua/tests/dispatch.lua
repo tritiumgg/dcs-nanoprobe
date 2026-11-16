@@ -1371,6 +1371,43 @@ scenario('sound', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   S.ok('SOUND: each scope calls its DCS form, a missing object or campaign 0 is NOT_BOUND, a bad payload is BAD_PAYLOAD')
 end, '\n[lua]\nraw = true\n')
 
+scenario('clear-debris', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
+  local sim, run, expect = effect_world(ctx)
+  local unit = sim.by_name['np.hGx2']
+  local function sphere(u, radius)
+    return { op = 'CLEAR_DEBRIS', volume = 1, x = u.x, y = u.y, z = u.z, radius = radius }
+  end
+  local everything = { op = 'CLEAR_DEBRIS', volume = 2, x = -1e7, y = -1e7, z = -1e7, x2 = 1e7, y2 = 1e7, z2 = 1e7 }
+  local r = run({ everything }, 'clear debris round a live unit', false)
+  expect(r[1], APPLIED, 'CLEAR_DEBRIS round a live unit')
+  assert(r[1].value == 0, 'a clear with nothing dead removed ' .. tostring(r[1].value))
+  assert(unit.alive, 'a clear removed a live unit')
+
+  sim:doom(unit)
+  r = run({
+    sphere(unit, 0.5),
+    everything,
+    sphere(unit, 0),
+    { op = 'CLEAR_DEBRIS', volume = 2, x = 1, y = 0, z = 0, x2 = 0, y2 = 0, z2 = 0 },
+    { op = 'CLEAR_DEBRIS', volume = 3, radius = 5 },
+    sphere({ x = 1e7 + 1, y = 0, z = 0 }, 5),
+  }, 'clear debris')
+  expect(r[1], APPLIED, 'CLEAR_DEBRIS on the wreck')
+  assert(r[1].value == 1, 'the sphere removed ' .. tostring(r[1].value) .. ', not 1')
+  expect(r[2], APPLIED, 'CLEAR_DEBRIS where nothing is left')
+  assert(r[2].value == 0, 'an empty clear removed ' .. tostring(r[2].value))
+  expect(r[3], BAD_PAYLOAD, 'CLEAR_DEBRIS with radius 0')
+  expect(r[4], BAD_PAYLOAD, 'CLEAR_DEBRIS with a box inside out')
+  expect(r[5], BAD_PAYLOAD, 'CLEAR_DEBRIS with volume 3')
+  expect(r[6], BAD_PAYLOAD, 'CLEAR_DEBRIS beyond 10,000 km')
+
+  sim.junk_raises = true
+  r = run({ sphere(unit, 5) }, 'clear debris that raises')
+  expect(r[1], 22, 'CLEAR_DEBRIS that raises')
+  sim.junk_raises = nil
+  S.ok('CLEAR_DEBRIS: a sphere or a box removes the wrecks inside and returns the count, a bad volume is BAD_PAYLOAD')
+end)
+
 scenario('picture', nil, function(ctx)
   local sim, run, expect = effect_world(ctx)
   local NOT_BOUND = 18

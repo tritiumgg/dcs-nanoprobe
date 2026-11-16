@@ -22,7 +22,7 @@ use nanoprobe_proto::v1alpha1::{
 };
 use nanoprobe_sidecar::ids::EntityId;
 use nanoprobe_sidecar::reconciler::EffectResult;
-use nanoprobe_sidecar::sim::wire::Body;
+use nanoprobe_sidecar::sim::wire::{Body, Debris};
 use nanoprobe_sidecar::stock::{Item, Stock};
 use nanoprobe_sidecar::store::{
     Authority, Kind, LostPolicy, NewGroup, NewUnit, Outcome, Point, Store, StoreError, UnitState,
@@ -701,7 +701,16 @@ pub fn effect_response(
     let result_pb = Some(command_result(result));
     match kind {
         EffectKind::Adjust => AdjustWarehouseStockResponse { result: result_pb }.encode_to_vec(),
-        EffectKind::Damage => DoEffectResponse { result: result_pb }.encode_to_vec(),
+        EffectKind::Damage => DoEffectResponse {
+            result: result_pb,
+            debris_removed: None,
+        }
+        .encode_to_vec(),
+        EffectKind::Debris => DoEffectResponse {
+            result: result_pb,
+            debris_removed: debris_removed(result),
+        }
+        .encode_to_vec(),
         EffectKind::Message => pb::SendMessageResponse { result: result_pb }.encode_to_vec(),
         EffectKind::Chat => pb::SendChatResponse { result: result_pb }.encode_to_vec(),
         EffectKind::Invoke => pb::InvokeLuaResponse {
@@ -798,8 +807,94 @@ fn effect_start(g: &mut Inner, c: u64, e: &pb::effect::Effect) -> Result<(u64, u
             .with_rec(c, |rec, store, sim| rec.picture_stop(store, sim))
             .flatten()
             .ok_or_else(dcs_not_ready),
+        pb::effect::Effect::ClearDebris(d) => clear_debris_start(g, c, d),
         _ => Err(not_built("DoEffect for this effect")),
     }
+}
+
+/// The farthest from 0 a clear-debris coordinate or radius may be: 10,000 km
+/// (spec/commands.md, "Layout: CLEAR_DEBRIS").
+const DEBRIS_REACH_M: f64 = 10_000_000.0;
+
+/// How many junk objects a clear removed, from its result's value: a
+/// whole number, at least 0. None when the result holds no count.
+fn debris_removed(result: Option<&EffectResult>) -> Option<u64> {
+    match result.and_then(|r| r.result.as_ref()).map(|r| &r.value) {
+        Some(Lv::Number(n)) if n.is_finite() && *n >= 0.0 => Some(n.round() as u64),
+        _ => None,
+    }
+}
+
+/// A clear-debris point: on the campaign's loaded theater, within reach.
+fn debris_point(slot: &Slot, p: Option<&pb::Position>, field: &str) -> Result<[f64; 3], Status> {
+    let at = place(p, slot, field)?;
+    let theater = &p.expect("placed").theater;
+    if let Some(l) = slot.store.loaded()
+        && !l.theater.is_empty()
+        && &l.theater != theater
+    {
+        return Err(status(
+            Code::FailedPrecondition,
+            ErrorReason::TheaterNotLoaded,
+            format!("`{}` is loaded, not `{theater}`", l.theater),
+            0,
+            &format!("{field}.theater"),
+        ));
+    }
+    for (v, axis) in [(at.x, "north"), (at.y, "alt"), (at.z, "east")] {
+        if v.abs() > DEBRIS_REACH_M {
+            return Err(invalid(&format!("{field}.{axis}"), "within 10,000 km of 0"));
+        }
+    }
+    Ok([at.x, at.y, at.z])
+}
+
+fn clear_debris_start(g: &mut Inner, c: u64, d: &pb::ClearDebris) -> Result<(u64, u64), Status> {
+    use pb::clear_debris::Volume;
+    const F: &str = "effect.clear_debris";
+    let slot = g.campaigns.get(&c).expect("resolved campaign");
+    let volume = match &d.volume {
+        Some(Volume::Sphere(s)) => {
+            let center = debris_point(slot, s.center.as_ref(), &format!("{F}.sphere.center"))?;
+            if !(s.radius.is_finite() && s.radius > 0.0 && s.radius <= DEBRIS_REACH_M) {
+                return Err(invalid(
+                    &format!("{F}.sphere.radius"),
+                    "above 0, at most 10,000 km",
+                ));
+            }
+            Some(Debris::Sphere {
+                center,
+                radius: s.radius,
+            })
+        }
+        Some(Volume::Box(b)) => {
+            let min = debris_point(slot, b.min.as_ref(), &format!("{F}.box.min"))?;
+            let max = debris_point(slot, b.max.as_ref(), &format!("{F}.box.max"))?;
+            if b.min.as_ref().map(|p| &p.theater) != b.max.as_ref().map(|p| &p.theater) {
+                return Err(invalid(
+                    &format!("{F}.box.max.theater"),
+                    "a box's corners name the same theater",
+                ));
+            }
+            for (i, axis) in ["north", "alt", "east"].into_iter().enumerate() {
+                if min[i] > max[i] {
+                    return Err(invalid(
+                        &format!("{F}.box.max.{axis}"),
+                        "each of max's coordinates is at least min's",
+                    ));
+                }
+            }
+            Some(Debris::Box { min, max })
+        }
+        Some(Volume::WholeMap(_)) => None,
+        None => return Err(invalid(&format!("{F}.volume"), "a volume is required")),
+    };
+    g.with_rec(c, |rec, store, sim| match volume {
+        Some(v) => rec.clear_debris(store, sim, v),
+        None => rec.clear_debris_everywhere(store, sim),
+    })
+    .flatten()
+    .ok_or_else(dcs_not_ready)
 }
 
 /// The scope code of a sound or picture, with the target checked: a group
@@ -1199,10 +1294,15 @@ impl CommandsService for Commands {
                 e @ (pb::effect::Effect::Damage(_)
                 | pb::effect::Effect::Sound(_)
                 | pb::effect::Effect::Picture(_)
-                | pb::effect::Effect::PictureStop(_)),
+                | pb::effect::Effect::PictureStop(_)
+                | pb::effect::Effect::ClearDebris(_)),
             ) => e.clone(),
             Some(_) => return Err(not_built("DoEffect for this effect")),
             None => return Err(invalid("effect", "an effect is required")),
+        };
+        let kind = match effect {
+            pb::effect::Effect::ClearDebris(_) => EffectKind::Debris,
+            _ => EffectKind::Damage,
         };
         let mut hashed = r.clone();
         hashed.write = unleased(&r.write);
@@ -1218,7 +1318,7 @@ impl CommandsService for Commands {
                     need: Need::Active,
                 },
                 &hashed,
-                EffectKind::Damage,
+                kind,
                 |g: &mut Inner, c| effect_start(g, c, &effect),
             )
             .await?;
@@ -1260,6 +1360,7 @@ impl CommandsService for Commands {
         // A pending effect or query settles here once its result is in.
         let done = settle(&mut g, key, done);
         let mut value = None;
+        let mut debris_removed = None;
         let (result, entity) = match done.method {
             "AdjustWarehouseStock" => (
                 AdjustWarehouseStockResponse::decode(done.response.as_slice())
@@ -1267,12 +1368,11 @@ impl CommandsService for Commands {
                     .and_then(|r| r.result),
                 None,
             ),
-            "DoEffect" => (
-                DoEffectResponse::decode(done.response.as_slice())
-                    .ok()
-                    .and_then(|r| r.result),
-                None,
-            ),
+            "DoEffect" => {
+                let r = DoEffectResponse::decode(done.response.as_slice()).ok();
+                debris_removed = r.as_ref().and_then(|r| r.debris_removed);
+                (r.and_then(|r| r.result), None)
+            }
             "Capture" => match CaptureResponse::decode(done.response.as_slice()) {
                 Ok(r) => (r.result, r.entity),
                 Err(_) => (None, None),
@@ -1307,6 +1407,7 @@ impl CommandsService for Commands {
             value,
             entity,
             campaign_id: done.campaign,
+            debris_removed,
         }))
     }
 }

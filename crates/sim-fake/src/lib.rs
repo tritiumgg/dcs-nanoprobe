@@ -44,7 +44,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use nanoprobe_sidecar::ids;
 use nanoprobe_sidecar::intents::{Waypoint, route_points};
 use nanoprobe_sidecar::sim::wire::{
-    Body, Command, Enumeration, Input, Object, ObjectGone, Position, Seen, gone_reason, lv,
+    Body, Command, Debris, Enumeration, Input, Object, ObjectGone, Position, Seen, gone_reason, lv,
     moderation, object_kind, opcode,
 };
 use nanoprobe_sidecar::sim::{Detached, RawRecord, SimAdapter};
@@ -129,6 +129,8 @@ pub struct Config {
     /// Whether `agent.toml` allows raw Lua: `EXTENSION_SET` and `EVAL` are
     /// answered `RAW_LUA_OFF` when it does not.
     pub raw_lua: bool,
+    /// The junk objects each `CLEAR_DEBRIS` reports removed.
+    pub debris_per_clear: f64,
 }
 
 impl Default for Config {
@@ -149,6 +151,7 @@ impl Default for Config {
             warehouse_every: 5,
             enum_end_hold: 0,
             raw_lua: true,
+            debris_per_clear: 3.0,
         }
     }
 }
@@ -287,6 +290,9 @@ pub struct Ledger {
     pub pictures: Vec<Body>,
     /// `PICTURE_STOP`s the agent applied.
     pub picture_stops: u32,
+    /// `CLEAR_DEBRIS` volumes the agent applied, in order. Each removes
+    /// `Config::debris_per_clear` junk objects.
+    pub debris: Vec<Debris>,
     /// `MESSAGE`s the agent applied: scope, target, clear, seconds, text.
     pub messages: Vec<(u32, u64, bool, f64, String)>,
     /// `CHAT`s the agent applied: player, text.
@@ -2627,6 +2633,11 @@ impl FakeSim {
                 let o = *o;
                 self.life.insert(o, *life_percent);
                 self.result(&cmd, rc::APPLIED, o, "", Lv::Nil);
+            }
+            Body::ClearDebris(d) => {
+                self.ledger.debris.push(*d);
+                let n = self.cfg.debris_per_clear;
+                self.result(&cmd, rc::APPLIED, 0, "", Lv::Number(n));
             }
             Body::Sound {
                 scope,

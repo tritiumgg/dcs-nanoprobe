@@ -68,6 +68,8 @@ pub enum EffectKind {
     Bans,
     /// `MovePlayer`.
     Move,
+    /// `DoEffect` with `ClearDebris`, whose response carries a count.
+    Debris,
 }
 
 /// A command whose result the call did not wait for.
@@ -143,6 +145,7 @@ pub fn encode_done(done: &Done) -> Vec<u8> {
             EffectKind::Unban => ("unban", 0),
             EffectKind::Bans => ("bans", 0),
             EffectKind::Move => ("move", 0),
+            EffectKind::Debris => ("debris", 0),
         };
         pairs.push((s("epoch"), s(&p.cmd.0.to_string())));
         pairs.push((s("seq"), s(&p.cmd.1.to_string())));
@@ -190,6 +193,7 @@ pub fn decode_done(bytes: &[u8]) -> Option<Done> {
                 "unban" => EffectKind::Unban,
                 "bans" => EffectKind::Bans,
                 "move" => EffectKind::Move,
+                "debris" => EffectKind::Debris,
                 _ => return None,
             },
         }),
@@ -412,6 +416,7 @@ mod tests {
             EffectKind::Unban,
             EffectKind::Bans,
             EffectKind::Move,
+            EffectKind::Debris,
         ];
         for kind in kinds {
             let done = Done {

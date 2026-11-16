@@ -1089,3 +1089,129 @@ async fn a_route_makes_one_event_per_waypoint_and_one_completion_across_a_restar
         ]
     );
 }
+
+/// `ClearDebris` through `DoEffect`: a sphere and a box are one command each
+/// with the count DCS gives; the whole map is 256 boxes whose counts add up,
+/// under one outcome that `GetOutcome` repeats; bad volumes are refused
+/// before anything is sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn clear_debris_effects() {
+    use nanoprobe_sidecar::sim::wire::Debris;
+    let (hub, ch) = in_process(cfg(), fake_config()).await.expect("server");
+    let l = lease(&ch).await;
+    let c = campaign(&ch, &l).await;
+    let mut cmd = CommandsServiceClient::new(ch.clone());
+    // A group seen live: the mission runs and the agent is attached.
+    let g = cmd
+        .put_group(group(&l, "g", c, 0.0, 2, false))
+        .await
+        .expect("put")
+        .into_inner();
+    until(&ch, c, g.group_id, live).await;
+    let at = |north: f64, alt: f64, east: f64| {
+        Some(pb::Position {
+            theater: "Caucasus".into(),
+            north,
+            east,
+            alt,
+        })
+    };
+    let clear = |key: &str, v: pb::clear_debris::Volume| pb::DoEffectRequest {
+        write: write(&l, key, c),
+        effect: Some(pb::Effect {
+            effect: Some(pb::effect::Effect::ClearDebris(pb::ClearDebris {
+                volume: Some(v),
+            })),
+        }),
+    };
+    use pb::clear_debris::Volume;
+    let sphere = |center, radius| Volume::Sphere(pb::Sphere { center, radius });
+    let boxed = |min, max| Volume::Box(pb::Box { min, max });
+    let applied = |r: &pb::DoEffectResponse| {
+        assert_eq!(
+            r.result.as_ref().expect("result").outcome,
+            pb::Outcome::Applied as i32
+        );
+    };
+
+    let r = cmd
+        .do_effect(clear("one", sphere(at(10.0, 5.0, 20.0), 30.0)))
+        .await
+        .expect("sphere")
+        .into_inner();
+    applied(&r);
+    assert_eq!(r.debris_removed, Some(3));
+    let r = cmd
+        .do_effect(clear("box", boxed(at(-1.0, -2.0, -3.0), at(1.0, 2.0, 3.0))))
+        .await
+        .expect("box")
+        .into_inner();
+    applied(&r);
+    assert_eq!(r.debris_removed, Some(3));
+    assert_eq!(
+        fake(&hub, |s| s.ledger().debris.clone()),
+        vec![
+            Debris::Sphere {
+                center: [10.0, 5.0, 20.0],
+                radius: 30.0
+            },
+            Debris::Box {
+                min: [-1.0, -2.0, -3.0],
+                max: [1.0, 2.0, 3.0]
+            },
+        ]
+    );
+
+    let r = cmd
+        .do_effect(clear("map", Volume::WholeMap(pb::WholeMap {})))
+        .await
+        .expect("whole map")
+        .into_inner();
+    applied(&r);
+    assert_eq!(r.debris_removed, Some(3 * 256));
+    let sent = fake(&hub, |s| s.ledger().debris.clone());
+    assert_eq!(sent.len(), 2 + 256);
+    assert!(sent[2..].iter().all(|d| matches!(d, Debris::Box { .. })));
+    let o = outcome(&ch, "map").await;
+    assert_eq!(outcome_of(&o.result), pb::Outcome::Applied as i32);
+    assert_eq!(o.debris_removed, Some(3 * 256));
+    // A repeat under the key is the first response; nothing is sent again.
+    let again = cmd
+        .do_effect(clear("map", Volume::WholeMap(pb::WholeMap {})))
+        .await
+        .expect("repeat")
+        .into_inner();
+    assert_eq!(again.debris_removed, Some(3 * 256));
+    assert_eq!(fake(&hub, |s| s.ledger().debris.len()), 2 + 256);
+
+    let mut other = at(0.0, 0.0, 0.0);
+    other.as_mut().expect("at").theater = "Syria".into();
+    let bad = [
+        ("zero", sphere(at(0.0, 0.0, 0.0), 0.0)),
+        ("negative", sphere(at(0.0, 0.0, 0.0), -1.0)),
+        ("nan", sphere(at(0.0, 0.0, 0.0), f64::NAN)),
+        ("far-radius", sphere(at(0.0, 0.0, 0.0), 1.0e7 + 1.0)),
+        ("far-center", sphere(at(1.0e7 + 1.0, 0.0, 0.0), 5.0)),
+        ("no-center", sphere(None, 5.0)),
+        ("theater", sphere(other, 5.0)),
+        ("inside-out", boxed(at(1.0, 0.0, 0.0), at(0.0, 0.0, 0.0))),
+        ("no-max", boxed(at(0.0, 0.0, 0.0), None)),
+    ];
+    for (key, v) in bad {
+        let e = cmd.do_effect(clear(key, v)).await.expect_err(key);
+        assert_eq!(e.code(), tonic::Code::InvalidArgument, "{key}");
+    }
+    let e = cmd
+        .do_effect(pb::DoEffectRequest {
+            write: write(&l, "none", c),
+            effect: Some(pb::Effect {
+                effect: Some(pb::effect::Effect::ClearDebris(pb::ClearDebris {
+                    volume: None,
+                })),
+            }),
+        })
+        .await
+        .expect_err("no volume");
+    assert_eq!(e.code(), tonic::Code::InvalidArgument);
+    assert_eq!(fake(&hub, |s| s.ledger().debris.len()), 2 + 256);
+}

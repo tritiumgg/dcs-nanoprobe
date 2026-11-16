@@ -34,6 +34,19 @@
 //! DCS returns every name exactly. Everything goes under
 //! `bundles/commands-names-<name>-<time>/`, with `names.json`; the caller
 //! restores the target.
+//!
+//! `commands <name> --part debris`: the `CLEAR_DEBRIS` check. It deploys and
+//! loads a fresh shell mission as above, then runs `command-probe --part world
+//! --scenario debris` (the probe's module documents it). When the probe
+//! reports `spawned`, this tool kills the grid's units with a scripted
+//! explosion 6 m beside each, holds model time [`COOL_S`] so the wrecks stop
+//! burning, and writes the ground height at the first unit into the probe's
+//! `go` file. The kill must find every unit, and it keeps their handles.
+//! After the probe's verdict this tool reads DCS: every killed unit's reads
+//! raise (its wreck was removed, LIVE run 1) and every control unit exists
+//! alive. The run passes when the probe's verdict and that read pass. Everything goes under
+//! `bundles/commands-debris-<name>-<time>/`, with `debris.json`; the caller
+//! restores the target.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -59,6 +72,10 @@ const NEW_TYPE: &str = "BTR-80";
 /// agent's pending destroys drained. The agent reports every 10 s, so this is
 /// two reports and a margin; a destroy still pending after it has not drained.
 const DRAIN_WAIT_S: u64 = 35;
+/// Model seconds for killed ground units' wrecks to stop burning: their
+/// death events came up to 103 s after the kill (LIVE,
+/// docs/results/2026-11-16-clear-debris.md).
+const COOL_S: f64 = 120.0;
 /// The naming check's campaign: a creation millisecond of 2025-11-13, tag `jqW`.
 const NAMES_CAMPAIGN: u64 = 1_763_000_000_000;
 /// Campaigns of the two runs, so one run's names are not the other's.
@@ -526,6 +543,195 @@ fn attempt_names(
     result
 }
 
+/// Lua for the server state: kill each named unit with an explosion of power
+/// 30, 6 m beside it, keep its handle in `E.store.debris`, and return `hit y`:
+/// the units it found and the ground height at the first, `%.1f`.
+fn kill_source(names: &[String]) -> String {
+    let names: Vec<String> = names.iter().map(|n| format!("'{n}'")).collect();
+    format!(
+        "local E = ...\n\
+         local y, hit = nil, {{}}\n\
+         for _, n in ipairs({{{}}}) do\n\
+           local u = Unit.getByName(n)\n\
+           if u then\n\
+             local p = u:getPoint()\n\
+             y = y or p.y\n\
+             hit[#hit + 1] = u\n\
+             trigger.action.explosion({{ x = p.x, y = p.y, z = p.z - 6 }}, 30)\n\
+           end\n\
+         end\n\
+         E.store.debris = hit\n\
+         return string.format('%d %.1f', #hit, y or 0)\n",
+        names.join(",")
+    )
+}
+
+/// Lua for the server state, after the clears: `left alive`, the killed
+/// units whose reads still answer (their wreck is in DCS; a removed one
+/// raises, LIVE run 1), and the named control units that exist alive.
+fn after_source(control: &[String]) -> String {
+    let names: Vec<String> = control.iter().map(|n| format!("'{n}'")).collect();
+    format!(
+        "local E = ...\n\
+         local left = 0\n\
+         for _, u in ipairs(E.store.debris or {{}}) do\n\
+           if pcall(Unit.getLife, u) then left = left + 1 end\n\
+         end\n\
+         local alive = 0\n\
+         for _, n in ipairs({{{}}}) do\n\
+           local u = Unit.getByName(n)\n\
+           if u and u:isExist() and u:getLife() > 0 then alive = alive + 1 end\n\
+         end\n\
+         E.store.debris = nil\n\
+         return string.format('%d %d', left, alive)\n",
+        names.join(",")
+    )
+}
+
+/// Whether the read after the clears passes: no wreck left, every control
+/// unit alive. Returns `(ok, wrecks_left, control_alive)`.
+pub(super) fn judge_after(read: &str, control: usize) -> (bool, u64, u64) {
+    let mut parts = read.split(' ').map(|v| v.parse::<u64>().ok());
+    match (parts.next().flatten(), parts.next().flatten()) {
+        (Some(l), Some(a)) => (l == 0 && a == control as u64, l, a),
+        _ => (false, u64::MAX, 0),
+    }
+}
+
+pub fn run_debris(
+    repository: &Path,
+    name: &str,
+    groups: u64,
+    units: u64,
+) -> Result<ExitCode, String> {
+    let Opened { run, shell, .. } = live::open(repository, name, "commands-debris")?;
+    let started = bundle::utc_now();
+    let result = attempt_debris(&run, name, &shell, groups, units);
+    let ok = result
+        .as_ref()
+        .is_ok_and(|v| v["pass"] == json!(true) && v["dcs_after"]["ok"] == json!(true));
+    let out = json!({
+        "target": name,
+        "started": started,
+        "ended": bundle::utc_now(),
+        "groups": groups,
+        "units": units,
+        "verdict": result.as_ref().ok(),
+        "error": result.as_ref().err(),
+        "agent_build": crate::soak::agent_build(name),
+        "provenance": crate::soak::platform_provenance(name),
+        "ok": ok,
+    });
+    let path = run.folder.join("debris.json");
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("{}: {e}", path.display()))?;
+    println!(
+        "== {}: {}",
+        if ok { "PASS" } else { "FAIL" },
+        path.display()
+    );
+    result?;
+    Ok(if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
+fn attempt_debris(
+    run: &Run,
+    name: &str,
+    shell: &[u8],
+    groups: u64,
+    units: u64,
+) -> Result<Value, String> {
+    let probe = link::build_linux_bins(&[("nanoprobe-fake-agent", "command-probe")])?
+        .pop()
+        .ok_or("command-probe was not built")?;
+    println!("== deploy --dev");
+    crate::deploy(name, None, true, false)?;
+    let agent_toml = run
+        .remote
+        .read(AGENT_TOML)?
+        .ok_or("no agent.toml on the target")?;
+    let budget = commanded_ms(&String::from_utf8_lossy(&agent_toml))?;
+    println!("== restart");
+    crate::restart(name)?;
+    println!("== load a fresh shell mission");
+    crate::live::load(&run.remote, "np-shell.miz", shell)?;
+    run.sh(
+        &format!("pkill -f '[c]ommand-probe --part' || true; rm -rf {DIR}"),
+        &[],
+    )?;
+    link::upload_container(&run.remote, DIR, &probe, "command-probe")?;
+    run.sh(&format!("mkdir -p {DIR}/control"), &[])?;
+    let result = (|| {
+        let origin = run.eval("server", "debris-origin", ORIGIN_SOURCE, 60)?;
+        let origin = origin.as_str().ok_or("the origin is not a string")?;
+        let (x, z) = origin
+            .split_once(' ')
+            .ok_or_else(|| format!("the origin is {origin}"))?;
+        println!("== debris: {groups} groups of {units}, origin {x} {z}, budget {budget} ms");
+        start(
+            run,
+            "debris",
+            CAMPAIGNS[0],
+            &format!(
+                "--groups {groups} --units {units} --origin-x {x} --origin-z {z} \
+                 --commanded-ms {budget} --control-dir {DIR}/control"
+            ),
+        )?;
+        let mut killed = false;
+        let mut control = Vec::new();
+        let mut verdict = drive(run, "debris", &mut |run, lines| {
+            if killed {
+                return Ok(());
+            }
+            let Some(p) = Stage::phase(lines, "spawned") else {
+                return Ok(());
+            };
+            let names = Stage::strings(&p["kill"]);
+            control = Stage::strings(&p["control"]);
+            let read = run.eval("server", "debris-kill", &kill_source(&names), 60)?;
+            let (hit, y) = read
+                .as_str()
+                .and_then(|t| t.split_once(' '))
+                .and_then(|(h, y)| Some((h.parse::<usize>().ok()?, y.parse::<f64>().ok()?)))
+                .ok_or_else(|| format!("the kill read is {read}"))?;
+            if hit != names.len() {
+                return Err(format!("the kill found {hit} of {} units", names.len()));
+            }
+            println!("== killed {hit} units; {COOL_S} s for the wrecks to burn out");
+            run.hold(COOL_S)?;
+            run.sh(&format!("printf '%s' '{y:.1}' > {DIR}/control/go"), &[])?;
+            killed = true;
+            Ok(())
+        })?;
+        // DCS after the clears: no wreck left, every control unit alive.
+        let read = run.eval("server", "debris-after", &after_source(&control), 60)?;
+        let (ok, left, alive) = judge_after(read.as_str().unwrap_or(""), control.len());
+        println!("   DCS after the clears: {left} wrecks left, {alive} control units alive");
+        verdict["dcs_after"] = json!({
+            "ok": ok,
+            "wrecks_left": left,
+            "control_alive": alive,
+            "control": control.len(),
+        });
+        Ok(verdict)
+    })();
+    let _ = run.sh("pkill -f '[c]ommand-probe --part' || true", &[]);
+    for file in ["debris.jsonl", "debris.err"] {
+        if let Ok(bytes) = run.sh(&format!("cat {DIR}/{file} 2>/dev/null || true"), &[]) {
+            let _ = std::fs::write(run.folder.join(file), bytes);
+        }
+    }
+    let _ = run.sh(&format!("rm -rf {DIR}"), &[]);
+    result
+}
+
 /// Start the probe for a scenario in the container.
 fn start(run: &Run, scenario: &str, campaign: u64, extra: &str) -> Result<(), String> {
     let [map, port, token] = run.link_args();
@@ -610,6 +816,15 @@ fn paused_now(lines: &[Value]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_read_after_the_clears_is_judged() {
+        assert_eq!(judge_after("0 4", 4), (true, 0, 4));
+        assert_eq!(judge_after("1 4", 4), (false, 1, 4));
+        assert_eq!(judge_after("0 3", 4), (false, 0, 3));
+        assert!(!judge_after("", 4).0);
+        assert!(!judge_after("x 4", 4).0);
+    }
 
     #[test]
     fn the_budget_comes_from_agent_toml() {

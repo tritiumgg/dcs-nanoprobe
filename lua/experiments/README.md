@@ -130,3 +130,15 @@ the slot: the client enters its aircraft with `alone/e31-spawn.lua`. `cargo xtas
 inventory lists an aircraft, and reads its warehouse. `lua/tests/warehouse_experiments.lua` rehearses
 `step.lua` on the mock. The results are in
 `docs/results/2026-11-16-warehouse-player-deltas.md`.
+
+## Junk
+
+The snippets in `junk/` settle what `world.removeJunk` clears (`junk.lua`) and whether
+one wreck can be removed on its own (`junk2.lua`). The runner does not pick them up:
+each runs alone in the `server` state with
+`cargo xtask eval <target> server <file> --timeout 500`, on a server with no players,
+and needs the `s15` and `scenario` libraries in the profile. `junk.lua` takes 160 s of
+model time and `junk2.lua` 312 s. Both kill what they spawn with scripted explosions
+4 to 14 km from the mission's first airbase and clear their own wrecks at the end.
+`lua/tests/junk_experiment.lua` rehearses them on the mock. The results are in
+`docs/results/2026-11-16-clear-debris.md`.

@@ -110,6 +110,28 @@
 //! entities stay `live`, and no spawn is sent; the reconciler counted no
 //! `foreign_name`; and every object went `DESTROYED` at the removal.
 //!
+//! # Clearing debris: `--scenario debris`
+//!
+//! The probe creates `--groups` groups of `--units` `M-113`s on the grid of
+//! part A, and one control group of `--units` 1,500 m from the grid, and waits
+//! until all are `live` with every unit's `OBJECT`. It prints phase `spawned`
+//! with the grid's unit names and waits in `--control-dir` for `go`: the
+//! caller kills the grid's units with scripted explosions, runs model time
+//! until their wrecks stop burning, and writes the ground height at the first
+//! group into `go`. The probe then sends three `CLEAR_DEBRIS`:
+//! a sphere on the first group, a box round the second, and a clear of the
+//! whole map (the reconciler's tiles), and waits for their results.
+//!
+//! The run passes when: the three outcomes are `APPLIED`; the sphere and the
+//! box each removed at least `--units` junk objects, a group's wrecks, and the
+//! whole map at least those of the other `--groups` less 2; no control unit
+//! went; the clears spread over more than one frame; every over-budget frame
+//! of the run is attributed to one command; and the agent's over-budget
+//! counter fits the results. The verdict gives each clear's count and cost,
+//! the whole map's tiles' cost (median, p99, maximum) and the frames they took.
+//! The caller reads DCS after the verdict: every killed unit's wreck removed
+//! and every control unit alive.
+//!
 //! Test tooling only: built from source, never released.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -121,7 +143,7 @@ use nanoprobe_sidecar::ids::{CampaignId, EntityId, NameKind, name};
 use nanoprobe_sidecar::lifecycle::State;
 use nanoprobe_sidecar::link::Config;
 use nanoprobe_sidecar::reconciler::{Config as RecConfig, Reconciler};
-use nanoprobe_sidecar::sim::wire::{Body, Command, Input, gone_reason, lv};
+use nanoprobe_sidecar::sim::wire::{Body, Command, Debris, Input, gone_reason, lv, opcode};
 use nanoprobe_sidecar::sim::{Detached, RawRecord, SimAdapter};
 use nanoprobe_sidecar::store::{
     Authority, Entry, NewGroup, NewUnit, Outcome, Point, Store, UnitState,
@@ -501,8 +523,11 @@ fn opts(args: &[String]) -> Result<Opts, String> {
     if o.scenario == "names" && o.campaign == 0 {
         return Err("--scenario names needs a campaign".into());
     }
-    if o.scenario == "paused" && o.control_dir.is_none() {
-        return Err("--scenario paused needs --control-dir".into());
+    if matches!(o.scenario.as_str(), "paused" | "debris") && o.control_dir.is_none() {
+        return Err(format!("--scenario {} needs --control-dir", o.scenario));
+    }
+    if o.scenario == "debris" && o.groups < 3 {
+        return Err("--scenario debris needs --groups 3 or more".into());
     }
     Ok(o)
 }
@@ -653,8 +678,9 @@ pub fn run(args: &[String]) -> Result<bool, String> {
         "groups" => groups(&mut c),
         "paused" => paused(&mut c),
         "names" => names(&mut c),
+        "debris" => debris(&mut c),
         other => Err(format!(
-            "--scenario is groups, paused or names, not {other}"
+            "--scenario is groups, paused, names or debris, not {other}"
         )),
     }
 }
@@ -1232,6 +1258,221 @@ fn groups_verdict(
 
 // ---------------------------------------------------------------------------
 // Part B.
+
+/// Create a group of `M-113`s in a row along z from `(x, z)`.
+fn row_group(
+    c: &mut Ctx,
+    theater: &str,
+    x: f64,
+    z: f64,
+    label: String,
+) -> Result<EntityId, String> {
+    let units = (0..c.o.units)
+        .map(|u| {
+            NewUnit::new(
+                "M-113",
+                UnitState {
+                    at: Point {
+                        x,
+                        y: 0.0,
+                        z: z + u as f64 * 20.0,
+                    },
+                    ..UnitState::default()
+                },
+            )
+        })
+        .collect();
+    c.store
+        .create_group(NewGroup {
+            theater: theater.into(),
+            country: 2,
+            category: 2,
+            coalition: 2,
+            units,
+            authority: Authority::Sim,
+            label,
+            extra: lv::obj(vec![("task", lv::s("Ground Nothing"))]),
+        })
+        .map_err(|e| format!("store: {e:?}"))
+}
+
+fn debris(c: &mut Ctx) -> Result<bool, String> {
+    c.wait_ready()?;
+    let theater = c
+        .store
+        .loaded()
+        .map(|l| l.theater.clone())
+        .unwrap_or_default();
+    let side = (c.o.groups as f64).sqrt().ceil() as usize;
+    let (ox, oz) = c.o.origin;
+    let mut grid = Vec::new();
+    for n in 0..c.o.groups {
+        let (row, col) = (n / side, n % side);
+        let at = (ox + row as f64 * c.o.spacing, oz + col as f64 * c.o.spacing);
+        grid.push((
+            row_group(c, &theater, at.0, at.1, format!("debris {n}"))?,
+            at,
+        ));
+    }
+    let control = row_group(c, &theater, ox - 1_500.0, oz, "debris control".into())?;
+    let members = |c: &Ctx, g: EntityId| c.store.group(g).expect("group").members.clone();
+    let names_of = |c: &Ctx, gs: &[EntityId]| -> Vec<String> {
+        gs.iter()
+            .flat_map(|g| members(c, *g))
+            .map(|m| unit_name(c, m))
+            .collect()
+    };
+    let grid_ids: Vec<EntityId> = grid.iter().map(|(g, _)| *g).collect();
+    let kill = names_of(c, &grid_ids);
+    let kept = names_of(c, &[control]);
+    let all: Vec<String> = kill.iter().chain(&kept).cloned().collect();
+    c.until("every group live and every unit's OBJECT", |c| {
+        grid_ids
+            .iter()
+            .chain([&control])
+            .all(|g| c.store.group(*g).is_some_and(|x| x.state == State::Live))
+            && all
+                .iter()
+                .all(|n| c.log.objects.iter().any(|o| &o.name == n))
+    })?;
+    let kept_objects: BTreeSet<u64> = c
+        .log
+        .objects
+        .iter()
+        .filter(|o| kept.contains(&o.name))
+        .map(|o| o.object)
+        .collect();
+    println!(
+        "{{\"ev\":\"phase\",\"name\":\"spawned\",\"kill\":{},\"control\":{}}}",
+        str_list(kill.iter()),
+        str_list(kept.iter())
+    );
+    wait_file(c, "go", true)?;
+    // The caller writes the ground height at the first group into `go`.
+    let ground: f64 = std::fs::read_to_string(control_file(c, "go"))
+        .map_err(|e| format!("go: {e}"))?
+        .trim()
+        .parse()
+        .map_err(|_| "go holds no ground height".to_owned())?;
+    let counter0 = c.counter()?;
+    let results0 = c.log.results.len();
+    let ((x0, z0), (x1, z1)) = (grid[0].1, grid[1.min(grid.len() - 1)].1);
+    let len = (c.o.units.max(1) - 1) as f64 * 20.0;
+    let sphere = Debris::Sphere {
+        center: [x0, ground, z0 + len / 2.0],
+        radius: len / 2.0 + c.o.spacing / 3.0,
+    };
+    let boxed = Debris::Box {
+        min: [x1 - 30.0, -1_000.0, z1 - 30.0],
+        max: [x1 + 30.0, 9_000.0, z1 + len + 30.0],
+    };
+    let mut keys = Vec::new();
+    for (what, v) in [
+        ("sphere", Some(sphere)),
+        ("box", Some(boxed)),
+        ("whole map", None),
+    ] {
+        let mut tap = Tap {
+            sim: &mut c.sim,
+            log: &mut c.log,
+        };
+        let key = match v {
+            Some(v) => c.rec.clear_debris(&mut c.store, &mut tap, v),
+            None => c.rec.clear_debris_everywhere(&mut c.store, &mut tap),
+        };
+        keys.push((
+            what,
+            key.ok_or_else(|| format!("the {what} clear was not sent"))?,
+        ));
+        c.step();
+    }
+    c.until("every clear answered", |c| {
+        keys.iter().all(|(_, k)| c.rec.effect_result(*k).is_some())
+    })?;
+    let last_frame = c.log.results.last().map_or(c.log.frame, |r| r.frame);
+    c.until("two frames after the last result", |c| {
+        c.log.frame >= last_frame + 2
+    })?;
+    let counter = c.counter()?;
+    let budget_us = (c.o.commanded_ms * 1000.0).round() as u64;
+    let run_results = &c.log.results[results0..];
+    let report = budget_report(run_results, budget_us);
+    // The whole map's own tiles: after the box's command, up to its last tile.
+    let (box_key, map_key) = (keys[1].1, keys[2].1);
+    let tiles: Vec<&Stamped> = run_results
+        .iter()
+        .filter(|st| {
+            st.result.opcode == opcode::CLEAR_DEBRIS
+                && st.result.epoch == map_key.0
+                && st.result.seq > box_key.1
+                && st.result.seq <= map_key.1
+        })
+        .collect();
+    let tile_costs: Vec<u32> = tiles.iter().map(|st| st.result.cost_us).collect();
+    let (median, p99, max) = cost_stats(&tile_costs);
+    let frames: BTreeSet<u64> = tiles.iter().map(|st| st.frame).collect();
+    let mut clears = Vec::new();
+    let mut pass = true;
+    for (what, k) in &keys {
+        let r = c.rec.effect_result(*k).expect("answered");
+        let (removed, cost) = r.result.as_ref().map_or((-1.0, 0), |x| {
+            let n = match x.value {
+                Lv::Number(n) => n,
+                _ => -1.0,
+            };
+            (n, x.cost_us)
+        });
+        let applied = r.outcome == Outcome::Applied;
+        // Each wreck counts once at least: the sphere and the box hold one
+        // group each, and the whole map the rest.
+        let groups = if *what == "whole map" {
+            c.o.groups.saturating_sub(2)
+        } else {
+            1
+        };
+        pass &= applied && removed >= (groups * c.o.units) as f64;
+        clears.push(format!(
+            "{{\"clear\":{},\"applied\":{applied},\"removed\":{removed},\"cost_us\":{cost}}}",
+            json_string(what)
+        ));
+    }
+    let control_gone: Vec<u64> = c
+        .log
+        .gone
+        .iter()
+        .filter(|g| kept_objects.contains(&g.object))
+        .map(|g| g.object)
+        .collect();
+    let control_live = c
+        .store
+        .group(control)
+        .is_some_and(|g| g.state == State::Live);
+    let counter_ok = report.counter_fits(counter.saturating_sub(counter0));
+    pass &= control_gone.is_empty()
+        && control_live
+        && report.unattributed.is_empty()
+        && counter_ok
+        && frames.len() > 1;
+    println!(
+        "{{\"ev\":\"verdict\",\"scenario\":\"debris\",\"pass\":{pass},\"clears\":[{}],\
+         \"tiles\":{},\"tile_cost_us\":{{\"median\":{median},\"p99\":{p99},\"max\":{max}}},\
+         \"tile_frames\":{},\"control_live\":{control_live},\"control_gone\":{},\
+         \"budget_us\":{budget_us},\"over_frames\":{},\"unattributed_frames\":{},\
+         \"max_frame_us\":{},\"max_commands_in_frame\":{},\"counter_delta\":{},\
+         \"counter_ok\":{}}}",
+        clears.join(","),
+        tiles.len(),
+        frames.len(),
+        id_list(control_gone),
+        report.over_frames.len(),
+        id_list(report.unattributed.iter().copied()),
+        report.max_frame_us,
+        report.max_commands_in_frame,
+        counter.saturating_sub(counter0),
+        counter_ok,
+    );
+    Ok(pass)
+}
 
 fn control_file(c: &Ctx, name: &str) -> PathBuf {
     c.o.control_dir.clone().expect("checked").join(name)
