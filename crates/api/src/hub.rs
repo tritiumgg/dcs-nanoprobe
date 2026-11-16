@@ -1620,6 +1620,74 @@ impl Inner {
         Ok(())
     }
 
+    /// Reload the active campaign's mission (plan 4.4; spec/persistence.md,
+    /// "Campaign operations", Reload): write its shell for the next
+    /// mission's theater, or the loaded one, and owe the load as an
+    /// activation does. The caller captured the live groups first.
+    pub fn reload(&mut self, cfg: &Config, id: u64) -> Result<(), Status> {
+        let slot = self.campaigns.get(&id).expect("resolved");
+        if slot.store.owed_load().is_some() {
+            return Err(status(
+                Code::FailedPrecondition,
+                ErrorReason::Unspecified,
+                "a mission load is owed already; wait for its new mission",
+                0,
+                "",
+            ));
+        }
+        let next = self.next_of(id);
+        let theater = if !next.theater.is_empty() {
+            next.theater.clone()
+        } else if let Some(l) = slot.store.loaded().filter(|l| !l.theater.is_empty()) {
+            l.theater.clone()
+        } else {
+            slot.theater.clone()
+        };
+        if !slot.meta.theaters.contains(&theater) {
+            return Err(crate::convert::invalid(
+                "next.theater",
+                &format!("{theater:?} is not one of the campaign's theaters"),
+            ));
+        }
+        // The clock goes into the shell before the running mission ends.
+        self.sync_clock(id);
+        let owed = self.write_shell(id, &theater)?;
+        let slot = self.campaigns.get_mut(&id).expect("resolved");
+        slot.theater = theater.clone();
+        if slot.opened
+            && slot.store.on_disk()
+            && let Some(mut r) = slot.store.record().cloned()
+            && r.theater != theater
+        {
+            r.theater = theater.clone();
+            if let Err(e) = slot.store.set_record(r) {
+                panic!("the store of campaign {id} could not be written, stopping: {e}");
+            }
+        }
+        self.hold_after = None;
+        match owed {
+            Some(o) => slot.store.set_owed_load(Some(o)),
+            None => {
+                self.restart(cfg);
+                self.backend.load_mission(&theater);
+            }
+        }
+        Ok(())
+    }
+
+    /// Set campaign `id`'s next-mission settings.
+    pub fn set_next(&mut self, id: u64, next: &crate::next::Next) -> Result<(), Status> {
+        let slot = self.campaigns.get_mut(&id).expect("resolved");
+        if !next.theater.is_empty() && !slot.meta.theaters.contains(&next.theater) {
+            return Err(crate::convert::invalid(
+                "next.theater",
+                &format!("{:?} is not one of the campaign's theaters", next.theater),
+            ));
+        }
+        slot.store.set_next_mission(Some(next.to_lv()));
+        Ok(())
+    }
+
     /// Suspend a campaign, or finish it with `outcome` (the encoded
     /// `google.protobuf.Struct`). The active one first tells the agent no
     /// campaign is active; then its store takes a final checkpoint and is
@@ -3044,6 +3112,113 @@ mod tests {
                 .all(|(_, generation, ..)| *generation > before),
             "a spawn went into the previous mission: {spawns:?}, generation before {before}"
         );
+    }
+
+    #[test]
+    fn a_reload_switches_theater_and_back_with_the_other_map_s_entities_virtual() {
+        use nanoprobe_sidecar::lifecycle::State;
+        const AFGHANISTAN: &[u8] = include_bytes!("../../../templates/afghanistan.miz");
+        let dir = tempfile::tempdir().expect("dir");
+        std::fs::write(dir.path().join("Caucasus.miz"), TEMPLATE).expect("miz");
+        std::fs::write(dir.path().join("Afghanistan.miz"), AFGHANISTAN).expect("miz");
+        let missions = crate::real::Missions {
+            dir: Some(dir.path().to_path_buf()),
+            dcs_dir: "Z:\\m".into(),
+        };
+        let cfg = Config::default();
+        let hub = Hub::new(
+            cfg.clone(),
+            Box::new(Folder(
+                nanoprobe_sim_fake::FakeSim::new(nanoprobe_sim_fake::Config::default()),
+                missions,
+            )),
+        );
+        hub.start();
+        let group = |theater: &str| nanoprobe_sidecar::store::NewGroup {
+            theater: theater.into(),
+            country: 2,
+            category: 2,
+            coalition: 2,
+            units: vec![nanoprobe_sidecar::store::NewUnit::new(
+                "M-113",
+                nanoprobe_sidecar::store::UnitState::default(),
+            )],
+            authority: nanoprobe_sidecar::store::Authority::Sim,
+            label: String::new(),
+            extra: nanoprobe_transport::codec::Lv::Nil,
+        };
+        let (a, b) = {
+            let mut g = hub.lock();
+            let meta = pb::Campaign {
+                id: 1,
+                name: "two maps".into(),
+                theaters: vec!["Caucasus".into(), "Afghanistan".into()],
+                ..pb::Campaign::default()
+            };
+            g.add_campaign(&cfg, meta, "Caucasus".into()).expect("add");
+            let store = &mut g.campaigns.get_mut(&1).expect("slot").store;
+            let a = store.create_group(group("Caucasus")).expect("a");
+            let b = store.create_group(group("Afghanistan")).expect("b");
+            g.activate(&cfg, 1).expect("activate");
+            (a, b)
+        };
+        let state = |hub: &Hub, id| {
+            hub.lock().campaigns[&1]
+                .store
+                .group(id)
+                .expect("group")
+                .state
+        };
+        let switch = |theater: &str| {
+            let mut g = hub.lock();
+            let any = g.backend.as_any().expect("fake");
+            any.downcast_mut::<nanoprobe_sim_fake::FakeSim>()
+                .expect("fake")
+                .set_load_theater(Some(theater.into()));
+            let next = crate::next::Next {
+                theater: theater.into(),
+                ..crate::next::Next::default()
+            };
+            g.set_next(1, &next).expect("next");
+            g.reload(&cfg, 1).expect("reload");
+            assert!(g.reload(&cfg, 1).is_err(), "one owed load at a time");
+        };
+        steps(&hub, 300);
+        assert_eq!(
+            (state(&hub, a), state(&hub, b)),
+            (State::Live, State::Virtual)
+        );
+        switch("Afghanistan");
+        steps(&hub, 300);
+        assert_eq!(
+            hub.lock().campaigns[&1]
+                .store
+                .loaded()
+                .map(|l| l.theater.clone()),
+            Some("Afghanistan".into())
+        );
+        assert_eq!(
+            (state(&hub, a), state(&hub, b)),
+            (State::Virtual, State::Live)
+        );
+        switch("Caucasus");
+        steps(&hub, 300);
+        assert_eq!(
+            (state(&hub, a), state(&hub, b)),
+            (State::Live, State::Virtual)
+        );
+        let mut g = hub.lock();
+        assert_eq!(mission_loads(&mut g).len(), 3);
+        let e = g
+            .set_next(
+                1,
+                &crate::next::Next {
+                    theater: "Syria".into(),
+                    ..crate::next::Next::default()
+                },
+            )
+            .expect_err("not a theater of the campaign");
+        assert_eq!(e.code(), Code::InvalidArgument);
     }
 
     #[test]

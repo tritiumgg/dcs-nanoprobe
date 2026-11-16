@@ -49,6 +49,13 @@ pub fn not_built(what: &str) -> Status {
     )
 }
 
+/// Milliseconds since the Unix epoch of a timestamp.
+pub fn ms_of_timestamp(t: &prost_types::Timestamp) -> i64 {
+    t.seconds
+        .saturating_mul(1000)
+        .saturating_add(i64::from(t.nanos / 1_000_000))
+}
+
 /// A finite number, or `INVALID_FIELD`.
 pub fn finite(v: f64, field: &str) -> Result<f64, Status> {
     if v.is_finite() {

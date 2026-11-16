@@ -384,6 +384,8 @@ struct Run {
 pub struct FakeSim {
     /// Frames until a `MISSION_LOAD` already answered starts its load.
     load_after: Option<u32>,
+    /// The theater a `MISSION_LOAD` loads; `None` loads the configured one.
+    load_theater: Option<String>,
     cfg: Config,
     ledger: Ledger,
     // The process.
@@ -521,6 +523,7 @@ impl FakeSim {
         let cfg_seed = cfg.death_seed;
         let mut f = FakeSim {
             load_after: None,
+            load_theater: None,
             cfg,
             ledger: Ledger::default(),
             alive: true,
@@ -1315,6 +1318,20 @@ impl FakeSim {
         self.burst
     }
 
+    /// Make a `MISSION_LOAD` load `theater`, as a shell for it would; `None`
+    /// loads the configured theater.
+    pub fn set_load_theater(&mut self, theater: Option<String>) {
+        self.load_theater = theater;
+    }
+
+    /// The load a `MISSION_LOAD` starts.
+    fn load_commanded(&mut self) {
+        match self.load_theater.clone() {
+            Some(t) => self.load_mission_on(&t),
+            None => self.load_mission(),
+        }
+    }
+
     /// Start a mission load on another theater.
     pub fn load_mission_on(&mut self, theater: &str) {
         if !self.alive {
@@ -2056,7 +2073,7 @@ impl FakeSim {
         if let Some(n) = self.load_after {
             if n == 0 {
                 self.load_after = None;
-                self.load_mission();
+                self.load_commanded();
             } else {
                 self.load_after = Some(n - 1);
             }
@@ -2430,7 +2447,7 @@ impl FakeSim {
                 // The result is queued, then DCS loads: the fake loads its
                 // one mission, now or after `load_delay_frames`.
                 if self.cfg.load_delay_frames == 0 {
-                    self.load_mission();
+                    self.load_commanded();
                 } else {
                     self.load_after = Some(self.cfg.load_delay_frames);
                 }
