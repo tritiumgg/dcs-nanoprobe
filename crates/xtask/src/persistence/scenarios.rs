@@ -17,6 +17,9 @@ use super::api::{self, Api, at, ps, route};
 #[derive(Clone, Debug)]
 pub struct DcsUnit {
     pub name: String,
+    pub north: f64,
+    pub east: f64,
+    pub alt: f64,
     pub in_air: bool,
 }
 
@@ -73,6 +76,18 @@ pub trait Target {
     }
     /// Whether DCS is paused. `None` on the fake.
     fn paused(&mut self) -> Result<Option<bool>, String>;
+    /// Players connected now. `None` on the fake.
+    fn players(&mut self) -> Result<Option<usize>, String>;
+    /// Remove one unit by name with `Unit.destroy`, which emits no death.
+    fn remove_unit(&mut self, unit: &str) -> Result<(), String>;
+    /// Spawn the F-15C payload outside the platform, with Lua number keys,
+    /// read its ammunition and remove it. `Null` on the fake.
+    fn payload_control(
+        &mut self,
+        at: (f64, f64),
+        alt: f64,
+        pylons: &[(u32, &str)],
+    ) -> Result<Value, String>;
     /// Kill one unit by name with an explosion on it.
     fn kill_unit(&mut self, unit: &str) -> Result<(), String>;
     /// String keys that look like integers in the DCS tables the restore
@@ -379,10 +394,25 @@ fn units_in_air(
     }))
 }
 
+/// Where DCS holds a group's first unit, `None` on the fake.
+fn dcs_lead(
+    t: &mut dyn Target,
+    campaign: u64,
+    group: u64,
+) -> Result<Option<(f64, f64, f64)>, String> {
+    Ok(t.dcs_groups()?.and_then(|g| {
+        dcs_of(&g, campaign)
+            .get(&group)
+            .and_then(|(_, u)| u.first().map(|u| (u.north, u.east, u.alt)))
+    }))
+}
+
 /// 1. A reload, then a DCS kill, with a convoy under way and an aircraft
 ///    airborne: the world returns, the convoy arrives, the aircraft flies
-///    on, no group is duplicated, and no order is given again: the order
-///    revision the store holds is the one DCS applied before.
+///    on, and no group is duplicated. Positions come from DCS: before the
+///    restore while it drives, after it while the mission is still paused.
+///    The order revisions are recorded; how many times DCS was given an
+///    order is not visible through the API (an open item).
 pub fn reload_and_kill(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Value, String> {
     let theater = t.theater();
     let c = campaign(t, api, &format!("s18-reload-{tag}"))?;
@@ -425,48 +455,52 @@ pub fn reload_and_kill(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<V
                 Ok((dist(ORIGIN, (l.0, l.1)) >= share * length && flying).then_some(g))
             },
         )?;
-        let moved = before
-            .get(&convoy)
-            .and_then(lead)
-            .map(|l| dist(ORIGIN, (l.0, l.1)))
-            .unwrap_or(0.0);
+        // DCS's own positions, read with the store's, before the restore.
+        let convoy_before = dcs_lead(t, c, convoy)?;
+        let jet_before = dcs_lead(t, c, jet)?;
         let orders: BTreeMap<u64, (u64, u64)> = before
             .iter()
             .map(|(id, g)| (*id, (g.order_revision, g.applied_order_revision)))
             .collect();
-        let jet_alt = before.get(&jet).and_then(lead).map(|l| l.2);
         match phase {
             "reload" => reload(t, api)?,
             _ => t.kill_dcs()?,
         }
-        // The sidecar sees the new mission before the groups are read.
-        t.hold(5.0)?;
         if phase != "reload" {
             // A new connection: the sidecar started again.
             *api = reconnect(t, api)?;
         }
-        let back = all_live(t, api, c, &[convoy, jet], 600.0, true)?;
+        // The mission starts paused: the restore spawns while nothing
+        // drives, so DCS's positions are where the restore put the units.
+        t.pause_wait(5.0);
+        let back = all_live(t, api, c, &[convoy, jet], 600.0, false)?;
+        let paused = t.paused()?;
         let once = one_per_entity(t, api, c)?;
-        let after = back
-            .get(&convoy)
-            .and_then(lead)
-            .map(|l| dist(ORIGIN, (l.0, l.1)))
-            .unwrap_or(0.0);
+        let convoy_after = dcs_lead(t, c, convoy)?;
+        let jet_after = dcs_lead(t, c, jet)?;
+        let from = |p: Option<(f64, f64, f64)>| p.map(|l| dist(ORIGIN, (l.0, l.1)));
+        let (m0, m1) = (from(convoy_before), from(convoy_after));
+        // Respawned where it was, not at its start: within 100 m of where
+        // DCS had it, the distance it drives in 10 s.
+        let kept = match (m0, m1) {
+            (Some(a), Some(b)) => (b - a).abs() <= 100.0,
+            _ => !t.live(),
+        };
+        let air = units_in_air(t, c, jet)?;
         let same_orders = back
             .iter()
             .all(|(id, g)| orders.get(id).is_some_and(|o| o.0 == g.order_revision));
-        let air = units_in_air(t, c, jet)?;
         phases.push(json!({
             "phase": phase,
-            "convoy_moved_m_before": moved,
-            "convoy_moved_m_after": after,
-            // Respawned where it was, not at the start: within 100 m of it.
-            "convoy_kept_its_place": after >= moved - 100.0 || !t.live(),
-            "jet_alt_before": jet_alt,
-            "jet_alt_after": back.get(&jet).and_then(lead).map(|l| l.2),
+            "paused_at_restore": paused,
+            "convoy_from_start_m_before": m0,
+            "convoy_from_start_m_after": m1,
+            "convoy_kept_its_place": kept,
+            "jet_alt_before": jet_before.map(|l| l.2),
+            "jet_alt_after": jet_after.map(|l| l.2),
             "jet_in_air": air,
             "one_per_entity": once,
-            "order_revisions_kept": same_orders,
+            "order_revisions_unchanged": same_orders,
             "orders_before": orders.iter().map(|(k, v)| json!([k, v.0, v.1])).collect::<Vec<_>>(),
             "orders_after": back.iter().map(|(k, g)| json!([k, g.order_revision, g.applied_order_revision])).collect::<Vec<_>>(),
         }));
@@ -486,22 +520,25 @@ pub fn reload_and_kill(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<V
                 .map(|l| (l.0, l.1)))
         },
     );
+    let at_end = dcs_lead(t, c, convoy)?;
     let once = one_per_entity(t, api, c)?;
     let air = units_in_air(t, c, jet)?;
     let jet_now = api.groups(c)?.get(&jet).cloned();
     let pass = phases.iter().all(|p| {
         p["one_per_entity"]["pass"] == json!(true)
             && p["convoy_kept_its_place"] == json!(true)
-            && p["order_revisions_kept"] == json!(true)
+            && p["paused_at_restore"] != json!(false)
             && p["jet_in_air"]
                 .as_array()
                 .is_none_or(|a| a.contains(&json!(true)))
     }) && arrived.is_ok()
+        && at_end.is_none_or(|l| dist((l.0, l.1), end) <= 50.0)
         && once["pass"] == json!(true)
         && air.as_ref().is_none_or(|a| a.iter().any(|b| *b))
         && jet_now.as_ref().is_some_and(live);
     out["phases"] = json!(phases);
     out["arrived"] = json!(arrived.as_ref().map(|p| [p.0, p.1]).map_err(|e| e.clone()));
+    out["dcs_convoy_at_end"] = json!(at_end.map(|l| [l.0, l.1]));
     out["one_per_entity_at_end"] = once;
     out["jet_in_air_at_end"] = json!(air);
     out["pass"] = json!(pass);
@@ -564,13 +601,14 @@ pub fn paused_burst(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Valu
         "after_resume": after_resume,
         "pass": after_resume["pass"] == json!(true)
             && after_burst["pass"] == json!(true)
-            && paused_at_load != Some(false)
-            && paused_before_resume != Some(false),
+            && during_pause["pass"] == json!(true)
+            && (paused_at_load == Some(true) || !t.live())
+            && (paused_before_resume == Some(true) || !t.live()),
     }))
 }
 
-/// 3. Suspend A, activate B, then A: each comes back where it was left, and
-///    nothing of one is in DCS while the other is active.
+/// 3. Suspend A, activate B, then A: each comes back where DCS held it when
+///    it was left, and nothing of one is in DCS while the other is active.
 pub fn switch(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Value, String> {
     let theater = t.theater();
     let places = land_grid(t, (ORIGIN.0 + 4000.0, ORIGIN.1), 5, 300.0)?;
@@ -583,14 +621,25 @@ pub fn switch(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Value, Str
         );
     }
     api.sample_rates(a, 2.0, 10.0)?;
-    let a_left = all_live(t, api, a, &a_ids, 300.0, true)?;
+    all_live(t, api, a, &a_ids, 300.0, true)?;
     t.hold(10.0)?;
-    let a_left: BTreeMap<u64, (f64, f64, f64)> = api
-        .groups(a)?
-        .into_iter()
-        .filter(|(id, _)| a_left.contains_key(id))
-        .filter_map(|(id, g)| lead(&g).map(|l| (id, l)))
-        .collect();
+    // Where DCS holds A's groups when A is suspended; the store's on the
+    // fake.
+    let where_a =
+        |t: &mut dyn Target, api: &mut Api| -> Result<BTreeMap<u64, (f64, f64)>, String> {
+            Ok(match t.dcs_groups()? {
+                Some(g) => dcs_of(&g, a)
+                    .into_iter()
+                    .filter_map(|(id, (_, u))| u.first().map(|u| (id, (u.north, u.east))))
+                    .collect(),
+                None => api
+                    .groups(a)?
+                    .into_iter()
+                    .filter_map(|(id, g)| lead(&g).map(|l| (id, (l.0, l.1))))
+                    .collect(),
+            })
+        };
+    let a_left = where_a(t, api)?;
     let suspended = api.suspend(a)?;
     let b = campaign(t, api, &format!("s18-b-{tag}"))?;
     let mut b_ids = Vec::new();
@@ -608,15 +657,15 @@ pub fn switch(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Value, Str
     wait(t, api, "A's mission", 600.0, 5.0, true, |api, _| {
         Ok((api.campaign(a)?.loaded_theater == theater_c).then_some(()))
     })?;
-    let back = all_live(t, api, a, &a_ids, 300.0, true)?;
+    all_live(t, api, a, &a_ids, 300.0, true)?;
     let a_once = one_per_entity(t, api, a)?;
     let b_in_dcs_under_a = t.dcs_groups()?.map(|g| dcs_of(&g, b).len());
+    let back = where_a(t, api)?;
     let moved: Vec<Value> = back
         .iter()
-        .filter_map(|(id, g)| {
-            let l = lead(g)?;
+        .filter_map(|(id, l)| {
             let was = a_left.get(id)?;
-            Some(json!({ "group": id, "moved_m": dist((l.0, l.1), (was.0, was.1)) }))
+            Some(json!({ "group": id, "moved_m": dist(*l, *was) }))
         })
         .collect();
     let in_place = moved.len() == a_ids.len()
@@ -638,22 +687,27 @@ pub fn switch(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Value, Str
             && b_once["pass"] == json!(true)
             && a_in_dcs_under_b.is_none_or(|n| n == 0)
             && b_in_dcs_under_a.is_none_or(|n| n == 0)
-            && b_state == pb::CampaignState::Suspended as i32,
+            && b_state == pb::CampaignState::Suspended as i32
+            && suspended.state == pb::CampaignState::Suspended as i32,
     }))
 }
 
 /// 4. A reload with a death pending: a unit is killed and the mission
-///    loaded again, once with the sidecar stopped so the death reaches it
-///    late, once with it running. The dead member is not spawned again.
+///    loaded again, once with the sidecar paused from before the kill until
+///    after the reload started, so it reads the death late, and once with
+///    it running; the dead member is not spawned again and is recorded
+///    dead. Then the respawn gate: a member removed by script, which DCS
+///    reports with no death, is held by its mark across the reload and not
+///    spawned again.
 pub fn death_pending(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Value, String> {
     if !t.live() {
-        return Ok(json!({ "pass": true, "skipped": "a kill needs DCS" }));
+        return Ok(json!({ "pass": null, "skipped": "a kill needs DCS" }));
     }
     let theater = t.theater();
     let c = campaign(t, api, &format!("s18-death-{tag}"))?;
-    let places = land_grid(t, (ORIGIN.0 + 6000.0, ORIGIN.1), 2, 1000.0)?;
+    let places = land_grid(t, (ORIGIN.0 + 6000.0, ORIGIN.1), 3, 1000.0)?;
     let mut cases = Vec::new();
-    for (i, (case, frozen)) in [("late", true), ("prompt", false)].into_iter().enumerate() {
+    for (i, case) in ["late", "prompt", "removed"].into_iter().enumerate() {
         let put = api.put_group(
             c,
             ground(&theater, &format!("d{i}"), 3, places[i], 150.0),
@@ -663,14 +717,19 @@ pub fn death_pending(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Val
         let victim = put.unit_ids[1];
         all_live(t, api, c, &[g], 300.0, true)?;
         let dcs_name = names::name(Kind::Unit, names::tag_of(c), victim);
+        let frozen = case == "late";
         if frozen {
             t.freeze_sidecar(true)?;
         }
-        let mut dead_before = None;
+        let mut gone_before = None;
         let r = (|| {
-            t.kill_unit(&dcs_name)?;
+            if case == "removed" {
+                t.remove_unit(&dcs_name)?;
+            } else {
+                t.kill_unit(&dcs_name)?;
+            }
             t.hold(3.0)?;
-            dead_before = t.dcs_groups()?.map(|gs| {
+            gone_before = t.dcs_groups()?.map(|gs| {
                 !gs.iter()
                     .flat_map(|g| g.units.iter())
                     .any(|u| u.name == dcs_name)
@@ -684,22 +743,34 @@ pub fn death_pending(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Val
         let back = all_live(t, api, c, &[g], 300.0, true)?;
         t.hold(10.0)?;
         let once = one_per_entity(t, api, c)?;
-        let unit = back[&g].units.iter().find(|u| u.id == victim).cloned();
+        let unit = api.groups(c)?[&g]
+            .units
+            .iter()
+            .find(|u| u.id == victim)
+            .cloned()
+            .or_else(|| back[&g].units.iter().find(|u| u.id == victim).cloned());
         let in_dcs = t.dcs_groups()?.map(|gs| {
             gs.iter()
                 .flat_map(|g| g.units.iter())
                 .any(|u| u.name == dcs_name)
         });
+        let recorded = match case {
+            // A death fact: dead, no mark.
+            "late" | "prompt" => unit.as_ref().is_some_and(|u| !u.alive && u.left == 0),
+            // No death fact: a mark holds it.
+            _ => unit.as_ref().is_some_and(|u| u.left != 0),
+        };
         cases.push(json!({
             "case": case,
             "group": g,
             "victim": victim,
-            "victim_gone_from_dcs_before_reload": dead_before,
+            "victim_gone_from_dcs_before_reload": gone_before,
             "victim_alive_in_store": unit.as_ref().map(|u| u.alive),
             "victim_left": unit.as_ref().map(|u| u.left),
             "victim_in_dcs": in_dcs,
+            "recorded_as_expected": recorded,
             "one_per_entity": once,
-            "pass": in_dcs == Some(false) && dead_before == Some(true) && once["pass"] == json!(true),
+            "pass": in_dcs == Some(false) && gone_before == Some(true) && recorded && once["pass"] == json!(true),
         }));
     }
     let pass = cases.iter().all(|c| c["pass"] == json!(true));
@@ -875,7 +946,28 @@ pub fn tables(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Value, Str
         })
     });
     let air = units_in_air(t, c, jet)?;
+    // The same payload spawned outside the platform with Lua number keys:
+    // what DCS loads from it is what the platform's must load.
+    let control = t.payload_control(
+        (air_at.0 + 3000.0, air_at.1),
+        4000.0,
+        &[
+            (1, C8E),
+            (2, AIM120B),
+            (6, AIM120B),
+            (10, AIM120B),
+            (11, C8E),
+        ],
+    )?;
+    let jet_unit = names::name(
+        Kind::Unit,
+        names::tag_of(c),
+        api.groups(c)?[&jet].units[0].id,
+    );
+    let as_control = control.is_null()
+        || (control["spawned"] == json!(true) && control["ammo"] == s0[&jet_unit]["ammo"]);
     let pass = (armed || !t.live())
+        && as_control
         && s0 == s1
         && s1 == s2
         && no_bad_keys
@@ -888,6 +980,8 @@ pub fn tables(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Value, Str
         "spawn_with_ammo": spawn_with_ammo,
         "spawned": s0, "after_rematerialize": s1, "after_reload": s2,
         "jet_armed": armed,
+        "payload_control": control,
+        "jet_loaded_as_control": as_control,
         "jet_in_air": air,
         "keys": keys,
         "pass": pass,
@@ -929,7 +1023,29 @@ pub fn owed_load(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Value, 
     let thaw = t.freeze_dcs(false);
     let activated = activated?;
     thaw?;
+    // Until DCS starts the new mission, nothing of the campaign may be in
+    // the old one: sample DCS, then the starts, so a sample is known to be
+    // of the old mission.
+    let mut early = Vec::new();
+    let mut samples = 0;
+    let mut sample = |t: &mut dyn Target| -> Result<bool, String> {
+        let Some(m) = mark else { return Ok(true) };
+        let n = t.dcs_groups()?.map_or(0, |g| dcs_of(&g, fresh).len());
+        let started = t.starts_since(m) > 0;
+        if !started {
+            samples += 1;
+            if n > 0 {
+                early.push(n);
+            }
+        }
+        Ok(started)
+    };
+    sample(t)?;
     t.start_sidecar()?;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while !sample(t)? && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(500));
+    }
     *api = reconnect(t, api)?;
     wait(
         t,
@@ -955,9 +1071,16 @@ pub fn owed_load(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Value, 
         "old": old, "campaign": fresh, "activated_state": activated.state,
         "loading_events": loads,
         "dcs_mission_starts": starts,
+        "samples_before_the_load": samples,
+        "campaign_groups_in_the_old_mission": early,
         "one_per_entity": once,
         "old_groups_in_dcs": old_in_dcs,
-        "pass": starts.is_none_or(|n| n == 1) && once["pass"] == json!(true) && old_in_dcs.is_none_or(|n| n == 0),
+        "pass": starts.is_none_or(|n| n == 1)
+            && (loads == 1 || !t.live())
+            && early.is_empty()
+            && activated.state == pb::CampaignState::Active as i32
+            && once["pass"] == json!(true)
+            && old_in_dcs.is_none_or(|n| n == 0),
     }))
 }
 
@@ -992,6 +1115,7 @@ pub fn run(
 ) -> Result<(), String> {
     for name in which {
         println!("== {name}");
+        let players_before = t.players()?;
         let mut api = Api::connect(
             rt,
             &t.endpoint(),
@@ -1014,13 +1138,14 @@ pub fn run(
             Ok(v) => {
                 println!(
                     "   {}",
-                    if v["pass"] == json!(true) {
-                        "PASS"
-                    } else {
-                        "FAIL"
+                    match &v["pass"] {
+                        Value::Bool(true) => "PASS",
+                        Value::Null => "SKIP",
+                        _ => "FAIL",
                     }
                 );
                 results[*name] = v;
+                results[*name]["players"] = json!([players_before, t.players().ok().flatten()]);
             }
             Err(e) => {
                 println!("   ERROR {e}");

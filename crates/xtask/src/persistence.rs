@@ -102,7 +102,12 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
         extra["provenance"] = json!(crate::soak::platform_provenance(name));
         (folder, r, extra)
     };
-    let ok = result.is_ok() && which.iter().all(|w| results[*w]["pass"] == json!(true));
+    // A scenario the fake cannot run is skipped (`pass` null), only there.
+    let ok = result.is_ok()
+        && which.iter().all(|w| {
+            results[*w]["pass"] == json!(true)
+                || (name == "rehearse" && results[*w]["pass"].is_null())
+        });
     let out = json!({
         "target": name,
         "scenarios": which,
@@ -160,7 +165,7 @@ fn on_server(
     )));
     let profile = run.remote.full_path("");
     let profile = profile.trim_end_matches('/').to_owned();
-    for d in [MISSIONS_DIR, STORE_DIR] {
+    for d in [MAP_DIR, MISSIONS_DIR, STORE_DIR] {
         let full = format!("{profile}/{d}");
         if !run
             .sh("test -e \"$1\" && echo yes || true", &[&full])?
@@ -410,10 +415,12 @@ impl<'a> LiveTarget<'a> {
 /// A Lua long string holding `s`.
 fn lua_string(s: &str) -> String {
     let mut eq = String::new();
-    while s.contains(&format!("]{eq}]")) {
+    while s.contains(&format!("]{eq}]")) || s.ends_with(&format!("]{eq}")) {
         eq.push('=');
     }
-    format!("[{eq}[{s}]{eq}]")
+    // Lua drops a newline that opens a long string: add one to drop.
+    let nl = if s.starts_with('\n') { "\n" } else { "" };
+    format!("[{eq}[{nl}{s}]{eq}]")
 }
 
 impl Target for LiveTarget<'_> {
@@ -451,6 +458,7 @@ impl Target for LiveTarget<'_> {
     }
 
     fn reload(&mut self) -> Result<(), String> {
+        self.no_players()?;
         println!("   reload");
         self.load_mission()
     }
@@ -580,6 +588,9 @@ impl Target for LiveTarget<'_> {
                 .iter()
                 .map(|u| DcsUnit {
                     name: u["name"].as_str().unwrap_or_default().to_owned(),
+                    north: u["x"].as_f64().unwrap_or(f64::NAN),
+                    east: u["z"].as_f64().unwrap_or(f64::NAN),
+                    alt: u["y"].as_f64().unwrap_or(f64::NAN),
                     in_air: u["air"] == json!(true),
                 })
                 .collect();
@@ -600,12 +611,56 @@ impl Target for LiveTarget<'_> {
     }
 
     fn paused(&mut self) -> Result<Option<bool>, String> {
-        Ok(self
-            .eval("hook", "s18-paused", "return DCS.getPause()")?
-            .as_bool())
+        let v = self.eval("hook", "s18-paused", "return DCS.getPause()")?;
+        v.as_bool()
+            .map(Some)
+            .ok_or_else(|| format!("DCS.getPause() gave {v}"))
+    }
+
+    fn players(&mut self) -> Result<Option<usize>, String> {
+        self.run.remote.players().map(Some)
+    }
+
+    fn remove_unit(&mut self, unit: &str) -> Result<(), String> {
+        self.no_players()?;
+        let v = self.eval(
+            "server",
+            "s18-remove",
+            &format!(
+                "local u = Unit.getByName({})\nif not u then return 'none' end\nu:destroy()\nreturn 'ok'\n",
+                lua_string(unit)
+            ),
+        )?;
+        if v != json!("ok") {
+            return Err(format!("no unit {unit} to remove: {v}"));
+        }
+        Ok(())
+    }
+
+    fn payload_control(
+        &mut self,
+        at: (f64, f64),
+        alt: f64,
+        pylons: &[(u32, &str)],
+    ) -> Result<Value, String> {
+        let pylons = pylons
+            .iter()
+            .map(|(n, c)| format!("[{n}] = {{ CLSID = {} }}", lua_string(c)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.eval(
+            "server",
+            "s18-payload",
+            &PAYLOAD_CONTROL_LUA
+                .replace("__X__", &at.0.to_string())
+                .replace("__Z__", &at.1.to_string())
+                .replace("__ALT__", &alt.to_string())
+                .replace("__PYLONS__", &pylons),
+        )
     }
 
     fn kill_unit(&mut self, unit: &str) -> Result<(), String> {
+        self.no_players()?;
         let v = self.eval(
             "server",
             "s18-kill",
@@ -711,13 +766,38 @@ for _, side in ipairs({ 0, 1, 2 }) do
     if ok and type(n) == 'string' and n:sub(1, 2) == 'np' then
       local units = {}
       for _, u in ipairs(g:getUnits() or {}) do
-        units[#units + 1] = { name = u:getName(), air = u:inAir() }
+        local p = u:getPoint()
+        units[#units + 1] = { name = u:getName(), air = u:inAir(), x = p.x, y = p.y, z = p.z }
       end
       out[#out + 1] = { name = n, units = units }
     end
   end
 end
 return out
+"#;
+
+/// An F-15C spawned by `coalition.addGroup` with a Lua payload table keyed
+/// by pylon number, outside the platform: its `getAmmo` rows, then removed.
+/// The control for what the platform's payload conversion loads.
+const PAYLOAD_CONTROL_LUA: &str = r#"
+local g = coalition.addGroup(country.id.USA, Group.Category.AIRPLANE, {
+  name = 's18-payload-control', task = 'CAP',
+  units = { {
+    name = 's18-payload-control-1', type = 'F-15C', skill = 'High',
+    x = __X__, y = __Z__, alt = __ALT__, alt_type = 'BARO', speed = 180, heading = 0,
+    payload = { pylons = { __PYLONS__ }, fuel = 6103, flare = 60, chaff = 120, gun = 100 },
+  } },
+})
+local rows = {}
+local u = Unit.getByName('s18-payload-control-1')
+if u then
+  local ammo = u:getAmmo() or {}
+  for i = 1, #ammo do
+    rows[#rows + 1] = { type = ammo[i].desc.typeName, count = ammo[i].count }
+  end
+end
+if g then g:destroy() end
+return { spawned = u ~= nil, ammo = rows }
 "#;
 
 /// DCS's reads of each unit named: its ammunition by type and count, its
@@ -941,6 +1021,23 @@ impl Target for FakeTarget {
         Ok(None)
     }
 
+    fn players(&mut self) -> Result<Option<usize>, String> {
+        Ok(None)
+    }
+
+    fn remove_unit(&mut self, _unit: &str) -> Result<(), String> {
+        Err("a scripted removal needs DCS".into())
+    }
+
+    fn payload_control(
+        &mut self,
+        _at: (f64, f64),
+        _alt: f64,
+        _pylons: &[(u32, &str)],
+    ) -> Result<Value, String> {
+        Ok(Value::Null)
+    }
+
     fn kill_unit(&mut self, _unit: &str) -> Result<(), String> {
         Err("a kill needs DCS".into())
     }
@@ -976,6 +1073,8 @@ mod tests {
     fn a_lua_string_holds_any_text() {
         assert_eq!(lua_string("Z:\\a\\b.miz"), "[[Z:\\a\\b.miz]]");
         assert_eq!(lua_string("a]]b"), "[=[a]]b]=]");
+        assert_eq!(lua_string("a]"), "[=[a]]=]");
+        assert_eq!(lua_string("\nx"), "[[\n\nx]]");
     }
 
     #[test]
