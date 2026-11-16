@@ -19,7 +19,7 @@ workspace = true
 # needs the store on disk names the feature.
 [features]
 default = ["disk"]
-disk = ["dep:rusqlite"]
+disk = ["dep:rusqlite", "dep:zip"]
 
 [dependencies]
 nanoprobe-transport = { path = "../transport" }
@@ -27,6 +27,13 @@ rusqlite = { version = "0.42", features = ["bundled"], optional = true }
 getrandom = "0.3"
 serde_json = "1.0.154"
 sha2 = "0.10"
+zip = { version = "9.5.1", default-features = false, features = ["deflate"], optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 nanoprobe-sim-fake = { path = "../sim-fake" }

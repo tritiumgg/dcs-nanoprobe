@@ -16,6 +16,10 @@ pub mod reconciler;
 pub mod replay;
 #[cfg(feature = "disk")]
 pub mod server;
+#[cfg(feature = "disk")]
+pub mod shell;
 pub mod sim;
+#[cfg(feature = "disk")]
+pub mod space;
 pub mod stock;
 pub mod store;
