@@ -537,7 +537,7 @@ fn remove_entity(
 }
 
 /// Release a member held out of spawns (spec/world.md, "Respawn gate").
-fn resolve_member(
+pub(crate) fn resolve_member(
     g: &mut Inner,
     c: u64,
     r: &ResolveMemberRequest,

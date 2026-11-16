@@ -447,6 +447,8 @@ pub struct FakeSim {
     written_stamp: (u32, u64),
     /// Destroys to answer `DCS_REFUSED`.
     refuse_destroys: u32,
+    /// `MISSION_LOAD`s still to refuse.
+    refuse_loads: u32,
     /// DCS groups that were in DCS when the active campaign changed.
     orphans: BTreeSet<u64>,
     /// Drop the next `RESULT` of this frame.
@@ -567,6 +569,7 @@ impl FakeSim {
             lose_result: false,
             written_stamp: (0, 0),
             refuse_destroys: 0,
+            refuse_loads: 0,
             orphans: BTreeSet::new(),
             losing: false,
             enumerations: 0,
@@ -1535,6 +1538,12 @@ impl FakeSim {
         );
     }
 
+    /// The next `n` mission loads fail in DCS: answered `DCS_REFUSED`, and
+    /// the mission runs on.
+    pub fn refuse_loads(&mut self, n: u32) {
+        self.refuse_loads = n;
+    }
+
     /// The next `n` destroys of any entity raise in DCS and are answered
     /// `DCS_REFUSED`.
     pub fn refuse_destroys(&mut self, n: u32) {
@@ -2441,6 +2450,16 @@ impl FakeSim {
             Body::MissionLoad { path } => {
                 if path.is_empty() || path.len() > 1024 {
                     return self.result(&cmd, rc::BAD_PAYLOAD, 0, "", Lv::Nil);
+                }
+                if self.refuse_loads > 0 {
+                    self.refuse_loads -= 1;
+                    return self.result(
+                        &cmd,
+                        rc::DCS_REFUSED,
+                        0,
+                        "injected: the load failed",
+                        Lv::Nil,
+                    );
                 }
                 self.ledger.mission_loads.push(path.clone());
                 self.result(&cmd, rc::APPLIED, 0, "", Lv::Nil);

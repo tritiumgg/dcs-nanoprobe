@@ -145,7 +145,7 @@ impl MissionService for Mission {
 }
 
 /// The next mission a request names. A weather table must be a table.
-fn next_of(n: Option<&NextMission>) -> Result<Next, Status> {
+pub(crate) fn next_of(n: Option<&NextMission>) -> Result<Next, Status> {
     let Some(n) = n else {
         return Err(invalid("next", "the next mission is required"));
     };

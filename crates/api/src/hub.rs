@@ -140,7 +140,12 @@ fn owed_load(
                 // first sample, not from the running one's.
                 if owed.start_ms.is_some() {
                     store.set_mission_start_ms(owed.start_ms);
-                    store.await_generation();
+                    // Unless the new generation's samples came in the same
+                    // step, before the result was folded in.
+                    let running = store.loaded().map(|l| (l.agent_boot, l.mission_gen));
+                    if sent_in.is_none() || running == sent_in {
+                        store.await_generation();
+                    }
                 }
                 store.set_shell_slot(slot_in(&owed.path));
                 // Hold until the store records a mission other than the
@@ -268,6 +273,9 @@ pub struct Inner {
     /// (spec/persistence.md, "Reading a finished campaign"), with when a
     /// read last named each.
     archive: BTreeMap<u64, (nanoprobe_sidecar::campaigns::ReadCopy, Instant)>,
+    /// Bytes the free-space rule asks for on top of what a campaign holds:
+    /// a test sets it to make the file system look full.
+    pub space_extra: u64,
     /// Whether the last step's verdict was hung: a change publishes a
     /// lifecycle event (`SIM_STATE_HUNG` on entering, the real state on
     /// leaving).
@@ -1122,6 +1130,7 @@ impl Inner {
     /// Refuse with `SPACE_LOW` when the store's file system has less free
     /// space than campaign `id` holds there plus `extra` bytes.
     pub fn space_check(&self, id: u64, extra: u64) -> Result<(), Status> {
+        let extra = extra.saturating_add(self.space_extra);
         match self.space(Some(id)) {
             Some((free, held)) if free < held.saturating_add(extra) => Err(status(
                 Code::ResourceExhausted,
@@ -2385,6 +2394,7 @@ impl Hub {
                 hold_after: None,
                 hung: false,
                 archive: BTreeMap::new(),
+                space_extra: 0,
                 server: None,
                 lock: None,
                 idem_keep: cfg.idempotency_keep,
@@ -3699,6 +3709,362 @@ mod tests {
         assert_eq!(e.code(), Code::InvalidArgument);
     }
 
+    /// The clock across an applied load whose mission starts late, a
+    /// refused load, and a DCS restart that loads no shell.
+    #[test]
+    fn the_clock_follows_loads_refusals_and_restarts() {
+        use nanoprobe_sidecar::shell::Start;
+        let dir = tempfile::tempdir().expect("dir");
+        std::fs::write(dir.path().join("Caucasus.miz"), TEMPLATE).expect("miz");
+        let missions = crate::real::Missions {
+            dir: Some(dir.path().to_path_buf()),
+            dcs_dir: "Z:\\m".into(),
+        };
+        let cfg = Config::default();
+        let hub = Hub::new(
+            cfg.clone(),
+            Box::new(Folder(
+                nanoprobe_sim_fake::FakeSim::new(nanoprobe_sim_fake::Config {
+                    load_delay_frames: 40,
+                    ..nanoprobe_sim_fake::Config::default()
+                }),
+                missions,
+            )),
+        );
+        hub.start();
+        fn fake(g: &mut Inner) -> &mut nanoprobe_sim_fake::FakeSim {
+            g.backend
+                .as_any()
+                .expect("fake")
+                .downcast_mut::<nanoprobe_sim_fake::FakeSim>()
+                .expect("fake")
+        }
+        let at = |y, m, d| {
+            Start {
+                year: y,
+                month: m,
+                day: d,
+                seconds: 0,
+            }
+            .unix_ms()
+        };
+        let owed = |hub: &Hub| hub.lock().campaigns[&1].store.owed_load().is_some();
+        let until_applied = |hub: &Hub| {
+            for _ in 0..400 {
+                hub.step().expect("step");
+                if !owed(hub) {
+                    return;
+                }
+            }
+            panic!("the load was never answered");
+        };
+        let clock = |hub: &Hub| hub.lock().clock_ms(1).expect("clock");
+        {
+            let mut g = hub.lock();
+            g.add_campaign(
+                &cfg,
+                pb::Campaign {
+                    id: 1,
+                    name: "c".into(),
+                    theaters: vec!["Caucasus".into()],
+                    clock: Some(prost_types::Timestamp {
+                        seconds: at(2030, 1, 1) / 1000,
+                        nanos: 0,
+                    }),
+                    ..pb::Campaign::default()
+                },
+                "Caucasus".into(),
+            )
+            .expect("add");
+            g.activate(&cfg, 1).expect("activate");
+        }
+        until_applied(&hub);
+        for _ in 0..200 {
+            hub.step().expect("step");
+        }
+        let running = clock(&hub);
+        assert!(
+            running > at(2030, 1, 1),
+            "the clock runs with the model time"
+        );
+
+        // A refused load: the running mission's clock goes on.
+        fake(&mut hub.lock()).refuse_loads(1);
+        let next = |ms| crate::next::Next {
+            start_ms: Some(ms),
+            ..crate::next::Next::default()
+        };
+        {
+            let mut g = hub.lock();
+            g.set_next(1, &next(at(2040, 1, 1))).expect("next");
+            g.reload(&cfg, 1).expect("reload");
+        }
+        until_applied(&hub);
+        for _ in 0..50 {
+            hub.step().expect("step");
+        }
+        let after_refusal = clock(&hub);
+        assert!(
+            after_refusal > running && after_refusal < at(2031, 1, 1),
+            "the refused load's start does not take over: {after_refusal}"
+        );
+
+        // An applied load whose mission starts 40 frames later: the clock is
+        // the new start until the new generation's first sample.
+        {
+            let mut g = hub.lock();
+            g.set_next(1, &next(at(2050, 6, 1))).expect("next");
+            g.reload(&cfg, 1).expect("reload");
+        }
+        until_applied(&hub);
+        assert_eq!(clock(&hub), at(2050, 6, 1), "no old model time is added");
+        for _ in 0..200 {
+            hub.step().expect("step");
+        }
+        let before_restart = clock(&hub);
+        assert!(before_restart > at(2050, 6, 1));
+
+        // A DCS restart runs a mission the campaign did not load: the clock
+        // does not go back.
+        {
+            let mut g = hub.lock();
+            fake(&mut g).restart_dcs();
+            let boot = g.sidecar_boot;
+            g.backend.attach(boot);
+        }
+        for _ in 0..300 {
+            hub.step().expect("step");
+        }
+        let after_restart = clock(&hub);
+        assert!(
+            after_restart >= before_restart,
+            "the clock went back from {before_restart} to {after_restart}"
+        );
+        assert_eq!(hub.lock().campaigns[&1].store.mission_start_ms(), None);
+    }
+
+    /// The shell of a reload: the start and the weather a request set, in
+    /// the second slot; then a reload with no start carries the clock.
+    #[test]
+    fn a_reload_writes_the_requested_weather_and_start_then_the_clock() {
+        use nanoprobe_sidecar::shell::{self, Start};
+        let dir = tempfile::tempdir().expect("dir");
+        std::fs::write(dir.path().join("Caucasus.miz"), TEMPLATE).expect("miz");
+        let missions = crate::real::Missions {
+            dir: Some(dir.path().to_path_buf()),
+            dcs_dir: "Z:\\m".into(),
+        };
+        let cfg = Config::default();
+        let hub = Hub::new(
+            cfg.clone(),
+            Box::new(Folder(
+                nanoprobe_sim_fake::FakeSim::new(nanoprobe_sim_fake::Config::default()),
+                missions,
+            )),
+        );
+        hub.start();
+        let applied = |hub: &Hub| {
+            for _ in 0..400 {
+                hub.step().expect("step");
+                if hub.lock().campaigns[&1].store.owed_load().is_none() {
+                    return;
+                }
+            }
+            panic!("not applied");
+        };
+        {
+            let mut g = hub.lock();
+            g.add_campaign(
+                &cfg,
+                pb::Campaign {
+                    id: 1,
+                    name: "c".into(),
+                    theaters: vec!["Caucasus".into()],
+                    ..pb::Campaign::default()
+                },
+                "Caucasus".into(),
+            )
+            .expect("add");
+            g.activate(&cfg, 1).expect("activate");
+        }
+        applied(&hub);
+        let start = Start {
+            year: 2033,
+            month: 3,
+            day: 9,
+            seconds: 4_000,
+        };
+        let weather = prost_types::Struct {
+            fields: [(
+                "season".to_owned(),
+                prost_types::Value {
+                    kind: Some(prost_types::value::Kind::StructValue(prost_types::Struct {
+                        fields: [(
+                            "temperature".to_owned(),
+                            prost_types::Value {
+                                kind: Some(prost_types::value::Kind::NumberValue(-4.5)),
+                            },
+                        )]
+                        .into(),
+                    })),
+                },
+            )]
+            .into(),
+        };
+        let next = crate::services::mission::next_of(Some(&pb::NextMission {
+            theater: String::new(),
+            start: Some(prost_types::Timestamp {
+                seconds: start.unix_ms() / 1000,
+                nanos: 0,
+            }),
+            weather: Some(weather.clone()),
+            dynamic_spawn: Vec::new(),
+        }))
+        .expect("next");
+        {
+            let mut g = hub.lock();
+            g.set_next(1, &next).expect("set");
+            g.reload(&cfg, 1).expect("reload");
+        }
+        let read = |slot: &str| {
+            std::fs::read(dir.path().join("shells").join(format!("1.{slot}.miz"))).expect("shell")
+        };
+        let b = read("b");
+        assert_eq!(shell::start_of(&b), Ok(start));
+        let mission = shell::members(&b)
+            .expect("members")
+            .into_iter()
+            .find(|(n, _)| n == "mission")
+            .expect("mission")
+            .1;
+        let d = shell::lua::parse(&mission).expect("parse");
+        let w = d.root.get(&shell::lua::Key::s("weather")).expect("weather");
+        assert_eq!(
+            shell::lua::value(&mission, w),
+            Some(crate::lua::struct_to_lua(&weather))
+        );
+        applied(&hub);
+        for _ in 0..100 {
+            hub.step().expect("step");
+        }
+        // No start set: the shell carries the clock as it was at the write.
+        let low = hub.lock().clock_ms(1).expect("clock");
+        hub.lock().reload(&cfg, 1).expect("reload");
+        let high = hub.lock().clock_ms(1).expect("clock");
+        let a = shell::start_of(&read("a")).expect("start").unix_ms();
+        assert!(
+            a / 1000 >= low / 1000 && a / 1000 <= high / 1000 && a > start.unix_ms(),
+            "the shell's start {a} is the clock, between {low} and {high}"
+        );
+    }
+
+    #[test]
+    fn resolve_member_works_on_a_suspended_campaign() {
+        use nanoprobe_sidecar::store::LeftAs;
+        let cfg = Config::default();
+        let hub = Hub::new(cfg.clone(), Box::new(Silent));
+        let mut g = hub.lock();
+        g.add_campaign(
+            &cfg,
+            pb::Campaign {
+                id: 1,
+                name: "c".into(),
+                ..pb::Campaign::default()
+            },
+            "Caucasus".into(),
+        )
+        .expect("add");
+        let store = &mut g.campaigns.get_mut(&1).expect("slot").store;
+        let group = store
+            .create_group(nanoprobe_sidecar::store::NewGroup {
+                theater: "Caucasus".into(),
+                country: 2,
+                category: 2,
+                coalition: 2,
+                units: vec![
+                    nanoprobe_sidecar::store::NewUnit::new(
+                        "M-113",
+                        nanoprobe_sidecar::store::UnitState::default(),
+                    ),
+                    nanoprobe_sidecar::store::NewUnit::new(
+                        "M-113",
+                        nanoprobe_sidecar::store::UnitState::default(),
+                    ),
+                ],
+                authority: nanoprobe_sidecar::store::Authority::Sim,
+                label: String::new(),
+                extra: nanoprobe_transport::codec::Lv::Nil,
+            })
+            .expect("group");
+        let m = store.group(group).expect("group").members.clone();
+        assert!(store.left(m[0], 5, LeftAs::Removed));
+        let state = store.group(group).expect("group").state;
+        assert_eq!(g.active, None, "suspended");
+        let req = |unit: EntityId, r: pb::Resolution| pb::ResolveMemberRequest {
+            write: None,
+            unit: unit.0,
+            resolution: r as i32,
+        };
+        let e =
+            crate::services::commands::resolve_member(&mut g, 1, &req(m[1], pb::Resolution::Dead))
+                .expect_err("not held");
+        assert_eq!(e.code(), Code::FailedPrecondition);
+        let e =
+            crate::services::commands::resolve_member(&mut g, 1, &req(group, pb::Resolution::Dead))
+                .expect_err("a group");
+        assert_eq!(e.code(), Code::InvalidArgument);
+        let e = crate::services::commands::resolve_member(
+            &mut g,
+            1,
+            &req(m[0], pb::Resolution::Unspecified),
+        )
+        .expect_err("no resolution");
+        assert_eq!(e.code(), Code::InvalidArgument);
+        crate::services::commands::resolve_member(&mut g, 1, &req(m[0], pb::Resolution::Restore))
+            .expect("restore");
+        let store = &g.campaigns[&1].store;
+        assert!(!store.held(m[0]));
+        assert_eq!(
+            store.group(group).expect("group").state,
+            state,
+            "the group's state waits for a spawn"
+        );
+    }
+
+    #[test]
+    fn a_full_file_system_refuses_a_backup_a_copy_and_a_template() {
+        let (_dir, missions, cfg) = owed_setup();
+        let hub = folder_hub(&cfg, &missions, 0x1000);
+        hub.start();
+        let mut g = hub.lock();
+        g.add_campaign(
+            &cfg,
+            pb::Campaign {
+                id: 1,
+                name: "c1".into(),
+                theaters: vec!["Caucasus".into()],
+                ..pb::Campaign::default()
+            },
+            "Caucasus".into(),
+        )
+        .expect("add");
+        assert!(g.space_check(1, 0).is_ok(), "a temp folder has room");
+        g.space_extra = u64::MAX / 2;
+        let low = |r: Result<(), Status>| {
+            let e = r.expect_err("space low");
+            assert_eq!(e.code(), Code::ResourceExhausted);
+            assert_eq!(nanoprobe_proto::errors::reason(&e), ErrorReason::SpaceLow);
+        };
+        low(g.space_check(1, 0));
+        low(g.set_template(1, "Caucasus", TEMPLATE));
+        // A closed store is read through a copy, which needs room too.
+        g.suspend(&cfg, 1, None);
+        g.settle(Some(1));
+        low(g.open_archive(1));
+        g.space_extra = 0;
+        g.open_archive(1).expect("room again");
+    }
+
     #[test]
     fn activation_writes_the_shell_from_the_next_mission_and_the_clock_follows() {
         use nanoprobe_sidecar::shell::{self, DynamicSpawn, Start};
@@ -3803,7 +4169,7 @@ mod tests {
             code(g.set_template(1, "Caucasus", b"not a zip")),
             Code::InvalidArgument
         );
-        // A placed group whose name reads as a platform name.
+        // A placed unit whose name reads as a platform name.
         let platform = nanoprobe_transport::names::name(
             nanoprobe_transport::names::Kind::Group,
             nanoprobe_transport::names::tag_of(1),
@@ -3815,8 +4181,10 @@ mod tests {
                 String::from_utf8(d)
                     .expect("utf-8")
                     .replacen(
-                        "[\"name\"] = \"blue\"",
-                        &format!("[\"name\"] = {platform:?}"),
+                        "[\"name\"] = \"neutrals\",\n\t\t\t[\"country\"] = {},",
+                        &format!(
+                            "[\"name\"] = \"neutrals\",\n\t\t\t[\"country\"] = {{ [1] = {{ [\"id\"] = 82, [\"name\"] = \"UN Peacekeepers\", [\"vehicle\"] = {{ [\"group\"] = {{ [1] = {{ [\"name\"] = \"placed\", [\"units\"] = {{ [1] = {{ [\"name\"] = {platform:?}, [\"type\"] = \"M-113\" }} }} }} }} }} }} }},"
+                        ),
                         1,
                     )
                     .into_bytes()

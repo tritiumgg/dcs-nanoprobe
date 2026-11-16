@@ -775,6 +775,23 @@ mod tests {
     }
 
     #[test]
+    fn a_restored_finished_backup_stays_finished() {
+        let (_d, c) = campaigns();
+        let id = CampaignId(1);
+        let mut s = c.create(id, record(CampaignState::Active)).expect("create");
+        c.finish(&mut s, 3, Vec::new(), b"won".to_vec())
+            .expect("finish");
+        drop(s);
+        let b = c.backup(id, 4, 0, BackupReason::Manual).expect("backup");
+        let r = c.restore(id, b.number, 5).expect("restore");
+        assert_eq!(
+            record_of(&c.store_path(id)).expect("record").2.state,
+            CampaignState::Finished
+        );
+        assert!(r.aside.exists());
+    }
+
+    #[test]
     fn a_finished_campaign_reads_through_a_copy_that_goes_away() {
         let (_d, c) = campaigns();
         let id = CampaignId(1);
