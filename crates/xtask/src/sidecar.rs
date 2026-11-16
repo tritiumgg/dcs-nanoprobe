@@ -59,6 +59,10 @@ const PROBE_C: &str = "nanoprobe-xtask-conformance";
 const SIDECAR_C: &str = "nanoprobe-xtask-sidecar";
 /// The API port inside the shared namespace.
 pub(crate) const API_PORT: u16 = 47311;
+/// The run's lease lifetime. The drivers renew between calls, but one eval
+/// over SSH or a hold during a map load can take longer than the default
+/// 30 s, and a lost lease ends the run on a refusal no test meant.
+const LEASE_TTL_S: u64 = 300;
 /// Model seconds each hold runs.
 const HOLD_S: f64 = 15.0;
 /// How long a probe or a hello may take, seconds.
@@ -554,7 +558,7 @@ fn with_map(
         let toml = format!(
             "[agent]\nmap_path = \"/nanoprobe-shm/nanoprobe.map\"\nhandshake = \"127.0.0.1:{port}\"\n\
              token_path = \"/etc/nanoprobe/agent-token\"\n\n[api]\nlisten = \"0.0.0.0:{API_PORT}\"\n\
-             tokens_path = \"/etc/nanoprobe/tokens.toml\"\n\n[store]\ndir = \"/var/lib/nanoprobe/campaigns\"\n\n\
+             tokens_path = \"/etc/nanoprobe/tokens.toml\"\nlease_ttl_s = {LEASE_TTL_S}\n\n[store]\ndir = \"/var/lib/nanoprobe/campaigns\"\n\n\
              [missions]\ndir = \"/missions\"\ndcs_dir = '{dcs_missions}'\n\n\
              [health]\nheartbeat_stale_s = {stale}\n",
             stale = crate::shell_live::HEARTBEAT_STALE_S,

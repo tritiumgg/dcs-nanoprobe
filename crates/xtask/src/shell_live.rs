@@ -438,6 +438,8 @@ pub fn drive(
         "local m = env.mission\nreturn { day = m.date.Day, month = m.date.Month, year = m.date.Year, start = m.start_time, wind = m.weather.wind.atGround.speed, temp = m.weather.season.temperature, abs = timer.getAbsTime() }\n",
         60,
     )?;
+    // An eval can outlast the lease's 30 s; renew before the next call.
+    api.renew()?;
     let want = shell::Start::from_unix_ms(START_S * 1000);
     let pass = seen["day"] == json!(want.day)
         && seen["month"] == json!(want.month)
@@ -481,6 +483,7 @@ pub fn drive(
         generation = loaded(run, &mut api, theater, generation)?;
         if i == 0 {
             results["e7_airbase_ids"]["Afghanistan"] = airbase_ids(run, AFGHANISTAN)?;
+            api.renew()?;
             // A point on land near the first airbase of the map.
             let p = run.eval(
                 "server",
@@ -488,6 +491,7 @@ pub fn drive(
                 "local ab = world.getAirbases()\nfor _, a in ipairs(ab) do local p = a:getPoint()\nfor _, d in ipairs({ 300, 600, 900, -300, -600 }) do local q = { x = p.x + d, y = p.z + d }\nlocal t = land.getSurfaceType(q)\nif t == 1 or t == 4 then return { q.x, q.y } end end end\nreturn nil\n",
                 60,
             )?;
+            api.renew()?;
             let (n, e) = (
                 p[0].as_f64().ok_or(format!("no land point: {p}"))?,
                 p[1].as_f64().ok_or("no land point")?,
@@ -576,6 +580,7 @@ pub fn drive(
             "local out = {}\nfor _, side in ipairs({ 'red', 'blue' }) do for _, s in ipairs(DCS.getAvailableSlots(side) or {}) do local e = { side = side }\nfor k, v in pairs(s) do e[tostring(k)] = tostring(v) end\nout[#out + 1] = e end end\nreturn out\n",
             60,
         )?;
+        api.renew()?;
         // The shell DCS loaded, compared with the template member by member.
         let shell_file = run
             .remote
