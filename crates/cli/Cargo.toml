@@ -20,7 +20,7 @@ path = "src/main.rs"
 nanoprobe-agent-link = { path = "../agent-link" }
 nanoprobe-install = { path = "../install" }
 nanoprobe-proto = { path = "../proto" }
-nanoprobe-sidecar = { path = "../sidecar" }
+nanoprobe-sidecar = { path = "../sidecar", features = ["disk"] }
 nanoprobe-transport = { path = "../transport" }
 serde_json = "1.0.154"
 tokio = { version = "1.54.1", features = ["rt"] }
