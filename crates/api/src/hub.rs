@@ -255,6 +255,10 @@ pub struct Inner {
     /// sent in, by agent boot and generation, from its command's row: nothing
     /// materializes until the store records another.
     pub hold_after: Option<(u64, u32)>,
+    /// Finished campaigns read through a migrated copy of their store
+    /// (spec/persistence.md, "Reading a finished campaign"), with when a
+    /// read last named each.
+    archive: BTreeMap<u64, (nanoprobe_sidecar::campaigns::ReadCopy, Instant)>,
     /// Whether the last step's verdict was hung: a change publishes a
     /// lifecycle event (`SIM_STATE_HUNG` on entering, the real state on
     /// leaving).
@@ -348,6 +352,10 @@ pub fn lease_status(e: LeaseError) -> Status {
         ),
     }
 }
+
+/// How long a finished campaign's read copy stays after the last read
+/// that named it.
+pub const ARCHIVE_KEEP: Duration = Duration::from_secs(60);
 
 /// `FAILED_PRECONDITION` naming the theater.
 fn precondition(msg: String) -> Status {
@@ -646,6 +654,7 @@ impl Inner {
             panic!("injected: a crash between the events commit and the store commit");
         }
         self.timers(cfg);
+        self.expire_archives();
         self.settle(None);
     }
 
@@ -865,6 +874,8 @@ impl Inner {
             .map_err(|e| format!("the store folder {}: {e}", sf.dir.display()))?;
         let mut active = Vec::new();
         for (id, r) in listed {
+            // Read copies a stopped sidecar left behind.
+            files.clear_read_copies(id);
             let path = files.store_path(id);
             let read = r.and_then(|r| {
                 let (_, schema, _) = nanoprobe_sidecar::store::record_of(&path)?;
@@ -988,6 +999,44 @@ impl Inner {
                 Err(e)
             }
         })
+    }
+
+    /// The store a read of campaign `id` sees: for a finished campaign on
+    /// disk, the migrated copy [`Inner::open_archive`] made; otherwise its
+    /// own.
+    pub fn read_store(&self, id: u64) -> &Store {
+        match self.archive.get(&id) {
+            Some((copy, _)) => copy.store(),
+            None => &self.campaigns[&id].store,
+        }
+    }
+
+    /// Make or keep the read copy of a finished campaign on disk; nothing
+    /// for any other campaign. A copy no read named for [`ARCHIVE_KEEP`] is
+    /// dropped by the step.
+    pub fn open_archive(&mut self, id: u64) -> Result<(), Status> {
+        let finished = self
+            .campaigns
+            .get(&id)
+            .is_some_and(|s| s.meta.state == pb::CampaignState::Finished as i32);
+        let Some(files) = self.files.as_ref().filter(|_| finished) else {
+            return Ok(());
+        };
+        if let Some((_, at)) = self.archive.get_mut(&id) {
+            *at = Instant::now();
+            return Ok(());
+        }
+        let copy = files
+            .read_copy(CampaignId(id), wall_ms())
+            .map_err(|e| disk_status(id, &e))?;
+        self.archive.insert(id, (copy, Instant::now()));
+        Ok(())
+    }
+
+    /// Drop the read copies no read named for [`ARCHIVE_KEEP`].
+    fn expire_archives(&mut self) {
+        self.archive
+            .retain(|_, (_, at)| at.elapsed() < ARCHIVE_KEEP);
     }
 
     /// The campaign folders, when the stores are on disk.
@@ -2052,6 +2101,7 @@ impl Hub {
                 backing_up: std::collections::BTreeSet::new(),
                 hold_after: None,
                 hung: false,
+                archive: BTreeMap::new(),
                 server: None,
                 lock: None,
                 idem_keep: cfg.idempotency_keep,
@@ -2991,6 +3041,85 @@ mod tests {
         for _ in 0..n {
             hub.step().expect("step");
         }
+    }
+
+    #[test]
+    fn a_finished_campaign_reads_through_a_copy_and_refuses_changes() {
+        let (_dir, missions, cfg) = owed_setup();
+        let hub = folder_hub(&cfg, &missions, 0x1000);
+        hub.start();
+        let group = {
+            let mut g = hub.lock();
+            let meta = pb::Campaign {
+                id: 1,
+                name: "c1".into(),
+                ..pb::Campaign::default()
+            };
+            g.add_campaign(&cfg, meta, "Caucasus".into()).expect("add");
+            let id = g
+                .campaigns
+                .get_mut(&1)
+                .expect("slot")
+                .store
+                .create_group(nanoprobe_sidecar::store::NewGroup {
+                    theater: "Caucasus".into(),
+                    country: 2,
+                    category: 2,
+                    coalition: 2,
+                    units: vec![nanoprobe_sidecar::store::NewUnit::new(
+                        "M-113",
+                        nanoprobe_sidecar::store::UnitState::default(),
+                    )],
+                    authority: nanoprobe_sidecar::store::Authority::Campaign,
+                    label: String::new(),
+                    extra: nanoprobe_transport::codec::Lv::Nil,
+                })
+                .expect("group");
+            g.activate(&cfg, 1).expect("activate");
+            g.settle(Some(1));
+            g.suspend(&cfg, 1, Some(Vec::new()));
+            g.settle(Some(1));
+            id
+        };
+        steps(&hub, 2);
+        let mut g = hub.lock();
+        assert!(
+            g.campaigns[&1].store.group(group).is_none(),
+            "the finished store is closed"
+        );
+        let e = g.resolve(1, Need::Campaign).expect_err("read-only");
+        assert_eq!(
+            nanoprobe_proto::errors::reason(&e),
+            ErrorReason::CampaignReadOnly
+        );
+        g.open_archive(1).expect("copy");
+        assert!(
+            g.read_store(1).group(group).is_some(),
+            "read through the copy"
+        );
+        let read = g
+            .files()
+            .expect("files")
+            .folder(CampaignId(1))
+            .join(".read");
+        let copies = std::fs::read_dir(&read)
+            .expect("dir")
+            .filter(|e| {
+                e.as_ref()
+                    .is_ok_and(|e| e.file_name().to_string_lossy().ends_with(".sqlite"))
+            })
+            .count();
+        assert_eq!(copies, 1);
+        g.archive
+            .values_mut()
+            .for_each(|(_, at)| *at -= ARCHIVE_KEEP);
+        drop(g);
+        steps(&hub, 1);
+        assert_eq!(
+            std::fs::read_dir(&read).expect("dir").count(),
+            0,
+            "an unused copy goes"
+        );
     }
 
     #[test]
