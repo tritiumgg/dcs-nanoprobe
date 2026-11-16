@@ -381,9 +381,10 @@ pub fn next_entity_of(path: &Path) -> Result<u64, DiskError> {
 /// handed out, for an offline restore (spec/persistence.md, "Restore a
 /// backup"): its next `EntityId` becomes at least `next_entity`, its
 /// revision the larger of its own and `revision` plus
-/// [`REVISION_RESERVE`], and it is marked closed. Every other key of
-/// `meta.world` keeps its bytes' meaning. Returns the new next `EntityId`
-/// and revision.
+/// [`REVISION_RESERVE`], and it is marked closed; its record is
+/// `suspended` unless it is `finished`; its commands in flight, its owed
+/// mission load and a start set for the next shell are cleared. Returns
+/// the new next `EntityId` and revision.
 pub fn rebase_world(path: &Path, next_entity: u64, revision: u64) -> Result<(u64, u64), DiskError> {
     let mut conn = connect(path)?;
     let world = get_meta(&conn, "world")?;
@@ -408,8 +409,30 @@ pub fn rebase_world(path: &Path, next_entity: u64, revision: u64) -> Result<(u64
             pairs.push((s(k), v));
         }
     }
+    // A restored store owes no mission load and waits for no command; a
+    // start set for the next shell is not carried over.
+    let mut pairs: Vec<(Lv, Lv)> = pairs
+        .into_iter()
+        .filter(|(k, _)| *k != s("owed_load"))
+        .map(|(k, v)| {
+            if k == s("next_mission")
+                && let Lv::Table(n) = v
+            {
+                let n = n.into_iter().filter(|(k, _)| *k != s("start_ms")).collect();
+                return (k, Lv::Table(n));
+            }
+            (k, v)
+        })
+        .collect();
+    pairs.retain(|(k, _)| *k != s("mission_start_ms"));
+    let mut record = dec_record(&get_meta(&conn, "campaign")?)?;
+    if record.state != CampaignState::Finished {
+        record.state = CampaignState::Suspended;
+    }
     let tx = conn.transaction()?;
     put_meta(&tx, "world", &Lv::Table(pairs))?;
+    put_meta(&tx, "campaign", &enc_record(&record))?;
+    tx.execute("DELETE FROM inflight", [])?;
     tx.commit()?;
     Ok((next, rev))
 }

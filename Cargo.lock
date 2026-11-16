@@ -764,8 +764,10 @@ dependencies = [
  "nanoprobe-agent-link",
  "nanoprobe-install",
  "nanoprobe-proto",
+ "nanoprobe-sidecar",
  "nanoprobe-transport",
  "serde_json",
+ "tempfile",
  "tokio",
  "tonic",
 ]

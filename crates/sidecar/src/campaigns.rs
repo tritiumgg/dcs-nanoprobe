@@ -703,12 +703,20 @@ mod tests {
     fn a_restore_keeps_ids_and_revisions_above_both_copies() {
         let (_d, c) = campaigns();
         let id = CampaignId(1);
-        let mut s = c
-            .create(id, record(CampaignState::Suspended))
-            .expect("create");
+        let mut s = c.create(id, record(CampaignState::Active)).expect("create");
         for _ in 0..3 {
             s.adopt_id().expect("id");
         }
+        let key = |k: &str| nanoprobe_transport::codec::Lv::String(k.as_bytes().to_vec());
+        s.set_owed_load(Some(crate::store::OwedLoad {
+            path: "Z:\\m\\shells\\1.a.miz".into(),
+            cmd: Some((1, 2)),
+            start_ms: Some(5),
+        }));
+        s.set_next_mission(Some(nanoprobe_transport::codec::Lv::Table(vec![
+            (key("theater"), key("Caucasus")),
+            (key("start_ms"), key("5")),
+        ])));
         s.commit().expect("commit");
         let b = c
             .backup(id, 5, s.revision(), BackupReason::Manual)
@@ -740,6 +748,20 @@ mod tests {
             rev + REVISION_RESERVE,
             "closed: no second reserve"
         );
+        assert_eq!(
+            opened.record().expect("record").state,
+            CampaignState::Suspended
+        );
+        assert_eq!(opened.owed_load(), None);
+        assert_eq!(
+            opened.next_mission(),
+            Some(&nanoprobe_transport::codec::Lv::Table(vec![(
+                key("theater"),
+                key("Caucasus")
+            )])),
+            "the start is cleared, the rest kept"
+        );
+        assert!(opened.unanswered().is_empty());
         assert_eq!(
             c.backups(id).expect("backups"),
             vec![b],

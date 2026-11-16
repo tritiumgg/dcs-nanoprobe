@@ -50,6 +50,18 @@ pub fn export(
         return Ok(());
     }
     let s = ro(store)?;
+    // One read transaction: every row of the store comes from one snapshot,
+    // while the driver goes on writing through its own connection.
+    s.execute_batch("BEGIN DEFERRED")?;
+    // The events up to the newest at the start; later ones are not exported.
+    let events_end: Option<(Connection, i64)> = if events.exists() {
+        let e = ro(events)?;
+        e.execute_batch("BEGIN DEFERRED")?;
+        let end: Option<i64> = e.query_row("SELECT max(seq) FROM event", [], |r| r.get(0))?;
+        Some((e, end.unwrap_or(0)))
+    } else {
+        None
+    };
     // Each query reads by key in pages, so a long journal is never held whole.
     let mut meta = s.prepare("SELECT key, value FROM meta ORDER BY key")?;
     let rows = meta.query_map([], |r| {
@@ -132,17 +144,17 @@ pub fn export(
             return Ok(());
         }
     }
-    if !events.exists() {
+    let Some((e, last)) = events_end else {
         return Ok(());
-    }
-    let e = ro(events)?;
+    };
     let mut seq = 0i64;
     loop {
         let mut q = e.prepare(
-            "SELECT seq, wall_ms, source, body FROM event WHERE seq > ?1 ORDER BY seq LIMIT ?2",
+            "SELECT seq, wall_ms, source, body FROM event WHERE seq > ?1 AND seq <= ?2 \
+             ORDER BY seq LIMIT ?3",
         )?;
         let page: Vec<(i64, i64, Option<String>, Vec<u8>)> = q
-            .query_map(rusqlite::params![seq, PAGE], |r| {
+            .query_map(rusqlite::params![seq, last, PAGE], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
             })?
             .collect::<Result<_, _>>()?;
