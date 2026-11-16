@@ -1097,12 +1097,17 @@ scenario('destroyed-overflow', MANY, function(ctx)
   local gen = agent.status().gen
   local taken, seen, held = nil, nil, nil
   local done, checks = agent.command_done, agent.checks
+  -- Only the destroy takes IDs: the spawn before it answers with none, and
+  -- a checks call between the two would see no IDs yet.
   agent.command_done = function(...)
-    taken = done(...)
-    seen = agent.status()
-    return taken
+    local n = done(...)
+    if (n or 0) > 0 then
+      taken = n
+      seen = agent.status()
+    end
+    return n
   end
-  -- The first checks call after the command: the shim has forgotten what it
+  -- The first checks call after the destroy: the shim has forgotten what it
   -- will, and no existence check has run yet.
   agent.checks = function(...)
     if taken and not held then
@@ -1120,7 +1125,13 @@ scenario('destroyed-overflow', MANY, function(ctx)
     { op = 'STATIC_SPAWN', gen = gen, entity = 9, rev = 1, country = 2, name = S1,
       static = { name = S1, type = 'Barrier', x = 500, y = 600, heading = 0 } },
     { op = 'STATIC_DESTROY', gen = gen, entity = 9, wait_result = true },
-  } }))
+  } }), 3000)
+  -- `checks` runs only on a sampling frame with the sidecar attached. The
+  -- sidecar stays 3 s after its last RESULT, and the test steps frames until
+  -- the hook has run, not for a time.
+  assert(ctx.run(30, function()
+    return held ~= nil
+  end), 'the checks hook did not run after the command:\n' .. dump(ctx))
   finish(ctx, 'a destroy of 4,100 IDs')
   assert(taken == 4096, 'command_done took ' .. tostring(taken) .. ' IDs, not 4096')
   assert(seen.pending_overflow == 4 and seen.pending_destroy == 4096,
@@ -1369,6 +1380,43 @@ scenario('sound', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
 
   S.ok('SOUND: each scope calls its DCS form, a missing object or campaign 0 is NOT_BOUND, a bad payload is BAD_PAYLOAD')
 end, '\n[lua]\nraw = true\n')
+
+scenario('clear-debris', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
+  local sim, run, expect = effect_world(ctx)
+  local unit = sim.by_name['np.hGx2']
+  local function sphere(u, radius)
+    return { op = 'CLEAR_DEBRIS', volume = 1, x = u.x, y = u.y, z = u.z, radius = radius }
+  end
+  local everything = { op = 'CLEAR_DEBRIS', volume = 2, x = -1e7, y = -1e7, z = -1e7, x2 = 1e7, y2 = 1e7, z2 = 1e7 }
+  local r = run({ everything }, 'clear debris round a live unit', false)
+  expect(r[1], APPLIED, 'CLEAR_DEBRIS round a live unit')
+  assert(r[1].value == 0, 'a clear with nothing dead removed ' .. tostring(r[1].value))
+  assert(unit.alive, 'a clear removed a live unit')
+
+  sim:doom(unit)
+  r = run({
+    sphere(unit, 0.5),
+    everything,
+    sphere(unit, 0),
+    { op = 'CLEAR_DEBRIS', volume = 2, x = 1, y = 0, z = 0, x2 = 0, y2 = 0, z2 = 0 },
+    { op = 'CLEAR_DEBRIS', volume = 3, radius = 5 },
+    sphere({ x = 1e7 + 1, y = 0, z = 0 }, 5),
+  }, 'clear debris')
+  expect(r[1], APPLIED, 'CLEAR_DEBRIS on the wreck')
+  assert(r[1].value == 1, 'the sphere removed ' .. tostring(r[1].value) .. ', not 1')
+  expect(r[2], APPLIED, 'CLEAR_DEBRIS where nothing is left')
+  assert(r[2].value == 0, 'an empty clear removed ' .. tostring(r[2].value))
+  expect(r[3], BAD_PAYLOAD, 'CLEAR_DEBRIS with radius 0')
+  expect(r[4], BAD_PAYLOAD, 'CLEAR_DEBRIS with a box inside out')
+  expect(r[5], BAD_PAYLOAD, 'CLEAR_DEBRIS with volume 3')
+  expect(r[6], BAD_PAYLOAD, 'CLEAR_DEBRIS beyond 10,000 km')
+
+  sim.junk_raises = true
+  r = run({ sphere(unit, 5) }, 'clear debris that raises')
+  expect(r[1], 22, 'CLEAR_DEBRIS that raises')
+  sim.junk_raises = nil
+  S.ok('CLEAR_DEBRIS: a sphere or a box removes the wrecks inside and returns the count, a bad volume is BAD_PAYLOAD')
+end)
 
 scenario('picture', nil, function(ctx)
   local sim, run, expect = effect_world(ctx)
@@ -2544,10 +2592,36 @@ scenario('extension-hooks', SHIM, function(ctx)
   -- so on_frame runs on the frames that follow without a sampling pump.
   host:set_pause(false, { silent = true })
   local frames_at = {}
-  play(ctx, { ext_invoke('f', 0), ext_invoke('f', 200), ext_invoke('f', 0) }, nil, 'after the unpause')
-  frames_at.first, frames_at.last = ctx.result(1).value.frames, ctx.result(3).value.frames
-  assert(frames_at.last - frames_at.first >= 10,
-    'on_frame ran ' .. (frames_at.last - frames_at.first) .. ' times in 20 frames after the unpause')
+  -- The sidecar's wait_ms is wall time, so a loaded machine can hand it two
+  -- frames. Count the frames the host ran between the two results instead,
+  -- and measure again when they were too few to judge.
+  local gap, ran = 0, 0
+  for _ = 1, 10 do
+    local seen_at = {}
+    -- Each try starts at an unpause, the state under test.
+    host:set_pause(true, { silent = true })
+    host:frame(0.01)
+    host:set_pause(false, { silent = true })
+    play(ctx, { ext_invoke('f', 0), ext_invoke('f', 200), ext_invoke('f', 0) }, function(n)
+      for _, seq in ipairs({ 1, 3 }) do
+        if not seen_at[seq] and ctx.result(seq) then
+          seen_at[seq] = n
+        end
+      end
+    end, 'after the unpause')
+    frames_at.first, frames_at.last = ctx.result(1).value.frames, ctx.result(3).value.frames
+    -- Result 3 and the end line can come in the same frame, after the last
+    -- step call: a try without both marks is too short to judge.
+    if seen_at[1] and seen_at[3] then
+      gap, ran = seen_at[3] - seen_at[1], frames_at.last - frames_at.first
+      if gap >= 10 then
+        break
+      end
+    end
+  end
+  assert(gap >= 10, 'the host ran ' .. gap .. ' frames between the results in 10 tries')
+  assert(ran >= gap / 2,
+    'on_frame ran ' .. ran .. ' times in ' .. gap .. ' frames after the unpause')
   S.ok('on_frame runs on every frame right after an unpause')
 
   -- The queue holds 256 events: the oldest are dropped and counted.

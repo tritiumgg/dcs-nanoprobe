@@ -1926,6 +1926,25 @@ local HANDLERS = {
   [59] = function(a)
     return stock_command(a, false)
   end,
+  -- CLEAR_DEBRIS: world.removeJunk on a sphere (volume 1) or a box (2),
+  -- which the agent checked. Its value is the number DCS returns: the junk
+  -- objects it removed (LIVE, docs/results/2026-11-16-clear-debris.md).
+  [63] = function(a)
+    local volume
+    if a.volume == 1 then
+      volume = { id = world.VolumeType.SPHERE, params = { point = { x = a.x, y = a.y, z = a.z }, radius = a.radius } }
+    else
+      volume = {
+        id = world.VolumeType.BOX,
+        params = { min = { x = a.x, y = a.y, z = a.z }, max = { x = a.x2, y = a.y2, z = a.z2 } },
+      }
+    end
+    local ok, removed = pcall(world.removeJunk, volume)
+    if not ok then
+      return DCS_REFUSED, nil, tostring(removed)
+    end
+    return APPLIED, removed
+  end,
   -- CAPTURE: a group's state, or a static's.
   [64] = function(a)
     local g = Group.getByName(a.name)

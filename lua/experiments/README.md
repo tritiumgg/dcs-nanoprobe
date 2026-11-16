@@ -125,3 +125,31 @@ database and each type's default spawn; `spawn.lua` (`hook`) spawns aircraft, gr
 units and ships with a state and sets life in three ways, about 10 s of model time;
 `guns.lua` (`server`) reads the full gun counts. `lua/tests/e39.lua` rehearses them on
 the mock. The results are in `docs/results/2026-11-16-e39-spawn-state.md`.
+
+## Warehouse
+
+How a player's actions change a warehouse's inventory. The server needs a mission with
+limited warehouses, packed with `cargo xtask miz <mission> <out> --limited-airport ID
+--limited-warehouse ID`. The client joins with `cargo xtask client join`.
+
+`run.sh <server> <action> [slot] [seconds] [stock]` fills the placeholders of `step.lua`
+and runs it in the server's hook state. The action is `list`, `stock`, `slot`, `deslot`,
+`kill` or `none`; `stock` is the count the `stock` action sets (default 100), and it copies
+names only from a warehouse that lists a count of 1,000,000 or more. A `slot` only assigns
+the slot: the client enters its aircraft with `alone/e31-spawn.lua`. `cargo xtask eval
+<server> server farp-spawn.lua` adds a FARP 2 km north of the first airdrome whose
+inventory lists an aircraft, and reads its warehouse. `lua/tests/warehouse_experiments.lua` rehearses
+`step.lua` on the mock. The results are in
+`docs/results/2026-11-16-warehouse-player-deltas.md`.
+
+## Junk
+
+The snippets in `junk/` settle what `world.removeJunk` clears (`junk.lua`) and whether
+one wreck can be removed on its own (`junk2.lua`). The runner does not pick them up:
+each runs alone in the `server` state with
+`cargo xtask eval <target> server <file> --timeout 500`, on a server with no players,
+and needs the `s15` and `scenario` libraries in the profile. `junk.lua` takes 160 s of
+model time and `junk2.lua` 312 s. Both kill what they spawn with scripted explosions
+4 to 14 km from the mission's first airbase and clear their own wrecks at the end.
+`lua/tests/junk_experiment.lua` rehearses them on the mock. The results are in
+`docs/results/2026-11-16-clear-debris.md`.

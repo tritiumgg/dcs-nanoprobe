@@ -270,6 +270,7 @@ form) and `static_name`, because its entity is a group or a static.
 | `CHAT` | `player`, `text` |
 | `MISSION_LOAD` | `path` |
 | `EVAL` | `source` |
+| `CLEAR_DEBRIS` | `volume`, `x`, `y`, `z`, `x2`, `y2`, `z2`, `radius` |
 
 For the mark, drawing and menu opcodes, `entity` and `parent` are the header's entity
 and the layout's parent as decimal text, so no `EntityId` loses digits in a Lua number;
@@ -369,6 +370,7 @@ other, is answered `UNKNOWN_OPCODE`, and sets `last_applied_seq`.
 | 60 | PICTURE | effect |  |  | any |  | hook | layout | Show a picture from the mission |
 | 61 | PICTURE_STOP | effect |  |  | any |  | hook | none | Take every picture off screen |
 | 62 | MODERATE | effect |  |  | any |  | hook | layout | Kick, ban, unban, or move a player |
+| 63 | CLEAR_DEBRIS | effect |  |  | any | bound | server | layout | Remove wrecks, craters and debris inside a volume |
 | 64 | CAPTURE | query | group or static |  | active | bound | server | none | Read an entity's full state and return it |
 | 65 | COUNTRIES | query |  |  | any | bound | server | none | Read each country's coalition in the loaded mission |
 | 66 | PLAYERS | query |  |  | any |  | hook | none | Read the connected players and their slots |
@@ -841,6 +843,66 @@ coalition target, and what a client shows are UNVERIFIED.
 | 0x0008 | f64 | y | |
 | 0x0010 | f64 | z | |
 | 0x0018 | f64 | power | DCS illumination power |
+
+### Layout: CLEAR_DEBRIS
+
+| Offset | Type | Field | Meaning |
+|---|---|---|---|
+| 0x0000 | u32 | volume | A `volume` code |
+| 0x0004 | pad[4] | reserved | |
+| 0x0008 | f64 | x | A sphere's center, or a box's lowest corner |
+| 0x0010 | f64 | y | |
+| 0x0018 | f64 | z | |
+| 0x0020 | f64 | x2 | A box's highest corner; 0 for a sphere |
+| 0x0028 | f64 | y2 | |
+| 0x0030 | f64 | z2 | |
+| 0x0038 | f64 | radius | A sphere's radius in meters; 0 for a box |
+
+### Codes: volume
+
+| Code | Name | Meaning |
+|---|---|---|
+| 1 | SPHERE | `x`, `y`, `z` and `radius` |
+| 2 | BOX | From `x`, `y`, `z` to `x2`, `y2`, `z2`, aligned with the axes |
+
+The handler calls `world.removeJunk` with a DCS volume of the code's shape, and returns
+the number DCS returns: how many junk objects it removed, which counts craters and
+debris as well as wrecks. The agent sends it as the `RESULT`'s value. A call that raises
+is `DCS_REFUSED` with its text; otherwise `APPLIED`.
+
+The agent checks the payload, else `BAD_PAYLOAD`: a known `volume`, every number
+finite and within 10,000 km of 0, a sphere's `radius` above 0, and a box's `x`, `y`, `z`
+each at most its `x2`, `y2`, `z2`.
+
+What DCS removes (LIVE, docs/results/2026-11-16-clear-debris.md): the wrecks of ground
+units that have stopped burning. A clear on open ground where an explosion struck
+returns 1, so a crater counts as junk (inferred from the count). DCS leaves every live
+unit and static, a wreck that is still burning, a dead static's object, and destroyed
+scenery. A clear around a dead aircraft or a dead static returns a count above 0; what it
+removes there is UNVERIFIED. A burning wreck it leaves still explodes and sends its death
+events, so a clear changes nothing in spec/records.md. A wreck it removes reads as a
+removed object: `isDead`, `getLife` and `getPoint` raise. The volume's edge is not exact
+to an object's position. A 2,000 km sphere removed the wrecks of a whole run in one
+call, the 250 km boxes below removed them too, and DCS accepts a 10,000 km sphere and a
+2,000 km box.
+
+The cost: the `world.removeJunk` call alone takes about 4 us per object it removes and
+4 to 6 us when it removes nothing, at any size. A `CLEAR_DEBRIS` command's `cost_us`
+includes the pump around it: 20 us at the median for a box that removes little, 37 us
+at p99, 981 us at most, and 6.4 ms in all for a whole-map clear of 217 objects, spread
+over 4 frames (LIVE, run 3 of the results).
+
+A clear of the whole map is not one command, so that no single command removes the junk
+of the whole map at once. The sidecar sends it as boxes 250 km square that tile x and z
+from -2,000 km to 2,000 km, 256 commands, each from 10 km below sea level to 100 km above
+it. That this reach covers every theater is UNVERIFIED: only Caucasus and Afghanistan
+were run, and junk outside it is left without an error. They go through the ring under the commanded-work budget like any other command. The
+call has one outcome, settled when every box sent has answered: the outcome of the first
+box, by sequence number, that was not `APPLIED`, carrying the sum of the applied boxes'
+counts when it has a result; otherwise `not_sent` when a box was never sent, because the
+agent detached; otherwise `APPLIED` with the sum of the counts. The sidecar keeps what it
+needs to fold the boxes in memory, so a clear in flight when the sidecar restarts
+settles as `unknown`, a clear of one volume as well.
 
 ### Layout: DAMAGE
 

@@ -101,10 +101,18 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
             let client = client.ok_or("--part moderation needs --client <windows-target>")?;
             return moderation::run(repository, name, client, miz.map(Path::new));
         }
+        "debris" => {
+            if groups < 3 || units == 0 || units > 50 {
+                return Err(
+                    "--part debris needs --groups 3 or more and --units between 1 and 50".into(),
+                );
+            }
+            return world::run_debris(repository, name, groups, units);
+        }
         "commands" => {}
         other => {
             return Err(format!(
-                "--part is commands, world, names, players or moderation, not {other}"
+                "--part is commands, world, names, players, moderation or debris, not {other}"
             ));
         }
     }
@@ -118,6 +126,7 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
 const USAGE: &str = "usage: cargo xtask commands <name> [--seed N] [--commands 1000] \
     [--restart-every 100] | cargo xtask commands <name> --part world [--groups 100] [--units 4] \
     | cargo xtask commands <name> --part names [--units 4] \
+    | cargo xtask commands <name> --part debris [--groups 100] [--units 4] \
     | cargo xtask commands <name> --part players --raw-lua on|off \
     | cargo xtask commands <name> --part moderation --client <windows-target> [--miz FILE]";
 

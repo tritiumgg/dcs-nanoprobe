@@ -359,6 +359,7 @@ codes opcode
   60 PICTURE class=effect campaign=any state=hook payload=layout
   61 PICTURE_STOP class=effect campaign=any state=hook payload=none
   62 MODERATE class=effect campaign=any state=hook payload=layout
+  63 CLEAR_DEBRIS class=effect campaign=any gen=bound state=server payload=layout
   64 CAPTURE class=query entity=group_or_static campaign=active gen=bound state=server payload=none
   65 COUNTRIES class=query campaign=any gen=bound state=server payload=none
   66 PLAYERS class=query campaign=any state=hook payload=none
@@ -501,6 +502,19 @@ layout ILLUMINATION fixed=32
   0x0008 f64 y
   0x0010 f64 z
   0x0018 f64 power
+layout CLEAR_DEBRIS fixed=64
+  0x0000 u32 volume
+  0x0004 pad[4] reserved
+  0x0008 f64 x
+  0x0010 f64 y
+  0x0018 f64 z
+  0x0020 f64 x2
+  0x0028 f64 y2
+  0x0030 f64 z2
+  0x0038 f64 radius
+codes volume
+  1 SPHERE
+  2 BOX
 layout DAMAGE fixed=8
   0x0000 f64 life_percent
 layout CHAT fixed=8
@@ -528,4 +542,4 @@ codes moderation
   2 BAN call=net.banlist_add(player,_seconds,_reason);_with_player_0,_net.banlist_add_by_ucid(ucid,_seconds,_reason)
   3 UNBAN call=net.banlist_remove(ucid)
   4 SLOT call=net.force_player_slot(player,_side,_slot)
-hash df4b4a88786ef8fa
+hash 780c54caa5135621

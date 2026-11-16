@@ -17,7 +17,7 @@ use nanoprobe_agent_link::sampler::{Rates, Report, Sampler, clock_cost};
 use nanoprobe_agent_link::{Admit, Link, Options};
 use nanoprobe_transport::codec::{Lv, Reader, Writer};
 use nanoprobe_transport::layout::{
-    HandlerState, kind, lifecycle, moderation, opcode as op, opcode_row, result,
+    HandlerState, kind, lifecycle, moderation, opcode as op, opcode_row, result, volume,
 };
 use nanoprobe_transport::log::{Level, Value};
 use nanoprobe_transport::names::{self, Kind};
@@ -1316,10 +1316,49 @@ fn arguments_with(
             f.text("slot", slot);
             f.text("reason", reason);
         }
+        op::CLEAR_DEBRIS => {
+            let shape = u64::from(rd.u32().ok()?);
+            rd.skip(4).ok()?;
+            let mut v = [0.0f64; 7];
+            for x in &mut v {
+                *x = rd.f64().ok()? + 0.0;
+            }
+            let [x, y, z, x2, y2, z2, radius] = v;
+            if !v
+                .iter()
+                .all(|n| n.is_finite() && n.abs() <= DEBRIS_REACH_MAX)
+            {
+                return None;
+            }
+            let sound = match shape {
+                volume::SPHERE => radius > 0.0,
+                volume::BOX => x <= x2 && y <= y2 && z <= z2,
+                _ => false,
+            };
+            if !sound {
+                return None;
+            }
+            f.num("volume", shape as f64);
+            for (key, n) in [
+                ("x", x),
+                ("y", y),
+                ("z", z),
+                ("x2", x2),
+                ("y2", y2),
+                ("z2", z2),
+                ("radius", radius),
+            ] {
+                f.num(key, n);
+            }
+        }
         _ => {}
     }
     Some(f.finish())
 }
+
+/// The farthest from 0 a `CLEAR_DEBRIS` coordinate or radius may be, in
+/// meters: 10,000 km.
+const DEBRIS_REACH_MAX: f64 = 10_000_000.0;
 
 /// The longest a `PICTURE` stays, in seconds.
 const PICTURE_SECONDS_MAX: f64 = 86_400.0;
@@ -2904,6 +2943,69 @@ mod tests {
         }
         assert!(bad(vec![0; 23]));
         assert!(bad(moderate(1, 7, 0.0, "abc")[..30].to_vec()));
+    }
+
+    fn clear(shape: u32, v: [f64; 7]) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u32(shape).pad(4);
+        for x in v {
+            w.f64(x);
+        }
+        w.finish()
+    }
+
+    #[test]
+    fn clear_debris_decodes_a_sphere_and_a_box() {
+        let h = header(0, 0);
+        let fields = |shape: f64, v: [f64; 7]| {
+            let mut out = vec![("volume", n(shape))];
+            for (key, x) in ["x", "y", "z", "x2", "y2", "z2", "radius"]
+                .into_iter()
+                .zip(v)
+            {
+                out.push((key, n(x)));
+            }
+            out
+        };
+        let sphere = [100.0, 5.0, -200.0, 0.0, 0.0, 0.0, 50.0];
+        expect(op::CLEAR_DEBRIS, &h, &clear(1, sphere), fields(1.0, sphere));
+        let boxed = [-10.0, -1.0, -10.0, 10.0, 1.0, 10.0, 0.0];
+        expect(op::CLEAR_DEBRIS, &h, &clear(2, boxed), fields(2.0, boxed));
+        // A box may be flat, and the limits are inclusive.
+        let flat = [-1e7, 0.0, 0.0, 1e7, 0.0, 1e7, 0.0];
+        assert!(arguments(op::CLEAR_DEBRIS as u16, &h, &clear(2, flat)).is_some());
+        assert_eq!(
+            handler_state(op::CLEAR_DEBRIS as u16),
+            Some(HandlerState::Server)
+        );
+    }
+
+    #[test]
+    fn clear_debris_refuses_what_the_spec_names() {
+        let h = header(0, 0);
+        let bad = |bytes: Vec<u8>| arguments(op::CLEAR_DEBRIS as u16, &h, &bytes).is_none();
+        let sphere = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 10.0];
+        assert!(bad(clear(0, sphere)));
+        assert!(bad(clear(3, sphere)));
+        assert!(bad(clear(1, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])));
+        assert!(bad(clear(1, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0])));
+        assert!(bad(clear(2, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])));
+        assert!(bad(clear(2, [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0])));
+        assert!(bad(clear(2, [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0])));
+        for at in 0..7 {
+            for x in [
+                f64::NAN,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                1.0e7 + 1.0,
+                -1.0e7 - 1.0,
+            ] {
+                let mut v = sphere;
+                v[at] = x;
+                assert!(bad(clear(1, v)), "{at} {x}");
+            }
+        }
+        assert!(bad(clear(1, sphere)[..63].to_vec()));
     }
 
     #[test]

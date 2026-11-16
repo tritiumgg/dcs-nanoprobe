@@ -202,9 +202,12 @@ commands:
                             when it is out of date
   api-dump <name>           Write lua/mock/api/<state>.txt from each state's globals
   snapshot <name>           List the profile's tree, outside Logs/
-  miz <template> <out> [--start-time S] [--limited-airport ID] [--sound-picture]
+  miz <template> <out> [--start-time S] [--limited-airport ID] [--limited-warehouse ID]
+      [--sound-picture]
                             Write a shell mission from an empty Mission Editor
-                            template, optionally starting S seconds after midnight
+                            template, optionally starting S seconds after midnight.
+                            --limited-warehouse limits the warehouse of a FARP or
+                            other static by its unit ID.
 
 Profiles are read from the file NANOPROBE_TARGETS names, or by default from
 ~/.config/nanoprobe/targets.toml (%APPDATA%\\nanoprobe\\targets.toml on Windows).";
@@ -922,6 +925,13 @@ fn miz(template: &str, out: &str, rest: &[&str]) -> Result<ExitCode, String> {
                     value
                         .parse()
                         .map_err(|_| format!("--limited-airport {value:?} is not an airbase ID"))?,
+                )
+            }
+            "--limited-warehouse" => {
+                changes.limited_warehouse = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("--limited-warehouse {value:?} is not a unit ID"))?,
                 )
             }
             _ => return Err(format!("unknown options: {}", rest.join(" "))),
