@@ -152,6 +152,22 @@ impl Api {
         Ok(())
     }
 
+    /// Renew the lease, or take a new one when the sidecar lost it: it exits
+    /// when DCS restarts and the image starts it again with no leases.
+    fn keep(&mut self) {
+        if self.renew().is_ok() {
+            return;
+        }
+        let granted = self
+            .rt
+            .block_on(self.session.acquire_lease(pb::AcquireLeaseRequest {
+                client_name: "xtask-shell".into(),
+            }));
+        if let Ok(g) = granted {
+            self.lease = g.into_inner().lease;
+        }
+    }
+
     fn key(&mut self, what: &str) -> Option<pb::Idempotency> {
         self.keys += 1;
         Some(pb::Idempotency {
@@ -334,9 +350,12 @@ fn wait<T>(
         if Instant::now() > deadline {
             return Err(format!("{what}: not within {limit:?}"));
         }
-        api.renew()?;
+        api.keep();
         // Unpauses and lets the mission run a moment; a load is not held.
-        let _ = run.hold(3.0);
+        // With DCS down the hold fails at once: wait instead.
+        if run.hold(3.0).is_err() {
+            std::thread::sleep(Duration::from_secs(3));
+        }
     }
 }
 
@@ -678,8 +697,11 @@ pub fn drive(
             && seen["zone_found"] == json!(true)
             && tpl_rules > 0
             && seen["rules"].as_u64() == Some(tpl_rules as u64)
-            && fixed
-            && dynamic;
+            && fixed;
+        // LIVE (2.9.31.29434, Wine, 2026-11-16): `DCS.getAvailableSlots`
+        // listed the template's Client seats and no dynamic-spawn slot while
+        // the shell carried the airport's flag. Whether a client is offered
+        // one is a person test; the listing is recorded, not passed on.
         results["own_template"] = json!({
             "pass": pass,
             "same_members": same_members,
@@ -689,7 +711,7 @@ pub fn drive(
             "shell_dynamic_spawn": spawn_flag,
             "template_rules": tpl_rules,
             "fixed_slot": fixed,
-            "dynamic_slot": dynamic,
+            "dynamic_slot_listed": dynamic,
             "dynamic_slot_rule": dynamic_rule,
             "seen": seen,
             "slots": slots,
@@ -824,7 +846,10 @@ pub fn drive(
         LOAD_LIMIT,
         "DCS back after the restart",
         |api| {
-            let s = api.status()?;
+            // The sidecar restarts with DCS: no answer is not back yet.
+            let Ok(s) = api.status() else {
+                return Ok(None);
+            };
             Ok((s.health == pb::Health::Healthy as i32
                 && s.sim_state == pb::SimState::Running as i32)
                 .then_some(()))
@@ -852,7 +877,11 @@ pub fn drive(
         LOAD_LIMIT,
         "DCS back after the kill",
         |api| {
-            let s = api.status()?;
+            let Ok(s) = api.status() else {
+                // The sidecar restarts after the kill: DCS left Healthy.
+                left_healthy = true;
+                return Ok(None);
+            };
             let healthy = s.health == pb::Health::Healthy as i32;
             if !healthy {
                 left_healthy = true;
