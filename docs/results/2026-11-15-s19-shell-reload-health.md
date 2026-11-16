@@ -10,17 +10,37 @@
 
 ## Host exit tests
 
-| Exit item | Test | Result |
+Run with `cargo test -p nanoprobe-api -p nanoprobe-sidecar -p nanoprobe-cli` on the
+branch; `mise run check` runs them all.
+
+| Exit item | Host test | Result |
 |---|---|---|
-| Weather and time across a reload | `activation_writes_the_shell_from_the_next_mission_and_the_clock_follows`; `shell::tests::only_the_runtime_fields_change` | PASS: the shell holds the set start and the dynamic-spawn flags; the start is used once; the clock runs from the shell's start |
-| Two theaters there and back | `a_reload_switches_theater_and_back_with_the_other_map_s_entities_virtual` | PASS: each reload leaves the other map's group `virtual` and the loaded map's `live`; shells alternate between the two slots |
-| A campaign's own template | `a_campaign_template_is_checked_kept_and_written_into_its_shell`; `shell::tests::no_change_keeps_every_member_byte_for_byte` | PASS: refused for a theater not the campaign's, a file that is not a `.miz`, and a placed name that reads as a platform name; the shell carries the template's own weather |
-| A finished campaign readable, refusing changes | `a_finished_campaign_reads_through_a_copy_and_refuses_changes`; `campaigns::tests::a_finished_campaign_reads_through_a_copy_that_goes_away` | PASS: read through a migrated copy under `.read/`, removed after 60 s unused; changes refused as read-only |
-| Hung verdict | `a_hung_verdict_is_a_lifecycle_event_on_entering_and_leaving` | PASS on the host for the event; the verdict itself is the S17 health rule, checked live |
-| Resolving a held member | `store::tests::a_held_member_resolves_dead_or_restored_once` | PASS |
-| Offline restore | `campaigns::tests::a_restore_keeps_ids_and_revisions_above_both_copies`; `restore::tests::refuses_a_held_store_dir_and_restores_a_free_one` | PASS |
-| Export | `export::tests::exports_every_table_one_json_object_per_line`; `export_reload_and_delete_through_the_services` | PASS |
+| Weather and time change across a commanded reload | `a_reload_writes_the_requested_weather_and_start_then_the_clock` (a `NextMission` with a start and a weather Struct, the reload's shell in the second slot, then a reload with no start carrying the clock); `shell::tests::only_the_runtime_fields_change` | PASS on the host; that DCS applies them: live |
+| The campaign clock | `the_clock_follows_loads_refusals_and_restarts` (an applied load whose mission starts late, a refused load, a DCS restart that loads no shell) | PASS |
+| A killed DCS, restarted by the host, restored unattended | live only (the fake's restart is covered by S18's tests) | live |
+| A crashed DCS reported hung within the limit | `a_hung_verdict_is_a_lifecycle_event_on_entering_and_leaving` for the event; the verdict is S17's rule | live |
+| Client behaviour across a reload is recorded | none | open: person test |
+| A generated shell offers both kinds of player slot, a client takes each | `a_campaign_template_is_checked_kept_and_written_into_its_shell` (the dynamic-spawn flags in the shell); offered slots live | offered: live; taken: open, person test |
+| Two theaters, switched and back, the unloaded map's entities virtual | `a_reload_switches_theater_and_back_with_the_other_map_s_entities_virtual` | PASS |
+| A finished campaign readable, refusing changes | `a_finished_campaign_reads_through_a_copy_and_refuses_changes`; `campaigns::tests::a_finished_campaign_reads_through_a_copy_that_goes_away` | PASS |
+| A campaign's own editor-built template, only runtime fields changed | `a_campaign_template_is_checked_kept_and_written_into_its_shell`; `shell::tests::no_change_keeps_every_member_byte_for_byte` | PASS on the host; with the owner's editor-built mission: live |
+
+Other built items and their tests: `ResolveMember`
+(`resolve_member_works_on_a_suspended_campaign`, `store::tests::a_held_member_resolves_dead_or_restored_once`),
+the offline restore (`campaigns::tests::a_restore_keeps_ids_and_revisions_above_both_copies`,
+`a_restored_finished_backup_stays_finished`, `restore::tests::refuses_a_held_store_dir_and_restores_a_free_one`),
+export (`export::tests::exports_every_table_one_json_object_per_line`,
+`export_reload_and_delete_through_the_services`), free space
+(`a_full_file_system_refuses_a_backup_a_copy_and_a_template`).
 
 ## Live
 
 Filled in by the live runs.
+
+## Open
+
+- A client takes each kind of slot, and client behaviour across a reload: person tests
+  on the Windows client, which the owner is using during this step.
+- Whether DCS keeps a loaded `.miz` open on Windows, so a rename over it fails: a
+  Windows check, open while the owner uses the PC. The two shell slots never write over
+  the file the last load named.
