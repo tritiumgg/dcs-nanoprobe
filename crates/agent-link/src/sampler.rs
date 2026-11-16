@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 use nanoprobe_transport::codec::Lv;
 use nanoprobe_transport::layout::kind;
 use nanoprobe_transport::records::{
-    Airbase, Attitude, EnumBegin, EnumEnd, Object, ObjectGone, Positions, Seen, Vitals, Warehouse,
+    Airbase, Ammo, Attitude, EnumBegin, EnumEnd, Object, ObjectGone, Positions, Seen, Vitals,
+    Warehouse,
 };
 
 use crate::link::Link;
@@ -207,6 +208,17 @@ pub struct Found {
     /// A static that can move: cargo (DCS `Object.Category.CARGO`). Its
     /// position is read with the units'. Not part of the `OBJECT` record.
     pub movable: bool,
+}
+
+/// A loadout read an event asked for.
+#[derive(Clone, Debug)]
+struct LoadoutMark {
+    /// The unit's DCS object ID: a birth's row does not exist yet.
+    object: u64,
+    /// [`Ammo::BIRTH`] or [`Ammo::TAKEOFF`]; the later event's.
+    cause: u32,
+    /// Pumps that found no row for the object.
+    waits: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -912,6 +924,11 @@ pub struct Sampler {
     recount: bool,
     /// Rows an event named since their life was read.
     life_marks: Vec<u32>,
+    /// Loadout reads a birth or a takeoff event asked for, in the order
+    /// they came, one entry per object.
+    loadouts: Vec<LoadoutMark>,
+    /// Loadout marks dropped because the list was full.
+    loadouts_dropped: u64,
     /// A sample record's payload while it is written, kept for its
     /// capacity.
     scratch: Vec<u8>,
@@ -980,6 +997,14 @@ const PUMP_WAIT_S: f64 = 1.0;
 
 /// Existence checks one pump asks for at most.
 pub const CHECKS_PER_PUMP: usize = 20;
+/// Loadout reads one pump hands out at most (spec/sampling.md, "Loadout
+/// reads").
+pub const LOADOUTS_PER_PUMP: usize = 8;
+/// The most loadout marks that wait; a mark past it is dropped and counted.
+pub const LOADOUT_MARKS_MAX: usize = 1024;
+/// Pumps a mark waits for its object's row, which a birth's mark precedes,
+/// before it is dropped.
+pub const LOADOUT_WAIT_PUMPS: u32 = 600;
 /// Pending-destroy objects one pump checks at most, within `CHECKS_PER_PUMP`.
 const PENDING_PER_PUMP: usize = 4;
 /// The most objects the pending-destroy set holds. The object table has no
@@ -1152,6 +1177,8 @@ impl Sampler {
             suspect_cargo: 0,
             recount: false,
             life_marks: Vec::new(),
+            loadouts: Vec::new(),
+            loadouts_dropped: 0,
             scratch: Vec::new(),
             xcall_seen: 0.0,
         }
@@ -1273,6 +1300,7 @@ impl Sampler {
         self.sub_dirty = true;
         self.stopped.clear();
         self.life_marks.clear();
+        self.loadouts.clear();
         self.idle_units = 0;
         self.cargo = 0;
         self.idle_cargo = 0;
@@ -1826,6 +1854,147 @@ impl Sampler {
         out.len()
     }
 
+    /// A birth or a takeoff event named `object` as its initiator: the next
+    /// pump reads the unit's ammunition if a player occupies it
+    /// (spec/sampling.md, "Loadout reads"). `cause` is [`Ammo::BIRTH`] or
+    /// [`Ammo::TAKEOFF`]. A birth's row does not exist yet, so the mark keeps
+    /// the object ID and waits for the row. An object whose row is not a unit
+    /// is ignored; a second event for an object already marked replaces its
+    /// cause.
+    pub fn mark_loadout(&mut self, object: Option<f64>, cause: u32) {
+        let Some(object) = object.filter(|o| (0.0..9.007_199_254_740_992e15).contains(o)) else {
+            return;
+        };
+        let object = object as u64;
+        if self
+            .by_object
+            .get(&object)
+            .and_then(|&slot| self.rows[slot as usize].as_ref())
+            .is_some_and(|row| !row.unit())
+        {
+            return;
+        }
+        if let Some(mark) = self.loadouts.iter_mut().find(|m| m.object == object) {
+            mark.cause = cause;
+        } else if self.loadouts.len() >= LOADOUT_MARKS_MAX {
+            self.loadouts_dropped += 1;
+        } else {
+            self.loadouts.push(LoadoutMark {
+                object,
+                cause,
+                waits: 0,
+            });
+        }
+    }
+
+    /// Loadout marks waiting for a pump.
+    pub fn loadouts_waiting(&self) -> usize {
+        self.loadouts.len()
+    }
+
+    /// Loadout marks dropped because the list was full.
+    pub fn loadouts_dropped(&self) -> u64 {
+        self.loadouts_dropped
+    }
+
+    /// The slot of the unit row a loadout mark names, once its row exists.
+    fn loadout_slot(&self, object: u64) -> Option<u32> {
+        let &slot = self.by_object.get(&object)?;
+        let row = self.rows[slot as usize].as_ref()?;
+        (row.unit() && !row.suspect).then_some(slot)
+    }
+
+    /// Whether a loadout mark has its row: a pump has a read to make.
+    fn loadouts_ready(&self) -> bool {
+        self.loadouts
+            .iter()
+            .any(|m| self.loadout_slot(m.object).is_some())
+    }
+
+    /// Fill `out` with at most `LOADOUTS_PER_PUMP` pairs of a unit's slot and
+    /// the cause of its read, and return how many. A pump hands out as many
+    /// as its budget pays for at a vitals row's cost each, at least one.
+    /// The marks of rows that do not exist yet wait; one that waits
+    /// `LOADOUT_WAIT_PUMPS` pumps is dropped. Nothing when the pump is not
+    /// sampling.
+    pub fn loadouts(&mut self, out: &mut Vec<(u32, u32)>) -> usize {
+        out.clear();
+        if !self.sampling || self.loadouts.is_empty() {
+            return 0;
+        }
+        let cost = self.tiers[Tier::Vitals.index()].cost;
+        let afford = if cost > 0.0 {
+            (self.budget.budget.max(0.0) / cost) as usize
+        } else {
+            LOADOUTS_PER_PUMP
+        };
+        let most = afford.clamp(1, LOADOUTS_PER_PUMP);
+        let marks = std::mem::take(&mut self.loadouts);
+        let mut kept = Vec::with_capacity(marks.len());
+        for mut mark in marks {
+            match self.loadout_slot(mark.object) {
+                Some(slot) if out.len() < most => out.push((slot, mark.cause)),
+                // A row that exists waits its turn.
+                Some(_) => kept.push(mark),
+                None => {
+                    mark.waits += 1;
+                    if mark.waits <= LOADOUT_WAIT_PUMPS && !self.has_other_row(mark.object) {
+                        kept.push(mark);
+                    }
+                }
+            }
+        }
+        self.loadouts = kept;
+        self.checked |= !out.is_empty();
+        out.len()
+    }
+
+    /// Whether the object has a row that is no readable unit: a static, or a
+    /// unit left out of every tier.
+    fn has_other_row(&self, object: u64) -> bool {
+        self.by_object
+            .get(&object)
+            .and_then(|&slot| self.rows[slot as usize].as_ref())
+            .is_some()
+    }
+
+    /// A player-occupied unit's ammunition: pairs of type name and count,
+    /// read for the event `cause` named. Writes one `AMMO` record.
+    pub fn ammo(&mut self, link: &mut impl Port, slot: u32, cause: u32, items: &[(Vec<u8>, f64)]) {
+        let Some(row) = self.present(slot).filter(|r| r.unit()) else {
+            return;
+        };
+        let object = row.found.object;
+        let list = items
+            .iter()
+            .enumerate()
+            .map(|(i, (t, c))| {
+                (
+                    Lv::Number((i + 1) as f64),
+                    Lv::Table(vec![
+                        (Lv::String(b"type".to_vec()), Lv::String(t.clone())),
+                        (Lv::String(b"count".to_vec()), Lv::Number(*c)),
+                    ]),
+                )
+            })
+            .collect();
+        let payload = Ammo {
+            object,
+            cause,
+            ammo: Lv::Table(list),
+        }
+        .encode();
+        if payload.len() > link.max_payload() {
+            return;
+        }
+        // The `OBJECT` of a row the pump just read goes before its sample.
+        if self.dirty {
+            link.flush();
+            self.dirty = false;
+        }
+        link.sample(kind::AMMO as u16, &payload);
+    }
+
     /// The command destroyed these objects: each row held leaves as
     /// `DESTROYED` at once, before the command's `RESULT`, and every ID
     /// enters the pending-destroy set (spec/commands.md, "A destroy while
@@ -1951,6 +2120,7 @@ impl Sampler {
         self.sub_slots.retain(|s| *s != slot);
         self.stopped.retain(|s| *s != slot);
         self.life_marks.retain(|s| *s != slot);
+        self.loadouts.retain(|m| m.object != object);
         self.put(link, kind::OBJECT_GONE as u16, gone_record.encode());
         self.resolve_miss(link, object, false);
         slot + 1
@@ -2441,7 +2611,7 @@ impl Sampler {
         // its call for no rows.
         let maintenance = (self.births > 0 || self.enum_due || self.enumeration.is_some())
             && self.maintenance_pays();
-        if maintenance || self.sub_wanted() || !self.urgent.is_empty() {
+        if maintenance || self.sub_wanted() || !self.urgent.is_empty() || self.loadouts_ready() {
             return true;
         }
         if self.behind() {
@@ -4997,3 +5167,7 @@ mod gone_tests;
 #[cfg(test)]
 #[path = "sampler_seen_tests.rs"]
 mod seen_tests;
+
+#[cfg(test)]
+#[path = "sampler_loadout_tests.rs"]
+mod loadout_tests;

@@ -8,7 +8,7 @@
 use nanoprobe_transport::codec::{DecodeError, Lv, Reader, Writer};
 use nanoprobe_transport::layout::{command, kind};
 use nanoprobe_transport::records::{
-    Airbase, AuthorEvent, Bind, CommandHeader, CommandResult, EnumBegin, EnumEnd, Event,
+    Airbase, Ammo, AuthorEvent, Bind, CommandHeader, CommandResult, EnumBegin, EnumEnd, Event,
     ExtensionStats, Frame, Gap, Hello, Lifecycle, Menu, Player, Positions, Rates, Subscribe,
     Vitals as TransportVitals, Warehouse,
 };
@@ -301,6 +301,8 @@ pub enum Input {
     Positions(Vec<Position>),
     /// `VITALS`
     Vitals(Vec<Vitals>),
+    /// `AMMO`
+    Ammo(Ammo),
     /// `AIRBASE`
     Airbase(Airbase),
     /// `WAREHOUSE`
@@ -336,6 +338,7 @@ impl Input {
             kind::POSITIONS => Input::Positions(decode_positions(payload)?),
             kind::VITALS => Input::Vitals(decode_vitals(payload)?),
             kind::EVENT => Input::Event(Event::decode(payload)?),
+            kind::AMMO => Input::Ammo(Ammo::decode(payload)?),
             kind::AIRBASE => Input::Airbase(Airbase::decode(payload)?),
             kind::WAREHOUSE => Input::Warehouse(Warehouse::decode(payload)?),
             kind::AUTHOR_EVENT => Input::AuthorEvent(AuthorEvent::decode(payload)?),
@@ -362,6 +365,7 @@ impl Input {
             Input::Positions(p) => (kind::POSITIONS, encode_positions(p)),
             Input::Vitals(v) => (kind::VITALS, encode_vitals(v)),
             Input::Event(e) => (kind::EVENT, e.encode()),
+            Input::Ammo(a) => (kind::AMMO, a.encode()),
             Input::Airbase(a) => (kind::AIRBASE, a.encode()),
             Input::Warehouse(w) => (kind::WAREHOUSE, w.encode()),
             Input::AuthorEvent(a) => (kind::AUTHOR_EVENT, a.encode()),

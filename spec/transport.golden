@@ -117,6 +117,7 @@ codes record_kind
   32 POSITIONS class=sample
   33 VITALS class=sample
   34 ATTITUDE class=sample
+  35 AMMO class=sample
   36 WAREHOUSE class=sample
   37 AIRBASE class=sample
   38 EXTENSION class=sample
@@ -288,6 +289,11 @@ layout ATTITUDE fixed=8
   + f32[n] heading
   + f32[n] pitch
   + f32[n] roll
+layout AMMO fixed=16
+  0x0000 u64 object
+  0x0008 u32 cause
+  0x000c pad[4] reserved
+  + lv ammo
 layout WAREHOUSE fixed=0
   + str airbase
   + lv stock
@@ -522,4 +528,4 @@ codes moderation
   2 BAN call=net.banlist_add(player,_seconds,_reason);_with_player_0,_net.banlist_add_by_ucid(ucid,_seconds,_reason)
   3 UNBAN call=net.banlist_remove(ucid)
   4 SLOT call=net.force_player_slot(player,_side,_slot)
-hash d386caeb0c478c15
+hash df4b4a88786ef8fa

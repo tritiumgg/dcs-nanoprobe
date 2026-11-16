@@ -579,6 +579,24 @@ impl Inner {
             if let Some(read) = self.link.read_with(r, &look) {
                 group.push(read);
             }
+            // The ammunition a birth or a takeoff read of a player-occupied
+            // unit gave: a unit the store holds shows it (spec/world.md,
+            // "Ammunition"). It is volatile, kept in the store's unit.
+            if r.kind == nanoprobe_transport::layout::kind::AMMO as u16
+                && let Some(e) = env.as_ref()
+                && let Ok(a) = nanoprobe_transport::records::Ammo::decode(&r.payload)
+            {
+                let at = self.link.stamp();
+                let mut g = e.borrow_mut();
+                let (rec, store, _) = &mut *g;
+                if let Some((unit, _)) = rec.entity_of(store, a.object)
+                    && store.loaded().is_some_and(|l| {
+                        l.agent_boot == r.agent_boot && l.mission_gen == at.mission_generation
+                    })
+                {
+                    store.observe_loadout(EntityId(unit), crate::convert::loadout(&a, &at));
+                }
+            }
             for n in notes {
                 group.push(Read {
                     campaign: self.link.frame_campaign,

@@ -3,7 +3,7 @@
 //! by its layout (spec/records.md, spec/commands.md). The kinds are the
 //! control records, `LOG`, `EVENT`, the object table (`OBJECT`,
 //! `OBJECT_GONE`, `ENUM_BEGIN`, `ENUM_END`) and the samples (`POSITIONS`,
-//! `VITALS`, `ATTITUDE`, `WAREHOUSE`, `AIRBASE`). A decoder never
+//! `VITALS`, `ATTITUDE`, `AMMO`, `WAREHOUSE`, `AIRBASE`). A decoder never
 //! panics, and a count the payload cannot hold is an error that allocates
 //! nothing.
 
@@ -861,6 +861,46 @@ impl Attitude {
     }
 }
 
+/// `AMMO`: the ammunition of one player-occupied unit, read at its birth or
+/// its takeoff.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ammo {
+    /// DCS object ID.
+    pub object: u64,
+    /// The event that asked for the read: [`Ammo::BIRTH`] or
+    /// [`Ammo::TAKEOFF`].
+    pub cause: u32,
+    /// An array of tables, each with `type` and `count`.
+    pub ammo: Lv,
+}
+
+impl Ammo {
+    /// The read followed `S_EVENT_BIRTH`.
+    pub const BIRTH: u32 = 1;
+    /// The read followed `S_EVENT_TAKEOFF`.
+    pub const TAKEOFF: u32 = 2;
+
+    /// The payload.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u64(self.object).u32(self.cause).pad(4).lv(&self.ammo);
+        w.finish()
+    }
+
+    /// Decode a payload.
+    pub fn decode(b: &[u8]) -> Result<Ammo, DecodeError> {
+        let mut r = Reader::new(b);
+        let object = r.u64()?;
+        let cause = r.u32()?;
+        r.skip(4)?;
+        Ok(Ammo {
+            object,
+            cause,
+            ammo: r.lv()?,
+        })
+    }
+}
+
 /// `WAREHOUSE`: the inventory of one airbase.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Warehouse {
@@ -1699,7 +1739,22 @@ mod tests {
     }
 
     #[test]
-    fn warehouse_and_airbase_round_trip() {
+    fn ammo_warehouse_and_airbase_round_trip() {
+        let a = Ammo {
+            object: 5,
+            cause: Ammo::TAKEOFF,
+            ammo: stock(),
+        };
+        let b = a.encode();
+        assert_eq!(Ammo::decode(&b), Ok(a));
+        truncations_fail(&b, Ammo::decode);
+        let empty = Ammo {
+            object: 0,
+            cause: Ammo::BIRTH,
+            ammo: Lv::Nil,
+        };
+        assert_eq!(empty.encode().len(), fixed("AMMO") + 1);
+
         let w = Warehouse {
             airbase: "Batumi".into(),
             stock: stock(),

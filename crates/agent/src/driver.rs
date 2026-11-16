@@ -22,7 +22,8 @@ use nanoprobe_transport::layout::{
 use nanoprobe_transport::log::{Level, Value};
 use nanoprobe_transport::names::{self, Kind};
 use nanoprobe_transport::records::{
-    Airbase, AuthorEvent, Bind, CommandHeader, Event, ExtensionStats, Log, Menu, Player, Subscribe,
+    Airbase, Ammo, AuthorEvent, Bind, CommandHeader, Event, ExtensionStats, Log, Menu, Player,
+    Subscribe,
 };
 
 use crate::state;
@@ -72,6 +73,10 @@ struct Driver {
     birth_events: Vec<u32>,
     /// The DCS event IDs after which the target's existence is checked.
     watch_events: Vec<u32>,
+    /// The DCS event IDs after which the initiator's ammunition is read if a
+    /// player occupies it: a birth, and a takeoff.
+    loadout_birth_events: Vec<u32>,
+    loadout_takeoff_events: Vec<u32>,
     /// A frame began and its `finish` has not run.
     open: bool,
     root: PathBuf,
@@ -282,6 +287,8 @@ pub fn start(root: &Path, dcs_version: &str) -> Result<String, String> {
         life_events: Vec::new(),
         birth_events: Vec::new(),
         watch_events: Vec::new(),
+        loadout_birth_events: Vec::new(),
+        loadout_takeoff_events: Vec::new(),
         open: false,
         link,
         root: root.to_path_buf(),
@@ -1785,6 +1792,16 @@ pub fn event(event: Event, started: Instant) -> u32 {
         {
             d.sampler.birth_waits();
         }
+        // A birth or a takeoff of a unit asks for a read of its ammunition
+        // if a player occupies it (spec/sampling.md, "Loadout reads").
+        if let Some(cause) = loadout_cause(
+            &d.loadout_birth_events,
+            &d.loadout_takeoff_events,
+            event.id,
+            field(INITIATOR_CATEGORY),
+        ) {
+            d.sampler.mark_loadout(field(INITIATOR), cause);
+        }
         let max = d.link.outbound().ring().max_payload();
         let mut payload = event.encode();
         if payload.len() > max {
@@ -1919,14 +1936,34 @@ pub fn set_deaths(ids: Vec<u32>) {
 
 /// The DCS event IDs that ask for a read, from the shim's `world.event`:
 /// `which` 1 for the target's life, 2 for a birth, 3 for a check of whether
-/// the target still exists.
+/// the target still exists, 4 and 5 for the initiator's ammunition after a
+/// birth and after a takeoff.
 pub fn set_reads(which: u32, ids: Vec<u32>) {
     with(|d| match which {
         1 => d.life_events = ids,
         2 => d.birth_events = ids,
         3 => d.watch_events = ids,
+        4 => d.loadout_birth_events = ids,
+        5 => d.loadout_takeoff_events = ids,
         _ => {}
     });
+}
+
+/// The cause of a loadout read an event asks for: [`Ammo::BIRTH`] or
+/// [`Ammo::TAKEOFF`], or None for any other event. Only a unit's event
+/// counts: an initiator category that is present and not a unit's (1)
+/// asks for nothing.
+fn loadout_cause(birth: &[u32], takeoff: &[u32], id: u32, category: Option<f64>) -> Option<u32> {
+    if category.is_some_and(|c| c != 1.0) {
+        return None;
+    }
+    if birth.contains(&id) {
+        Some(Ammo::BIRTH)
+    } else if takeoff.contains(&id) {
+        Some(Ammo::TAKEOFF)
+    } else {
+        None
+    }
 }
 
 /// Queue a `LOG` record from Lua: `target` is `hook`, `shim` or `agent`.
@@ -2010,6 +2047,17 @@ fn begun(d: &mut Driver) -> bool {
 /// The objects whose existence the pump checks now, into `out`; how many.
 pub fn checks(out: &mut Vec<u64>) -> usize {
     with(|d| if begun(d) { d.sampler.checks(out) } else { 0 }).unwrap_or(0)
+}
+
+/// The units whose ammunition the pump reads now, into `out` as pairs of a
+/// slot and a cause; how many.
+pub fn loadouts(out: &mut Vec<(u32, u32)>) -> usize {
+    with(|d| if begun(d) { d.sampler.loadouts(out) } else { 0 }).unwrap_or(0)
+}
+
+/// A player-occupied unit's ammunition, read for the event `cause` names.
+pub fn ammo(slot: u32, cause: u32, items: &[(Vec<u8>, f64)]) {
+    with(|d| d.sampler.ammo(&mut d.link, slot, cause, items));
 }
 
 /// An object in the table no longer exists, with what the reads that tell a
@@ -2686,6 +2734,24 @@ mod tests {
             &[],
             vec![("entity", s("18446744073709551615"))],
         );
+    }
+
+    #[test]
+    fn only_a_birth_and_a_takeoff_of_a_unit_ask_for_a_loadout_read() {
+        let (birth, takeoff) = ([15], [3]);
+        let cause = |id, category| loadout_cause(&birth, &takeoff, id, category);
+        assert_eq!(cause(15, Some(1.0)), Some(Ammo::BIRTH));
+        assert_eq!(cause(3, Some(1.0)), Some(Ammo::TAKEOFF));
+        // An initiator with no category may still be a unit.
+        assert_eq!(cause(3, None), Some(Ammo::TAKEOFF));
+        // A static's or a cargo's birth asks for nothing.
+        assert_eq!(cause(15, Some(3.0)), None);
+        assert_eq!(cause(15, Some(6.0)), None);
+        // Any other event asks for nothing, and so does an empty list.
+        for id in [0, 1, 2, 4, 28, 54] {
+            assert_eq!(cause(id, Some(1.0)), None, "event {id}");
+        }
+        assert_eq!(loadout_cause(&[], &[], 15, Some(1.0)), None);
     }
 
     #[test]

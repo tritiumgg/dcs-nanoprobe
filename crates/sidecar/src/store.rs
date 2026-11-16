@@ -190,9 +190,38 @@ pub struct Unit {
     /// What the last capture read besides the state: initial life and attitude.
     /// Absent keys stay 0 and nil.
     pub captured: CapturedMore,
+    /// The last ammunition read of a player-occupied unit. Volatile: never
+    /// written to disk, never part of a capture, and forgotten at a new
+    /// mission generation.
+    pub loadout: Option<Loadout>,
     /// Further keys of the DCS unit or static table: payload, livery,
     /// callsign and so on (spec/world.md, "Lua tables in the API"). Spec.
     pub extra: Lv,
+}
+
+/// The stamps of a record, as the API shows them.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ReadStamp {
+    /// Wall-clock time, seconds since the epoch.
+    pub wall_s: f64,
+    /// Model time, seconds.
+    pub model_time: f64,
+    /// The mission generation.
+    pub mission_gen: u32,
+    /// The agent's frame sequence number.
+    pub frame: u64,
+}
+
+/// A player-occupied unit's ammunition and the read it came from
+/// (spec/records.md, "Layout: AMMO").
+#[derive(Clone, Debug, PartialEq)]
+pub struct Loadout {
+    /// The event that asked for the read: 1 birth, 2 takeoff.
+    pub cause: u32,
+    /// Counts by `getAmmo` type name.
+    pub ammo: BTreeMap<String, u32>,
+    /// When the read was made.
+    pub read: ReadStamp,
 }
 
 impl Unit {
@@ -1151,6 +1180,7 @@ impl Store {
                     label: u.label,
                     skill: u.skill,
                     captured: CapturedMore::default(),
+                    loadout: None,
                     extra: u.extra,
                 },
             );
@@ -1634,6 +1664,7 @@ impl Store {
         let mut cleared = Vec::new();
         for u in self.units.values_mut() {
             u.object = 0;
+            u.loadout = None;
             if !u.left_logged && (u.missing || u.removed) {
                 u.missing = false;
                 u.removed = false;
@@ -1751,6 +1782,18 @@ impl Store {
         {
             u.state.life = life;
             u.captured.life_percent = None;
+            self.touch(unit);
+        }
+    }
+
+    /// A player-occupied unit's ammunition read. It is volatile: nothing of
+    /// it is written to disk.
+    pub fn observe_loadout(&mut self, unit: EntityId, loadout: Loadout) {
+        if let Some(u) = self.units.get_mut(&unit)
+            && !u.dead
+            && u.loadout.as_ref() != Some(&loadout)
+        {
+            u.loadout = Some(loadout);
             self.touch(unit);
         }
     }

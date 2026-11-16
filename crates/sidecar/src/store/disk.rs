@@ -977,6 +977,8 @@ fn durable_eq(a: &Unit, b: &Unit) -> bool {
         label,
         skill,
         captured,
+        // Volatile: never written.
+        loadout: _,
         extra,
     } = a;
     *id == b.id
@@ -1617,6 +1619,8 @@ fn enc_unit(v: &Unit) -> Lv {
         skill,
         extra,
         captured,
+        // Volatile: never written.
+        loadout: _,
     } = v;
     let CapturedMore {
         life0,
@@ -1675,6 +1679,7 @@ fn dec_unit(v: &Lv) -> Result<Unit, DiskError> {
                 life_percent: c.opt_f("life_percent")?,
             }
         },
+        loadout: None,
     })
 }
 

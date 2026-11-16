@@ -947,6 +947,32 @@ impl FakeSim {
             }]));
     }
 
+    /// An `AMMO` record for an object, in the next frame: what the agent
+    /// writes for a player-occupied unit at its birth (`cause` 1) or its
+    /// takeoff (2). `rows` are `getAmmo` type names and counts.
+    pub fn emit_ammo(&mut self, object: u64, cause: u32, rows: &[(&str, f64)]) {
+        let ammo = Lv::Table(
+            rows.iter()
+                .enumerate()
+                .map(|(i, (t, c))| {
+                    (
+                        Lv::Number((i + 1) as f64),
+                        Lv::Table(vec![
+                            (lv::s("type"), lv::s(t)),
+                            (lv::s("count"), Lv::Number(*c)),
+                        ]),
+                    )
+                })
+                .collect(),
+        );
+        self.queued_out
+            .push(Input::Ammo(nanoprobe_transport::records::Ammo {
+                object,
+                cause,
+                ammo,
+            }));
+    }
+
     fn player_record(&mut self, event: u32, id: u32, text: &str) {
         let Some(c) = self.clients.get(&id) else {
             return;

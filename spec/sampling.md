@@ -141,6 +141,9 @@ Which rows a sweep reads:
   `S_EVENT_HIT` names the row as its target, no sooner than 1 s after the row's last
   read. The slow sweep also checks `isExist` on each row it visits, which
   finds a kill that sent no hit event (spec/records.md, "The object table"). A sidecar subscribes the units players occupy.
+- **Ammunition** has no tier and no period. A birth or a takeoff of a unit asks for one
+  read of that unit's ammunition if a player occupies it ("Loadout reads"). No other unit
+  is read for ammunition.
 - An event with no target, and an event naming an object the table
   lacks, marks nothing. Damage that sends no event, such as a scripted explosion's
   splash on a unit it does not kill (LIVE), shows at the row's next slow sweep of life.
@@ -228,6 +231,38 @@ added already in the table; the birth of an object the enumeration already added
 one `wants` check and is dropped. Every birth resolves within one enumeration period
 plus that enumeration's duration. While births wait, as in a fill of 2,000 objects at
 37 µs a birth (LIVE, S11), the enumeration waits behind them.
+
+### Loadout reads
+
+The ammunition of a unit a player occupies is read on two events and on no period. The
+event handler does not read it: for an `S_EVENT_BIRTH` or an `S_EVENT_TAKEOFF` whose
+initiator is a unit (an initiator category, when the event has one, of 1), the agent
+marks the initiator's object ID with the cause, birth or takeoff. A birth's row does not
+exist yet when the event arrives, so the mark names the object ID and waits for the row.
+A second event for a marked object replaces its cause: the later one is kept. A mark for
+an object that has a row that is not a unit is not kept; a mark whose object has no row
+after 600 pumps is dropped; a removed row loses its mark.
+
+The pump makes the reads after its tiers, so the births it resolved are in the table. It
+takes at most 8 marks, and at most as many as the pump's remaining budget pays for at the
+cost of a vitals row each, and at least one; the rest wait for the next pump. A pump
+with a mark that has its row counts as having work ("The pump's worth"). The list holds at
+most 1,024 marks; a mark past that is dropped and counted. For each mark the shim calls
+`Unit.getPlayerName` under `pcall`, in the pump and never in the event handler. A unit with
+no player name is dropped with no further read and no record. For a unit with one, the
+shim calls `getAmmo`, reduces each row to its type name (`desc.typeName`) and count, keeps
+at most 64 rows, and the agent writes one `AMMO` record with the cause (spec/records.md,
+"Layout: AMMO"). A read that raises writes nothing and counts in the shim's read errors.
+
+The cost of a birth or a takeoff of an AI unit is one `getPlayerName` call. The cost of a
+player unit's is that call and one `getAmmo` call, twice in a unit's life at most.
+
+A rearm is not read. DCS sends no event for a rise in ammunition: every fall has a shot
+event, and a rearm has none (LIVE, E38,
+docs/results/2026-11-14-e38-life-and-ammunition.md). The `AMMO` record shows the load at
+the birth or the takeoff it names. The first call of `getPlayerName` on a running DCS is
+UNVERIFIED: that it returns nil, or an empty string, for an AI unit is the shim's
+assumption, and either one drops the unit.
 
 ### The sweep
 

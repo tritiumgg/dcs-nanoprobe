@@ -132,6 +132,8 @@ entries! {
     att => work_att, hot;
     stopped => work_stopped, hot;
     vit => work_vit, hot;
+    loadouts => work_loadouts, hot;
+    ammo => work_ammo, hot;
     airbase => work_airbase, hot;
     item => work_item, hot;
     seen => work_seen, hot;
@@ -1829,6 +1831,66 @@ unsafe fn work_vit(state: *mut State) -> c_int {
     let life = unsafe { arg_finite(state, 2) };
     // SAFETY: as above.
     unsafe { push_bool(state, driver::vitals(slot, life)) }
+}
+
+/// The slots and causes `loadouts` hands out, kept to avoid an allocation.
+static LOADOUTS: Mutex<Vec<(u32, u32)>> = Mutex::new(Vec::new());
+
+/// `loadouts(buffer)`: the units whose ammunition the pump reads now, if a
+/// player occupies them (spec/sampling.md, "Loadout reads"). Writes pairs
+/// into `buffer`, an array with room for them: a slot plus one, as the other
+/// entries take it, then the cause (1 birth, 2 takeoff). Returns how many
+/// pairs.
+unsafe fn work_loadouts(state: *mut State) -> c_int {
+    // SAFETY: a live state.
+    if unsafe { lua::lua_type(state, 1) } != lua::TTABLE {
+        return 0;
+    }
+    // SAFETY: as above; the argument is a table.
+    let room = unsafe { lua::lua_objlen(state, 1) } / 2;
+    let Ok(mut marks) = LOADOUTS.try_lock() else {
+        return 0;
+    };
+    let n = driver::loadouts(&mut marks).min(room);
+    for (i, (slot, cause)) in marks.iter().take(n).enumerate() {
+        // SAFETY: a live state with a free slot; indexes 2i + 1 and 2i + 2
+        // are within the table's length, so the raw sets do not allocate.
+        unsafe {
+            lua::lua_pushnumber(state, f64::from(*slot) + 1.0);
+            lua::lua_rawseti(state, 1, (2 * i + 1) as c_int);
+            lua::lua_pushnumber(state, f64::from(*cause));
+            lua::lua_rawseti(state, 1, (2 * i + 2) as c_int);
+        }
+    }
+    // SAFETY: a live state with a free slot.
+    unsafe { lua::lua_pushinteger(state, n as isize) };
+    1
+}
+
+/// The most entries `ammo` takes.
+const AMMO_MAX: c_int = 64;
+
+/// `ammo(slot, cause, type, count, ...)`: a player-occupied unit's
+/// ammunition, read for the event `cause` names.
+unsafe fn work_ammo(state: *mut State) -> c_int {
+    // SAFETY: a live state.
+    let (Some(slot), Some(cause)) = (unsafe { arg_slot(state, 1) }, unsafe { arg_id(state, 2) })
+    else {
+        return 0;
+    };
+    // SAFETY: as above.
+    let top = unsafe { lua::lua_gettop(state) }.min(2 + 2 * AMMO_MAX);
+    let mut items = Vec::new();
+    let mut i = 3;
+    while i < top {
+        // SAFETY: as above; `i` and `i + 1` are on the stack.
+        if let (Lv::String(t), Some(c)) = unsafe { (scalar(state, i), arg_finite(state, i + 1)) } {
+            items.push((t, c));
+        }
+        i += 2;
+    }
+    driver::ammo(slot, u32::try_from(cause).unwrap_or(0), &items);
+    0
 }
 
 /// A table's pairs.

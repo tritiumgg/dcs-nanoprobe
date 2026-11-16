@@ -128,13 +128,12 @@ a character boundary, so the replacement always fits. An `EVENT`'s values are `l
 | 32 | POSITIONS | sample | Positions of a batch of objects |
 | 33 | VITALS | sample | Life of a batch of objects |
 | 34 | ATTITUDE | sample | Heading, pitch and roll of a batch of objects |
+| 35 | AMMO | sample | A player-occupied unit's ammunition, read at its birth or its takeoff |
 | 36 | WAREHOUSE | sample | One warehouse's stock |
 | 37 | AIRBASE | sample | One airbase's owner |
 | 38 | EXTENSION | sample | One registered extension's run time |
 
 `FRAME` is written with the records it stamps and is never queued alone.
-
-Kind 35 is reserved and is not reused.
 
 ## Control records
 
@@ -780,7 +779,8 @@ describes the same object.
 for a row once when it is added, after an `S_EVENT_HIT` names it as target, in the slow
 sweep every 60 s at the default `vitals_s`, and at a capture. A `SUBSCRIBE` changes that
 for the rows it names: their life is read periodically (`vitals_s`, 5 s by default). The
-platform does not read unit fuel or ammunition.
+platform does not read unit fuel. It reads the ammunition of a player-occupied unit only,
+on two events (below, "Layout: AMMO").
 
 For a consumer, the life of an AI unit is current within about 1 s of a hit event that
 names the unit. Damage that sends no
@@ -821,6 +821,30 @@ capture reads life itself.
 
 Attitude is not sampled periodically. The agent writes it on a capture, for a
 subscribed object, and once when an object stops.
+
+### Layout: AMMO
+
+| Offset | Type | Field | Meaning |
+|---|---|---|---|
+| 0x0000 | u64 | object | DCS object ID |
+| 0x0008 | u32 | cause | The event that asked for the read: 1 birth, 2 takeoff |
+| 0x000C | pad[4] | reserved | |
+| + | lv | ammo | An array of tables, each with `type` (string, from the row's `desc.typeName`) and `count` (number) |
+
+The agent writes `AMMO` only for a unit a player occupies, and only after one of two
+events names the unit as initiator: `S_EVENT_BIRTH`, which a player taking a slot
+causes, and `S_EVENT_TAKEOFF`. The next pump checks `Unit.getPlayerName` for the unit;
+a unit with no player name gets no read and no record, so an AI unit never has an
+`AMMO` record. If both events name a unit before a pump reads it, one record is written
+with the later cause. A pump reads at most a few marked units (spec/sampling.md,
+"Loadout reads"), and nothing reads ammunition on a period.
+
+No DCS event announces a rise in ammunition: every fall has a shot event, and a rearm
+has none (LIVE, E38, docs/results/2026-11-14-e38-life-and-ammunition.md). So a rearm is
+not read; the record shows the load at the birth or the takeoff it names. Flares and
+chaff are not among the rows (LIVE, E8). A unit with no ammunition rows gets a record
+with an empty array. A unit that has no `AMMO` record has an unknown load, not a full
+one.
 
 ### Layout: WAREHOUSE
 

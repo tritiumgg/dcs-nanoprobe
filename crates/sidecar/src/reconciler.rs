@@ -626,8 +626,10 @@ impl Reconciler {
                 }
             }
             Input::Event(_) => self.counters.events += 1,
-            // Read by the API's event log, not by the reconciler.
+            // Read by the API's event log, not by the reconciler. The API
+            // hub folds an `AMMO` into the store's unit.
             Input::Other(_)
+            | Input::Ammo(_)
             | Input::AuthorEvent(_)
             | Input::Player(_)
             | Input::Menu(_)

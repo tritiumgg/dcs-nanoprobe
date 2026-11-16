@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use nanoprobe_transport::codec::{DecodeError, Lv};
 use nanoprobe_transport::layout::{gap_class, kind};
 use nanoprobe_transport::records::{
-    Airbase, Attitude, EnumBegin, EnumEnd, Frame, Gap, Hello, Lifecycle, Object, ObjectGone,
+    Airbase, Ammo, Attitude, EnumBegin, EnumEnd, Frame, Gap, Hello, Lifecycle, Object, ObjectGone,
     Positions, Seen, Vitals, Warehouse,
 };
 
@@ -47,6 +47,16 @@ pub struct Sample<T> {
     pub at: Stamp,
 }
 
+/// The ammunition of a player-occupied unit and the event that asked for its
+/// read.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Loadout {
+    /// [`Ammo::BIRTH`] or [`Ammo::TAKEOFF`].
+    pub cause: u32,
+    /// An array of tables, each with `type` and `count`.
+    pub ammo: Lv,
+}
+
 /// One object of the mirrored table.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Row {
@@ -60,6 +70,8 @@ pub struct Row {
     pub vitals: Option<Sample<f32>>,
     /// The last heading, pitch and roll, radians.
     pub attitude: Option<Sample<[f32; 3]>>,
+    /// The last ammunition read of a player-occupied unit, with its cause.
+    pub ammo: Option<Sample<Loadout>>,
     /// Positions taken for it.
     pub position_samples: u64,
     /// Real-time seconds between its last two positions, 0 before two.
@@ -217,6 +229,12 @@ impl Mirror {
                     self.attitude(a);
                 }
             }
+            kind::AMMO => {
+                let a = Ammo::decode(payload)?;
+                if self.sampling() {
+                    self.ammo(a);
+                }
+            }
             kind::WAREHOUSE => {
                 let w = Warehouse::decode(payload)?;
                 if self.sampling() {
@@ -372,6 +390,7 @@ impl Mirror {
                         position: None,
                         vitals: None,
                         attitude: None,
+                        ammo: None,
                         position_samples: 0,
                         position_interval: 0.0,
                         since,
@@ -529,6 +548,23 @@ impl Mirror {
                 }
                 None => self.counters.samples_unknown_object += 1,
             }
+        }
+    }
+
+    /// `AMMO`: the ammunition of a known object, with its cause.
+    fn ammo(&mut self, a: Ammo) {
+        let at = self.stamp;
+        match self.rows.get_mut(&a.object) {
+            Some(row) => {
+                row.ammo = Some(Sample {
+                    value: Loadout {
+                        cause: a.cause,
+                        ammo: a.ammo,
+                    },
+                    at,
+                });
+            }
+            None => self.counters.samples_unknown_object += 1,
         }
     }
 
@@ -713,6 +749,40 @@ mod tests {
         assert_eq!(v.value, 10.0);
         assert_eq!(m.counters().enumerations_used, 1);
         assert!(!m.wants_enumeration());
+    }
+
+    fn ammo(id: u64, cause: u32) -> (u64, Vec<u8>) {
+        let a = Ammo {
+            object: id,
+            cause,
+            ammo: Lv::Table(vec![(Lv::Number(1.0), Lv::Number(2.0))]),
+        };
+        (kind::AMMO, a.encode())
+    }
+
+    #[test]
+    fn the_latest_ammo_of_a_row_keeps_its_cause_and_stamps() {
+        let mut m = Mirror::new();
+        m.attached();
+        feed(
+            &mut m,
+            &[
+                frame(1, 10.0),
+                hello(),
+                object(1, 0),
+                object(2, 0),
+                ammo(1, Ammo::BIRTH),
+                frame(1, 20.0),
+                ammo(1, Ammo::TAKEOFF),
+                ammo(9, Ammo::BIRTH),
+            ],
+        );
+        let a = m.get(1).unwrap().ammo.as_ref().unwrap();
+        assert_eq!(a.value.cause, Ammo::TAKEOFF);
+        assert_eq!(a.at.real_time, 20.0);
+        // A row with no `AMMO` record has none, and an unknown object counts.
+        assert!(m.get(2).unwrap().ammo.is_none());
+        assert_eq!(m.counters().samples_unknown_object, 1);
     }
 
     #[test]
@@ -1172,6 +1242,7 @@ mod tests {
             kind::POSITIONS,
             kind::VITALS,
             kind::ATTITUDE,
+            kind::AMMO,
             kind::WAREHOUSE,
             kind::AIRBASE,
         ] {

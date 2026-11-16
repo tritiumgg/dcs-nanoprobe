@@ -82,6 +82,9 @@
 --     `sim.picture_stops`; getValueResourceByKey returns a key it does not
 --     know as it is (LIVE). The shapes of the arguments are ED-CODE; their
 --     values on screen are UNVERIFIED.
+--   - A unit added with a `player` name has a player in it: Unit.getPlayerName
+--     returns the name, and nil for an AI unit (UNVERIFIED). `sim:takeoff(unit)`
+--     sends S_EVENT_TAKEOFF with the unit as initiator.
 -- UNVERIFIED choices: births reach handlers at the next frame; the other
 -- getters on a unit that no longer exists raise; a static's initiator_data
 -- has no mission_id; an explosion kills within 10 m.
@@ -328,6 +331,8 @@ function Sim:add_group(country, category, data)
       life = kind.life,
       fuel = kind.air and ((u.payload and u.payload.fuel or kind.fuel_max) / kind.fuel_max) or 1,
       gun = u.payload and u.payload.gun or 100,
+      -- The name of the player in the unit, nil for an AI unit.
+      player = u.player,
       alive = true,
     }
     self.units[unit.id] = unit
@@ -404,6 +409,17 @@ function Sim:explode(point)
     self:doom_static(static)
     queue_deaths(self, static)
   end
+end
+
+-- Put a player in a unit, or take the player out with a nil name. No event
+-- follows: DCS sends S_EVENT_BIRTH when the unit is added.
+function Sim:set_player(unit, name)
+  unit.player = name
+end
+
+-- An S_EVENT_TAKEOFF with `unit` as initiator on the next flush.
+function Sim:takeoff(unit)
+  self.queue[#self.queue + 1] = { event = 'S_EVENT_TAKEOFF', initiator = unit }
 end
 
 -- Send a HIT that kills nothing, from `shooter` (or nobody) to `unit`.
@@ -676,6 +692,11 @@ local function scripting(host, name)
     end,
     getFuel = function(self)
       return live(self, 'getFuel').fuel
+    end,
+    -- The player's name, nil for an AI unit (UNVERIFIED: no run of DCS has
+    -- read it).
+    getPlayerName = function(self)
+      return live(self, 'getPlayerName').player
     end,
     getAmmo = function(self)
       local unit = live(self, 'getAmmo')

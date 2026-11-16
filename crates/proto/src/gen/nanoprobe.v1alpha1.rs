@@ -3931,6 +3931,16 @@ pub struct Unit {
     /// value the unit started with.
     #[prost(double, optional, tag = "9")]
     pub life: ::core::option::Option<f64>,
+    /// A player-occupied unit's ammunition by weapon type name, as `getAmmo`
+    /// listed it at the read that `ammo_read` names. Empty for an AI unit, for a
+    /// unit with no read yet, and for one with no ammunition. DCS sends no event
+    /// for a rearm, so a rearm is not read (spec/world.md, "Ammunition").
+    #[prost(btree_map = "string, uint32", tag = "11")]
+    pub ammo: ::prost::alloc::collections::BTreeMap<::prost::alloc::string::String, u32>,
+    /// The read that gave `ammo`: its cause and the stamps it was read under.
+    /// Absent when no read was made.
+    #[prost(message, optional, tag = "16")]
+    pub ammo_read: ::core::option::Option<AmmoRead>,
     /// Player keys of the occupants, by seat.
     #[prost(string, repeated, tag = "12")]
     pub occupants: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
@@ -3945,6 +3955,15 @@ pub struct Unit {
     /// enumeration's end clears at the load (spec/world.md, "Respawn gate").
     #[prost(enumeration = "UnitLeft", tag = "15")]
     pub left: i32,
+}
+/// The read of a player-occupied unit's ammunition.
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct AmmoRead {
+    #[prost(enumeration = "AmmoReadCause", tag = "1")]
+    pub cause: i32,
+    /// When the read was made.
+    #[prost(message, optional, tag = "2")]
+    pub read: ::core::option::Option<Stamp>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Group {
@@ -4322,6 +4341,37 @@ impl RateClass {
             "RATE_CLASS_NORMAL" => Some(Self::Normal),
             "RATE_CLASS_FAST" => Some(Self::Fast),
             "RATE_CLASS_SLOW" => Some(Self::Slow),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum AmmoReadCause {
+    Unspecified = 0,
+    /// The unit's birth: a player took its slot.
+    Birth = 1,
+    /// The unit's takeoff.
+    Takeoff = 2,
+}
+impl AmmoReadCause {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "AMMO_READ_CAUSE_UNSPECIFIED",
+            Self::Birth => "AMMO_READ_CAUSE_BIRTH",
+            Self::Takeoff => "AMMO_READ_CAUSE_TAKEOFF",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "AMMO_READ_CAUSE_UNSPECIFIED" => Some(Self::Unspecified),
+            "AMMO_READ_CAUSE_BIRTH" => Some(Self::Birth),
+            "AMMO_READ_CAUSE_TAKEOFF" => Some(Self::Takeoff),
             _ => None,
         }
     }

@@ -23,7 +23,7 @@ entities by `EntityId` within a campaign.
 | Kind | Identity | Created by the platform | Carries |
 |---|---|---|---|
 | Group | `EntityId` | yes | The spec: country, category and members; its controller options; and the order. The unit of spawn, order, materialize and destroy. |
-| Unit | `EntityId`, a member of one group | with its group | Observed state: position, attitude, life. Dies alone. |
+| Unit | `EntityId`, a member of one group | with its group | Observed state: position, attitude, life, and a player unit's ammunition at its last birth or takeoff. Dies alone. |
 | Static | `EntityId` | yes | A spec and observed state. Spawned and destroyed alone. |
 | Airbase | theater and DCS name | no | Owner (coalition) |
 | Warehouse | theater and DCS name of its airbase | no | Stock |
@@ -413,6 +413,23 @@ does not apply is counted (`lives_lost`), and the next sample shows the unit's l
 
 A unit spawns with the fuel, ammunition, flares and chaff its payload or type gives
 (owner's decision, after E39).
+
+### Ammunition
+
+`Unit.ammo` is the ammunition of a unit a player occupies, by `getAmmo` type name, as
+the agent read it at the unit's birth or at its takeoff. `Unit.ammo_read` names the
+event that asked for the read, `AMMO_READ_CAUSE_BIRTH` or `AMMO_READ_CAUSE_TAKEOFF`, and
+carries the stamps of the read. Rows with the same type name add up. The newest read
+replaces the one before. A controller reads it for a loadout check.
+
+An AI unit has no ammunition read: its `ammo` is empty and it has no `ammo_read`. So has
+a player unit before its first read, and one with no ammunition rows. Nothing sees a
+rearm, because DCS sends no event for one (LIVE, E38,
+docs/results/2026-11-14-e38-life-and-ammunition.md): the loadout is the one at the last
+birth or takeoff. The sidecar keeps it in memory with the unit. It is not stored on
+disk, not part of a capture and not carried by a restore, and a new mission generation
+clears it. A unit the store holds shows it. The units the sidecar adopts have no entity
+in the store (above, "Managed and unmanaged"), so the API shows no `Unit` for them.
 
 ## Lua tables in the API
 

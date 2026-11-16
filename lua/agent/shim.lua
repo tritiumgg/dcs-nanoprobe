@@ -104,6 +104,8 @@ local CAPABILITIES = {
   'DCS.getUnitPositionByObjectId',
   'Unit.getLife',
   'Unit.isDead',
+  'Unit.getAmmo',
+  'Unit.getPlayerName',
   'Unit.getObjectID',
   'land.getHeight',
   'trigger.action.explosion',
@@ -411,6 +413,11 @@ local function register()
       -- A hit, a damage assessment or a kill asks for one check of whether
       -- its target still exists (spec/records.md, "The object table").
       agent.reads(3, unpack(ids({ 'S_EVENT_HIT', 'S_EVENT_BDA', 'S_EVENT_KILL' })))
+      -- A birth and a takeoff ask for a read of the initiator's ammunition,
+      -- made only if a player occupies the unit (spec/sampling.md, "Loadout
+      -- reads").
+      agent.reads(4, unpack(ids({ 'S_EVENT_BIRTH' })))
+      agent.reads(5, unpack(ids({ 'S_EVENT_TAKEOFF' })))
     end
   end
   if previous and previous.handler and not M.replaced then
@@ -2202,6 +2209,54 @@ local function run_extensions()
   end
 end
 
+-- The ammunition of a unit a birth or a takeoff event named, when a player
+-- occupies it (spec/sampling.md, "Loadout reads"). A unit with no player
+-- name gets no `getAmmo` and no record. Each row is reduced to its type and
+-- count. Raises on a failed read; the caller catches it.
+local function loadout(slot, cause)
+  local o = T.objs[slot]
+  if not o or not T.unit[slot] then
+    return
+  end
+  local name = Unit.getPlayerName(o)
+  if type(name) ~= 'string' or name == '' then
+    return
+  end
+  local a = o:getAmmo()
+  list[1], list[2] = slot, cause
+  local n = 2
+  if type(a) == 'table' then
+    for _, entry in ipairs(a) do
+      local desc = type(entry) == 'table' and rawget(entry, 'desc')
+      local type_name = type(desc) == 'table' and rawget(desc, 'typeName')
+      local count = type(entry) == 'table' and rawget(entry, 'count')
+      if type(type_name) == 'string' and type(count) == 'number' and n < 130 then
+        list[n + 1], list[n + 2] = type_name, count
+        n = n + 2
+      end
+    end
+  end
+  agent.ammo(unpack(list, 1, n))
+end
+
+-- The loadout reads of this pump: pairs of a slot and a cause that the agent
+-- hands out, bounded per pump. Never periodic.
+local function loadouts()
+  local pairs_n = agent.loadouts(buf)
+  for i = 1, pairs_n or 0 do
+    local slot, cause = buf[2 * i - 1], buf[2 * i]
+    local ok, err = pcall(loadout, slot, cause)
+    if not ok then
+      M.read_errors = M.read_errors + 1
+      if M.read_errors <= LOGGED_ERRORS then
+        pcall(function()
+          M.file.write('error', 'a loadout read raised', { error = tostring(err) })
+        end)
+      end
+    end
+  end
+end
+
 local function pump()
   local gen, sample = agent.pump_begin(#T.births, #T.airbases, collectgarbage('count'))
   if gen == nil then
@@ -2244,7 +2299,7 @@ local function pump()
     -- batches of positions without attitude and of vitals itself.
     local tier, rows, flag = agent.plan(buf, T.objs, FN or nil)
     if not tier then
-      return
+      break
     end
     local run = RUN[tier]
     current = nil
@@ -2256,9 +2311,11 @@ local function pump()
         agent.suspect(current)
       end
     elseif stop then
-      return
+      break
     end
   end
+  -- The units a birth or a takeoff named, after the births resolved.
+  loadouts()
 end
 
 -- Errors the pump caught in this process, and how many it logs.

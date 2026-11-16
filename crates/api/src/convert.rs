@@ -9,7 +9,9 @@ use nanoprobe_proto::v1alpha1::{
 use nanoprobe_sidecar::ids::EntityId;
 use nanoprobe_sidecar::intents::{Intent, Waypoint};
 use nanoprobe_sidecar::lifecycle::State;
-use nanoprobe_sidecar::store::{Group, Kind, Point, Store, Unit};
+use nanoprobe_sidecar::store::{Group, Kind, Loadout, Point, ReadStamp, Store, Unit};
+use nanoprobe_transport::codec::Lv;
+use nanoprobe_transport::records::Ammo;
 use prost::Message;
 use tonic::{Code, Status};
 
@@ -119,8 +121,80 @@ fn life(u: &Unit) -> Option<f64> {
     }
 }
 
+/// The store's loadout from an `AMMO` record and the stamps it was read
+/// under. Rows with the same type add up; a row that is not a table with a
+/// string `type` and a number `count` is left out.
+pub fn loadout(a: &Ammo, at: &pb::Stamp) -> Loadout {
+    let mut ammo = BTreeMap::new();
+    if let Lv::Table(rows) = &a.ammo {
+        for (_, row) in rows {
+            let Lv::Table(fields) = row else {
+                continue;
+            };
+            let get = |key: &str| {
+                fields
+                    .iter()
+                    .find(|(k, _)| matches!(k, Lv::String(s) if s == key.as_bytes()))
+                    .map(|(_, v)| v)
+            };
+            if let (Some(Lv::String(t)), Some(Lv::Number(c))) = (get("type"), get("count"))
+                && c.is_finite()
+            {
+                let n = u32::try_from(c.max(0.0).round() as u64).unwrap_or(u32::MAX);
+                let total = ammo
+                    .entry(String::from_utf8_lossy(t).into_owned())
+                    .or_insert(0u32);
+                *total = total.saturating_add(n);
+            }
+        }
+    }
+    Loadout {
+        cause: a.cause,
+        ammo,
+        read: ReadStamp {
+            wall_s: at
+                .wall
+                .as_ref()
+                .map_or(0.0, |w| w.seconds as f64 + f64::from(w.nanos) / 1e9),
+            model_time: at.model_time,
+            mission_gen: at.mission_generation,
+            frame: at.frame,
+        },
+    }
+}
+
+/// The API's read of a unit's ammunition: its cause and stamps.
+fn ammo_read(l: &Loadout) -> pb::AmmoRead {
+    let wall = std::time::Duration::try_from_secs_f64(l.read.wall_s)
+        .ok()
+        .and_then(|d| {
+            Some(prost_types::Timestamp {
+                seconds: i64::try_from(d.as_secs()).ok()?,
+                nanos: i32::try_from(d.subsec_nanos()).ok()?,
+            })
+        });
+    pb::AmmoRead {
+        cause: match l.cause {
+            1 => pb::AmmoReadCause::Birth,
+            2 => pb::AmmoReadCause::Takeoff,
+            _ => pb::AmmoReadCause::Unspecified,
+        } as i32,
+        read: Some(pb::Stamp {
+            wall,
+            model_time: l.read.model_time,
+            mission_generation: l.read.mission_gen,
+            frame: l.read.frame,
+        }),
+    }
+}
+
 fn unit(u: &Unit, theater: &str) -> pb::Unit {
     pb::Unit {
+        ammo: u
+            .loadout
+            .as_ref()
+            .map_or_else(Default::default, |l| l.ammo.clone().into_iter().collect()),
+        ammo_read: u.loadout.as_ref().map(ammo_read),
         id: u.id.0,
         group_id: u.group.0,
         r#type: u.type_name.clone(),
