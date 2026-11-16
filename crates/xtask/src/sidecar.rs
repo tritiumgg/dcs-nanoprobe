@@ -617,7 +617,9 @@ fn with_map(
                 || crate::restart(name).map(|_| ()),
                 || {
                     host.text(
-                        "docker exec \"$1\" sh -c 'pkill -9 -f DCS_server.exe; echo killed'",
+                        // The bracket keeps the pattern from matching this
+                        // shell's own command line, which pkill would kill.
+                        "docker exec \"$1\" sh -c 'pkill -9 -f \"[D]CS_server.exe\"; echo killed'",
                         &[&container],
                     )
                 },
