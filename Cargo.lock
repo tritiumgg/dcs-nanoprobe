@@ -1930,6 +1930,7 @@ dependencies = [
  "nanoprobe-agent-link",
  "nanoprobe-fake-agent",
  "nanoprobe-install",
+ "nanoprobe-proto",
  "nanoprobe-transport",
  "prost",
  "prost-types",
@@ -1937,7 +1938,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tokio",
  "toml",
+ "tonic",
  "tonic-prost-build",
  "zip",
 ]
