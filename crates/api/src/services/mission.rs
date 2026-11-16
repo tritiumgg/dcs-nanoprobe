@@ -151,6 +151,7 @@ pub(crate) fn next_of(n: Option<&NextMission>) -> Result<Next, Status> {
     };
     let weather = n.weather.as_ref().map(crate::lua::struct_to_lua);
     if let Some(w) = &weather {
+        nanoprobe_sidecar::store::check_lv(w).map_err(|e| invalid("next.weather", e))?;
         nanoprobe_sidecar::shell::lua::write(w, 0).map_err(|e| invalid("next.weather", e))?;
     }
     Ok(Next {

@@ -1690,9 +1690,8 @@ impl Inner {
             && r.clock_ms != Some(ms)
         {
             r.clock_ms = Some(ms);
-            if let Err(e) = slot.store.set_record(r) {
-                panic!("the store of campaign {id} could not be written, stopping: {e}");
-            }
+            // Written by the commit of the change it belongs to.
+            slot.store.stage_record(r);
         }
     }
 
@@ -1704,14 +1703,35 @@ impl Inner {
     /// refusal leaves every campaign as it was. The caller then calls
     /// [`Inner::shell_written`].
     pub fn write_shell(&self, id: u64, theater: &str) -> Result<Option<OwedLoad>, Status> {
-        use nanoprobe_sidecar::shell::{self, Runtime, Start};
-        let Some(template) = self.template_for(id, theater)? else {
+        let Some((bytes, start)) = self.render_shell(id, theater)? else {
             return Ok(None);
         };
         let m = self
             .backend
             .missions()
             .expect("a template comes from [missions]");
+        let dir = m.dir().map_err(precondition)?;
+        let slot = nanoprobe_sidecar::shell::other_slot(self.last_slot(id));
+        nanoprobe_sidecar::shell::save(dir, id, slot, &bytes).map_err(|e| {
+            precondition(format!(
+                "the shell of campaign {id} could not be written: {e}"
+            ))
+        })?;
+        Ok(Some(OwedLoad {
+            path: m.shell_dcs_path(id, slot),
+            cmd: None,
+            start_ms: Some(start),
+        }))
+    }
+
+    /// Campaign `id`'s shell for `theater` and its start, ms since the
+    /// Unix epoch, without saving it; `None` for a backend that loads its
+    /// missions itself. Every refusal of a shell write but the save's.
+    fn render_shell(&self, id: u64, theater: &str) -> Result<Option<(Vec<u8>, i64)>, Status> {
+        use nanoprobe_sidecar::shell::{self, Runtime, Start};
+        let Some(template) = self.template_for(id, theater)? else {
+            return Ok(None);
+        };
         shell::check(&template, theater)
             .map_err(|e| precondition(format!("the template for theater {theater:?}: {e}")))?;
         // Settings made for another theater wait for a load of it.
@@ -1739,18 +1759,7 @@ impl Inner {
         };
         let bytes = shell::write(&template, &rt)
             .map_err(|e| precondition(format!("the shell for theater {theater:?}: {e}")))?;
-        let dir = m.dir().map_err(precondition)?;
-        let slot = shell::other_slot(self.last_slot(id));
-        shell::save(dir, id, slot, &bytes).map_err(|e| {
-            precondition(format!(
-                "the shell of campaign {id} could not be written: {e}"
-            ))
-        })?;
-        Ok(Some(OwedLoad {
-            path: m.shell_dcs_path(id, slot),
-            cmd: None,
-            start_ms: Some(start.unix_ms()),
-        }))
+        Ok(Some((bytes, start.unix_ms())))
     }
 
     /// The shell slot campaign `id`'s owed load names, else the slot of the
@@ -1769,28 +1778,24 @@ impl Inner {
             .flatten()
     }
 
-    /// After a shell was written for campaign `id` with `owed`: the start
-    /// it was written with is the campaign clock and is cleared from the
-    /// next-mission settings, in the commit that owes the load
-    /// (spec/persistence.md, "Campaign operations").
-    fn shell_written(&mut self, id: u64, owed: &OwedLoad) {
+    /// After a shell was written for campaign `id` on `theater`: a start
+    /// the next-mission settings set for it is cleared, in the commit that
+    /// owes the load (spec/persistence.md, "Mission shells").
+    fn shell_written(&mut self, id: u64, theater: &str) {
         let Some(slot) = self.campaigns.get_mut(&id) else {
             return;
         };
-        // The running mission's start stays until the load is applied.
+        // The start was used only if the settings were for this theater.
+        // The clock takes it when the load is applied: a refused load
+        // leaves the clock where it was.
         if let Some(mut next) = slot
             .store
             .next_mission()
             .and_then(|v| crate::next::Next::from_lv(v).ok())
+            && (next.theater.is_empty() || next.theater == theater)
             && next.start_ms.take().is_some()
         {
             slot.store.set_next_mission(Some(next.to_lv()));
-        }
-        // The record holds the start; the running mission's clock goes on
-        // until the load is applied, and a checkpoint writes it back if the
-        // load is refused.
-        if let Some(ms) = owed.start_ms {
-            self.write_clock(id, ms);
         }
     }
 
@@ -1826,7 +1831,7 @@ impl Inner {
         self.hold_after = None;
         let loads_itself = owed.is_none();
         if let Some(owed) = owed {
-            self.shell_written(id, &owed);
+            self.shell_written(id, &theater);
             if let Some(s) = self.campaigns.get_mut(&id) {
                 s.store.set_owed_load(Some(owed));
             }
@@ -1865,14 +1870,12 @@ impl Inner {
             && r.theater != theater
         {
             r.theater = theater.clone();
-            if let Err(e) = slot.store.set_record(r) {
-                panic!("the store of campaign {id} could not be written, stopping: {e}");
-            }
+            slot.store.stage_record(r);
         }
         self.hold_after = None;
         match owed {
             Some(o) => {
-                self.shell_written(id, &o);
+                self.shell_written(id, &theater);
                 let slot = self.campaigns.get_mut(&id).expect("resolved");
                 slot.store.set_owed_load(Some(o));
                 // The checkpoint goes into the commit that owes the load.
@@ -1906,6 +1909,15 @@ impl Inner {
                 "campaign_id",
             )
         })?;
+        if confirm.is_empty() {
+            return Err(status(
+                Code::FailedPrecondition,
+                ErrorReason::ConfirmationRequired,
+                "a delete needs confirm_name, the campaign's name",
+                0,
+                "confirm_name",
+            ));
+        }
         if slot.meta.name != confirm {
             return Err(crate::convert::invalid(
                 "confirm_name",
@@ -1948,8 +1960,8 @@ impl Inner {
             }
             self.campaigns.insert(id, slot);
             return Err(status(
-                Code::Unavailable,
-                ErrorReason::Unspecified,
+                Code::Internal,
+                ErrorReason::Internal,
                 format!("the folder of campaign {id} could not be removed: {e}"),
                 0,
                 "",
@@ -2032,7 +2044,8 @@ impl Inner {
                 format!("{theater:?} is not one of the campaign's theaters"),
             ));
         }
-        self.mission_check(id, &theater)?;
+        // Every refusal of the shell but its save comes before the capture.
+        self.render_shell(id, &theater)?;
         Ok(theater)
     }
 

@@ -360,11 +360,26 @@ pub fn next_mission_of(path: &Path) -> Result<Option<Lv>, DiskError> {
     })
 }
 
-/// The shell slot of the last load applied, in the store file at `path`,
-/// read without opening the store.
+/// The shell slot DCS may hold, in the store file at `path`, read without
+/// opening the store: the slot of an owed load already sent, else that of
+/// the last load applied.
 pub fn shell_slot_of(path: &Path) -> Result<Option<u8>, DiskError> {
     let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    Ok(match Rd(&get_meta(&conn, "world")?).get("shell_slot") {
+    let world = get_meta(&conn, "world")?;
+    let w = Rd(&world);
+    if let v @ Lv::Table(_) = w.get("owed_load") {
+        let owed = dec_owed_load(v)?;
+        let named = owed
+            .path
+            .strip_suffix(".miz")
+            .and_then(|p| p.rsplit_once('.'))
+            .map(|(_, s)| s.as_bytes())
+            .filter(|s| *s == b"a" || *s == b"b");
+        if let (Some(_), Some(s)) = (owed.cmd, named) {
+            return Ok(Some(s[0]));
+        }
+    }
+    Ok(match w.get("shell_slot") {
         Lv::String(b) if b.len() == 1 => Some(b[0]),
         _ => None,
     })
@@ -859,6 +874,15 @@ impl Store {
             d.record_written = false;
         }
         self.commit()
+    }
+
+    /// Set the campaign record without writing it: it goes to disk with the
+    /// next commit, with the rest of that commit's changes.
+    pub fn stage_record(&mut self, record: CampaignRecord) {
+        if let Some(d) = self.disk.0.as_mut() {
+            d.record = record;
+            d.record_written = false;
+        }
     }
 
     /// Write every change, then copy the file to `dest` consistently.
@@ -2909,6 +2933,36 @@ mod tests {
                     cmd: Some((3, 7)),
                     start_ms: Some(1_700_000_000_000),
                 })),
+            ),
+            (
+                "entry.resolve".to_owned(),
+                encode(&enc_entry(&Entry::Resolve {
+                    unit: EntityId(2),
+                    dead: true,
+                })),
+            ),
+            // The S19 keys of `meta.world`, as the store writes them.
+            (
+                "world.s19_keys".to_owned(),
+                encode(&t(vec![
+                    ("mission_start_ms", super::s(&(-5i64).to_string())),
+                    (
+                        "next_mission",
+                        t(vec![
+                            ("theater", super::s("Caucasus")),
+                            ("start_ms", super::s("1700000000000")),
+                            (
+                                "weather",
+                                Lv::String(encode(&t(vec![("k", Lv::Bool(true))]))),
+                            ),
+                        ]),
+                    ),
+                    (
+                        "model0",
+                        list(vec![super::s("11"), super::s("2"), Lv::Number(1.5)]),
+                    ),
+                    ("shell_slot", super::s("b")),
+                ])),
             ),
         ];
         for (i, e) in s.entries().iter().enumerate() {

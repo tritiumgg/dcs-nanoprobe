@@ -409,13 +409,14 @@ already written.
 `NextMission` is kept in `meta.world` until `SetNextMission` replaces it whole. It
 applies to a shell for its theater, or for any theater when it names none; a shell for
 another theater is written with the template's weather and flags and the campaign clock.
-Its `start` is used once: the commit that owes the load sets the campaign clock to it and
-clears it. The campaign clock is the start written into the running mission's shell
+Its `start` is used once: the commit that owes the load clears it, and the clock takes it
+when the load is applied (below); a load refused or rejected leaves the clock where it
+was. The campaign clock is the start written into the running mission's shell
 plus the model time since that generation's first sample; with no mission of its own
 running it is the clock in the campaign record, which suspend, finish, checkpoints and
 every shell write update. A load's start takes over at its `APPLIED`, counted from the
 next generation's first sample; a load refused or rejected keeps the running mission's
-start. A DCS restart runs a mission the campaign did not load: the clock reached before
+start, or with none the record's clock. A DCS restart runs a mission the campaign did not load: the clock reached before
 it is written to the record, and the clock stays there until the campaign's next load.
 A load whose outcome is `UNKNOWN`, or that left the commands in flight, and one a suspend
 dropped after it was sent, count as holding their slot. Dates and times are the mission's own calendar time, carried

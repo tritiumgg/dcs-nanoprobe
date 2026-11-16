@@ -3,7 +3,7 @@
 //! "The store file").
 
 use nanoprobe_sidecar::shell::DynamicSpawn;
-use nanoprobe_transport::codec::Lv;
+use nanoprobe_transport::codec::{Lv, Reader, Writer};
 
 /// The next mission's settings.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -40,8 +40,12 @@ impl Next {
         if let Some(ms) = self.start_ms {
             p.push((s("start_ms"), s(&ms.to_string())));
         }
+        // A nested Lua value is its own encoding inside a string, so the
+        // row's nesting stays fixed (spec/persistence.md, "Encodings").
         if let Some(w) = &self.weather {
-            p.push((s("weather"), w.clone()));
+            let mut wr = Writer::new();
+            wr.lv(w);
+            p.push((s("weather"), Lv::String(wr.finish())));
         }
         let dynamic = self
             .dynamic
@@ -77,7 +81,15 @@ impl Next {
                     .ok_or("next mission: start_ms")?,
             ),
         };
-        let weather = get(v, "weather").cloned();
+        let weather = match get(v, "weather") {
+            None => None,
+            Some(Lv::String(b)) => Some(
+                Reader::new(b)
+                    .lv()
+                    .map_err(|e| format!("next mission: weather: {e}"))?,
+            ),
+            Some(_) => return Err("next mission: weather".into()),
+        };
         let mut dynamic = Vec::new();
         if let Some(Lv::Table(items)) = get(v, "dynamic") {
             for (_, d) in items {
@@ -123,5 +135,20 @@ mod tests {
         let empty = Next::default();
         assert_eq!(Next::from_lv(&empty.to_lv()), Ok(empty));
         assert!(Next::from_lv(&Lv::Nil).is_err());
+    }
+
+    #[test]
+    fn a_weather_too_deep_to_store_is_refused() {
+        let mut deep = Lv::Table(vec![]);
+        for _ in 0..40 {
+            deep = Lv::Table(vec![(s("k"), deep)]);
+        }
+        let st = crate::lua::lua_to_struct(&Lv::Table(vec![(s("w"), deep)])).expect("struct");
+        let e = crate::services::mission::next_of(Some(&nanoprobe_proto::v1alpha1::NextMission {
+            weather: Some(st),
+            ..Default::default()
+        }))
+        .expect_err("too deep");
+        assert_eq!(e.code(), tonic::Code::InvalidArgument);
     }
 }

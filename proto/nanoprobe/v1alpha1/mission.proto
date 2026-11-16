@@ -86,9 +86,10 @@ message NextMission {
   google.protobuf.Timestamp start = 2;
   // The DCS weather table. Absent keeps the template's.
   google.protobuf.Struct weather = 3;
-  // Dynamic-spawn flags of airports, by their ID in the template's
-  // warehouses (DCS `Airbase:getID()`). Airports not named keep the
-  // template's flags. An ID the template does not hold is INVALID_FIELD.
+  // Dynamic-spawn flags of airports, by their key in the template's
+  // `warehouses.airports` (that it equals DCS `Airbase:getID()` is
+  // UNVERIFIED). Airports not named keep the template's flags. An ID the
+  // template does not hold is INVALID_FIELD.
   repeated DynamicSpawn dynamic_spawn = 4;
 }
 

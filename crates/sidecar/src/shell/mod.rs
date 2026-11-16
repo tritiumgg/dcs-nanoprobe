@@ -93,7 +93,8 @@ fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
 /// The dynamic-spawn flags of one airport.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DynamicSpawn {
-    /// The airport's ID in the `warehouses` member (DCS `Airbase:getID()`).
+    /// The airport's key in the `warehouses` member's `airports` (that it
+    /// equals DCS `Airbase:getID()` is UNVERIFIED).
     pub airbase: u64,
     /// `dynamicSpawn`.
     pub enabled: bool,

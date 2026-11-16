@@ -2065,9 +2065,10 @@ pub struct NextMission {
     /// The DCS weather table. Absent keeps the template's.
     #[prost(message, optional, tag = "3")]
     pub weather: ::core::option::Option<::prost_types::Struct>,
-    /// Dynamic-spawn flags of airports, by their ID in the template's
-    /// warehouses (DCS `Airbase:getID()`). Airports not named keep the
-    /// template's flags. An ID the template does not hold is INVALID_FIELD.
+    /// Dynamic-spawn flags of airports, by their key in the template's
+    /// `warehouses.airports` (that it equals DCS `Airbase:getID()` is
+    /// UNVERIFIED). Airports not named keep the template's flags. An ID the
+    /// template does not hold is INVALID_FIELD.
     #[prost(message, repeated, tag = "4")]
     pub dynamic_spawn: ::prost::alloc::vec::Vec<DynamicSpawn>,
 }
