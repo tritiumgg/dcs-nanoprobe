@@ -1,0 +1,812 @@
+//! `sidecar <name> --part shell [--template FILE]`: the S19 live test. It
+//! runs on the sidecar `--part hello` starts, with the two committed
+//! templates as `[missions] dir`'s `Caucasus.miz` and `Afghanistan.miz`, and
+//! drives the API from here. In order:
+//!
+//! 1. `reload`: a campaign on both theaters with a group on Caucasus; a
+//!    `SetNextMission` with a start and a weather of its own and a `Reload`:
+//!    the new mission's `env.mission` shows both;
+//! 2. `theaters`: reloads to Afghanistan (a group put there), Caucasus and
+//!    Afghanistan again: each time the other map's group is virtual and the
+//!    loaded map's is live;
+//! 3. `own_template`: with `--template FILE`, a second campaign with that
+//!    mission as its own Caucasus template and dynamic spawn on one airport:
+//!    the shell DCS loads keeps every member of the template but the runtime
+//!    fields, its zones, triggers and client groups are in `env.mission`,
+//!    and the slot list the hook reads; without it the item is skipped;
+//! 4. `finished`: that campaign (or the first) finished: it is listed with
+//!    its world, and a change is refused as read-only;
+//! 5. `hung`: the agent's deliberate access violation crashes DCS; the
+//!    status says hung within `heartbeat_stale_s` and a lifecycle event
+//!    `SIM_STATE_HUNG` is published; the processes left in the container are
+//!    recorded (E22); DCS is restarted;
+//! 6. `killed`: the first campaign active, DCS killed in its container; the
+//!    image starts it again, and the campaign's group is live again with no
+//!    call made.
+//!
+//! Steps 5 and 6 end DCS for everyone: each checks that no player is
+//! connected first.
+
+use std::time::{Duration, Instant};
+
+use nanoprobe_proto::v1alpha1::campaign_service_client::CampaignServiceClient;
+use nanoprobe_proto::v1alpha1::commands_service_client::CommandsServiceClient;
+use nanoprobe_proto::v1alpha1::events_service_client::EventsServiceClient;
+use nanoprobe_proto::v1alpha1::mission_service_client::MissionServiceClient;
+use nanoprobe_proto::v1alpha1::session_service_client::SessionServiceClient;
+use nanoprobe_proto::v1alpha1::world_service_client::WorldServiceClient;
+use nanoprobe_proto::v1alpha1::{self as pb, entity};
+use nanoprobe_sidecar::shell;
+use nanoprobe_transport::codec::Lv;
+use serde_json::{Value, json};
+use tonic::metadata::MetadataValue;
+use tonic::service::Interceptor;
+use tonic::service::interceptor::InterceptedService;
+use tonic::transport::{Channel, Endpoint};
+
+use crate::install::Profile as _;
+use crate::sampling::live::Run;
+
+/// The two committed templates.
+const CAUCASUS: &[u8] = include_bytes!("../../../templates/caucasus.miz");
+const AFGHANISTAN: &[u8] = include_bytes!("../../../templates/afghanistan.miz");
+
+/// How long a mission load may take before the step fails. Not a design
+/// limit (a load has no fixed duration); only when this test gives up.
+const LOAD_LIMIT: Duration = Duration::from_secs(900);
+/// How long a hung verdict may take after the crash: `heartbeat_stale_s`
+/// (10 s by default) plus the status poll and the sidecar's own read.
+const HUNG_LIMIT: Duration = Duration::from_secs(25);
+/// The start the reload writes: 2031-07-04 15:30:00.
+const START_S: i64 = 1_941_291_000;
+
+/// The templates `[missions] dir` holds for the part.
+pub fn templates() -> [(&'static str, &'static [u8]); 2] {
+    [("Caucasus.miz", CAUCASUS), ("Afghanistan.miz", AFGHANISTAN)]
+}
+
+#[derive(Clone)]
+struct Auth(MetadataValue<tonic::metadata::Ascii>);
+
+impl Interceptor for Auth {
+    fn call(&mut self, mut req: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
+        req.metadata_mut().insert("authorization", self.0.clone());
+        Ok(req)
+    }
+}
+
+type Svc = InterceptedService<Channel, Auth>;
+
+/// The API clients, with a runtime to call them from blocking code.
+struct Api {
+    rt: tokio::runtime::Runtime,
+    session: SessionServiceClient<Svc>,
+    campaigns: CampaignServiceClient<Svc>,
+    commands: CommandsServiceClient<Svc>,
+    world: WorldServiceClient<Svc>,
+    mission: MissionServiceClient<Svc>,
+    events: EventsServiceClient<Svc>,
+    lease: Option<pb::Lease>,
+    keys: u64,
+}
+
+fn status_text(what: &str) -> impl Fn(tonic::Status) -> String + '_ {
+    move |s| format!("{what}: {:?} {}", s.code(), s.message())
+}
+
+impl Api {
+    fn connect(endpoint: &str, token: &str) -> Result<Api, String> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())?;
+        let channel = rt
+            .block_on(
+                Endpoint::from_shared(endpoint.to_owned())
+                    .map_err(|e| e.to_string())?
+                    .connect(),
+            )
+            .map_err(|e| format!("connect {endpoint}: {e}"))?;
+        let auth = Auth(
+            format!("Bearer {token}")
+                .parse()
+                .map_err(|_| "the token is not header text")?,
+        );
+        let c = |ch: &Channel| InterceptedService::new(ch.clone(), auth.clone());
+        let mut api = Api {
+            session: SessionServiceClient::new(c(&channel)),
+            campaigns: CampaignServiceClient::new(c(&channel))
+                .max_encoding_message_size(17 * 1024 * 1024),
+            commands: CommandsServiceClient::new(c(&channel)),
+            world: WorldServiceClient::new(c(&channel)),
+            mission: MissionServiceClient::new(c(&channel)),
+            events: EventsServiceClient::new(c(&channel)),
+            rt,
+            lease: None,
+            keys: 0,
+        };
+        let granted = api
+            .rt
+            .block_on(api.session.acquire_lease(pb::AcquireLeaseRequest {
+                client_name: "xtask-shell".into(),
+            }))
+            .map_err(status_text("AcquireLease"))?
+            .into_inner();
+        api.lease = granted.lease;
+        Ok(api)
+    }
+
+    fn renew(&mut self) -> Result<(), String> {
+        let r = self
+            .rt
+            .block_on(self.session.renew_lease(pb::RenewLeaseRequest {
+                lease: self.lease.clone(),
+            }))
+            .map_err(status_text("RenewLease"))?;
+        drop(r);
+        Ok(())
+    }
+
+    fn key(&mut self, what: &str) -> Option<pb::Idempotency> {
+        self.keys += 1;
+        Some(pb::Idempotency {
+            key: format!("xtask-shell/{}/{what}/{}", std::process::id(), self.keys),
+        })
+    }
+
+    fn write(&mut self, what: &str, campaign: u64) -> Option<pb::Write> {
+        Some(pb::Write {
+            lease: self.lease.clone(),
+            idempotency: self.key(what),
+            campaign_id: campaign,
+        })
+    }
+
+    fn create(&mut self, name: &str, theaters: &[&str], activate: bool) -> Result<u64, String> {
+        let req = pb::CreateCampaignRequest {
+            lease: self.lease.clone(),
+            name: name.into(),
+            theaters: theaters.iter().map(|t| (*t).to_owned()).collect(),
+            first_theater: theaters[0].into(),
+            clock: None,
+            activate,
+            idempotency: self.key("create"),
+        };
+        Ok(self
+            .rt
+            .block_on(self.campaigns.create_campaign(req))
+            .map_err(status_text("CreateCampaign"))?
+            .into_inner()
+            .campaign
+            .ok_or("no campaign")?
+            .id)
+    }
+
+    fn group(&mut self, campaign: u64, label: &str, at: pb::Position) -> Result<u64, String> {
+        let unit = pb::UnitSpec {
+            r#type: "M-113".into(),
+            label: label.into(),
+            position: Some(at),
+            ..pb::UnitSpec::default()
+        };
+        let req = pb::PutGroupRequest {
+            write: self.write("group", campaign),
+            group_id: 0,
+            spec: Some(pb::GroupSpec {
+                label: label.into(),
+                country: 2,
+                category: pb::GroupCategory::Ground as i32,
+                units: vec![unit],
+                ..pb::GroupSpec::default()
+            }),
+            order: None,
+        };
+        Ok(self
+            .rt
+            .block_on(self.commands.put_group(req))
+            .map_err(status_text("PutGroup"))?
+            .into_inner()
+            .group_id)
+    }
+
+    fn state(&mut self, campaign: u64, group: u64) -> Result<i32, String> {
+        let mut s = self
+            .rt
+            .block_on(self.world.list_world(pb::ListWorldRequest {
+                filter: Some(pb::WorldFilter {
+                    campaign_id: campaign,
+                    ..pb::WorldFilter::default()
+                }),
+            }))
+            .map_err(status_text("ListWorld"))?
+            .into_inner();
+        let mut found = 0;
+        while let Some(page) = self
+            .rt
+            .block_on(s.message())
+            .map_err(status_text("ListWorld"))?
+        {
+            for e in page.entities {
+                if let Some(entity::Kind::Group(g)) = e.kind
+                    && g.id == group
+                {
+                    found = g.state;
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    fn status(&mut self) -> Result<pb::ServerStatus, String> {
+        self.rt
+            .block_on(
+                self.mission
+                    .get_server_status(pb::GetServerStatusRequest {}),
+            )
+            .map_err(status_text("GetServerStatus"))?
+            .into_inner()
+            .status
+            .ok_or("no status".into())
+    }
+
+    fn next(&mut self, campaign: u64, next: pb::NextMission) -> Result<(), String> {
+        let req = pb::SetNextMissionRequest {
+            write: self.write("next", campaign),
+            next: Some(next),
+        };
+        self.rt
+            .block_on(self.mission.set_next_mission(req))
+            .map_err(status_text("SetNextMission"))?;
+        Ok(())
+    }
+
+    fn reload(&mut self) -> Result<(), String> {
+        let req = pb::ReloadRequest {
+            write: self.write("reload", 0),
+        };
+        self.rt
+            .block_on(self.mission.reload(req))
+            .map_err(status_text("Reload"))?;
+        Ok(())
+    }
+
+    fn lifecycle_states(&mut self, server_log: bool, campaign: u64) -> Result<Vec<i32>, String> {
+        let r = self
+            .rt
+            .block_on(self.events.read_events(pb::ReadEventsRequest {
+                filter: Some(pb::EventFilter {
+                    campaign_id: campaign,
+                    server_log,
+                    ..pb::EventFilter::default()
+                }),
+                after_sequence: 0,
+                limit: 10_000,
+            }))
+            .map_err(status_text("ReadEvents"))?
+            .into_inner();
+        Ok(r.events
+            .into_iter()
+            .filter_map(|e| match e.body {
+                Some(pb::event::Body::Lifecycle(l)) => Some(l.state),
+                _ => None,
+            })
+            .collect())
+    }
+}
+
+fn caucasus(north: f64, east: f64) -> pb::Position {
+    pb::Position {
+        theater: "Caucasus".into(),
+        north,
+        east,
+        alt: 0.0,
+    }
+}
+
+/// Poll `check` while the simulation is held running, until it gives
+/// `Some` or `limit` passes.
+fn wait<T>(
+    run: &Run,
+    api: &mut Api,
+    limit: Duration,
+    what: &str,
+    mut check: impl FnMut(&mut Api) -> Result<Option<T>, String>,
+) -> Result<T, String> {
+    let deadline = Instant::now() + limit;
+    loop {
+        if let Some(v) = check(api)? {
+            return Ok(v);
+        }
+        if Instant::now() > deadline {
+            return Err(format!("{what}: not within {limit:?}"));
+        }
+        api.renew()?;
+        // Unpauses and lets the mission run a moment; a load is not held.
+        let _ = run.hold(3.0);
+    }
+}
+
+/// Wait for the mission on `theater` loaded after `generation`.
+fn loaded(run: &Run, api: &mut Api, theater: &str, after_gen: u32) -> Result<u32, String> {
+    wait(
+        run,
+        api,
+        LOAD_LIMIT,
+        &format!("a mission on {theater}"),
+        |api| {
+            let s = api.status()?;
+            let generation = s.now.as_ref().map_or(0, |n| n.mission_generation);
+            Ok((s.theater == theater
+                && generation > after_gen
+                && s.sim_state != pb::SimState::Loading as i32)
+                .then_some(generation))
+        },
+    )
+}
+
+fn live(run: &Run, api: &mut Api, campaign: u64, group: u64) -> Result<(), String> {
+    wait(
+        run,
+        api,
+        LOAD_LIMIT,
+        &format!("group {group} live"),
+        |api| Ok((api.state(campaign, group)? == pb::EntityState::Live as i32).then_some(())),
+    )
+}
+
+fn state_name(s: i32) -> String {
+    pb::EntityState::try_from(s).map_or_else(|_| s.to_string(), |s| s.as_str_name().into())
+}
+
+/// A Lua value as a JSON value, for a weather table built from the template.
+fn weather_struct(v: &Lv) -> Option<prost_types::Struct> {
+    nanoprobe_api::lua::lua_to_struct(v)
+}
+
+/// Run the part's steps; each records its result under its name.
+#[allow(clippy::too_many_arguments)]
+pub fn drive(
+    run: &Run,
+    endpoint: &str,
+    token: &str,
+    template: Option<&[u8]>,
+    players: impl Fn() -> Result<usize, String>,
+    restart: impl Fn() -> Result<(), String>,
+    kill: impl Fn() -> Result<String, String>,
+    results: &mut Value,
+) -> Result<(), String> {
+    let mut api = Api::connect(endpoint, token)?;
+    let mut generation = api.status()?.now.map_or(0, |n| n.mission_generation);
+
+    // 1. Weather and time across a commanded reload.
+    println!("== reload: start and weather");
+    let c1 = api.create("s19-two-maps", &["Caucasus", "Afghanistan"], true)?;
+    generation = loaded(run, &mut api, "Caucasus", generation)?;
+    let (x, z) = crate::sidecar::HELLO_POINTS[0];
+    let a = api.group(c1, "on-caucasus", caucasus(x, z))?;
+    live(run, &mut api, c1, a)?;
+    let tpl = shell::members(CAUCASUS)?;
+    let mission = &tpl.iter().find(|(n, _)| n == "mission").ok_or("mission")?.1;
+    let doc = shell::lua::parse(mission)?;
+    let mut weather = shell::lua::value(
+        mission,
+        doc.root
+            .get(&shell::lua::Key::s("weather"))
+            .ok_or("weather")?,
+    )
+    .ok_or("weather value")?;
+    // Set the ground wind and the temperature to values of the test's own.
+    let (wind, temp) = (7.0, 31.0);
+    set_path(
+        &mut weather,
+        &["wind", "atGround", "speed"],
+        Lv::Number(wind),
+    );
+    set_path(&mut weather, &["season", "temperature"], Lv::Number(temp));
+    api.next(
+        c1,
+        pb::NextMission {
+            theater: String::new(),
+            start: Some(prost_types::Timestamp {
+                seconds: START_S,
+                nanos: 0,
+            }),
+            weather: weather_struct(&weather),
+            dynamic_spawn: Vec::new(),
+        },
+    )?;
+    api.reload()?;
+    generation = loaded(run, &mut api, "Caucasus", generation)?;
+    live(run, &mut api, c1, a)?;
+    let seen = run.eval(
+        "server",
+        "s19-mission",
+        "local m = env.mission\nreturn { day = m.date.Day, month = m.date.Month, year = m.date.Year, start = m.start_time, wind = m.weather.wind.atGround.speed, temp = m.weather.season.temperature, abs = timer.getAbsTime() }\n",
+        60,
+    )?;
+    let want_start = START_S.rem_euclid(86_400);
+    let pass = seen["day"] == json!(4)
+        && seen["month"] == json!(7)
+        && seen["year"] == json!(2031)
+        && seen["start"].as_f64() == Some(want_start as f64)
+        && seen["wind"].as_f64() == Some(wind)
+        && seen["temp"].as_f64() == Some(temp);
+    let clock = api
+        .rt
+        .block_on(
+            api.campaigns
+                .get_campaign(pb::GetCampaignRequest { campaign_id: c1 }),
+        )
+        .map_err(status_text("GetCampaign"))?
+        .into_inner()
+        .campaign
+        .and_then(|c| c.clock)
+        .map(|t| t.seconds);
+    results["reload"] =
+        json!({ "pass": pass, "seen": seen, "clock_s": clock, "want_start_s": START_S });
+    println!("   {} {seen}", if pass { "ok  " } else { "FAIL" });
+
+    // 2. Two theaters, there and back.
+    println!("== theaters");
+    let mut rounds = Vec::new();
+    let mut b = 0;
+    for (i, theater) in ["Afghanistan", "Caucasus", "Afghanistan"]
+        .iter()
+        .enumerate()
+    {
+        api.next(
+            c1,
+            pb::NextMission {
+                theater: (*theater).into(),
+                ..pb::NextMission::default()
+            },
+        )?;
+        api.reload()?;
+        generation = loaded(run, &mut api, theater, generation)?;
+        if i == 0 {
+            // A point on land near the first airbase of the map.
+            let p = run.eval(
+                "server",
+                "s19-afghan-point",
+                "local ab = world.getAirbases()\nfor _, a in ipairs(ab) do local p = a:getPoint()\nfor _, d in ipairs({ 300, 600, 900, -300, -600 }) do local q = { x = p.x + d, y = p.z + d }\nlocal t = land.getSurfaceType(q)\nif t == 1 or t == 4 then return { q.x, q.y } end end end\nreturn nil\n",
+                60,
+            )?;
+            let (n, e) = (
+                p[0].as_f64().ok_or(format!("no land point: {p}"))?,
+                p[1].as_f64().ok_or("no land point")?,
+            );
+            b = api.group(
+                c1,
+                "on-afghanistan",
+                pb::Position {
+                    theater: "Afghanistan".into(),
+                    north: n,
+                    east: e,
+                    alt: 0.0,
+                },
+            )?;
+        }
+        let (here, there) = if *theater == "Caucasus" {
+            (a, b)
+        } else {
+            (b, a)
+        };
+        live(run, &mut api, c1, here)?;
+        let other = api.state(c1, there)?;
+        rounds.push(json!({
+            "theater": theater,
+            "generation": generation,
+            "loaded_live": true,
+            "other": state_name(other),
+            "pass": other == pb::EntityState::Virtual as i32,
+        }));
+    }
+    let pass = rounds.iter().all(|r| r["pass"] == json!(true));
+    results["theaters"] = json!({ "pass": pass, "rounds": rounds });
+    println!(
+        "   {} {}",
+        if pass { "ok  " } else { "FAIL" },
+        results["theaters"]
+    );
+
+    // 3. A campaign's own editor-built template.
+    let mut finish = c1;
+    if let Some(t) = template {
+        println!("== own template");
+        let theater = shell::theatre(t)?;
+        let c2 = api.create("s19-own-template", &[theater.as_str()], false)?;
+        let airport = shell::airports(t)?.into_iter().next().ok_or("no airport")?;
+        let req = pb::SetCampaignTemplateRequest {
+            write: api.write("template", c2),
+            theater: theater.clone(),
+            miz: t.to_vec(),
+        };
+        api.rt
+            .block_on(api.campaigns.set_campaign_template(req))
+            .map_err(status_text("SetCampaignTemplate"))?;
+        api.next(
+            c2,
+            pb::NextMission {
+                dynamic_spawn: vec![pb::DynamicSpawn {
+                    airbase_id: airport,
+                    enabled: true,
+                    hot_start: false,
+                }],
+                ..pb::NextMission::default()
+            },
+        )?;
+        let req = pb::ActivateCampaignRequest {
+            lease: api.lease.clone(),
+            campaign_id: c2,
+            idempotency: api.key("activate"),
+        };
+        api.rt
+            .block_on(api.campaigns.activate_campaign(req))
+            .map_err(status_text("ActivateCampaign"))?;
+        generation = loaded(run, &mut api, &theater, generation)?;
+        let _ = run.hold(5.0);
+        let seen = run.eval(
+            "server",
+            "s19-own",
+            &format!(
+                "local m = env.mission\nlocal zones = {{}}\nfor _, z in ipairs(m.triggers and m.triggers.zones or {{}}) do zones[#zones + 1] = z.name end\nlocal clients = {{}}\nfor side, c in pairs(m.coalition) do for _, country in ipairs(c.country or {{}}) do for _, cat in ipairs({{ 'plane', 'helicopter', 'vehicle', 'ship' }}) do for _, g in ipairs(country[cat] and country[cat].group or {{}}) do for _, u in ipairs(g.units or {{}}) do if u.skill == 'Client' or u.skill == 'Player' then clients[#clients + 1] = u.name end end end end end end\nlocal rules = m.trigrules and #m.trigrules or 0\nlocal z1 = zones[1] and trigger.misc.getZone(zones[1]) ~= nil\nreturn {{ zones = zones, zone_found = z1, clients = clients, rules = rules, dynamic = m.dynamicSpawn, airport = {airport} }}\n"
+            ),
+            60,
+        )?;
+        let slots = run.eval(
+            "hook",
+            "s19-slots",
+            "local out = {}\nfor _, side in ipairs({ 'red', 'blue' }) do for _, s in ipairs(DCS.getAvailableSlots(side) or {}) do out[#out + 1] = { side = side, id = tostring(s.unitId), type = s.type, role = s.role, group = s.groupName, airdrome = s.airdromeId, dynamic = s.dynamic } end end\nreturn out\n",
+            60,
+        )?;
+        // The shell DCS loaded, compared with the template member by member.
+        let shell_file = run
+            .remote
+            .read(&format!("nanoprobe/missions/shells/{c2}.a.miz"))?
+            .ok_or("the shell is not in the mission folder")?;
+        let (tm, sm) = (shell::members(t)?, shell::members(&shell_file)?);
+        let same_members = tm.iter().map(|m| &m.0).collect::<Vec<_>>()
+            == sm.iter().map(|m| &m.0).collect::<Vec<_>>();
+        let unchanged: Vec<String> = tm
+            .iter()
+            .zip(&sm)
+            .filter(|((n, x), (_, y))| n != "mission" && n != "warehouses" && x == y)
+            .map(|(m, _)| m.0.clone())
+            .collect();
+        let others = tm.len().saturating_sub(2);
+        let mission_rest = rest_equal(&tm, &sm, "mission", &["date", "start_time", "weather"])?;
+        let warehouses_rest = rest_equal(&tm, &sm, "warehouses", &["airports"])?;
+        let pass = same_members
+            && unchanged.len() == others
+            && mission_rest
+            && warehouses_rest
+            && seen["zone_found"] == json!(true)
+            && seen["clients"].as_array().is_some_and(|c| !c.is_empty())
+            && slots.as_array().is_some_and(|s| !s.is_empty());
+        results["own_template"] = json!({
+            "pass": pass,
+            "same_members": same_members,
+            "unchanged_members": unchanged,
+            "mission_rest_equal": mission_rest,
+            "warehouses_rest_equal": warehouses_rest,
+            "seen": seen,
+            "slots": slots,
+        });
+        println!(
+            "   {} {}",
+            if pass { "ok  " } else { "FAIL" },
+            results["own_template"]["seen"]
+        );
+        finish = c2;
+    }
+
+    // 4. A finished campaign is readable and refuses changes.
+    println!("== finished");
+    let req = pb::FinishCampaignRequest {
+        lease: api.lease.clone(),
+        campaign_id: finish,
+        outcome: None,
+        idempotency: api.key("finish"),
+    };
+    api.rt
+        .block_on(api.campaigns.finish_campaign(req))
+        .map_err(status_text("FinishCampaign"))?;
+    let got = api
+        .rt
+        .block_on(api.campaigns.get_campaign(pb::GetCampaignRequest {
+            campaign_id: finish,
+        }))
+        .map_err(status_text("GetCampaign"))?
+        .into_inner()
+        .campaign
+        .map_or(0, |c| c.state);
+    let listed = api.state(finish, if finish == c1 { a } else { 0 });
+    let refused = api.group(finish, "late", caucasus(x, z));
+    let read_only = refused
+        .as_ref()
+        .err()
+        .is_some_and(|e| e.contains("finished") || e.contains("read"));
+    let pass = got == pb::CampaignState::Finished as i32 && listed.is_ok() && read_only;
+    results["finished"] = json!({
+        "pass": pass,
+        "state": got,
+        "listed": listed.is_ok(),
+        "refused": refused.err(),
+    });
+    println!(
+        "   {} {}",
+        if pass { "ok  " } else { "FAIL" },
+        results["finished"]
+    );
+
+    // 5 and 6 need the first campaign active and an empty server.
+    if finish == c1 {
+        results["hung"] = json!({ "skipped": "the first campaign was finished: no --template" });
+        return Ok(());
+    }
+    let req = pb::ActivateCampaignRequest {
+        lease: api.lease.clone(),
+        campaign_id: c1,
+        idempotency: api.key("activate-c1"),
+    };
+    api.rt
+        .block_on(api.campaigns.activate_campaign(req))
+        .map_err(status_text("ActivateCampaign"))?;
+    loaded(run, &mut api, "Afghanistan", generation)?;
+    live(run, &mut api, c1, b)?;
+
+    println!("== hung: a deliberate access violation");
+    let n = players()?;
+    if n > 0 {
+        results["hung"] = json!({ "skipped": format!("{n} players connected") });
+        return Ok(());
+    }
+    // No result comes back: DCS crashes.
+    let _ = run.eval(
+        "server",
+        "s19-fault",
+        "local E = ...\nlocal agent = E.lib('agent').open()\nagent.crumb(91, 'S19 hung verdict')\nagent.fault()\nreturn 'not reached'\n",
+        10,
+    );
+    let crashed = Instant::now();
+    let deadline = crashed + HUNG_LIMIT + Duration::from_secs(35);
+    let mut verdicts = Vec::new();
+    let mut hung_after = None;
+    while Instant::now() < deadline {
+        let s = api.status()?;
+        verdicts.push(json!({
+            "t_s": crashed.elapsed().as_secs_f64(),
+            "health": s.health,
+            "sim_state": s.sim_state,
+            "age_s": s.heartbeat_age.map(|d| d.seconds),
+        }));
+        if s.health == pb::Health::Hung as i32 && s.sim_state == pb::SimState::Hung as i32 {
+            hung_after = Some(crashed.elapsed());
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    let processes = run
+        .sh("ps -eo pid,etimes,args 2>/dev/null | grep -i -E 'dcs|crash|wine' | grep -v grep || true", &[])
+        .map(|o| String::from_utf8_lossy(&o).into_owned())
+        .unwrap_or_default();
+    let events = api.lifecycle_states(false, c1).unwrap_or_default();
+    let event = events.contains(&(pb::SimState::Hung as i32));
+    let pass = hung_after.is_some_and(|d| d <= HUNG_LIMIT) && event;
+    results["hung"] = json!({
+        "pass": pass,
+        "hung_after_s": hung_after.map(|d| d.as_secs_f64()),
+        "limit_s": HUNG_LIMIT.as_secs(),
+        "lifecycle_event": event,
+        "verdicts": verdicts,
+        "processes": processes,
+    });
+    println!(
+        "   {} hung after {hung_after:?}",
+        if pass { "ok  " } else { "FAIL" }
+    );
+    println!("== restart DCS");
+    restart()?;
+    // DCS starts with the server's own mission; the campaign takes it.
+    wait(
+        run,
+        &mut api,
+        LOAD_LIMIT,
+        "DCS back after the restart",
+        |api| {
+            let s = api.status()?;
+            Ok((s.health == pb::Health::Healthy as i32
+                && s.sim_state == pb::SimState::Running as i32)
+                .then_some(()))
+        },
+    )?;
+    live(run, &mut api, c1, b).ok();
+
+    // 6. Killed, started again by the image, restored with no call made.
+    println!("== killed");
+    let n = players()?;
+    if n > 0 {
+        results["killed"] = json!({ "skipped": format!("{n} players connected") });
+        return Ok(());
+    }
+    let before = api.status()?;
+    let killed = kill()?;
+    let back = wait(
+        run,
+        &mut api,
+        LOAD_LIMIT,
+        "DCS back after the kill",
+        |api| {
+            let s = api.status()?;
+            Ok((s.health == pb::Health::Healthy as i32
+                && s.agent_build == before.agent_build
+                && s.now.as_ref().map(|n| n.mission_generation)
+                    != before.now.as_ref().map(|n| n.mission_generation)
+                && s.sim_state == pb::SimState::Running as i32)
+                .then_some(s))
+        },
+    )?;
+    let restored = wait(run, &mut api, LOAD_LIMIT, "the group live again", |api| {
+        let here = if back.theater == "Caucasus" { a } else { b };
+        Ok((api.state(c1, here)? == pb::EntityState::Live as i32).then_some(here))
+    });
+    let pass = restored.is_ok();
+    results["killed"] = json!({
+        "pass": pass,
+        "kill": killed,
+        "theater_after": back.theater,
+        "restored_group": restored.as_ref().ok(),
+        "error": restored.err(),
+    });
+    println!(
+        "   {} {}",
+        if pass { "ok  " } else { "FAIL" },
+        results["killed"]
+    );
+    // Leave no campaign active.
+    let req = pb::SuspendCampaignRequest {
+        lease: api.lease.clone(),
+        campaign_id: c1,
+        idempotency: api.key("suspend"),
+    };
+    let _ = api.rt.block_on(api.campaigns.suspend_campaign(req));
+    Ok(())
+}
+
+/// Whether member `name` of two `.miz` files is equal apart from the root
+/// keys in `drop`.
+fn rest_equal(
+    a: &[(String, Vec<u8>)],
+    b: &[(String, Vec<u8>)],
+    name: &str,
+    drop: &[&str],
+) -> Result<bool, String> {
+    let rest = |m: &[(String, Vec<u8>)]| -> Result<Lv, String> {
+        let src = &m.iter().find(|(n, _)| n == name).ok_or(name)?.1;
+        let d = shell::lua::parse(src)?;
+        let Lv::Table(p) = shell::lua::value(src, &d.root).ok_or("value")? else {
+            return Err("not a table".into());
+        };
+        Ok(Lv::Table(
+            p.into_iter()
+                .filter(|(k, _)| !drop.iter().any(|d| *k == Lv::String(d.as_bytes().to_vec())))
+                .collect(),
+        ))
+    };
+    Ok(rest(a)? == rest(b)?)
+}
+
+/// Set the value at `path` in a table, where every step exists.
+fn set_path(v: &mut Lv, path: &[&str], to: Lv) {
+    let Some((first, rest)) = path.split_first() else {
+        *v = to;
+        return;
+    };
+    if let Lv::Table(p) = v
+        && let Some((_, child)) = p
+            .iter_mut()
+            .find(|(k, _)| *k == Lv::String(first.as_bytes().to_vec()))
+    {
+        set_path(child, rest, to);
+    }
+}

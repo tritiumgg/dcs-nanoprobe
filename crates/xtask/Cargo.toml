@@ -17,7 +17,10 @@ publish = false
 [dependencies]
 nanoprobe-agent-link = { path = "../agent-link" }
 nanoprobe-fake-agent = { path = "../fake-agent" }
+nanoprobe-api = { path = "../api" }
 nanoprobe-install = { path = "../install" }
+nanoprobe-proto = { path = "../proto" }
+nanoprobe-sidecar = { path = "../sidecar", features = ["disk"] }
 nanoprobe-transport = { path = "../transport" }
 getrandom = "0.3"
 hmac = "0.12"
@@ -28,6 +31,8 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.10"
 toml = "1.2.1"
+tokio = { version = "1.54.1", features = ["rt", "time"] }
+tonic = { version = "0.14.9", default-features = false, features = ["channel", "codegen", "transport"] }
 tonic-prost-build = "0.14.9"
 zip = { version = "9.5.1", default-features = false, features = ["deflate"] }
 

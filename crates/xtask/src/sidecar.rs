@@ -1,4 +1,6 @@
-//! `sidecar <name> [--part all|conformance|hello]`: the S17 live test on a
+//! `sidecar <name> [--part all|conformance|hello|shell [--template FILE]]`:
+//! the S17 live test, and with `--part shell` the S19 one
+//! (`shell_live.rs`), on a
 //! docker-wine target. The product's sidecar runs in a container of its own
 //! that shares the game container's network namespace, as the example
 //! compose overlay in `deploy/` sets it up, but started by hand and removed
@@ -63,16 +65,23 @@ const HOLD_S: f64 = 15.0;
 const LIMIT_S: u64 = 900;
 /// The hello's route, from examples/hello-rust (start, end); the suite
 /// spawns at the start.
-const HELLO_POINTS: [(f64, f64); 2] = [(-290_000.0, 680_000.0), (-289_000.0, 680_000.0)];
+pub(crate) const HELLO_POINTS: [(f64, f64); 2] = [(-290_000.0, 680_000.0), (-289_000.0, 680_000.0)];
 
-const USAGE: &str = "usage: cargo xtask sidecar <name> [--part all|conformance|hello]";
+const USAGE: &str =
+    "usage: cargo xtask sidecar <name> [--part all|conformance|hello|shell [--template FILE]]";
 
 pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
-    let (name, part) = match args {
-        [name] => (*name, "all"),
-        [name, "--part", p] if ["all", "conformance", "hello"].contains(p) => (*name, *p),
+    let (name, part, template) = match args {
+        [name] => (*name, "all", None),
+        [name, "--part", p] if ["all", "conformance", "hello", "shell"].contains(p) => {
+            (*name, *p, None)
+        }
+        [name, "--part", "shell", "--template", t] => (*name, "shell", Some(*t)),
         _ => return Err(USAGE.into()),
     };
+    let template = template
+        .map(|t| std::fs::read(t).map_err(|e| format!("{t}: {e}")))
+        .transpose()?;
     let Target::DockerWine { ssh, container, .. } = crate::target(name)? else {
         return Err("sidecar runs on a docker-wine target".into());
     };
@@ -80,12 +89,34 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
     let host = Host { ssh, container };
     let started = bundle::utc_now();
     let mut results = json!({});
-    let result = attempt(repository, &run, &host, name, part, &shell, &mut results);
+    let result = attempt(
+        repository,
+        &run,
+        &host,
+        name,
+        part,
+        &shell,
+        template.as_deref(),
+        &mut results,
+    );
+    let keys: &[&str] = if part == "shell" {
+        &[
+            "reload",
+            "theaters",
+            "own_template",
+            "finished",
+            "hung",
+            "killed",
+        ]
+    } else {
+        &["conformance", "hello_rust", "hello_python"]
+    };
     let ok = result.is_ok()
-        && ["conformance", "hello_rust", "hello_python"]
+        && keys
             .iter()
-            .filter(|k| part == "all" || k.starts_with(part))
-            .all(|k| results[k]["pass"] == json!(true))
+            .filter(|k| part == "all" || part == "shell" || k.starts_with(part))
+            // A skipped item is reported, not failed.
+            .all(|k| results[k]["pass"] == json!(true) || results[k]["skipped"].is_string())
         // A clean stop of the sidecar's container.
         && (part == "conformance" || results["sidecar"]["exit_code_after_stop"] == json!("0"));
     let out = json!({
@@ -173,6 +204,7 @@ impl Host {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn attempt(
     repository: &Path,
     run: &Run,
@@ -180,6 +212,7 @@ fn attempt(
     name: &str,
     part: &str,
     shell: &[u8],
+    template: Option<&[u8]>,
     results: &mut Value,
 ) -> Result<(), String> {
     let probe = link::build_linux_bins(&[("nanoprobe-fake-agent", "conformance-probe")])?
@@ -231,8 +264,8 @@ fn attempt(
         .lines()
         .any(|l| l == "Build Cache|0");
     let result = with_map(
-        repository, run, host, name, part, shell, &probe, &sidecar, profile, &map_dir, &dir,
-        results,
+        repository, run, host, name, part, shell, template, &probe, &sidecar, profile, &map_dir,
+        &dir, results,
     );
     // Put everything back, whatever the outcome; each step goes on after a
     // failed one.
@@ -335,6 +368,7 @@ fn with_map(
     name: &str,
     part: &str,
     shell: &[u8],
+    template: Option<&[u8]>,
     probe: &Path,
     sidecar: &Path,
     profile: &str,
@@ -346,10 +380,17 @@ fn with_map(
     crate::restart(name)?;
     println!("== load a fresh shell mission");
     crate::live::load(&run.remote, "np-shell.miz", shell)?;
-    // `[missions]`: the shell as the Caucasus mission, the folder named as
-    // DCS opens it (spec/config.md).
-    run.remote
-        .write(&format!("{MISSIONS_DIR}/Caucasus.miz"), shell)?;
+    // `[missions]`: the templates, the folder named as DCS opens it
+    // (spec/config.md). The S17 parts load the shell as the Caucasus
+    // template; the shell part writes shells from the committed templates.
+    if part == "shell" {
+        for (file, bytes) in crate::shell_live::templates() {
+            run.remote.write(&format!("{MISSIONS_DIR}/{file}"), bytes)?;
+        }
+    } else {
+        run.remote
+            .write(&format!("{MISSIONS_DIR}/Caucasus.miz"), shell)?;
+    }
     let dcs_missions = format!(
         "Z:{}",
         format!("{profile}/{MISSIONS_DIR}").replace('/', "\\")
@@ -496,7 +537,7 @@ fn with_map(
         }
     }
 
-    if part == "all" || part == "hello" {
+    if part == "all" || part == "hello" || part == "shell" {
         let token: String = (0..4)
             .map(|_| format!("{:016x}", nanoprobe_transport::random_nonzero()))
             .collect();
@@ -515,11 +556,15 @@ fn with_map(
         host.sh(
             &format!(
                 "{} -v \"$5/sidecar.toml\":/etc/nanoprobe/sidecar.toml:ro -v \"$5/tokens.toml\":/etc/nanoprobe/tokens.toml:ro \
-                 -v \"$6\":/missions:ro \
+                 -v \"$6\":/missions:{mode} {restart} \
                  --tmpfs /var/lib/nanoprobe:rw,size=64m,uid={u},gid={g},mode=0700 {IMAGE} >/dev/null",
                 common(SIDECAR_C),
                 u = uid.split(':').next().unwrap_or("0"),
                 g = uid.split(':').nth(1).unwrap_or("0"),
+                // The shell part writes shells, and keeps the sidecar
+                // across the DCS restarts it makes.
+                mode = if part == "shell" { "rw" } else { "ro" },
+                restart = if part == "shell" { "--restart on-failure" } else { "" },
             ),
             &[args[0], args[1], args[2], args[3], args[4], &host_missions],
             b"",
@@ -548,6 +593,33 @@ fn with_map(
             .port();
         let mut forward = Forward::start(&host.ssh, local, &ip, API_PORT)?;
         let endpoint = format!("http://127.0.0.1:{local}");
+        if part == "shell" {
+            let container = host.container.clone();
+            let r = crate::shell_live::drive(
+                run,
+                &endpoint,
+                &token,
+                template,
+                || run.remote.players(),
+                || crate::restart(name).map(|_| ()),
+                || {
+                    host.text(
+                        "docker exec \"$1\" sh -c 'pkill -9 -f DCS_server.exe; echo killed'",
+                        &[&container],
+                    )
+                },
+                results,
+            );
+            results["sidecar_logs"] =
+                json!(host.text("docker logs --tail 200 \"$1\" 2>&1 || true", &[SIDECAR_C])?);
+            forward.stop();
+            host.sh("docker stop -t 20 \"$1\" >/dev/null", &[SIDECAR_C], b"")?;
+            results["sidecar"] = json!({
+                "exit_code_after_stop": host.text("docker inspect -f '{{.State.ExitCode}}' \"$1\"", &[SIDECAR_C])?,
+                "restarts": host.text("docker inspect -f '{{.RestartCount}}' \"$1\"", &[SIDECAR_C])?,
+            });
+            return r;
+        }
         let hellos: [(&str, Vec<String>); 2] = [
             (
                 "hello_rust",
