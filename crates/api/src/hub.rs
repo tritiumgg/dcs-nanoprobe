@@ -1850,6 +1850,7 @@ impl Inner {
             .unwrap_or_default();
         let owed = self.write_shell(id, &theater)?;
         if let Some(old) = self.active.take() {
+            self.end_run(old);
             self.close_store(old, CampaignState::Suspended, None);
             if let Some(s) = self.campaigns.get_mut(&old) {
                 s.meta.state = pb::CampaignState::Suspended as i32;
@@ -2132,6 +2133,23 @@ impl Inner {
         Ok(())
     }
 
+    /// The steps of leaving campaign `id`'s running mission, for a suspend
+    /// and for a switch: its clock goes into the record, the slot of a load
+    /// already sent is kept, and the owed load and the mission start are
+    /// cleared.
+    fn end_run(&mut self, id: u64) {
+        self.sync_clock(id);
+        if let Some(s) = self.campaigns.get_mut(&id) {
+            // A load already sent may still run: its file is not written
+            // over next.
+            if let Some(o) = s.store.owed_load().filter(|o| o.cmd.is_some()).cloned() {
+                s.store.set_shell_slot(slot_in(&o.path));
+            }
+            s.store.set_owed_load(None);
+            s.store.set_mission_start_ms(None);
+        }
+    }
+
     /// Suspend a campaign, or finish it with `outcome` (the encoded
     /// `google.protobuf.Struct`). The active one first tells the agent no
     /// campaign is active; then its store takes a final checkpoint and is
@@ -2144,16 +2162,7 @@ impl Inner {
             self.hold_after = None;
             self.send_no_campaign();
         }
-        self.sync_clock(id);
-        if let Some(s) = self.campaigns.get_mut(&id) {
-            // A load already sent may still run: its file is not written
-            // over next.
-            if let Some(o) = s.store.owed_load().filter(|o| o.cmd.is_some()).cloned() {
-                s.store.set_shell_slot(slot_in(&o.path));
-            }
-            s.store.set_owed_load(None);
-            s.store.set_mission_start_ms(None);
-        }
+        self.end_run(id);
         let state = if finished {
             CampaignState::Finished
         } else {
@@ -4744,6 +4753,116 @@ mod tests {
             .expect("a lease")
     }
 
+    /// Campaign 1 running from 2030-01-01 on the folder hub, past its first
+    /// checkpoint's worth of model time, and a campaign 2 beside it.
+    fn two_campaigns_with_a_running_clock() -> (tempfile::TempDir, Config, Arc<Hub>, i64) {
+        use nanoprobe_sidecar::shell::Start;
+        let (dir, missions, cfg) = owed_setup();
+        let hub = folder_hub(&cfg, &missions, 0x1000);
+        hub.start();
+        let at = Start {
+            year: 2030,
+            month: 1,
+            day: 1,
+            seconds: 0,
+        }
+        .unix_ms();
+        {
+            let mut g = hub.lock();
+            for (id, name) in [(1, "a"), (2, "b")] {
+                g.add_campaign(
+                    &cfg,
+                    pb::Campaign {
+                        id,
+                        name: name.into(),
+                        clock: Some(prost_types::Timestamp {
+                            seconds: at / 1000,
+                            nanos: 0,
+                        }),
+                        ..pb::Campaign::default()
+                    },
+                    "Caucasus".into(),
+                )
+                .expect("add");
+            }
+            g.activate(&cfg, 1).expect("activate");
+        }
+        steps(&hub, 400);
+        (dir, cfg, hub, at)
+    }
+
+    /// A switch leaves the old campaign as a suspend does: its clock is the
+    /// running one, and its store holds no mission start and no owed load.
+    #[test]
+    fn a_switch_suspends_the_old_campaign_with_its_running_clock() {
+        let (_dir, cfg, hub, at) = two_campaigns_with_a_running_clock();
+        let mut g = hub.lock();
+        let running = g.clock_ms(1).expect("clock");
+        assert!(running > at, "the clock ran");
+        g.activate(&cfg, 2).expect("switch");
+        assert_eq!(
+            g.campaigns[&1].meta.clock.as_ref().map(ms_of),
+            Some(running)
+        );
+        g.open_store(1).expect("open");
+        let s = &g.campaigns[&1].store;
+        assert_eq!(s.mission_start_ms(), None);
+        assert!(s.owed_load().is_none());
+    }
+
+    /// After a switch away and back, a refused load leaves the clock where
+    /// the record had it.
+    #[test]
+    fn a_refused_load_after_a_switch_back_keeps_the_record_clock() {
+        let (_dir, cfg, hub, _at) = two_campaigns_with_a_running_clock();
+        let running = {
+            let mut g = hub.lock();
+            let running = g.clock_ms(1).expect("clock");
+            g.activate(&cfg, 2).expect("switch");
+            running
+        };
+        steps(&hub, 300);
+        {
+            // DCS restarts while the other campaign runs, then loads
+            // nothing for campaign 1 but a refused mission.
+            let mut g = hub.lock();
+            let fake = |g: &mut Inner| {
+                g.backend
+                    .as_any()
+                    .expect("fake")
+                    .downcast_mut::<nanoprobe_sim_fake::FakeSim>()
+                    .expect("fake")
+                    .restart_dcs();
+            };
+            fake(&mut g);
+            let boot = g.sidecar_boot;
+            g.backend.attach(boot);
+        }
+        steps(&hub, 300);
+        {
+            let mut g = hub.lock();
+            g.backend
+                .as_any()
+                .expect("fake")
+                .downcast_mut::<nanoprobe_sim_fake::FakeSim>()
+                .expect("fake")
+                .refuse_loads(1);
+            g.activate(&cfg, 1).expect("back");
+        }
+        for _ in 0..400 {
+            hub.step().expect("step");
+            if hub.lock().campaigns[&1].store.owed_load().is_none() {
+                break;
+            }
+        }
+        steps(&hub, 50);
+        let clock = hub.lock().clock_ms(1).expect("clock");
+        assert!(
+            clock >= running && clock < running + 3_600_000,
+            "the clock stays with the record's: {clock} against {running}"
+        );
+    }
+
     /// A start set for another theater waits for a load of that theater.
     #[test]
     fn a_start_for_another_theater_survives_a_shell_write() {
@@ -4915,6 +5034,8 @@ mod tests {
         if std::fs::File::create(folder.join("probe")).is_ok() {
             let _ = std::fs::remove_file(folder.join("probe"));
             set(0o755);
+            let _ = s.stop.send(());
+            s.task.await.expect("join").expect("serve");
             return;
         }
         let r = campaigns
@@ -5230,6 +5351,59 @@ mod tests {
                 .taken
                 .len();
             assert_eq!(after, taken, "no command, no CAPTURE, reached DCS");
+        }
+        // A target whose next mission names an airport its template lacks is
+        // refused the same way: nothing is captured.
+        let c = campaigns
+            .create_campaign(create(&lease, "c", "Caucasus", false))
+            .await
+            .expect("c")
+            .into_inner()
+            .campaign
+            .expect("campaign")
+            .id;
+        s.hub
+            .lock()
+            .set_next(
+                c,
+                &crate::next::Next {
+                    dynamic: vec![nanoprobe_sidecar::shell::DynamicSpawn {
+                        airbase: 99_999,
+                        enabled: true,
+                        hot_start: false,
+                    }],
+                    ..crate::next::Next::default()
+                },
+            )
+            .expect("next");
+        let e = campaigns
+            .activate_campaign(pb::ActivateCampaignRequest {
+                lease: Some(lease.clone()),
+                campaign_id: c,
+                idempotency: Some(pb::Idempotency {
+                    key: "act-c".into(),
+                }),
+            })
+            .await
+            .expect_err("no such airport");
+        assert_eq!(e.code(), Code::InvalidArgument, "{e}");
+        assert_eq!(
+            nanoprobe_proto::errors::detail(&e).expect("detail").field,
+            "next.dynamic_spawn"
+        );
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        {
+            let mut g = s.hub.lock();
+            assert_eq!(g.active, Some(a));
+            assert_eq!(g.campaigns[&a].store.revision(), revision);
+            let any = g.backend.as_any().expect("fake");
+            let after = any
+                .downcast_mut::<nanoprobe_sim_fake::FakeSim>()
+                .expect("fake")
+                .ledger()
+                .taken
+                .len();
+            assert_eq!(after, taken, "nothing was captured");
         }
         let _ = s.stop.send(());
         s.task.await.expect("join").expect("serve");

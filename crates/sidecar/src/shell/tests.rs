@@ -295,3 +295,9 @@ fn placed_names_are_read_from_the_coalition_table() {
     collect_names(src, d.root.get(&Key::s("coalition")).unwrap(), &mut out);
     assert_eq!(out, ["USA", "np!abc1", "u1"]);
 }
+
+#[test]
+fn the_ends_of_i64_do_not_overflow_a_start() {
+    let _ = Start::from_unix_ms(i64::MIN).unix_ms();
+    let _ = Start::from_unix_ms(i64::MAX).unix_ms();
+}

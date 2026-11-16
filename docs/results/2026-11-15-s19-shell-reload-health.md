@@ -33,7 +33,10 @@ export (`export::tests::exports_every_table_one_json_object_per_line`,
 `export_reload_and_delete_through_the_services`), delete refusals
 (`a_delete_without_a_name_needs_a_confirmation`,
 `a_delete_that_cannot_remove_the_folder_keeps_the_campaign`), a create whose
-activation fails (`a_create_whose_activation_fails_leaves_no_campaign`), a start for
+activation fails (`a_create_whose_activation_fails_leaves_no_campaign`), a switch that leaves the old campaign as a suspend does
+(`a_switch_suspends_the_old_campaign_with_its_running_clock`,
+`a_refused_load_after_a_switch_back_keeps_the_record_clock`), a start outside years 1 to 9999
+(`a_start_outside_years_1_to_9999_is_refused`), a start for
 another theater kept (`a_start_for_another_theater_survives_a_shell_write`), the clock
 in `GetCampaign` (`get_campaign_shows_the_running_clock_before_any_checkpoint`), free space
 (`a_full_file_system_refuses_a_copy_and_a_template`;

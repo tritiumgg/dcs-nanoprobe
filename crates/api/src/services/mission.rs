@@ -154,6 +154,17 @@ pub(crate) fn next_of(n: Option<&NextMission>) -> Result<Next, Status> {
         nanoprobe_sidecar::store::check_lv(w).map_err(|e| invalid("next.weather", e))?;
         nanoprobe_sidecar::shell::lua::write(w, 0).map_err(|e| invalid("next.weather", e))?;
     }
+    // Years 1 to 9999, the dates a mission can carry.
+    const FIRST_S: i64 = -62_135_596_800;
+    const LAST_S: i64 = 253_402_300_799;
+    if let Some(t) = &n.start
+        && (!(FIRST_S..=LAST_S).contains(&t.seconds) || !(0..1_000_000_000).contains(&t.nanos))
+    {
+        return Err(invalid(
+            "next.start",
+            "must be a date from year 1 to year 9999",
+        ));
+    }
     Ok(Next {
         theater: n.theater.clone(),
         start_ms: n.start.as_ref().map(ms_of_timestamp),

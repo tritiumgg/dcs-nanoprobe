@@ -2975,6 +2975,14 @@ mod tests {
                             "weather",
                             Lv::String(encode(&t(vec![("k", Lv::Bool(true))]))),
                         ),
+                        (
+                            "dynamic",
+                            list(vec![t(vec![
+                                ("airbase", super::s("12")),
+                                ("enabled", Lv::Bool(true)),
+                                ("hot_start", Lv::Bool(false)),
+                            ])]),
+                        ),
                     ])),
                     Some((11, 2, 1.5)),
                     Some(b'b'),

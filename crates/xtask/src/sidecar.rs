@@ -704,7 +704,8 @@ fn with_map(
                 "done": text.lines().find(|l| l.contains("hello campaign done")),
             });
         }
-        // Each activation wrote a shell under `shells/`, and DCS loaded it.
+        // At least one activation wrote a shell under `shells/`. This does not
+        // show that every hello did, or that DCS loaded it.
         let shells = host.text("ls \"$1/shells\" 2>&1 || true", &[&host_missions])?;
         let shell_written = shells.lines().any(is_shell_file_name);
         results["hello_shells_written"] = json!({ "pass": shell_written, "listing": shells });

@@ -55,9 +55,13 @@ impl Start {
         }
     }
 
-    /// Milliseconds since the Unix epoch, in UTC.
+    /// Milliseconds since the Unix epoch, in UTC; saturates at the ends of
+    /// `i64`.
     pub fn unix_ms(&self) -> i64 {
-        (days_from_civil(self.year, self.month, self.day) * 86_400 + i64::from(self.seconds)) * 1000
+        days_from_civil(self.year, self.month, self.day)
+            .saturating_mul(86_400)
+            .saturating_add(i64::from(self.seconds))
+            .saturating_mul(1000)
     }
 }
 

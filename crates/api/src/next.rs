@@ -166,4 +166,26 @@ mod tests {
         };
         assert!(n.to_lv().is_err());
     }
+
+    #[test]
+    fn a_start_outside_years_1_to_9999_is_refused() {
+        let start = |seconds, nanos| nanoprobe_proto::v1alpha1::NextMission {
+            start: Some(prost_types::Timestamp { seconds, nanos }),
+            ..Default::default()
+        };
+        for (seconds, nanos) in [
+            (i64::MIN / 1000 - 1, 0),
+            (i64::MIN, 0),
+            (-62_135_596_801, 0),
+            (253_402_300_800, 0),
+            (0, -1),
+        ] {
+            let e = crate::services::mission::next_of(Some(&start(seconds, nanos)))
+                .expect_err("out of range");
+            assert_eq!(e.code(), tonic::Code::InvalidArgument, "{seconds} {nanos}");
+        }
+        crate::services::mission::next_of(Some(&start(-62_135_596_800, 0))).expect("year 1");
+        crate::services::mission::next_of(Some(&start(253_402_300_799, 999_999_999)))
+            .expect("year 9999");
+    }
 }

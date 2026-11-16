@@ -2059,7 +2059,8 @@ pub struct NextMission {
     pub theater: ::prost::alloc::string::String,
     /// The mission's date and start time, the mission's own calendar time in
     /// a Timestamp with no time-zone conversion. Absent carries the campaign
-    /// clock. Used by the next shell written, then cleared.
+    /// clock. Used by the next shell written for this theater (any theater
+    /// when `theater` is empty); the commit that owes that load clears it.
     #[prost(message, optional, tag = "2")]
     pub start: ::core::option::Option<::prost_types::Timestamp>,
     /// The DCS weather table. Absent keeps the template's.
