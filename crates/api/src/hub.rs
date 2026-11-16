@@ -244,6 +244,10 @@ pub struct Inner {
     /// sent in, by agent boot and generation, from its command's row: nothing
     /// materializes until the store records another.
     pub hold_after: Option<(u64, u32)>,
+    /// Whether the last step's verdict was hung: a change publishes a
+    /// lifecycle event (`SIM_STATE_HUNG` on entering, the real state on
+    /// leaving).
+    hung: bool,
     /// The server store, with `[store]` on disk.
     pub server: Option<ServerStore>,
     /// The lock on the store dir, held while the hub lives.
@@ -331,6 +335,16 @@ pub fn lease_status(e: LeaseError) -> Status {
             0,
             "lease",
         ),
+    }
+}
+
+/// The state the server reports for DCS: hung and gone from the verdict,
+/// otherwise the agent's lifecycle state.
+pub fn server_sim_state(health: Health, lifecycle: u32) -> pb::SimState {
+    match health {
+        Health::Hung => pb::SimState::Hung,
+        Health::Gone => pb::SimState::Gone,
+        _ => crate::events::sim_state(lifecycle),
     }
 }
 
@@ -590,6 +604,7 @@ impl Inner {
         }
         self.save_keys();
         self.drive_players();
+        self.watch_hung();
         // With no campaign active the agent must hold none: it idles, and
         // its records stamp campaign 0 (plan 4.6, "Suspend").
         if self.clear_campaign && self.active.is_none() {
@@ -610,6 +625,24 @@ impl Inner {
         }
         self.timers(cfg);
         self.settle(None);
+    }
+
+    /// Publish a lifecycle event when the verdict enters or leaves hung
+    /// (spec/errors.md, "Health"): `SIM_STATE_HUNG` on entering, the state
+    /// DCS shows on leaving (`SIM_STATE_GONE` when nothing listens).
+    fn watch_hung(&mut self) {
+        let health = self.backend.health();
+        let hung = health == Health::Hung;
+        if hung == self.hung {
+            return;
+        }
+        self.hung = hung;
+        let state = server_sim_state(health, self.link.lifecycle);
+        let theater = self.link.theater.clone();
+        self.publish(event::Body::Lifecycle(pb::LifecycleEvent {
+            state: state as i32,
+            theater,
+        }));
     }
 
     /// Write the player keys learned since the last step to the server
@@ -1731,6 +1764,7 @@ impl Hub {
                 backup_job: None,
                 backing_up: std::collections::BTreeSet::new(),
                 hold_after: None,
+                hung: false,
                 server: None,
                 lock: None,
                 idem_keep: cfg.idempotency_keep,
@@ -2458,6 +2492,73 @@ mod tests {
         fn as_any(&mut self) -> Option<&mut dyn std::any::Any> {
             Some(&mut self.0)
         }
+    }
+
+    /// A DCS whose verdict the test sets.
+    struct Verdicts(Silent, Arc<Mutex<Health>>);
+
+    impl Backend for Verdicts {
+        fn sim(&mut self) -> &mut dyn SimAdapter {
+            &mut self.0
+        }
+        fn frame(&mut self) {}
+        fn attach(&mut self, _sidecar_boot: u64) {}
+        fn detach(&mut self) {}
+        fn load_mission(&mut self, _theater: &str) {}
+        fn health(&self) -> Health {
+            *self.1.lock().expect("verdict")
+        }
+        fn heartbeat_age(&self) -> Option<Duration> {
+            None
+        }
+        fn attach_error(&self) -> String {
+            String::new()
+        }
+    }
+
+    #[test]
+    fn a_hung_verdict_is_a_lifecycle_event_on_entering_and_leaving() {
+        let verdict = Arc::new(Mutex::new(Health::Healthy));
+        let hub = Hub::new(
+            Config::default(),
+            Box::new(Verdicts(Silent, verdict.clone())),
+        );
+        hub.start();
+        let states = |hub: &Hub| -> Vec<i32> {
+            hub.lock()
+                .server_log
+                .after(0, 100)
+                .into_iter()
+                .filter_map(|e| match e.body {
+                    Some(event::Body::Lifecycle(l)) => Some(l.state),
+                    _ => None,
+                })
+                .collect()
+        };
+        let steps = |n| {
+            for _ in 0..n {
+                hub.step().expect("step");
+            }
+        };
+        steps(3);
+        assert!(states(&hub).is_empty(), "healthy publishes nothing");
+        *verdict.lock().unwrap() = Health::Hung;
+        steps(3);
+        assert_eq!(states(&hub), [pb::SimState::Hung as i32], "once on entering");
+        *verdict.lock().unwrap() = Health::Gone;
+        steps(3);
+        assert_eq!(
+            states(&hub),
+            [pb::SimState::Hung as i32, pb::SimState::Gone as i32],
+            "the real state on leaving"
+        );
+        *verdict.lock().unwrap() = Health::Hung;
+        steps(1);
+        *verdict.lock().unwrap() = Health::Healthy;
+        steps(1);
+        let s = states(&hub);
+        assert_eq!(s.len(), 4);
+        assert_eq!(s[3], pb::SimState::Unspecified as i32, "no lifecycle read yet");
     }
 
     /// The active campaign's owed mission load.

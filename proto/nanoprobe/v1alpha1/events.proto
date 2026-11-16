@@ -199,6 +199,11 @@ enum SimState {
   // The health verdict is gone: no DCS process holds a running agent. A DCS
   // the server is not attached to still reports its own state.
   SIM_STATE_GONE = 7;
+  // The health verdict is hung: DCS holds the port or the mapped file but
+  // its heartbeat stands still past the limit (a stall, a crash-report
+  // window, a load past loading_limit_s). A lifecycle event carries it when
+  // the verdict enters hung, and the state DCS shows when it leaves.
+  SIM_STATE_HUNG = 8;
 }
 
 message LifecycleEvent {

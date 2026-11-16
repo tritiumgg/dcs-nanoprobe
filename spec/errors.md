@@ -195,6 +195,11 @@ matches decides:
   handshake port still accepts a connect, which makes it `hung` and not `gone`, is
   UNVERIFIED until step S19 (E22).
 
+While the verdict is `hung`, the status reports the state `SIM_STATE_HUNG`, and while it
+is `gone`, `SIM_STATE_GONE`. When the verdict enters `hung`, the sidecar publishes a
+lifecycle event with `SIM_STATE_HUNG`; when it leaves, one with the state the status
+then reports. The event goes to the active campaign's history, or to the server log.
+
 The sidecar takes no action on a verdict. Starting, stopping and restarting DCS belong
 to the host. The health command's exit code is 0 for `healthy` and differs for each
 other verdict (spec/config.md).

@@ -12,8 +12,7 @@ use tonic::{Request, Response, Status};
 
 use crate::auth::{Access, require};
 use crate::convert::not_built;
-use crate::events::sim_state;
-use crate::hub::Hub;
+use crate::hub::{Hub, server_sim_state};
 
 /// The service.
 pub struct Mission(pub Arc<Hub>);
@@ -31,11 +30,7 @@ impl MissionService for Mission {
             seconds: i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
             nanos: i32::try_from(d.subsec_nanos()).unwrap_or(0),
         });
-        let state = if health == nanoprobe_proto::v1alpha1::Health::Gone {
-            SimState::Gone
-        } else {
-            sim_state(g.link.lifecycle)
-        };
+        let state: SimState = server_sim_state(health, g.link.lifecycle);
         Ok(Response::new(GetServerStatusResponse {
             status: Some(ServerStatus {
                 health: health as i32,

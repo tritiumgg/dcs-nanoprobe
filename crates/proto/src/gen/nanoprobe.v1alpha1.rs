@@ -1537,6 +1537,11 @@ pub enum SimState {
     /// The health verdict is gone: no DCS process holds a running agent. A DCS
     /// the server is not attached to still reports its own state.
     Gone = 7,
+    /// The health verdict is hung: DCS holds the port or the mapped file but
+    /// its heartbeat stands still past the limit (a stall, a crash-report
+    /// window, a load past loading_limit_s). A lifecycle event carries it when
+    /// the verdict enters hung, and the state DCS shows when it leaves.
+    Hung = 8,
 }
 impl SimState {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -1553,6 +1558,7 @@ impl SimState {
             Self::Stopping => "SIM_STATE_STOPPING",
             Self::Disabled => "SIM_STATE_DISABLED",
             Self::Gone => "SIM_STATE_GONE",
+            Self::Hung => "SIM_STATE_HUNG",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -1566,6 +1572,7 @@ impl SimState {
             "SIM_STATE_STOPPING" => Some(Self::Stopping),
             "SIM_STATE_DISABLED" => Some(Self::Disabled),
             "SIM_STATE_GONE" => Some(Self::Gone),
+            "SIM_STATE_HUNG" => Some(Self::Hung),
             _ => None,
         }
     }
