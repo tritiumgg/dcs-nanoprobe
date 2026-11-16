@@ -4,11 +4,13 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use nanoprobe_api::config::{Config, StoreFiles};
-use nanoprobe_fake_sidecar::{fake_config, start};
+use nanoprobe_fake_sidecar::{fake_config, start_with};
+use nanoprobe_sim_fake::FakeSim;
 
 const USAGE: &str = "\
 Usage: nanoprobe-fake-sidecar [--listen ADDR] [--tokens PATH] [--frame-ms MS]
-                              [--store DIR] [--run PROGRAM [ARGS...]]
+                              [--store DIR] [--theater NAME]
+                              [--run PROGRAM [ARGS...]]
 
 Serve the nanoprobe API over a fake DCS, for development and tests.
 
@@ -17,6 +19,9 @@ Serve the nanoprobe API over a fake DCS, for development and tests.
 --frame-ms MS   Milliseconds per fake frame (default 20).
 --store DIR     Keep the campaigns in DIR (spec/persistence.md). Without it
                 they are in memory and end with the process.
+--theater NAME  Start the fake DCS with a mission on NAME loaded, as a DCS
+                that started its own mission. Without it no mission is
+                loaded until an activation loads one.
 --run PROGRAM   Run PROGRAM with NANOPROBE_ADDR set to the server's URL, then
                 stop and exit with its exit code. Without it, serve until
                 Ctrl-C.
@@ -25,6 +30,7 @@ The server prints `listening on http://ADDR` once it accepts connections.";
 
 struct Args {
     cfg: Config,
+    theater: Option<String>,
     run: Vec<String>,
 }
 
@@ -34,6 +40,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
         ..Config::default()
     };
     let mut run = Vec::new();
+    let mut theater = None;
     let mut i = 0;
     while i < args.len() {
         let value = |i: usize| {
@@ -62,6 +69,10 @@ fn parse(args: &[String]) -> Result<Args, String> {
                 cfg.store = Some(StoreFiles::new(value(i)?.into()));
                 i += 2;
             }
+            "--theater" => {
+                theater = Some(value(i)?);
+                i += 2;
+            }
             "--run" => {
                 run = args[i + 1..].to_vec();
                 if run.is_empty() {
@@ -73,7 +84,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
             other => return Err(format!("unknown argument `{other}`")),
         }
     }
-    Ok(Args { cfg, run })
+    Ok(Args { cfg, run, theater })
 }
 
 #[tokio::main]
@@ -90,7 +101,20 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let server = match start(a.cfg, fake_config()).await {
+    // Each process is a DCS boot of its own, as a real agent's is: a
+    // sidecar started again over a store must not take it for the boot
+    // the store last saw.
+    let boot = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0x1000, |d| u64::try_from(d.as_millis()).unwrap_or(0x1000));
+    let mut sim = FakeSim::new(nanoprobe_sim_fake::Config {
+        first_boot: boot,
+        ..fake_config()
+    });
+    if let Some(t) = &a.theater {
+        sim.load_mission_on(t);
+    }
+    let server = match start_with(a.cfg, sim).await {
         Ok(s) => s,
         Err(e) => {
             eprintln!("nanoprobe-fake-sidecar: {e}");

@@ -46,17 +46,17 @@ use crate::ssh::{self, quote};
 use crate::{bundle, link};
 
 /// The map folder, under the profile.
-const MAP_DIR: &str = "nanoprobe/dev/sidecar";
+pub(crate) const MAP_DIR: &str = "nanoprobe/dev/sidecar";
 /// The mission folder of `[missions]`, under the profile: the run makes it
 /// and removes it.
-const MISSIONS_DIR: &str = "nanoprobe/missions";
+pub(crate) const MISSIONS_DIR: &str = "nanoprobe/missions";
 /// The image's tag.
-const IMAGE: &str = "nanoprobe-sidecar:xtask";
+pub(crate) const IMAGE: &str = "nanoprobe-sidecar:xtask";
 /// The containers' names.
 const PROBE_C: &str = "nanoprobe-xtask-conformance";
 const SIDECAR_C: &str = "nanoprobe-xtask-sidecar";
 /// The API port inside the shared namespace.
-const API_PORT: u16 = 47311;
+pub(crate) const API_PORT: u16 = 47311;
 /// Model seconds each hold runs.
 const HOLD_S: f64 = 15.0;
 /// How long a probe or a hello may take, seconds.
@@ -119,14 +119,14 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
 }
 
 /// The SSH host and the game container on it.
-struct Host {
-    ssh: String,
-    container: String,
+pub(crate) struct Host {
+    pub(crate) ssh: String,
+    pub(crate) container: String,
 }
 
 impl Host {
     /// Run `script` with `sh` on the host, `args` as `$1`, `$2`, ...
-    fn sh(&self, script: &str, args: &[&str], input: &[u8]) -> Result<Vec<u8>, String> {
+    pub(crate) fn sh(&self, script: &str, args: &[&str], input: &[u8]) -> Result<Vec<u8>, String> {
         let mut remote = format!("sh -c {} sh", quote(script));
         for a in args {
             remote.push(' ');
@@ -142,7 +142,7 @@ impl Host {
         Ok(o.stdout)
     }
 
-    fn text(&self, script: &str, args: &[&str]) -> Result<String, String> {
+    pub(crate) fn text(&self, script: &str, args: &[&str]) -> Result<String, String> {
         Ok(String::from_utf8_lossy(&self.sh(script, args, b"")?)
             .trim()
             .to_owned())
@@ -150,7 +150,7 @@ impl Host {
 
     /// The host path of `inside`, a path in the game container on a bind
     /// mount.
-    fn host_path(&self, inside: &str) -> Result<String, String> {
+    pub(crate) fn host_path(&self, inside: &str) -> Result<String, String> {
         let mounts = self.text(
             "docker inspect -f '{{range .Mounts}}{{if eq .Type \"bind\"}}{{.Source}}|{{.Destination}}{{println}}{{end}}{{end}}' \"$1\"",
             &[&self.container],
@@ -287,7 +287,7 @@ fn attempt(
 }
 
 /// `old` with `[transport] map_path` set to `map`, every other key kept.
-fn with_map_path(old: &str, map: &str) -> Result<String, String> {
+pub(crate) fn with_map_path(old: &str, map: &str) -> Result<String, String> {
     let mut table: toml::Table =
         toml::from_str(old).map_err(|e| format!("agent.toml on the target: {e}"))?;
     let t = table
@@ -301,7 +301,7 @@ fn with_map_path(old: &str, map: &str) -> Result<String, String> {
 
 /// Build `nanoprobe-sidecar` as a static Linux program, with zig as the C
 /// compiler of the bundled SQLite (mise.toml, `sidecar-linux`).
-fn build_sidecar(repository: &Path) -> Result<PathBuf, String> {
+pub(crate) fn build_sidecar(repository: &Path) -> Result<PathBuf, String> {
     let tools = repository.join("tools");
     let status = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
         .args([
@@ -655,10 +655,10 @@ fn materialized_after_load(text: &str) -> bool {
 }
 
 /// A loopback port here forwarded over SSH to `ip:port` on the host's side.
-struct Forward(Option<Child>);
+pub(crate) struct Forward(pub(crate) Option<Child>);
 
 impl Forward {
-    fn start(dest: &str, local: u16, ip: &str, port: u16) -> Result<Forward, String> {
+    pub(crate) fn start(dest: &str, local: u16, ip: &str, port: u16) -> Result<Forward, String> {
         let child = Command::new("ssh")
             .args([
                 "-N",
@@ -687,7 +687,7 @@ impl Forward {
         Ok(f)
     }
 
-    fn stop(&mut self) {
+    pub(crate) fn stop(&mut self) {
         if let Some(mut c) = self.0.take() {
             let _ = c.kill();
             let _ = c.wait();
@@ -723,7 +723,13 @@ fn hold(run: &Run) -> Result<(), String> {
     Ok(())
 }
 
-fn upload(host: &Host, dir: &str, name: &str, bytes: &[u8], mode: &str) -> Result<(), String> {
+pub(crate) fn upload(
+    host: &Host,
+    dir: &str,
+    name: &str,
+    bytes: &[u8],
+    mode: &str,
+) -> Result<(), String> {
     host.sh(
         "cat > \"$1/$2.partial\" && chmod \"$3\" \"$1/$2.partial\" && mv -f \"$1/$2.partial\" \"$1/$2\"",
         &[dir, name, mode],
@@ -732,11 +738,11 @@ fn upload(host: &Host, dir: &str, name: &str, bytes: &[u8], mode: &str) -> Resul
     .map(|_| ())
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn run_port(run: &Run) -> Result<u16, String> {
+pub(crate) fn run_port(run: &Run) -> Result<u16, String> {
     run.link_args()[1]
         .parse()
         .map_err(|e| format!("agent port: {e}"))
