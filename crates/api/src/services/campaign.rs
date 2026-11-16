@@ -23,8 +23,12 @@ use tonic::{Code, Request, Response, Status};
 
 use super::Out;
 use crate::auth::{Access, require};
-use crate::convert::{invalid, not_built};
+use crate::convert::invalid;
 use crate::hub::{Call, Hub, Inner, Need, disk_status, wall_ms};
+
+/// The most bytes of whole lines one export message carries, before the
+/// line that passes it.
+const EXPORT_CHUNK: usize = 64 * 1024;
 
 /// The service.
 pub struct Campaigns(pub Arc<Hub>);
@@ -338,16 +342,82 @@ impl CampaignService for Campaigns {
 
     async fn export_campaign(
         &self,
-        _req: Request<ExportCampaignRequest>,
+        req: Request<ExportCampaignRequest>,
     ) -> Result<Response<Self::ExportCampaignStream>, Status> {
-        Err(not_built("ExportCampaign"))
+        require(&req, Access::Observer)?;
+        let id = req.into_inner().campaign_id;
+        let (campaign, store, events) = {
+            let mut g = self.0.lock();
+            let id = g.resolve_read(id)?;
+            let files = g.files().ok_or_else(|| {
+                status(
+                    Code::FailedPrecondition,
+                    ErrorReason::Unspecified,
+                    "the stores are in memory (`[store] enabled = false`): there is no file to export",
+                    0,
+                    "",
+                )
+            })?;
+            (
+                id,
+                files.store_path(CampaignId(id)),
+                files.events_path(CampaignId(id)),
+            )
+        };
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        tokio::task::spawn_blocking(move || {
+            let mut chunk = Vec::new();
+            let send = |chunk: &mut Vec<u8>| {
+                tx.blocking_send(Ok(ExportCampaignResponse {
+                    lines: std::mem::take(chunk),
+                }))
+                .is_ok()
+            };
+            let r = nanoprobe_sidecar::export::export(campaign, &store, &events, &mut |line| {
+                chunk.extend_from_slice(&line);
+                chunk.len() < EXPORT_CHUNK || send(&mut chunk)
+            });
+            match r {
+                Ok(()) if !chunk.is_empty() => {
+                    send(&mut chunk);
+                }
+                Ok(()) => {}
+                Err(e) => {
+                    let _ = tx.blocking_send(Err(disk_status(campaign, &e)));
+                }
+            }
+        });
+        Ok(Response::new(Box::pin(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        )))
     }
 
     async fn delete_campaign(
         &self,
-        _req: Request<DeleteCampaignRequest>,
+        req: Request<DeleteCampaignRequest>,
     ) -> Result<Response<DeleteCampaignResponse>, Status> {
-        Err(not_built("DeleteCampaign"))
+        require(&req, Access::Admin)?;
+        let r = req.into_inner();
+        let mut hashed = r.clone();
+        hashed.lease = None;
+        let resp = self
+            .0
+            .write(
+                Call {
+                    method: "DeleteCampaign",
+                    key: r.idempotency.as_ref(),
+                    lease: r.lease.as_ref(),
+                    campaign: 0,
+                    need: Need::Nothing,
+                },
+                &hashed,
+                |g: &mut Inner, _| {
+                    g.delete_campaign(r.campaign_id, &r.confirm_name)?;
+                    Ok((DeleteCampaignResponse {}, 0))
+                },
+            )
+            .await?;
+        Ok(Response::new(resp))
     }
 
     async fn backup_campaign(

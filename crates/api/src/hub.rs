@@ -1646,7 +1646,7 @@ impl Inner {
         if !slot.meta.theaters.contains(&theater) {
             return Err(crate::convert::invalid(
                 "next.theater",
-                &format!("{theater:?} is not one of the campaign's theaters"),
+                format!("{theater:?} is not one of the campaign's theaters"),
             ));
         }
         // The clock goes into the shell before the running mission ends.
@@ -1675,13 +1675,70 @@ impl Inner {
         Ok(())
     }
 
+    /// Delete a campaign that is not active: close its store, remove its
+    /// folder and its shell (spec/persistence.md, "Campaign operations").
+    /// `confirm` must equal its name.
+    pub fn delete_campaign(&mut self, id: u64, confirm: &str) -> Result<(), Status> {
+        let slot = self.campaigns.get(&id).ok_or_else(|| {
+            status(
+                Code::NotFound,
+                ErrorReason::CampaignNotFound,
+                format!("no campaign {id}"),
+                0,
+                "campaign_id",
+            )
+        })?;
+        if slot.meta.name != confirm {
+            return Err(crate::convert::invalid(
+                "confirm_name",
+                "must equal the campaign's name",
+            ));
+        }
+        if self.active == Some(id) || self.backing_up.contains(&id) {
+            return Err(status(
+                Code::FailedPrecondition,
+                ErrorReason::Unspecified,
+                format!("campaign {id} is active or backing up; suspend it and wait first"),
+                0,
+                "campaign_id",
+            ));
+        }
+        if slot.opened && slot.store.on_disk() {
+            let state = slot
+                .store
+                .record()
+                .map_or(CampaignState::Suspended, |r| r.state);
+            self.close_store(id, state, None);
+        }
+        self.closing.retain(|(c, ..)| *c != id);
+        self.campaigns.remove(&id);
+        if let Some(files) = self.files.as_ref() {
+            files.delete(CampaignId(id)).map_err(|e| {
+                status(
+                    Code::Unavailable,
+                    ErrorReason::Unspecified,
+                    format!("the folder of campaign {id} could not be removed: {e}"),
+                    0,
+                    "",
+                )
+            })?;
+        }
+        if let Some(dir) = self.backend.missions().and_then(|m| m.dir().ok()) {
+            let shell = dir
+                .join(nanoprobe_sidecar::shell::SHELLS)
+                .join(nanoprobe_sidecar::shell::shell_name(id));
+            let _ = std::fs::remove_file(shell);
+        }
+        Ok(())
+    }
+
     /// Set campaign `id`'s next-mission settings.
     pub fn set_next(&mut self, id: u64, next: &crate::next::Next) -> Result<(), Status> {
         let slot = self.campaigns.get_mut(&id).expect("resolved");
         if !next.theater.is_empty() && !slot.meta.theaters.contains(&next.theater) {
             return Err(crate::convert::invalid(
                 "next.theater",
-                &format!("{:?} is not one of the campaign's theaters", next.theater),
+                format!("{:?} is not one of the campaign's theaters", next.theater),
             ));
         }
         slot.store.set_next_mission(Some(next.to_lv()));
@@ -3415,6 +3472,122 @@ mod tests {
                 key: format!("create-{name}"),
             }),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn export_reload_and_delete_through_the_services() {
+        use nanoprobe_proto::v1alpha1::campaign_service_client::CampaignServiceClient;
+        use nanoprobe_proto::v1alpha1::mission_service_client::MissionServiceClient;
+        use nanoprobe_proto::v1alpha1::session_service_client::SessionServiceClient;
+        let s = served_folder().await;
+        let mut session = SessionServiceClient::new(s.channel.clone());
+        let mut campaigns = CampaignServiceClient::new(s.channel.clone());
+        let mut mission = MissionServiceClient::new(s.channel.clone());
+        let lease = session
+            .acquire_lease(pb::AcquireLeaseRequest {
+                client_name: "test".into(),
+            })
+            .await
+            .expect("lease")
+            .into_inner()
+            .lease
+            .expect("a lease");
+        let id_of = |r: pb::CreateCampaignResponse| r.campaign.expect("campaign").id;
+        let a = id_of(
+            campaigns
+                .create_campaign(create(&lease, "a", "Caucasus", true))
+                .await
+                .expect("a")
+                .into_inner(),
+        );
+        let b = id_of(
+            campaigns
+                .create_campaign(create(&lease, "b", "Caucasus", false))
+                .await
+                .expect("b")
+                .into_inner(),
+        );
+        let mut stream = campaigns
+            .export_campaign(pb::ExportCampaignRequest { campaign_id: a })
+            .await
+            .expect("export")
+            .into_inner();
+        let mut bytes = Vec::new();
+        while let Some(m) = stream.message().await.expect("message") {
+            assert!(m.lines.ends_with(b"\n"), "whole lines");
+            bytes.extend(m.lines);
+        }
+        let first: serde_json::Value =
+            serde_json::from_slice(bytes.split(|b| *b == b'\n').next().expect("line"))
+                .expect("json");
+        assert_eq!(first["kind"], "header");
+        assert_eq!(first["campaign_id"], a);
+
+        let write = |key: &str| pb::Write {
+            lease: Some(lease.clone()),
+            idempotency: Some(pb::Idempotency { key: key.into() }),
+            campaign_id: 0,
+        };
+        let e = mission
+            .set_next_mission(pb::SetNextMissionRequest {
+                write: Some(write("next-bad")),
+                next: Some(pb::NextMission {
+                    theater: "Afghanistan".into(),
+                    ..pb::NextMission::default()
+                }),
+            })
+            .await
+            .expect_err("not a theater of the campaign");
+        assert_eq!(e.code(), Code::InvalidArgument);
+        // The activation's load is applied before a reload is taken.
+        for _ in 0..100 {
+            if s.hub.lock().campaigns[&a].store.owed_load().is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let r = mission
+            .reload(pb::ReloadRequest {
+                write: Some(write("reload-1")),
+            })
+            .await
+            .expect("reload")
+            .into_inner();
+        assert_eq!(
+            r.result.expect("result").outcome,
+            pb::Outcome::Pending as i32
+        );
+
+        let delete = |id, name: &str, key: &str| pb::DeleteCampaignRequest {
+            lease: Some(lease.clone()),
+            campaign_id: id,
+            confirm_name: name.into(),
+            idempotency: Some(pb::Idempotency { key: key.into() }),
+        };
+        let e = campaigns
+            .delete_campaign(delete(b, "not b", "del-1"))
+            .await
+            .expect_err("wrong name");
+        assert_eq!(e.code(), Code::InvalidArgument);
+        let e = campaigns
+            .delete_campaign(delete(a, "a", "del-2"))
+            .await
+            .expect_err("active");
+        assert_eq!(e.code(), Code::FailedPrecondition);
+        campaigns
+            .delete_campaign(delete(b, "b", "del-3"))
+            .await
+            .expect("delete b");
+        assert!(
+            !entries(&s.store).contains(&b.to_string()),
+            "folder removed"
+        );
+        let listed = campaigns
+            .list_campaigns(pb::ListCampaignsRequest {})
+            .await
+            .expect("list")
+            .into_inner();
+        assert_eq!(listed.campaigns.len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
