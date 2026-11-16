@@ -52,6 +52,9 @@ pub(crate) const MAP_DIR: &str = "nanoprobe/dev/sidecar";
 /// The mission folder of `[missions]`, under the profile: the run makes it
 /// and removes it.
 pub(crate) const MISSIONS_DIR: &str = "nanoprobe/missions";
+/// The shell part's campaign store, under the profile: the run makes it and
+/// removes it.
+const STORE_DIR: &str = "nanoprobe/dev/sidecar-store";
 /// The image's tag.
 pub(crate) const IMAGE: &str = "nanoprobe-sidecar:xtask";
 /// The containers' names.
@@ -317,6 +320,9 @@ fn attempt(
     if let Err(e) = run.sh("rm -rf \"$1\"", &[&missions_dir]) {
         cleanup.push(format!("mission folder: {e}"));
     }
+    if let Err(e) = run.sh("rm -rf \"$1\"", &[&format!("{profile}/{STORE_DIR}")]) {
+        cleanup.push(format!("store folder: {e}"));
+    }
     println!("== containers, image and host folder removed; agent.toml put back as found");
     if !cache_was_empty {
         println!("   the build cache was not empty before the run; it was left as it is");
@@ -442,6 +448,15 @@ fn with_map(
     let host_map = host.host_path(map_dir)?;
     let host_token = host.host_path(&run.remote.full_path(TOKEN))?;
     let host_missions = host.host_path(&format!("{profile}/{MISSIONS_DIR}"))?;
+    // The shell part restarts the sidecar with DCS: its store must outlive
+    // the container's tmpfs.
+    let host_store = if part == "shell" {
+        let store_dir = format!("{profile}/{STORE_DIR}");
+        run.sh("mkdir -p \"$1\" && chmod 700 \"$1\"", &[&store_dir])?;
+        host.host_path(&store_dir)?
+    } else {
+        String::new()
+    };
     let port = run_port(run)?;
     host.sh("rm -rf \"$1\" && mkdir -m 755 \"$1\"", &[dir], b"")?;
     upload(
@@ -568,18 +583,24 @@ fn with_map(
         host.sh(
             &format!(
                 "{} -v \"$5/sidecar.toml\":/etc/nanoprobe/sidecar.toml:ro -v \"$5/tokens.toml\":/etc/nanoprobe/tokens.toml:ro \
-                 -v \"$6\":/missions:{mode} {restart} \
-                 --tmpfs /var/lib/nanoprobe:rw,size=64m,uid={u},gid={g},mode=0700 {IMAGE} >/dev/null",
+                 -v \"$6\":/missions:{mode} {restart} {store} {IMAGE} >/dev/null",
                 common(SIDECAR_C),
-                u = uid.split(':').next().unwrap_or("0"),
-                g = uid.split(':').nth(1).unwrap_or("0"),
+                store = if part == "shell" {
+                    "-v \"$7\":/var/lib/nanoprobe".to_owned()
+                } else {
+                    format!(
+                        "--tmpfs /var/lib/nanoprobe:rw,size=64m,uid={u},gid={g},mode=0700",
+                        u = uid.split(':').next().unwrap_or("0"),
+                        g = uid.split(':').nth(1).unwrap_or("0"),
+                    )
+                },
                 // Every activation writes its shell under the folder. The
                 // shell part also keeps the sidecar across the DCS restarts
                 // it makes.
                 mode = "rw",
                 restart = if part == "shell" { "--restart on-failure" } else { "" },
             ),
-            &[args[0], args[1], args[2], args[3], args[4], &host_missions],
+            &[args[0], args[1], args[2], args[3], args[4], &host_missions, &host_store],
             b"",
         )?;
         let deadline = Instant::now() + Duration::from_secs(60);
