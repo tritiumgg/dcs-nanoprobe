@@ -294,6 +294,8 @@ pub struct Inner {
     /// the sidecar.
     #[doc(hidden)]
     pub crash_after_events: bool,
+    /// The store write times, for a live measurement (`crate::timings`).
+    timings: Option<crate::timings::Timings>,
 }
 
 /// A scheduled backup on its worker thread.
@@ -529,6 +531,7 @@ impl Inner {
     /// One driver step: a frame, every record read and folded in, then the
     /// checkpoint and backup timers.
     fn step(&mut self, cfg: &Config) {
+        self.report_timings();
         self.backend.frame();
         // The clock and the agent boot before the step: a DCS restart runs
         // a mission the campaign did not load, and the clock carries on
@@ -1208,6 +1211,7 @@ impl Inner {
     /// (spec/persistence.md, "Writes"). An acknowledged change is on disk
     /// before the call answers, and a command before it reaches DCS.
     fn settle(&mut self, acted: Option<u64>) {
+        let t0 = self.timings.is_some().then(Instant::now);
         // The events first, then the stores (spec/persistence.md, "A crash
         // between the two commits").
         self.commit_events();
@@ -1232,7 +1236,31 @@ impl Inner {
                 panic!("the server store could not be written, stopping: {e}");
             }
         }
+        if let (Some(t), Some(t0)) = (self.timings.as_mut(), t0) {
+            t.commit(t0.elapsed());
+        }
         self.backend.sim().flush();
+    }
+
+    /// Print the store write times when a period is due (`crate::timings`).
+    fn report_timings(&mut self) {
+        let Some(t) = self.timings.as_mut() else {
+            return;
+        };
+        let campaigns = &self.campaigns;
+        let active = self.active;
+        let units = || {
+            active.and_then(|a| campaigns.get(&a)).map_or(0, |s| {
+                s.store
+                    .groups()
+                    .filter(|g| !g.removed)
+                    .map(|g| g.members.len())
+                    .sum()
+            })
+        };
+        if let Some(line) = t.due(Instant::now(), units) {
+            eprintln!("{line}");
+        }
     }
 
     /// The periods the sampling tiers achieve now, with the targets the
@@ -1382,9 +1410,13 @@ impl Inner {
             self.sync_clock(id);
             let achieved = self.achieved(id);
             let slot = self.campaigns.get_mut(&id).expect("active campaign");
+            let t0 = Instant::now();
             match slot.store.checkpoint(now, achieved) {
                 Ok(c) => slot.meta.last_checkpoint = Some(checkpoint_info(&c)),
                 Err(e) => panic!("campaign {id} could not be checkpointed, stopping: {e}"),
+            }
+            if let Some(t) = self.timings.as_mut() {
+                t.checkpoint(t0.elapsed());
             }
             self.next_checkpoint_ms = now.saturating_add(ms(sf.checkpoint));
         }
@@ -2413,6 +2445,7 @@ impl Hub {
                 idem_keep: cfg.idempotency_keep,
                 crash_after_events: false,
                 closing: Vec::new(),
+                timings: crate::timings::Timings::from_env(),
             }),
             tick,
             settled: Notify::new(),

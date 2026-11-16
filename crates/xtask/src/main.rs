@@ -17,6 +17,7 @@ mod live;
 mod meter;
 mod miz;
 mod peerkill;
+mod persistence;
 mod probes;
 mod profile;
 mod proto;
@@ -182,6 +183,12 @@ commands:
                             namespace, the conformance suite through RealSim, and both
                             hello campaigns against it; removes what it started.
                             Refuses a server with players.
+  persistence <name>|rehearse [--only a,b,...]
+                            The S18 live tests on a docker-wine target, the sidecar
+                            as `sidecar` runs it with its store on disk: reload and
+                            DCS kill, paused burst, switch, death pending, tables,
+                            owed load, write cost. `rehearse` runs them against
+                            the fake sidecar here. Refuses a server with players.
   hello [<name>]            Run the Rust hello campaign against the API server
                             over the fake sim: here, or built for the target and
                             run on its system (the SSH host of a docker-wine
@@ -242,6 +249,7 @@ fn main() -> ExitCode {
         ["sampling", rest @ ..] => sampling::command(&repository(), rest),
         ["commands", rest @ ..] => commands::command(&repository(), rest),
         ["sidecar", rest @ ..] => sidecar::command(&repository(), rest),
+        ["persistence", rest @ ..] => persistence::command(&repository(), rest),
         ["soak", name, rest @ ..] => soak::command(&repository(), name, rest),
         ["routes", name, rest @ ..] => routes::command(&repository(), name, rest),
         ["client", rest @ ..] => client::command(rest),

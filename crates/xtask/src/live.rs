@@ -191,6 +191,43 @@ pub fn restart(
     Ok(())
 }
 
+/// The line count of `hook.log` now, for [`simulation_starts`].
+pub fn hook_mark(profile: &dyn Profile) -> usize {
+    hook_lines(profile)
+}
+
+/// How many times the hook logged a simulation start after line `after`.
+pub fn simulation_starts(profile: &dyn Profile, after: usize) -> usize {
+    profile.read(HOOK_LOG).ok().flatten().map_or(0, |t| {
+        String::from_utf8_lossy(&t)
+            .lines()
+            .skip(after)
+            .filter(|l| l.contains("\"msg\":\"simulation start\""))
+            .count()
+    })
+}
+
+/// Run `start`, which asks DCS to load a mission, and wait until the hook
+/// logs that the simulation started again. Fails when DCS restarted
+/// instead.
+pub fn wait_load(
+    profile: &dyn Profile,
+    start: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let after = hook_lines(profile);
+    let session_before = session(profile);
+    start()?;
+    let (lines, t) = wait("the mission to start", || {
+        if session(profile) != session_before {
+            return Some(Err("DCS restarted during the load".to_owned()));
+        }
+        simulation_started(profile, after).map(Ok)
+    })?;
+    lines?;
+    println!("   mission started {}s after the request", t.as_secs());
+    Ok(())
+}
+
 /// Upload `miz` and ask the development loader to load it. Wait until the
 /// hook logs that the simulation started again.
 pub fn load(profile: &dyn Profile, name: &str, miz: &[u8]) -> Result<(), String> {
