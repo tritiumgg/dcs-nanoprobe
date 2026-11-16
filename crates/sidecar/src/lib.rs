@@ -5,6 +5,8 @@ pub mod campaigns;
 pub mod conformance;
 #[cfg(feature = "disk")]
 pub mod eventfile;
+#[cfg(feature = "disk")]
+pub mod export;
 pub mod grid;
 pub mod ids;
 pub mod intents;
