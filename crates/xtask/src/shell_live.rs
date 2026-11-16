@@ -12,10 +12,13 @@
 //! 3. `own_template`: with `--template FILE`, a second campaign with that
 //!    mission as its own Caucasus template and dynamic spawn on one airport:
 //!    the shell DCS loads keeps every member of the template but the runtime
-//!    fields, its zones, triggers and client groups are in `env.mission`,
-//!    and the slot list the hook reads; without it the item is skipped;
-//! 4. `finished`: that campaign (or the first) finished: it is listed with
-//!    its world, and a change is refused as read-only;
+//!    fields, sets the airport's `dynamicSpawn`, and its zones and trigger
+//!    rules are in `env.mission`; the slot list the hook reads offers a
+//!    template client unit and a slot at the dynamic-spawn airport (every
+//!    slot field is recorded); without it the item is skipped;
+//! 4. `finished`: a campaign made for it, with a group in its store,
+//!    finished: it is listed with that group, and a change is refused with
+//!    `CAMPAIGN_READ_ONLY`;
 //! 5. `hung`: the agent's deliberate access violation crashes DCS; the
 //!    status says hung within `heartbeat_stale_s` and a lifecycle event
 //!    `SIM_STATE_HUNG` is published; the processes left in the container are
@@ -58,7 +61,7 @@ const LOAD_LIMIT: Duration = Duration::from_secs(900);
 /// (10 s by default) plus the status poll and the sidecar's own read.
 const HUNG_LIMIT: Duration = Duration::from_secs(25);
 /// The start the reload writes: 2031-07-04 15:30:00.
-const START_S: i64 = 1_941_291_000;
+const START_S: i64 = 1_940_945_400;
 
 /// The templates `[missions] dir` holds for the part.
 pub fn templates() -> [(&'static str, &'static [u8]); 2] {
@@ -182,14 +185,19 @@ impl Api {
             .id)
     }
 
-    fn group(&mut self, campaign: u64, label: &str, at: pb::Position) -> Result<u64, String> {
+    fn group_request(
+        &mut self,
+        campaign: u64,
+        label: &str,
+        at: pb::Position,
+    ) -> pb::PutGroupRequest {
         let unit = pb::UnitSpec {
             r#type: "M-113".into(),
             label: label.into(),
             position: Some(at),
             ..pb::UnitSpec::default()
         };
-        let req = pb::PutGroupRequest {
+        pb::PutGroupRequest {
             write: self.write("group", campaign),
             group_id: 0,
             spec: Some(pb::GroupSpec {
@@ -200,7 +208,11 @@ impl Api {
                 ..pb::GroupSpec::default()
             }),
             order: None,
-        };
+        }
+    }
+
+    fn group(&mut self, campaign: u64, label: &str, at: pb::Position) -> Result<u64, String> {
+        let req = self.group_request(campaign, label, at);
         Ok(self
             .rt
             .block_on(self.commands.put_group(req))
@@ -220,7 +232,7 @@ impl Api {
             }))
             .map_err(status_text("ListWorld"))?
             .into_inner();
-        let mut found = 0;
+        let mut found = None;
         while let Some(page) = self
             .rt
             .block_on(s.message())
@@ -230,11 +242,11 @@ impl Api {
                 if let Some(entity::Kind::Group(g)) = e.kind
                     && g.id == group
                 {
-                    found = g.state;
+                    found = Some(g.state);
                 }
             }
         }
-        Ok(found)
+        found.ok_or_else(|| format!("group {group} is not in campaign {campaign}'s world"))
     }
 
     fn status(&mut self) -> Result<pb::ServerStatus, String> {
@@ -424,11 +436,11 @@ pub fn drive(
         "local m = env.mission\nreturn { day = m.date.Day, month = m.date.Month, year = m.date.Year, start = m.start_time, wind = m.weather.wind.atGround.speed, temp = m.weather.season.temperature, abs = timer.getAbsTime() }\n",
         60,
     )?;
-    let want_start = START_S.rem_euclid(86_400);
-    let pass = seen["day"] == json!(4)
-        && seen["month"] == json!(7)
-        && seen["year"] == json!(2031)
-        && seen["start"].as_f64() == Some(want_start as f64)
+    let want = shell::Start::from_unix_ms(START_S * 1000);
+    let pass = seen["day"] == json!(want.day)
+        && seen["month"] == json!(want.month)
+        && seen["year"] == json!(want.year)
+        && seen["start"].as_f64() == Some(f64::from(want.seconds))
         && seen["wind"].as_f64() == Some(wind)
         && seen["temp"].as_f64() == Some(temp);
     let clock = api
@@ -511,7 +523,7 @@ pub fn drive(
     );
 
     // 3. A campaign's own editor-built template.
-    let mut finish = c1;
+    let mut own = false;
     if let Some(t) = template {
         println!("== own template");
         let theater = shell::theatre(t)?;
@@ -550,14 +562,14 @@ pub fn drive(
             "server",
             "s19-own",
             &format!(
-                "local m = env.mission\nlocal zones = {{}}\nfor _, z in ipairs(m.triggers and m.triggers.zones or {{}}) do zones[#zones + 1] = z.name end\nlocal clients = {{}}\nfor side, c in pairs(m.coalition) do for _, country in ipairs(c.country or {{}}) do for _, cat in ipairs({{ 'plane', 'helicopter', 'vehicle', 'ship' }}) do for _, g in ipairs(country[cat] and country[cat].group or {{}}) do for _, u in ipairs(g.units or {{}}) do if u.skill == 'Client' or u.skill == 'Player' then clients[#clients + 1] = u.name end end end end end end\nlocal rules = m.trigrules and #m.trigrules or 0\nlocal z1 = zones[1] and trigger.misc.getZone(zones[1]) ~= nil\nreturn {{ zones = zones, zone_found = z1, clients = clients, rules = rules, dynamic = m.dynamicSpawn, airport = {airport} }}\n"
+                "local m = env.mission\nlocal zones = {{}}\nfor _, z in ipairs(m.triggers and m.triggers.zones or {{}}) do zones[#zones + 1] = z.name end\nlocal clients = {{}}\nfor side, c in pairs(m.coalition) do for _, country in ipairs(c.country or {{}}) do for _, cat in ipairs({{ 'plane', 'helicopter', 'vehicle', 'ship' }}) do for _, g in ipairs(country[cat] and country[cat].group or {{}}) do for _, u in ipairs(g.units or {{}}) do if u.skill == 'Client' or u.skill == 'Player' then clients[#clients + 1] = {{ name = u.name, id = tostring(u.unitId), group = g.name }} end end end end end end\nlocal rules = m.trigrules and #m.trigrules or 0\nlocal z1 = zones[1] and trigger.misc.getZone(zones[1]) ~= nil\nreturn {{ zones = zones, zone_found = z1, clients = clients, rules = rules, airport = {airport} }}\n"
             ),
             60,
         )?;
         let slots = run.eval(
             "hook",
             "s19-slots",
-            "local out = {}\nfor _, side in ipairs({ 'red', 'blue' }) do for _, s in ipairs(DCS.getAvailableSlots(side) or {}) do out[#out + 1] = { side = side, id = tostring(s.unitId), type = s.type, role = s.role, group = s.groupName, airdrome = s.airdromeId, dynamic = s.dynamic } end end\nreturn out\n",
+            "local out = {}\nfor _, side in ipairs({ 'red', 'blue' }) do for _, s in ipairs(DCS.getAvailableSlots(side) or {}) do local e = { side = side }\nfor k, v in pairs(s) do e[tostring(k)] = tostring(v) end\nout[#out + 1] = e end end\nreturn out\n",
             60,
         )?;
         // The shell DCS loaded, compared with the template member by member.
@@ -577,19 +589,78 @@ pub fn drive(
         let others = tm.len().saturating_sub(2);
         let mission_rest = rest_equal(&tm, &sm, "mission", &["date", "start_time", "weather"])?;
         let warehouses_rest = rest_equal(&tm, &sm, "warehouses", &["airports"])?;
+        // The template's own trigger rules, all of them in the mission.
+        let tpl_rules = {
+            let src = &tm.iter().find(|(n, _)| n == "mission").ok_or("mission")?.1;
+            let d = shell::lua::parse(src)?;
+            d.root
+                .get(&shell::lua::Key::s("trigrules"))
+                .map_or(0, |n| n.fields.len())
+        };
+        // The airport's flag in the shell's warehouses.
+        let spawn_flag = {
+            let src = &sm
+                .iter()
+                .find(|(n, _)| n == "warehouses")
+                .ok_or("warehouses")?
+                .1;
+            let d = shell::lua::parse(src)?;
+            d.root
+                .at(&[
+                    shell::lua::Key::s("airports"),
+                    shell::lua::Key::Num(airport as f64),
+                    shell::lua::Key::s("dynamicSpawn"),
+                ])
+                .and_then(|n| shell::lua::scalar_value(src, n))
+                == Some(Lv::Bool(true))
+        };
+        let client_ids: Vec<String> = seen["clients"]
+            .as_array()
+            .map(|c| {
+                c.iter()
+                    .filter_map(|c| c["id"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let slot_list = slots.as_array().cloned().unwrap_or_default();
+        // A fixed slot: one of the template's client units.
+        let fixed = slot_list.iter().any(|s| {
+            s["unitId"]
+                .as_str()
+                .is_some_and(|id| client_ids.iter().any(|c| c == id))
+        });
+        // A dynamic slot: one that names the airport set for dynamic spawn,
+        // or says it is dynamic (field names UNVERIFIED: every field is
+        // recorded).
+        let airport_s = airport.to_string();
+        let dynamic = slot_list.iter().any(|s| {
+            s.as_object().is_some_and(|o| {
+                o.iter().any(|(k, v)| {
+                    let k = k.to_lowercase();
+                    (k.contains("dynamic") && v != "false" && v != "nil")
+                        || (k.contains("airdrome") && v.as_str() == Some(airport_s.as_str()))
+                })
+            })
+        });
         let pass = same_members
             && unchanged.len() == others
             && mission_rest
             && warehouses_rest
+            && spawn_flag
             && seen["zone_found"] == json!(true)
-            && seen["clients"].as_array().is_some_and(|c| !c.is_empty())
-            && slots.as_array().is_some_and(|s| !s.is_empty());
+            && seen["rules"].as_u64() == Some(tpl_rules as u64)
+            && fixed
+            && dynamic;
         results["own_template"] = json!({
             "pass": pass,
             "same_members": same_members,
             "unchanged_members": unchanged,
             "mission_rest_equal": mission_rest,
             "warehouses_rest_equal": warehouses_rest,
+            "shell_dynamic_spawn": spawn_flag,
+            "template_rules": tpl_rules,
+            "fixed_slot": fixed,
+            "dynamic_slot": dynamic,
             "seen": seen,
             "slots": slots,
         });
@@ -598,11 +669,14 @@ pub fn drive(
             if pass { "ok  " } else { "FAIL" },
             results["own_template"]["seen"]
         );
-        finish = c2;
+        own = true;
     }
 
-    // 4. A finished campaign is readable and refuses changes.
+    // 4. A finished campaign is readable and refuses changes: one made
+    // for it, with a group in its store.
     println!("== finished");
+    let finish = api.create("s19-finished", &["Caucasus"], false)?;
+    let kept = api.group(finish, "kept", caucasus(x, z))?;
     let req = pb::FinishCampaignRequest {
         lease: api.lease.clone(),
         campaign_id: finish,
@@ -621,18 +695,21 @@ pub fn drive(
         .into_inner()
         .campaign
         .map_or(0, |c| c.state);
-    let listed = api.state(finish, if finish == c1 { a } else { 0 });
-    let refused = api.group(finish, "late", caucasus(x, z));
-    let read_only = refused
+    let listed = api.state(finish, kept);
+    let req = api.group_request(finish, "late", caucasus(x, z));
+    let refused = api.rt.block_on(api.commands.put_group(req));
+    let reason = refused
         .as_ref()
         .err()
-        .is_some_and(|e| e.contains("finished") || e.contains("read"));
+        .and_then(nanoprobe_proto::errors::detail)
+        .map(|d| d.reason);
+    let read_only = reason == Some(pb::ErrorReason::CampaignReadOnly as i32);
     let pass = got == pb::CampaignState::Finished as i32 && listed.is_ok() && read_only;
     results["finished"] = json!({
         "pass": pass,
         "state": got,
-        "listed": listed.is_ok(),
-        "refused": refused.err(),
+        "listed": listed.as_ref().map(|s| state_name(*s)).map_err(Clone::clone),
+        "refused_reason": reason,
     });
     println!(
         "   {} {}",
@@ -641,19 +718,17 @@ pub fn drive(
     );
 
     // 5 and 6 need the first campaign active and an empty server.
-    if finish == c1 {
-        results["hung"] = json!({ "skipped": "the first campaign was finished: no --template" });
-        return Ok(());
+    if own {
+        let req = pb::ActivateCampaignRequest {
+            lease: api.lease.clone(),
+            campaign_id: c1,
+            idempotency: api.key("activate-c1"),
+        };
+        api.rt
+            .block_on(api.campaigns.activate_campaign(req))
+            .map_err(status_text("ActivateCampaign"))?;
+        loaded(run, &mut api, "Afghanistan", generation)?;
     }
-    let req = pb::ActivateCampaignRequest {
-        lease: api.lease.clone(),
-        campaign_id: c1,
-        idempotency: api.key("activate-c1"),
-    };
-    api.rt
-        .block_on(api.campaigns.activate_campaign(req))
-        .map_err(status_text("ActivateCampaign"))?;
-    loaded(run, &mut api, "Afghanistan", generation)?;
     live(run, &mut api, c1, b)?;
 
     println!("== hung: a deliberate access violation");
