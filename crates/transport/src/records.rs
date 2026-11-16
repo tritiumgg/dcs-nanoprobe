@@ -3,7 +3,7 @@
 //! by its layout (spec/records.md, spec/commands.md). The kinds are the
 //! control records, `LOG`, `EVENT`, the object table (`OBJECT`,
 //! `OBJECT_GONE`, `ENUM_BEGIN`, `ENUM_END`) and the samples (`POSITIONS`,
-//! `VITALS`, `ATTITUDE`, `AMMO`, `WAREHOUSE`, `AIRBASE`). A decoder never
+//! `VITALS`, `ATTITUDE`, `WAREHOUSE`, `AIRBASE`). A decoder never
 //! panics, and a count the payload cannot hold is an error that allocates
 //! nothing.
 
@@ -867,33 +867,6 @@ impl Attitude {
     }
 }
 
-/// `AMMO`: the ammunition of one object.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Ammo {
-    /// DCS object ID.
-    pub object: u64,
-    /// An array of tables, each with `type` and `count`.
-    pub ammo: Lv,
-}
-
-impl Ammo {
-    /// The payload.
-    pub fn encode(&self) -> Vec<u8> {
-        let mut w = Writer::new();
-        w.u64(self.object).lv(&self.ammo);
-        w.finish()
-    }
-
-    /// Decode a payload.
-    pub fn decode(b: &[u8]) -> Result<Ammo, DecodeError> {
-        let mut r = Reader::new(b);
-        Ok(Ammo {
-            object: r.u64()?,
-            ammo: r.lv()?,
-        })
-    }
-}
-
 /// `WAREHOUSE`: the inventory of one airbase.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Warehouse {
@@ -1143,8 +1116,6 @@ pub struct Rates {
     pub position_s: f64,
     /// Target period of the vitals tier.
     pub vitals_s: f64,
-    /// Target period of the ammunition tier.
-    pub ammo_s: f64,
     /// Target period of the warehouse and airbase tier.
     pub warehouse_s: f64,
     /// Period of the full enumeration.
@@ -1157,7 +1128,7 @@ impl Rates {
         let mut w = Writer::new();
         w.f64(self.position_s)
             .f64(self.vitals_s)
-            .f64(self.ammo_s)
+            .pad(8)
             .f64(self.warehouse_s)
             .f64(self.enumeration_s);
         w.finish()
@@ -1166,10 +1137,12 @@ impl Rates {
     /// Decode the bytes after the command header.
     pub fn decode(b: &[u8]) -> Result<Rates, DecodeError> {
         let mut r = Reader::new(b);
+        let position_s = r.f64()?;
+        let vitals_s = r.f64()?;
+        r.skip(8)?;
         Ok(Rates {
-            position_s: r.f64()?,
-            vitals_s: r.f64()?,
-            ammo_s: r.f64()?,
+            position_s,
+            vitals_s,
             warehouse_s: r.f64()?,
             enumeration_s: r.f64()?,
         })
@@ -1743,20 +1716,7 @@ mod tests {
     }
 
     #[test]
-    fn ammo_warehouse_and_airbase_round_trip() {
-        let a = Ammo {
-            object: 5,
-            ammo: stock(),
-        };
-        let b = a.encode();
-        assert_eq!(Ammo::decode(&b), Ok(a));
-        truncations_fail(&b, Ammo::decode);
-        let empty = Ammo {
-            object: 0,
-            ammo: Lv::Nil,
-        };
-        assert_eq!(empty.encode().len(), fixed("AMMO") + 1);
-
+    fn warehouse_and_airbase_round_trip() {
         let w = Warehouse {
             airbase: "Batumi".into(),
             stock: stock(),
@@ -1893,7 +1853,6 @@ mod tests {
         let r = Rates {
             position_s: 1.0,
             vitals_s: 2.0,
-            ammo_s: 3.0,
             warehouse_s: 4.0,
             enumeration_s: 5.0,
         };

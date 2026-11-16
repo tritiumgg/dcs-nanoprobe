@@ -219,7 +219,6 @@ fn rates_are_sent_after_every_hello() {
     let mut w = world(0, 0);
     let r = Rates {
         position_s: 2.0,
-        ammo_s: 7.0,
         ..Rates::default()
     };
     w.store.set_rates(r);

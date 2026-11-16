@@ -4,7 +4,7 @@
 use libfuzzer_sys::fuzz_target;
 use nanoprobe_transport::codec::Reader;
 use nanoprobe_transport::records::{
-    Airbase, Ammo, AuthorEvent, ExtensionStats, Menu, Player, Attitude, Bind, CommandHeader, CommandResult, EnumBegin, EnumEnd, Event, Frame,
+    Airbase, AuthorEvent, ExtensionStats, Menu, Player, Attitude, Bind, CommandHeader, CommandResult, EnumBegin, EnumEnd, Event, Frame,
     Gap, Hello, Lifecycle, Log, Object, ObjectGone, Positions, Rates, Seen, Subscribe, Vitals,
     Warehouse,
 };
@@ -60,9 +60,6 @@ fuzz_target!(|data: &[u8]| {
     }
     if let Ok(a) = Attitude::decode(data) {
         assert_eq!(a.object.len(), a.roll.len());
-    }
-    if let Ok(a) = Ammo::decode(data) {
-        assert!(Ammo::decode(&a.encode()).is_ok());
     }
     if let Ok(w) = Warehouse::decode(data) {
         assert!(Warehouse::decode(&w.encode()).is_ok());

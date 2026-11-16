@@ -14,8 +14,7 @@ use std::time::{Duration, Instant};
 use nanoprobe_transport::codec::Lv;
 use nanoprobe_transport::layout::kind;
 use nanoprobe_transport::records::{
-    Airbase, Ammo, Attitude, EnumBegin, EnumEnd, Object, ObjectGone, Positions, Seen, Vitals,
-    Warehouse,
+    Airbase, Attitude, EnumBegin, EnumEnd, Object, ObjectGone, Positions, Seen, Vitals, Warehouse,
 };
 
 use crate::link::Link;
@@ -48,7 +47,7 @@ pub trait Port {
     /// The boot of the last sidecar that attached.
     fn served_boot(&self) -> u64;
     /// Store the slice, periods and rows per clock read for the status block.
-    fn set_sampling(&mut self, slice_us: f64, periods: [f64; 5], rows_per_clock: u64);
+    fn set_sampling(&mut self, slice_us: f64, periods: [f64; 4], rows_per_clock: u64);
 }
 
 impl Port for Link {
@@ -85,7 +84,7 @@ impl Port for Link {
     fn served_boot(&self) -> u64 {
         Link::served_boot(self)
     }
-    fn set_sampling(&mut self, slice_us: f64, periods: [f64; 5], rows_per_clock: u64) {
+    fn set_sampling(&mut self, slice_us: f64, periods: [f64; 4], rows_per_clock: u64) {
         Link::set_sampling(self, slice_us, periods, rows_per_clock);
     }
 }
@@ -136,22 +135,19 @@ pub enum Tier {
     Stopped = 5,
     /// Life and fuel.
     Vitals = 6,
-    /// Ammunition of units.
-    Ammo = 7,
     /// Warehouses and airbase owners.
-    Warehouses = 8,
+    Warehouses = 7,
 }
 
 impl Tier {
     /// Every tier, in budget order.
-    pub const ALL: [Tier; 8] = [
+    pub const ALL: [Tier; 7] = [
         Tier::Births,
         Tier::Enumeration,
         Tier::Subscribed,
         Tier::Positions,
         Tier::Stopped,
         Tier::Vitals,
-        Tier::Ammo,
         Tier::Warehouses,
     ];
 
@@ -168,8 +164,6 @@ pub struct Rates {
     pub position_s: f64,
     /// Life and fuel.
     pub vitals_s: f64,
-    /// Ammunition.
-    pub ammo_s: f64,
     /// Warehouses and airbases.
     pub warehouse_s: f64,
     /// The full enumeration.
@@ -181,7 +175,6 @@ impl Default for Rates {
         Rates {
             position_s: 1.0,
             vitals_s: 5.0,
-            ammo_s: 30.0,
             warehouse_s: 60.0,
             enumeration_s: 60.0,
         }
@@ -246,13 +239,11 @@ struct Row {
     in_stopped: bool,
     /// Position reads in a row that found it unmoved, up to `IDLE_AFTER`.
     unmoved: u8,
-    /// An event named it since its life, or its ammunition, was last read:
-    /// it is in the list of rows to read.
+    /// An event named it since its life was last read: it is in the list of
+    /// rows to read.
     life_marked: bool,
-    ammo_marked: bool,
-    /// When its life and its ammunition were last read.
+    /// When its life was last read.
     life_at: Option<Instant>,
-    ammo_at: Option<Instant>,
     /// A subscription names it.
     watched: bool,
     /// Its object ID waits in the queue of existence checks.
@@ -282,9 +273,7 @@ impl Row {
             in_stopped: false,
             unmoved: 0,
             life_marked: false,
-            ammo_marked: false,
             life_at: None,
-            ammo_at: None,
             watched: false,
             checking: false,
             death_named: false,
@@ -583,9 +572,9 @@ pub struct Spend {
     pub syscall_us: f64,
     /// Each tier's batches, from plan to close, by the tier's number less
     /// one: births first, then the enumeration.
-    pub tier_us: [f64; 8],
+    pub tier_us: [f64; 7],
     /// Each tier's rows, in the same order.
-    pub tier_rows: [u64; 8],
+    pub tier_rows: [u64; 7],
     /// The pumps' batches of every tier, rows and births' and the
     /// enumeration's steps, from plan to close: the work the pump bound
     /// weighs against the calls ("The pump's worth").
@@ -683,7 +672,7 @@ pub struct Sampler {
     campaign: u64,
     defaults: Rates,
     rates: Rates,
-    tiers: [TierState; 8],
+    tiers: [TierState; 7],
     budget: Budget,
     window: Window,
     batch: Batch,
@@ -784,13 +773,13 @@ pub struct Sampler {
     /// queued: they want a pump at once, not after the pump's wait.
     urgent: VecDeque<u64>,
     /// Tiers a pump planned a batch of, in the pump running.
-    planned: [bool; 8],
+    planned: [bool; 7],
     /// Tiers below the positions whose owed rows a sampling pump planned
     /// none of for lack of budget, since a planned row of the tier last
     /// cleared the mark. Each holds when the mark was first set: the tier
     /// leaves `pump_worth` for `PUMP_WAIT_S` from then, and a later pump
     /// does not restart it.
-    unaffordable: [Option<Instant>; 8],
+    unaffordable: [Option<Instant>; 7],
     /// A test switches the starvation guard off.
     #[cfg(test)]
     no_guard: bool,
@@ -806,7 +795,7 @@ pub struct Sampler {
     #[cfg(test)]
     vitals_swept: u64,
     /// When a batch of each tier was last planned.
-    last_planned: [Option<Instant>; 8],
+    last_planned: [Option<Instant>; 7],
     /// The tier the pump's planning runs late, which takes one row.
     late_tier: Option<Tier>,
     /// `xcall_us` decayed on this frame: it decays at most once a frame.
@@ -897,14 +886,14 @@ pub struct Sampler {
     sweep_wait: Option<SweepWait>,
     /// When the shim's pump last ran.
     last_pump: Option<Instant>,
-    /// Completed sweeps of positions, vitals and ammunition.
+    /// Completed sweeps of positions and vitals.
     /// With a row's slot they pick the sweep that reads a row read less
     /// often ([`Sampler::readable`]).
-    passes: [u64; 3],
-    /// The two slow sweeps, of life and fuel (0) and of ammunition (1): when
-    /// the one running began, and how long the last one took, seconds.
-    slow_start: [Option<Instant>; 2],
-    slow_period: [f64; 2],
+    passes: [u64; 2],
+    /// The slow sweep of life and fuel: when the one running began, and how
+    /// long the last one took, seconds.
+    slow_start: Option<Instant>,
+    slow_period: f64,
     /// Unit rows read less often because they have not moved; statics that
     /// can move, and those of them read less often.
     idle_units: usize,
@@ -913,7 +902,6 @@ pub struct Sampler {
     /// Rows whose life and fuel are read every vitals period, and unit rows
     /// a subscription names.
     vital_rows: usize,
-    watched_units: usize,
     /// Rows left out of every tier because a read raised on them: all of
     /// them, the units, and the cargo statics. They are in `units` and
     /// `cargo`, and in no other count.
@@ -922,9 +910,8 @@ pub struct Sampler {
     suspect_cargo: usize,
     /// A row became suspect or was settled: the counts are taken again.
     recount: bool,
-    /// Rows an event named since their life, or their ammunition, was read.
+    /// Rows an event named since their life was read.
     life_marks: Vec<u32>,
-    ammo_marks: Vec<u32>,
     /// A sample record's payload while it is written, kept for its
     /// capacity.
     scratch: Vec<u8>,
@@ -969,18 +956,14 @@ const STOP_M: f64 = 0.5;
 const IDLE_AFTER: u8 = 3;
 const IDLE_EVERY: u64 = 5;
 /// A row no subscription names has its
-/// life and fuel read once in this many vitals sweeps, and its ammunition
-/// once in this many ammunition sweeps, besides the reads its events ask
-/// for: the two slow sweeps (spec/sampling.md, "Tiers"). `None` switches a
-/// slow sweep off; such a row is then read only when an event asks. The
-/// slow sweep of ammunition is off: the ammunition of a unit no subscription
-/// names is read after it fires, and at a capture.
+/// life and fuel read once in this many vitals sweeps, besides the reads its
+/// events ask for: the slow sweep (spec/sampling.md, "Tiers"). `None`
+/// switches the slow sweep off; such a row is then read only when an event
+/// asks.
 const VITALS_EVERY: Option<u64> = Some(12);
-const AMMO_EVERY: Option<u64> = None;
 /// A row an event names is read again no sooner than this after its last
-/// read, seconds: life, and ammunition.
+/// read, seconds.
 const LIFE_AGAIN_S: f64 = 1.0;
-const AMMO_AGAIN_S: f64 = 5.0;
 /// The host's sweep waits until it can read this many rows, or as many as
 /// credit can ever pay for, so a batch's fixed part is shared by many rows.
 /// A sweep that reads every row owed goes at once when the last one is
@@ -1012,7 +995,6 @@ fn pass_of(tier: Tier) -> Option<usize> {
     match tier {
         Tier::Positions => Some(0),
         Tier::Vitals => Some(1),
-        Tier::Ammo => Some(2),
         _ => None,
     }
 }
@@ -1106,8 +1088,8 @@ impl Sampler {
             pumps: 0,
             empty_pumps: 0,
             urgent: VecDeque::new(),
-            planned: [false; 8],
-            unaffordable: [None; 8],
+            planned: [false; 7],
+            unaffordable: [None; 7],
             #[cfg(test)]
             no_guard: false,
             #[cfg(test)]
@@ -1116,7 +1098,7 @@ impl Sampler {
             vitals_due: 0.0,
             #[cfg(test)]
             vitals_swept: 0,
-            last_planned: [None; 8],
+            last_planned: [None; 7],
             late_tier: None,
             x_decayed: false,
             sub_pump: false,
@@ -1158,20 +1140,18 @@ impl Sampler {
             last_sweep: None,
             sweeps: 0,
             last_pump: None,
-            passes: [0; 3],
-            slow_start: [None; 2],
-            slow_period: [0.0; 2],
+            passes: [0; 2],
+            slow_start: None,
+            slow_period: 0.0,
             idle_units: 0,
             cargo: 0,
             idle_cargo: 0,
             vital_rows: 0,
-            watched_units: 0,
             suspect_rows: 0,
             suspect_units: 0,
             suspect_cargo: 0,
             recount: false,
             life_marks: Vec::new(),
-            ammo_marks: Vec::new(),
             scratch: Vec::new(),
             xcall_seen: 0.0,
         }
@@ -1293,12 +1273,10 @@ impl Sampler {
         self.sub_dirty = true;
         self.stopped.clear();
         self.life_marks.clear();
-        self.ammo_marks.clear();
         self.idle_units = 0;
         self.cargo = 0;
         self.idle_cargo = 0;
         self.vital_rows = 0;
-        self.watched_units = 0;
         self.suspect_rows = 0;
         self.suspect_units = 0;
         self.suspect_cargo = 0;
@@ -1316,8 +1294,8 @@ impl Sampler {
             t.sweep_start = None;
             t.owed_since = None;
         }
-        self.slow_start = [None; 2];
-        self.slow_period = [0.0; 2];
+        self.slow_start = None;
+        self.slow_period = 0.0;
         self.sweep_fund = 0.0;
     }
 
@@ -1973,7 +1951,6 @@ impl Sampler {
         self.sub_slots.retain(|s| *s != slot);
         self.stopped.retain(|s| *s != slot);
         self.life_marks.retain(|s| *s != slot);
-        self.ammo_marks.retain(|s| *s != slot);
         self.put(link, kind::OBJECT_GONE as u16, gone_record.encode());
         self.resolve_miss(link, object, false);
         slot + 1
@@ -1985,11 +1962,9 @@ impl Sampler {
         self.row(slot).filter(|r| r.found.object != 0)
     }
 
-    /// An event named an object as hit (`life`) or as a shooter: its life,
-    /// or its ammunition, is read on a coming pump (spec/sampling.md,
-    /// "Tiers"). An object the table lacks, and a static's ammunition, are
-    /// ignored.
-    pub fn mark(&mut self, object: Option<f64>, life: bool) {
+    /// An event named an object as hit: its life is read on a coming pump
+    /// (spec/sampling.md, "Tiers"). An object the table lacks is ignored.
+    pub fn mark(&mut self, object: Option<f64>) {
         let Some(object) = object.filter(|o| (0.0..9.007_199_254_740_992e15).contains(o)) else {
             return;
         };
@@ -1999,12 +1974,8 @@ impl Sampler {
         let Some(row) = self.rows[slot as usize].as_mut() else {
             return;
         };
-        if life {
-            if !std::mem::replace(&mut row.life_marked, true) {
-                self.life_marks.push(slot);
-            }
-        } else if row.unit() && !std::mem::replace(&mut row.ammo_marked, true) {
-            self.ammo_marks.push(slot);
+        if !std::mem::replace(&mut row.life_marked, true) {
+            self.life_marks.push(slot);
         }
     }
 
@@ -2020,7 +1991,7 @@ impl Sampler {
     /// tier's rows.
     fn tally(&mut self) {
         self.recount = false;
-        let (mut idle_units, mut idle_cargo, mut vital, mut watched) = (0, 0, 0, 0);
+        let (mut idle_units, mut idle_cargo, mut vital) = (0, 0, 0);
         let (mut out, mut out_units, mut out_cargo) = (0, 0, 0);
         for row in self.rows.iter().flatten().filter(|r| r.found.object != 0) {
             if row.suspect {
@@ -2031,7 +2002,6 @@ impl Sampler {
             }
             if row.unit() {
                 idle_units += usize::from(row.idle());
-                watched += usize::from(row.watched);
             } else if row.found.movable {
                 idle_cargo += usize::from(row.idle());
             }
@@ -2040,7 +2010,6 @@ impl Sampler {
         self.idle_units = idle_units;
         self.idle_cargo = idle_cargo;
         self.vital_rows = vital;
-        self.watched_units = watched;
         self.suspect_rows = out;
         self.suspect_units = out_units;
         self.suspect_cargo = out_cargo;
@@ -2105,7 +2074,6 @@ impl Sampler {
         self.rates = Rates {
             position_s: pick(rates.position_s, self.defaults.position_s),
             vitals_s: pick(rates.vitals_s, self.defaults.vitals_s),
-            ammo_s: pick(rates.ammo_s, self.defaults.ammo_s),
             warehouse_s: pick(rates.warehouse_s, self.defaults.warehouse_s),
             enumeration_s: pick(rates.enumeration_s, self.defaults.enumeration_s),
         };
@@ -2501,7 +2469,7 @@ impl Sampler {
         // pump's wait from when it was first marked. Pumps that come for
         // other tiers more than once a second do not keep it out.
         if !waited {
-            for tier in [Tier::Vitals, Tier::Ammo, Tier::Warehouses] {
+            for tier in [Tier::Vitals, Tier::Warehouses] {
                 let t = &self.tiers[tier.index()];
                 if self.marked_out(tier, now) {
                     let c = if t.cost > 0.0 { t.cost } else { call };
@@ -2855,31 +2823,25 @@ impl Sampler {
             self.passes[i] += 1;
             // A slow sweep has read every row once its tier has completed
             // `every` sweeps.
-            let slow = match tier {
-                Tier::Vitals => VITALS_EVERY.map(|e| (0, e)),
-                Tier::Ammo => AMMO_EVERY.map(|e| (1, e)),
-                _ => None,
-            };
-            if let Some((k, every)) = slow
+            if tier == Tier::Vitals
+                && let Some(every) = VITALS_EVERY
                 && self.passes[i].is_multiple_of(every)
             {
-                if let Some(start) = self.slow_start[k] {
-                    self.slow_period[k] = now.saturating_duration_since(start).as_secs_f64();
+                if let Some(start) = self.slow_start {
+                    self.slow_period = now.saturating_duration_since(start).as_secs_f64();
                 }
-                self.slow_start[k] = Some(now);
+                self.slow_start = Some(now);
             }
         }
     }
 
-    /// The achieved periods of the two slow sweeps at `now`, seconds: of
-    /// life and fuel, and of ammunition. Each is the longer of the last
-    /// sweep's time and the time the running one has taken, and 0 for a
-    /// sweep that is switched off or has no rows.
-    fn slow_periods(&self, now: Instant) -> [f64; 2] {
-        [0, 1].map(|k| {
-            self.slow_start[k].map_or(0.0, |start| {
-                self.slow_period[k].max(now.saturating_duration_since(start).as_secs_f64())
-            })
+    /// The achieved period of the slow sweep of life and fuel at `now`,
+    /// seconds: the longer of the last sweep's time and the time the running
+    /// one has taken, and 0 for a sweep that is switched off or has no rows.
+    fn slow_periods(&self, now: Instant) -> f64 {
+        self.slow_start.map_or(0.0, |start| {
+            self.slow_period
+                .max(now.saturating_duration_since(start).as_secs_f64())
         })
     }
 
@@ -3013,7 +2975,7 @@ impl Sampler {
         b.deadline = sample.then(|| now + Duration::from_secs_f64(b.budget / 1e6));
         self.sampling = sample;
         self.batches = 0;
-        self.planned = [false; 8];
+        self.planned = [false; 7];
         self.pump_start = Some(now);
         self.since_clock = 0;
         self.batch = Batch::default();
@@ -3088,11 +3050,6 @@ impl Sampler {
                 self.rates.vitals_s,
             ),
             (
-                Tier::Ammo,
-                part(units, self.watched_units as f64, AMMO_EVERY),
-                self.rates.ammo_s,
-            ),
-            (
                 Tier::Warehouses,
                 self.airbases as f64,
                 self.rates.warehouse_s,
@@ -3123,14 +3080,8 @@ impl Sampler {
             if t.credit >= 1.0 {
                 t.owed_since.get_or_insert(now);
                 // A slow sweep's first period runs from the first row owed.
-                match tier {
-                    Tier::Vitals if VITALS_EVERY.is_some() => {
-                        self.slow_start[0].get_or_insert(now);
-                    }
-                    Tier::Ammo if AMMO_EVERY.is_some() => {
-                        self.slow_start[1].get_or_insert(now);
-                    }
-                    _ => {}
+                if tier == Tier::Vitals && VITALS_EVERY.is_some() {
+                    self.slow_start.get_or_insert(now);
                 }
             }
             if n == 0.0 {
@@ -3224,7 +3175,6 @@ impl Sampler {
         let late = |tier: Tier| {
             let period = match tier {
                 Tier::Vitals => self.rates.vitals_s,
-                Tier::Ammo => self.rates.ammo_s,
                 Tier::Warehouses => self.rates.warehouse_s,
                 _ => return false,
             };
@@ -3247,7 +3197,7 @@ impl Sampler {
         };
         #[cfg(test)]
         let lates = if self.no_guard {
-            [false; 8]
+            [false; 7]
         } else {
             Tier::ALL.map(late)
         };
@@ -3287,12 +3237,7 @@ impl Sampler {
             }
             // The rank is strict: while the host's sweep is behind, no tier
             // below the positions gets rows.
-            if behind
-                && matches!(
-                    tier,
-                    Tier::Stopped | Tier::Vitals | Tier::Ammo | Tier::Warehouses
-                )
-            {
+            if behind && matches!(tier, Tier::Stopped | Tier::Vitals | Tier::Warehouses) {
                 continue;
             }
             // On a pump for the subscribed rows the other tiers keep the
@@ -3359,7 +3304,6 @@ impl Sampler {
                 Tier::Subscribed,
                 Tier::Positions,
                 Tier::Vitals,
-                Tier::Ammo,
                 Tier::Warehouses,
             ]
             .iter()
@@ -3372,12 +3316,10 @@ impl Sampler {
     fn rows_owed(&self) -> bool {
         !self.stopped.is_empty()
             || !self.life_marks.is_empty()
-            || !self.ammo_marks.is_empty()
             || [
                 Tier::Subscribed,
                 Tier::Positions,
                 Tier::Vitals,
-                Tier::Ammo,
                 Tier::Warehouses,
             ]
             .iter()
@@ -3457,7 +3399,7 @@ impl Sampler {
             let c = self.tiers[t.index()].cost;
             if c > 0.0 { c } else { call }
         };
-        let mut tiers = vec![Tier::Vitals, Tier::Ammo, Tier::Warehouses];
+        let mut tiers = vec![Tier::Vitals, Tier::Warehouses];
         if all && !self.direct {
             tiers.extend([Tier::Subscribed, Tier::Positions]);
         }
@@ -3467,7 +3409,6 @@ impl Sampler {
             .sum::<f64>()
             + self.stopped.len() as f64 * cost(Tier::Stopped)
             + (self.life_marks.len() + self.checks.len()) as f64 * cost(Tier::Vitals)
-            + self.ammo_marks.len() as f64 * cost(Tier::Ammo)
     }
 
     /// The cost of the cheapest row or item the pump owes, µs; `None` when
@@ -3486,7 +3427,7 @@ impl Sampler {
         let held = self.behind();
         let mut owed = vec![];
         if !held {
-            for t in [Tier::Vitals, Tier::Ammo, Tier::Warehouses] {
+            for t in [Tier::Vitals, Tier::Warehouses] {
                 if self.tiers[t.index()].credit >= 1.0 {
                     owed.push(cost(t));
                 }
@@ -3496,9 +3437,6 @@ impl Sampler {
             }
             if !self.life_marks.is_empty() || !self.checks.is_empty() {
                 owed.push(cost(Tier::Vitals));
-            }
-            if !self.ammo_marks.is_empty() {
-                owed.push(cost(Tier::Ammo));
             }
         }
         if !self.direct {
@@ -3628,7 +3566,7 @@ impl Sampler {
                     flag: start,
                 })
             }
-            Tier::Subscribed | Tier::Positions | Tier::Vitals | Tier::Ammo | Tier::Warehouses => {
+            Tier::Subscribed | Tier::Positions | Tier::Vitals | Tier::Warehouses => {
                 // The rows an event marked go first: they are read at once,
                 // not at the cursor's turn.
                 let ripe = self.ripe(tier, now);
@@ -3687,19 +3625,15 @@ impl Sampler {
 
     /// How many rows an event marked for a tier may be read at `now`.
     fn ripe(&self, tier: Tier, now: Instant) -> usize {
-        let count = |marks: &[u32], life: bool, wait: f64| {
-            marks
+        match tier {
+            Tier::Vitals => self
+                .life_marks
                 .iter()
                 .filter(|s| {
-                    self.present(**s).is_some_and(|r| {
-                        Self::again(if life { r.life_at } else { r.ammo_at }, now, wait)
-                    })
+                    self.present(**s)
+                        .is_some_and(|r| Self::again(r.life_at, now, LIFE_AGAIN_S))
                 })
-                .count()
-        };
-        match tier {
-            Tier::Vitals => count(&self.life_marks, true, LIFE_AGAIN_S),
-            Tier::Ammo => count(&self.ammo_marks, false, AMMO_AGAIN_S),
+                .count(),
             _ => 0,
         }
     }
@@ -3711,41 +3645,30 @@ impl Sampler {
         if n == 0 {
             return 0;
         }
-        let (life, wait) = match tier {
-            Tier::Vitals => (true, LIFE_AGAIN_S),
-            Tier::Ammo => (false, AMMO_AGAIN_S),
-            _ => return 0,
-        };
-        let mut marks = std::mem::take(if life {
-            &mut self.life_marks
-        } else {
-            &mut self.ammo_marks
-        });
+        if tier != Tier::Vitals {
+            return 0;
+        }
+        let mut marks = std::mem::take(&mut self.life_marks);
         let mut taken = 0;
         marks.retain(|s| {
             let ready = taken < n
-                && self.present(*s).is_some_and(|r| {
-                    !r.suspect && Self::again(if life { r.life_at } else { r.ammo_at }, now, wait)
-                });
+                && self
+                    .present(*s)
+                    .is_some_and(|r| !r.suspect && Self::again(r.life_at, now, LIFE_AGAIN_S));
             if ready {
                 slots.push(*s);
                 taken += 1;
             }
             !ready
         });
-        if life {
-            self.life_marks = marks;
-        } else {
-            self.ammo_marks = marks;
-        }
+        self.life_marks = marks;
         taken
     }
 
     /// The slot at a cursor place, when the tier reads it on this sweep.
     /// Positions are the units' and the cargo statics'. A unit or a cargo
     /// static that has not moved, the life and fuel of a row that no
-    /// subscription names, and the ammunition of a
-    /// unit no subscription names are read once in several sweeps: the
+    /// subscription names are read once in several sweeps: the
     /// sweep's count and the slot pick the sweep, so each sweep reads an
     /// even share of them.
     fn readable(&self, tier: Tier, place: usize) -> Option<u32> {
@@ -3773,7 +3696,6 @@ impl Sampler {
                 let reads = match tier {
                     Tier::Positions => row.swept() && (!row.idle() || turn(Some(IDLE_EVERY))),
                     Tier::Vitals => row.vital() || turn(VITALS_EVERY),
-                    Tier::Ammo => row.unit() && (row.watched || turn(AMMO_EVERY)),
                     _ => true,
                 };
                 reads.then_some(slot)
@@ -3909,7 +3831,7 @@ impl Sampler {
         // A batch that cannot tell them apart still corrects a cost that is
         // too high: its whole time less the fixed part's estimate bounds
         // what its rows cost (LIVE, S10: one slow first read left
-        // ammunition at 1.5 ms a row, and every later batch had one row).
+        // a tier at 1.5 ms a row, and every later batch had one row).
         let measured = self.batch.here
             || inner.is_some()
             || !row_tier
@@ -3944,14 +3866,13 @@ impl Sampler {
                 let rest: Vec<u32> = self.batch.slots[from..].to_vec();
                 self.stopped.extend(rest);
             }
-            Tier::Subscribed | Tier::Positions | Tier::Vitals | Tier::Ammo | Tier::Warehouses => {
+            Tier::Subscribed | Tier::Positions | Tier::Vitals | Tier::Warehouses => {
                 let all = done.min(self.batch.slots.len());
                 // The batch's first rows are the ones an event marked: those
                 // read are no longer marked, and the rest wait in the list
                 // again. Every row read notes when.
                 let lead = std::mem::take(&mut self.batch.lead).min(self.batch.slots.len());
-                if matches!(tier, Tier::Vitals | Tier::Ammo) {
-                    let life = tier == Tier::Vitals;
+                if tier == Tier::Vitals {
                     for i in 0..self.batch.slots.len().max(lead) {
                         let Some(&slot) = self.batch.slots.get(i) else {
                             break;
@@ -3964,22 +3885,13 @@ impl Sampler {
                         else {
                             continue;
                         };
-                        let (marked, at) = if life {
-                            (&mut row.life_marked, &mut row.life_at)
-                        } else {
-                            (&mut row.ammo_marked, &mut row.ammo_at)
-                        };
                         if read {
-                            *at = Some(now);
+                            row.life_at = Some(now);
                             if i < lead {
-                                *marked = false;
+                                row.life_marked = false;
                             }
                         } else if row.found.object != 0 {
-                            if life {
-                                self.life_marks.push(slot);
-                            } else {
-                                self.ammo_marks.push(slot);
-                            }
+                            self.life_marks.push(slot);
                         }
                     }
                 }
@@ -4255,41 +4167,6 @@ impl Sampler {
         self.tick(now)
     }
 
-    /// A unit's ammunition: pairs of type name and count. Returns true to
-    /// stop.
-    pub fn ammo(
-        &mut self,
-        link: &mut impl Port,
-        slot: u32,
-        items: &[(Vec<u8>, f64)],
-        now: impl FnOnce() -> Instant,
-    ) -> bool {
-        if let Some(object) = self.batch_row(slot) {
-            let list = items
-                .iter()
-                .enumerate()
-                .map(|(i, (t, c))| {
-                    (
-                        Lv::Number((i + 1) as f64),
-                        Lv::Table(vec![
-                            (Lv::String(b"type".to_vec()), Lv::String(t.clone())),
-                            (Lv::String(b"count".to_vec()), Lv::Number(*c)),
-                        ]),
-                    )
-                })
-                .collect();
-            let record = Ammo {
-                object,
-                ammo: Lv::Table(list),
-            };
-            let payload = record.encode();
-            if payload.len() <= link.max_payload() {
-                link.sample(kind::AMMO as u16, &payload);
-            }
-        }
-        self.tick(now)
-    }
-
     /// One airbase of the batch: its owner and stock. Returns true to stop.
     pub fn airbase(
         &mut self,
@@ -4474,7 +4351,7 @@ impl Sampler {
         // budget waits for the pump's wait. A tier the rank held back
         // (`behind`) is not starved.
         if self.sampling && self.direct && !self.behind() {
-            for tier in [Tier::Vitals, Tier::Ammo, Tier::Warehouses] {
+            for tier in [Tier::Vitals, Tier::Warehouses] {
                 let i = tier.index();
                 if !self.planned[i] && self.tiers[i].credit >= 1.0 {
                     self.mark_unaffordable(tier, now);
@@ -4636,7 +4513,7 @@ impl Sampler {
             batch_us: self.batch_us,
             spend: self.window.spend,
             idle: self.idle_units + self.idle_cargo,
-            marked: (self.life_marks.len(), self.ammo_marks.len()),
+            marked: self.life_marks.len(),
             sweeps: std::mem::take(&mut self.sweeps),
             slow_periods: self.slow_periods(now),
             sweep_row_us: self.sweep_row_us,
@@ -4665,16 +4542,15 @@ impl Sampler {
         Some(report)
     }
 
-    /// The achieved periods: position, vitals, ammunition, warehouse,
-    /// enumeration.
-    pub fn periods(&self) -> [f64; 5] {
+    /// The achieved periods: position, vitals, warehouse, enumeration.
+    pub fn periods(&self) -> [f64; 4] {
         self.periods_at(None)
     }
 
     /// The achieved periods at `now`: each the longer of the last completed
     /// period and the time since the last completion, so a tier that stalls
     /// shows its stall as it grows (spec/sampling.md, "Achieved period").
-    pub fn periods_at(&self, now: Option<Instant>) -> [f64; 5] {
+    pub fn periods_at(&self, now: Option<Instant>) -> [f64; 4] {
         let since = |t: Option<Instant>| match (now, t) {
             (Some(n), Some(t)) => n.saturating_duration_since(t).as_secs_f64(),
             _ => 0.0,
@@ -4700,7 +4576,6 @@ impl Sampler {
         [
             tier(Tier::Positions),
             tier(Tier::Vitals),
-            tier(Tier::Ammo),
             tier(Tier::Warehouses),
             enumeration,
         ]
@@ -4728,7 +4603,7 @@ impl Sampler {
 
     /// Each tier's running cost per row, µs.
     #[cfg(test)]
-    fn costs(&self) -> [f64; 8] {
+    fn costs(&self) -> [f64; 7] {
         self.tiers.map(|t| t.cost)
     }
 
@@ -4793,7 +4668,7 @@ pub struct Report {
     /// Births the shim holds, waiting to be resolved.
     pub births: usize,
     /// The achieved periods.
-    pub periods: [f64; 5],
+    pub periods: [f64; 4],
     /// Debt dropped by the cap in the window, µs.
     pub forgiven_us: f64,
     /// The sampling budget's scale `k`.
@@ -4827,7 +4702,7 @@ pub struct Report {
     /// What those frames ran past the budget in all, µs.
     pub overrun_sum_us: f64,
     /// Each tier's running cost per row, µs, in [`Tier::ALL`] order.
-    pub costs: [f64; 8],
+    pub costs: [f64; 7],
     /// Birth (0) and enumeration (1) steps: the upper edges of the buckets
     /// holding their p50 and p99 since the agent started, µs, and the
     /// largest step in the window.
@@ -4847,14 +4722,13 @@ pub struct Report {
     pub spend: Spend,
     /// Units and cargo statics read less often because they have not moved.
     pub idle: usize,
-    /// Rows an event marked for a read of life, and of ammunition, that
-    /// still wait.
-    pub marked: (usize, usize),
+    /// Rows an event marked for a read of life that still wait.
+    pub marked: usize,
     /// The host's sweeps of positions in the window.
     pub sweeps: u64,
-    /// The achieved periods of the slow sweeps, seconds: of life and fuel,
-    /// and of ammunition, for the rows read once in several sweeps.
-    pub slow_periods: [f64; 2],
+    /// The achieved period of the slow sweep of life and fuel, seconds, for
+    /// the rows read once in several sweeps.
+    pub slow_periods: f64,
     /// The running cost of one row inside the host's sweep, µs: the getter
     /// under `lua_pcall` and the row's own work. `costs` holds the sweep's
     /// whole time over its rows, which plans it.

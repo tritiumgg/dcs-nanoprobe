@@ -204,7 +204,7 @@ fn set_components(
 }
 
 /// Check a unit's spawn life (spec/world.md, "Spawn state"): a percentage
-/// from 0 to 100. Fuel and ammunition are not restored.
+/// from 0 to 100. Fuel is not restored.
 fn spawn_state_ok(u: &pb::UnitSpec, f: &str) -> Result<(), Status> {
     if let Some(p) = u.life_percent
         && !(p.is_finite() && (0.0..=100.0).contains(&p))
@@ -214,10 +214,10 @@ fn spawn_state_ok(u: &pb::UnitSpec, f: &str) -> Result<(), Status> {
             "a percentage from 0 to 100",
         ));
     }
-    if u.fuel.is_some() || !u.ammo.is_empty() {
+    if u.fuel.is_some() {
         return Err(invalid(
             f,
-            "a unit spawns with its payload's fuel and ammunition; only its life can be given",
+            "a unit spawns with its payload's fuel; only its life can be given",
         ));
     }
     Ok(())
@@ -663,7 +663,6 @@ fn set_sample_rates(
     for (v, f) in [
         (r.position_period, "position_period"),
         (r.vitals_period, "vitals_period"),
-        (r.ammo_period, "ammo_period"),
         (r.warehouse_period, "warehouse_period"),
         (r.enumeration_period, "enumeration_period"),
     ] {
@@ -674,7 +673,6 @@ fn set_sample_rates(
     slot.store.set_rates(Rates {
         position_s: r.position_period,
         vitals_s: r.vitals_period,
-        ammo_s: r.ammo_period,
         warehouse_s: r.warehouse_period,
         enumeration_s: r.enumeration_period,
     });

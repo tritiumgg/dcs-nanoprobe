@@ -106,7 +106,7 @@ The cap is one sweep's rows for every tier except vitals. The cap of vitals is e
 row once, a full slow cycle, `max(n, rows)`, with `n` one sweep's rows and `rows` the
 rows in the table. A stall or a hold
 by a higher tier can take more than one sweep from vitals, a twelfth of its cycle, and
-vitals repays it. Until it is repaid, vitals reads above its rate, with ammunition and
+vitals repays it. Until it is repaid, vitals reads above its rate, with
 warehouses behind it, apart from the starvation guard's one row.
 
 The budget goes to the tiers in this order; each takes the rows its credit allows, and
@@ -120,8 +120,7 @@ what is left goes on:
 | 4 | Positions | every unit, and every static that can move | `position_s`; five times it for a row that has not moved | `DCS.getUnitPositionByObjectId` |
 | 5 | Attitude when stopped | units that stopped since their last attitude | each pump | `getPosition` |
 | 6 | Vitals | every row | `vitals_s` for a row `SUBSCRIBE` names; twelve times it for any other row, the slow sweep | `getLife`, and `getFuel` for a unit; `isExist` on each row the slow sweep visits |
-| 7 | Ammunition | the units `SUBSCRIBE` names, and units that fired | `ammo_s` for a unit `SUBSCRIBE` names; no period for any other unit | `getAmmo` |
-| 8 | Warehouses and airbases | every airbase of the mission | `warehouse_s` | `getCoalition`, `getWarehouse():getInventory()` |
+| 7 | Warehouses and airbases | every airbase of the mission | `warehouse_s` | `getCoalition`, `getWarehouse():getInventory()` |
 
 Which rows a sweep reads:
 
@@ -145,14 +144,7 @@ Which rows a sweep reads:
   its row's last read. The slow sweep also checks `isExist` on each row it visits, which
   finds a kill that sent no hit event (spec/records.md, "The object table"). A sidecar subscribes the units players occupy, and a capture
   reads fuel itself (spec/commands.md).
-- **Ammunition.** That of a unit `SUBSCRIBE` names is read on every ammunition sweep.
-  Any other unit's is read on demand only: after an `S_EVENT_SHOT` or
-  `S_EVENT_SHOOTING_END` names the unit as its initiator, no sooner than 5 s after its
-  last read, and at a capture (spec/commands.md). It has no periodic sweep. A unit that
-  has not fired therefore has no `AMMO` record: its load is unknown, not full. A rearm
-  sends no event (LIVE for an AI tank), so it is not seen before the unit fires again or
-  is captured.
-- An event with no target or no initiator, and an event naming an object the table
+- An event with no target, and an event naming an object the table
   lacks, marks nothing. Damage that sends no event, such as a scripted explosion's
   splash on a unit it does not kill (LIVE), shows at the row's next slow sweep of life.
 - **After a `HELLO`** the sidecar holds no samples. Every row returns to every position
@@ -163,7 +155,7 @@ Rows that an event or an attach marked are read at the start of their tier's nex
 batch, before the cursor's rows, and do not count against the tier's credit.
 
 When the budget cannot meet every target, the tiers lower in the table get less, so the
-rates fall in the order of plan section 4.2: ammunition and warehouses first, then
+rates fall in the order of plan section 4.2: warehouses first, then
 vitals, then the positions of rows no subscription names. Subscribed positions fall
 last. The enumeration keeps its period, within the limit below.
 
@@ -181,7 +173,7 @@ rows, with one row, ahead of owed vitals. A tier is late only when the budget is
 scale of 1, the pumps could not afford it (it carries the mark of "The pump's worth") and
 the sweep is not behind. The wait is timed
 from the tier's last planned batch, or from its first owed row when none was planned.
-Ammunition and warehouses are late when two rows are owed and the wait passed the pump's 1
+Warehouses are late when two rows are owed and the wait passed the pump's 1
 s wait. Vitals is late when the wait passed 1 vitals period, and takes its rows by the
 rank. A late tier takes at most one row per late interval. With the guard on, the vitals
 period stays inside the 4.5-6.5 s band of the vitals target as a rate: the target × the
@@ -303,8 +295,8 @@ With the sweep in `frame` the pump is called only when it has work worth its cal
   urgent only when it was actually queued, and the pump releases the sweep's reserve for it
   unless the sweep is behind;
 - or the sweep is not behind (above), and the tiers below the positions owe rows that
-  cost at least three calls, or as much as a frame could spend on them. A tier (vitals,
-  ammunition or warehouses) whose owed rows a pump planned none of for lack of budget is
+  cost at least three calls, or as much as a frame could spend on them. A tier (vitals
+  or warehouses) whose owed rows a pump planned none of for lack of budget is
   marked, and leaves that sum for 1 s from when it was first marked. A later pump does
   not renew or restart the mark, so pumps that come more than once a second for other
   tiers cannot keep the tier out. A planned row of the tier clears the mark, and rows
@@ -396,8 +388,7 @@ block (spec/transport.md) and in the `sampling` LOG.
 The slow sweep, of the life and fuel of the rows read once in twelve vitals sweeps,
 completes when the vitals tier has completed twelve sweeps. Its achieved period is
 reported in the `sampling` LOG in the same way: the longer of the last slow sweep's time
-and the time the running one has taken, and 0 before any such row was owed. Ammunition
-has no slow sweep, and its key reads 0.
+and the time the running one has taken, and 0 before any such row was owed.
 
 A tier that reads a row only on its turn, in one of every `every` of its sweeps (an idle
 unit's position, a row's slow life and fuel), decides each place once per sweep. A batch
@@ -481,16 +472,16 @@ message `sampling` and these `data` keys:
 | `slice_us` | `S` of the last frame |
 | `rows` | Rows in the table |
 | `births` | Births the shim holds, waiting to be resolved |
-| `position_s`, `vitals_s`, `ammo_s`, `warehouse_s`, `enumeration_s` | The achieved periods |
+| `position_s`, `vitals_s`, `warehouse_s`, `enumeration_s` | The achieved periods |
 | `forgiven_us` | Debt dropped by the cap in the window |
 | `scale` | `k` |
-| `overrun_us` | The most a frame's sampling ran past `B` in the window, among frames that swept rows (tiers 3 to 8), a frame with checks included |
+| `overrun_us` | The most a frame's sampling ran past `B` in the window, among frames that swept rows (tiers 3 to 7), a frame with checks included |
 | `row_frames`, `overrun_frames` | Frames in the window that swept rows, and of those the frames whose sampling ran past `B` by more than `clock_interval_us`. A frame that made existence checks and also swept rows is a row frame, and its time includes the checks'; only a frame that made checks and no row is a check pump |
 | `overrun_sum_us` | What those overrun frames ran past `B` in all, µs |
 | `lone_rows` | Frames in the window that took a batch past what was left of `B`: one dear row, or a first batch whose fixed part alone passed it ("Tiers") |
 | `maintenance_frames`, `maintenance_overrun_us` | Frames in the window that resolved births or ran the enumeration, and the most one ran past `B`. Their steps are single DCS calls, such as one `coalition.getGroups`, which the clock check cannot split |
 | `clock_interval_us` | What `rows_per_clock` rows of the cheapest tier cost: the most sampling can run past `B` between two clock reads |
-| `cost_births`, `cost_enumeration`, `cost_subscribed`, `cost_positions`, `cost_stopped`, `cost_vitals`, `cost_ammo`, `cost_warehouses` | Each tier's running cost per row, µs |
+| `cost_births`, `cost_enumeration`, `cost_subscribed`, `cost_positions`, `cost_stopped`, `cost_vitals`, `cost_warehouses` | Each tier's running cost per row, µs |
 | `birth_step_p50_us`, `birth_step_p99_us`, `enum_step_p50_us`, `enum_step_p99_us` | The upper edge of the histogram bucket (spec/transport.md, "Metrics") holding the p50 and p99 of one birth step (one object's reads) and one enumeration step (one DCS call, or one object), since the agent started |
 | `birth_step_max_us`, `enum_step_max_us` | The longest such step in the window |
 | `batch_us` | The running estimate of a batch's fixed part: planning it, the shim's dispatch and its return, apart from its rows |
@@ -499,12 +490,12 @@ message `sampling` and these `data` keys:
 | `xcall_us`, `close_us` | The running estimates of the cross-state call and of closing a batch. Each takes at most a quarter of 250 µs from one measurement and decays by 1 % on each pump, so one slow call cannot stop sampling. `xcall_us` also decays on a frame where the gate's cap is below 3 × `x` ("Slice") |
 | `starved` | Frames in the window whose fixed work reached the allowance `A`; when above 0 the agent also logs a warning (spec/config.md) |
 | `us_fixed`, `us_xcall`, `us_pump`, `us_syscall` | Where the window's agent time went, µs: from the start of `frame` to the slice on frames that are not system-call frames; the cross-state calls; the pumps; the system-call frames. With the tiers' times they do not add up to the window's agent time: the rest is the end of each frame |
-| `us_births`, `us_enumeration`, `us_subscribed`, `us_positions`, `us_stopped`, `us_vitals`, `us_ammo`, `us_warehouses` | Each tier's time in the window, µs: its batches from plan to close, and the sweeps for positions |
-| `rows_births`, `rows_enumeration`, `rows_subscribed`, `rows_positions`, `rows_stopped`, `rows_vitals`, `rows_ammo`, `rows_warehouses` | Each tier's rows in the window |
+| `us_births`, `us_enumeration`, `us_subscribed`, `us_positions`, `us_stopped`, `us_vitals`, `us_warehouses` | Each tier's time in the window, µs: its batches from plan to close, and the sweeps for positions |
+| `rows_births`, `rows_enumeration`, `rows_subscribed`, `rows_positions`, `rows_stopped`, `rows_vitals`, `rows_warehouses` | Each tier's rows in the window |
 | `due_vitals`, `swept_vitals` | Vitals rows due in the window at the target period, the rows of one vitals sweep × `window_s` / the target; and the rows the vitals cursor read, without the reads an event mark asked for, which `rows_vitals` includes. The vitals period as a rate is the target × `due_vitals` / `swept_vitals`, each summed over the windows of a span ("Starvation guard") |
 | `idle` | Units and movable statics read once in five position sweeps |
-| `marked_life`, `marked_ammo` | Rows marked for a read of life, and of ammunition, that still wait |
-| `life_sweep_s`, `ammo_sweep_s` | The achieved period of the slow sweep of life and fuel ("Achieved period"); `ammo_sweep_s` is 0, ammunition having none |
+| `marked_life` | Rows marked for a read of life that still wait |
+| `life_sweep_s` | The achieved period of the slow sweep of life and fuel ("Achieved period") |
 | `sweeps` | Sweeps of positions in `frame` in the window |
 | `sweep_row_us`, `sweep_batch_us` | The running cost of one row inside the sweep's loop, and of a sweep outside its loop. `cost_positions` is the sweep's whole time over its rows |
 | `sweep_cut` | Sweeps in the window that their deadline stopped |

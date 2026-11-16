@@ -769,13 +769,12 @@ scenario('world', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   expect(r[2], APPLIED, 'GROUP_CAPTURE_DESTROY')
   assert(#r[2].value == 2, 'the capture holds ' .. #r[2].value .. ' units, not 2:\n' .. dump(ctx))
   for _, key in ipairs({ 'name', 'id', 'type', 'x', 'y', 'z', 'heading', 'pitch', 'roll', 'life', 'life0',
-    'fuel', 'ammo' }) do
+    'fuel' }) do
     assert(r[2].value[1][key] ~= nil, 'the captured unit has no ' .. key .. ':\n' .. dump(ctx))
   end
   assert(r[2].value[1].type == 'BTR-80' and r[2].value[1].life0 == 2, 'wrong capture:\n' .. dump(ctx))
   assert(r[1].value[1].name == r[2].value[1].name, 'CAPTURE and the capture-destroy disagree')
-  assert(r[2].value[1].ammo[1].type == 'weapons.shells.2A72_30' and r[2].value[1].ammo[1].count == 500
-    and r[2].value[1].ammo[1].desc == nil, 'an ammo row is not {type, count}:\n' .. dump(ctx))
+  assert(r[2].value[1].ammo == nil, 'the capture holds an ammo key:\n' .. dump(ctx))
   host:set_pause(false)
   ctx.run(0.5)
   host:set_pause(true)
@@ -810,7 +809,7 @@ scenario('world', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   expect(r[4], APPLIED, 'STATIC_DESTROY')
   expect(r[5], APPLIED, 'STATIC_DESTROY of nothing')
 
-  -- A 30-unit group with a dozen ammo rows each is captured, not TOO_LARGE.
+  -- A 30-unit group is captured, not TOO_LARGE.
   local BIG, names = 'np!hGx9', {}
   for i = 1, 30 do
     names[i] = 'np.hGxbig' .. i
@@ -821,8 +820,8 @@ scenario('world', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
     { op = 'GROUP_CAPTURE_DESTROY', entity = 9 },
   }, 'a large capture')
   expect(r[1], APPLIED, 'GROUP_SPAWN of 30 units')
-  expect(r[2], APPLIED, 'GROUP_CAPTURE_DESTROY of 30 units with 12 ammo rows each')
-  assert(#r[2].value == 30 and #r[2].value[1].ammo == 12, 'the large capture is short:\n' .. dump(ctx):sub(1, 3000))
+  expect(r[2], APPLIED, 'GROUP_CAPTURE_DESTROY of 30 units')
+  assert(#r[2].value == 30, 'the large capture is short:\n' .. dump(ctx):sub(1, 3000))
   ctx.run(0.2)
   assert(sim.statics[S1] == nil, 'the static is still in the world')
 

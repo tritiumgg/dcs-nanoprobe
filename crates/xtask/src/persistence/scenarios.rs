@@ -85,21 +85,13 @@ pub trait Target {
     fn players(&mut self) -> Result<Option<usize>, String>;
     /// Remove one unit by name with `Unit.destroy`, which emits no death.
     fn remove_unit(&mut self, unit: &str) -> Result<(), String>;
-    /// Spawn the F-15C payload outside the platform, with Lua number keys,
-    /// read its ammunition and remove it. `Null` on the fake.
-    fn payload_control(
-        &mut self,
-        at: (f64, f64),
-        alt: f64,
-        pylons: &[(u32, &str)],
-    ) -> Result<Value, String>;
     /// Kill one unit by name with an explosion on it.
     fn kill_unit(&mut self, unit: &str) -> Result<(), String>;
     /// String keys that look like integers in the DCS tables the restore
     /// path carries, for the units named.
     fn integer_keys(&mut self, units: &[String]) -> Result<Value, String>;
-    /// DCS's own reads of the units named, by name: ammunition rows,
-    /// callsign and fuel. An empty object on the fake.
+    /// DCS's own reads of the units named, by name: callsign, fuel and life.
+    /// An empty object on the fake.
     fn unit_state(&mut self, units: &[String]) -> Result<Value, String>;
     /// DCS's controller option IDs and values the scenario sets.
     fn option_ids(&mut self) -> Result<Value, String>;
@@ -858,8 +850,7 @@ pub fn write_cost(
 ///    keys whose integer keys travel as decimal strings), and controller
 ///    options on it and on a ground group; through a capture, a
 ///    dematerialize and materialize, and a reload. DCS's own reads of each
-///    unit (its ammunition and callsign) must match after each. A spawn
-///    with a captured ammunition count is tried and its answer kept. Then
+///    unit (its callsign and life) must match after each. Then
 ///    no string key in the DCS tables looks like an integer.
 pub fn tables(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Value, String> {
     let theater = t.theater();
@@ -914,13 +905,6 @@ pub fn tables(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Value, Str
     let s0 = snap(t)?;
     let captured = api.capture(c, jet)?;
     let outcome = captured.result.as_ref().map(|r| r.outcome);
-    // A spawn with a captured ammunition count.
-    let mut with_ammo = ground(&theater, "tammo", 1, places[0], 0.0);
-    with_ammo.units[0].ammo = [("probe".to_owned(), 1)].into();
-    let spawn_with_ammo = match api.put_group(c, with_ammo, None) {
-        Ok(r) => json!({ "accepted": r.group_id }),
-        Err(e) => json!({ "refused": e }),
-    };
     api.materialize(c, &[jet, tank], false)?;
     wait(t, api, "virtual", 120.0, 2.0, true, |api, _| {
         let g = api.groups(c)?;
@@ -945,50 +929,18 @@ pub fn tables(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Value, Str
         Value::Object(o) => o.is_empty(),
         _ => false,
     };
-    // Every unit's ammunition was read, and every read saw keys.
+    // Every unit's description was read, and every read saw keys.
     let reads = keys["read"].as_array().cloned().unwrap_or_default();
     let all_read = !t.live()
         || (names_.iter().all(|n| {
             reads
                 .iter()
-                .any(|r| r["what"] == json!(format!("{n}:getAmmo")))
+                .any(|r| r["what"] == json!(format!("{n}:getDesc")))
         }) && reads
             .iter()
             .all(|r| r["keys"].as_u64().is_some_and(|k| k > 0)));
-    let armed = s0.as_object().is_some_and(|o| {
-        o.values().any(|u| {
-            u["ammo"].as_array().is_some_and(|a| {
-                a.iter().any(|r| {
-                    r["type"].as_str().is_some_and(|t| t.contains("AIM"))
-                        && r["count"].as_u64().is_some_and(|n| n > 0)
-                })
-            })
-        })
-    });
     let air = units_in_air(t, c, jet)?;
-    // The same payload spawned outside the platform with Lua number keys:
-    // what DCS loads from it is what the platform's must load.
-    let control = t.payload_control(
-        (air_at.0 + 3000.0, air_at.1),
-        4000.0,
-        &[
-            (1, AIM120B),
-            (2, TANK610),
-            (6, TANK610),
-            (10, TANK610),
-            (11, AIM120B),
-        ],
-    )?;
-    let jet_unit = names::name(
-        Kind::Unit,
-        names::tag_of(c),
-        api.groups(c)?[&jet].units[0].id,
-    );
-    let as_control = control.is_null()
-        || (control["spawned"] == json!(true) && control["ammo"] == s0[&jet_unit]["ammo"]);
-    let pass = (armed || !t.live())
-        && as_control
-        && s0 == s1
+    let pass = s0 == s1
         && s1 == s2
         && no_bad_keys
         && all_read
@@ -998,11 +950,7 @@ pub fn tables(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Value, Str
         "campaign": c,
         "option_ids": ids_opt,
         "capture_outcome": outcome,
-        "spawn_with_ammo": spawn_with_ammo,
         "spawned": s0, "after_rematerialize": s1, "after_reload": s2,
-        "jet_armed": armed,
-        "payload_control": control,
-        "jet_loaded_as_control": as_control,
         "jet_in_air": air,
         "keys": keys,
         "pass": pass,

@@ -748,14 +748,14 @@ local function main()
       return sum / #k01
     end
     local kpos, ksub, kvit = kept('rows_positions'), kept('rows_subscribed'), kept('rows_vitals')
-    local kammo, kwh = kept('rows_ammo'), kept('rows_warehouses')
-    local pos, vit, ammo, wh = mean('position_s'), mean('vitals_s'), mean('ammo_s'), mean('warehouse_s')
-    local enum = m2.periods[5]
+    local kwh = kept('rows_warehouses')
+    local pos, vit, wh = mean('position_s'), mean('vitals_s'), mean('warehouse_s')
+    local enum = m2.periods[4]
     local function show(v)
       return v and string.format('%.2f', v) or 'not judged'
     end
-    local kept_text = string.format('kept: subscribed %s, positions %s, vitals %s, ammunition %s, '
-      .. 'warehouses %s', show(ksub), show(kpos), show(kvit), show(kammo), show(kwh))
+    local kept_text = string.format('kept: subscribed %s, positions %s, vitals %s, '
+      .. 'warehouses %s', show(ksub), show(kpos), show(kvit), show(kwh))
     -- Births and the enumeration rank above subscribed positions, so these
     -- slow while they run; they must keep a rate.
     assert(subscribed > 0 and subscribed < 5, 'subscribed rows sampled ' .. subscribed .. ' s apart')
@@ -765,7 +765,7 @@ local function main()
     end
     -- Warehouses are left out: they read a few rows a window, so their kept
     -- share swings by whole rows (spec/faults.md: k = 0.1 is a test scale).
-    assert(le(kvit, kpos) and le(kammo, kvit) and le(kpos, ksub),
+    assert(le(kvit, kpos) and le(kpos, ksub),
       'the lower tiers did not stretch first; ' .. kept_text)
     -- Subscribed positions fall last: they keep their rate at a tenth.
     assert(ksub == nil or ksub >= 0.9, 'subscribed rows kept ' .. show(ksub) .. ' of their rate')
@@ -776,8 +776,8 @@ local function main()
     -- keeps its period (S10 ruling 3b): it must still complete.
     assert(enum > 0, 'no enumeration completed at k = 0.1')
     S.ok(string.format('at k = 0.1 the rates fall in order: %s; mean periods: subscribed %.2f s, '
-      .. 'positions %.2f s, vitals %.2f s, ammunition %.2f s, warehouses %.2f s; enumeration %.2f s',
-      kept_text, subscribed, pos, vit, ammo, wh, enum))
+      .. 'positions %.2f s, vitals %.2f s, warehouses %.2f s; enumeration %.2f s',
+      kept_text, subscribed, pos, vit, wh, enum))
 
     -- The overhead holds: the sampling reports after the change.
     local reports, rows, over, max_debt, share_sum = 0, 0, 0, 0, 0

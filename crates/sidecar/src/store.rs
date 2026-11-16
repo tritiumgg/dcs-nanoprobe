@@ -142,8 +142,6 @@ pub struct CapturedMore {
     pub pitch: f64,
     /// Roll, radians.
     pub roll: f64,
-    /// `getAmmo()` as DCS returns it, or nil.
-    pub ammo: Lv,
     /// The life a `PutGroup` asked the unit to spawn with, as a percentage
     /// of its initial life, until DCS reads the unit's life.
     pub life_percent: Option<f64>,
@@ -155,7 +153,6 @@ impl Default for CapturedMore {
             life0: 0.0,
             pitch: 0.0,
             roll: 0.0,
-            ammo: Lv::Nil,
             life_percent: None,
         }
     }
@@ -192,8 +189,8 @@ pub struct Unit {
     pub label: String,
     /// DCS skill, empty for the default. Spec.
     pub skill: String,
-    /// What the last capture read besides the state: initial life, attitude
-    /// and ammunition. Absent keys stay 0 and nil.
+    /// What the last capture read besides the state: initial life and attitude.
+    /// Absent keys stay 0 and nil.
     pub captured: CapturedMore,
     /// Further keys of the DCS unit or static table: payload, livery,
     /// callsign and so on (spec/world.md, "Lua tables in the API"). Spec.
@@ -1804,18 +1801,12 @@ impl Store {
         }
     }
 
-    /// The rest of a capture: initial life, attitude, ammunition, and the DCS
+    /// The rest of a capture: initial life, attitude, and the DCS
     /// object ID the unit has now (0 leaves it as it was).
     pub fn observe_capture_more(&mut self, unit: EntityId, more: CapturedMore, object: u64) {
         if let Some(u) = self.units.get_mut(&unit)
             && !u.dead
         {
-            let mut more = more;
-            if check_lv(&more.ammo).is_err() {
-                // The agent caps what it sends; a value past the store's
-                // limits is dropped rather than stop the sidecar.
-                more.ammo = Lv::Nil;
-            }
             u.captured = more;
             if object != 0 {
                 u.object = object;

@@ -257,18 +257,17 @@ pub struct Metrics {
     pub slice_us: f64,
     /// Running average interval between pump calls, µs.
     pub frame_interval_us: f64,
-    /// Achieved periods: position, vitals, ammunition, warehouse, enumeration.
-    pub periods: [f64; 5],
+    /// Achieved periods: position, vitals, warehouse, enumeration.
+    pub periods: [f64; 4],
     /// Rows the sampling loop passes between clock reads.
     pub rows_per_clock: u64,
     /// The histograms: pump, interval, command, event, system-call frame.
     pub hist: [[u64; s::HIST_BUCKETS]; 5],
 }
 
-const PERIODS: [usize; 5] = [
+const PERIODS: [usize; 4] = [
     s::PERIOD_POSITION,
     s::PERIOD_VITALS,
-    s::PERIOD_AMMO,
     s::PERIOD_WAREHOUSE,
     s::PERIOD_ENUMERATION,
 ];
@@ -484,7 +483,7 @@ mod tests {
         let m = Heap::new(s::SIZE);
         let mut metrics = Metrics {
             slice_us: 250.0,
-            periods: [1.0, 5.0, 30.0, 60.0, 30.0],
+            periods: [1.0, 5.0, 60.0, 30.0],
             ..Metrics::default()
         };
         metrics.hist[2][7] = 11;
@@ -512,7 +511,7 @@ mod tests {
             match next() % 5 {
                 0 => metrics.slice_us = (next() % 250) as f64,
                 1 => metrics.frame_interval_us = (next() % 20_000) as f64,
-                2 => metrics.periods[(next() % 5) as usize] = (next() % 600) as f64 / 7.0,
+                2 => metrics.periods[(next() % 4) as usize] = (next() % 600) as f64 / 7.0,
                 3 => metrics.rows_per_clock = next() % 64,
                 _ => metrics.hist[(next() % 5) as usize][(next() % 32) as usize] += 1,
             }

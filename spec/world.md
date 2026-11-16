@@ -23,7 +23,7 @@ entities by `EntityId` within a campaign.
 | Kind | Identity | Created by the platform | Carries |
 |---|---|---|---|
 | Group | `EntityId` | yes | The spec: country, category and members; its controller options; and the order. The unit of spawn, order, materialize and destroy. |
-| Unit | `EntityId`, a member of one group | with its group | Observed state: position, attitude, life, fuel, ammunition. Dies alone. |
+| Unit | `EntityId`, a member of one group | with its group | Observed state: position, attitude, life, fuel. Dies alone. |
 | Static | `EntityId` | yes | A spec and observed state. Spawned and destroyed alone. |
 | Airbase | theater and DCS name | no | Owner (coalition) |
 | Warehouse | theater and DCS name of its airbase | no | Stock |
@@ -412,7 +412,7 @@ holds, so a read at the life the spawn gave cannot overwrite it. A `DAMAGE` that
 does not apply is counted (`lives_lost`), and the next sample shows the unit's life.
 
 A unit spawns with the fuel, ammunition, flares and chaff its payload or type gives
-(owner's decision, after E39). A `PutGroup` that gives a unit `fuel` or `ammo` is
+(owner's decision, after E39). A `PutGroup` that gives a unit `fuel` is
 refused.
 
 ## Lua tables in the API
@@ -431,7 +431,7 @@ are strings and whose numbers are doubles. The sidecar converts both ways by one
 
 So a sparse table such as pylons 1, 3 and 5 is an object with the keys `"1"`, `"3"` and
 `"5"`. A string key that looks like an integer cannot be sent. None of these DCS tables
-has one: `getAmmo`, `getDesc` and `getPosition` of an F-15C and an M-113, and
+has one: `getDesc` and `getPosition` of an F-15C and an M-113, and
 `getInventory` of three Caucasus airbases' warehouses (LIVE, DCS 2.9.31.29434 dedicated
 server under Wine 10.0, docs/results/2026-11-15-s18-persistence-live.md). That no other
 DCS table the platform handles has one, of these or other unit types and warehouses, is

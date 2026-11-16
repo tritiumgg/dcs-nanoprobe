@@ -563,7 +563,7 @@ fn median_interval(
     (median, intervals.len())
 }
 
-/// The mirror dump's real time and the five achieved periods. A dump that
+/// The mirror dump's real time and the four achieved periods. A dump that
 /// lacks either carries no evidence for the age and period checks, so it is
 /// an error.
 fn read_evidence(mj: &Value) -> Result<(f64, Vec<f64>), String> {
@@ -577,8 +577,8 @@ fn read_evidence(mj: &Value) -> Result<(f64, Vec<f64>), String> {
             .collect()
     });
     match periods {
-        Some(p) if p.len() == 5 => Ok((real, p)),
-        _ => Err("the mirror dump has no `periods` (an array of 5 numbers)".into()),
+        Some(p) if p.len() == 4 => Ok((real, p)),
+        _ => Err("the mirror dump has no `periods` (an array of 4 numbers)".into()),
     }
 }
 
@@ -610,14 +610,13 @@ pub fn compare_files(oracle: &Path, mirror: &Path, judge: Judge<'_>) -> Result<V
     v.oracle_failed = failed;
     // A tier that owes rows never reports 0 (spec/sampling.md, "Achieved
     // period"): positions with a unit or a cargo static, vitals and the
-    // enumeration with any object. Ammunition owes rows only for units that
-    // fired or that a subscription names, which the oracle does not know.
+    // enumeration with any object.
     let swept = truth.iter().any(|t| t.kind == 1 || t.cargo);
     let period = |i: usize| periods.get(i).copied().unwrap_or(0.0);
     for (name, i, owes) in [
         ("positions", 0, swept),
         ("vitals", 1, !truth.is_empty()),
-        ("enumeration", 4, !truth.is_empty()),
+        ("enumeration", 3, !truth.is_empty()),
     ] {
         if owes && periods.len() > i && period(i) <= 0.0 {
             v.zero_periods.push(name);
@@ -1326,21 +1325,21 @@ mod tests {
         assert!(v.matches() && v.late.is_empty(), "{v:?}");
     }
 
-    /// A dump with no real time or no five periods is refused, not judged
+    /// A dump with no real time or no four periods is refused, not judged
     /// against the targets.
     #[test]
     fn a_dump_without_evidence_is_an_error() {
         use serde_json::json;
-        let ok = json!({"real": 12.5, "periods": [1.0, 2.0, 3.0, 4.0, 5.0]});
-        assert_eq!(read_evidence(&ok).unwrap().1.len(), 5);
+        let ok = json!({"real": 12.5, "periods": [1.0, 2.0, 3.0, 4.0]});
+        assert_eq!(read_evidence(&ok).unwrap().1.len(), 4);
         for bad in [
-            json!({"periods": [1.0, 2.0, 3.0, 4.0, 5.0]}),
-            json!({"real": null, "periods": [1.0, 2.0, 3.0, 4.0, 5.0]}),
-            json!({"real": 0.0, "periods": [1.0, 2.0, 3.0, 4.0, 5.0]}),
+            json!({"periods": [1.0, 2.0, 3.0, 4.0]}),
+            json!({"real": null, "periods": [1.0, 2.0, 3.0, 4.0]}),
+            json!({"real": 0.0, "periods": [1.0, 2.0, 3.0, 4.0]}),
             json!({"real": 12.5}),
             json!({"real": 12.5, "periods": null}),
             json!({"real": 12.5, "periods": [1.0, 2.0]}),
-            json!({"real": 12.5, "periods": [1.0, 2.0, null, 4.0, 5.0]}),
+            json!({"real": 12.5, "periods": [1.0, 2.0, null, 4.0]}),
         ] {
             assert!(read_evidence(&bad).is_err(), "{bad}");
         }

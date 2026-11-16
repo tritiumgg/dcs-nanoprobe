@@ -132,7 +132,6 @@ entries! {
     att => work_att, hot;
     stopped => work_stopped, hot;
     vit => work_vit, hot;
-    ammo => work_ammo, hot;
     airbase => work_airbase, hot;
     item => work_item, hot;
     seen => work_seen, hot;
@@ -1442,8 +1441,8 @@ unsafe fn work_deaths(state: *mut State) -> c_int {
 }
 
 /// `reads(which, id, ...)`: the DCS event IDs that ask for a read: `which`
-/// 1 for a read of the target's life, 2 for a read of the initiator's
-/// ammunition, 3 for the births the shim keeps for the next pump.
+/// 1 for a read of the target's life, 2 for the births the shim keeps for
+/// the next pump, 3 for a check of whether the target still exists.
 unsafe fn work_reads(state: *mut State) -> c_int {
     // SAFETY: a live state; reading a value never raises.
     let which = unsafe { arg_id(state, 1) }.unwrap_or(0) as u32;
@@ -1841,32 +1840,6 @@ unsafe fn work_vit(state: *mut State) -> c_int {
     let (life, fuel) = unsafe { (arg_finite(state, 2), arg_finite(state, 3)) };
     // SAFETY: as above.
     unsafe { push_bool(state, driver::vitals(slot, life, fuel)) }
-}
-
-/// The most ammunition entries `ammo` takes.
-const AMMO_MAX: c_int = 64;
-
-/// `ammo(slot, type, count, ...)`: a unit's ammunition. Returns true to
-/// stop.
-unsafe fn work_ammo(state: *mut State) -> c_int {
-    // SAFETY: a live state.
-    let Some(slot) = (unsafe { arg_slot(state, 1) }) else {
-        // SAFETY: as above.
-        return unsafe { push_bool(state, false) };
-    };
-    // SAFETY: as above.
-    let top = unsafe { lua::lua_gettop(state) }.min(1 + 2 * AMMO_MAX);
-    let mut items = Vec::new();
-    let mut i = 2;
-    while i < top {
-        // SAFETY: as above; `i` and `i + 1` are on the stack.
-        if let (Lv::String(t), Some(c)) = unsafe { (scalar(state, i), arg_finite(state, i + 1)) } {
-            items.push((t, c));
-        }
-        i += 2;
-    }
-    // SAFETY: as above.
-    unsafe { push_bool(state, driver::ammo(slot, &items)) }
 }
 
 /// A table's pairs.

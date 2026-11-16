@@ -61,8 +61,6 @@ message Unit {
   optional double life = 9;
   // A fraction of internal fuel.
   optional double fuel = 10;
-  // Ammunition by weapon type name.
-  map<string, uint32> ammo = 11;
   // Player keys of the occupants, by seat.
   repeated string occupants = 12;
   Stamp sampled = 13;
@@ -73,6 +71,8 @@ message Unit {
   // until the controller removes the group; a mark inferred at an
   // enumeration's end clears at the load (spec/world.md, "Respawn gate").
   UnitLeft left = 15;
+  reserved 11;
+  reserved "ammo";
 }
 
 enum UnitLeft {

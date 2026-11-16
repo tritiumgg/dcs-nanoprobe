@@ -140,7 +140,7 @@ fn the_slow_period_is_the_time_every_row_took() {
     let (mut s, mut rec, mut w) = rows_table(1200);
     let (_, gap_s, unread, _) = longest_gap(&mut s, &mut rec, &mut w, Tier::Vitals, 5 * every);
     assert_eq!(unread, 0);
-    let reported = s.slow_period[0];
+    let reported = s.slow_period;
     assert!(reported > 0.0, "no period reported");
     // No row waited longer than the period the sweep reports, within a
     // pass's time.

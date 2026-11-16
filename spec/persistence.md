@@ -49,8 +49,8 @@ one `lv` value (spec/transport.md, "Encodings"):
 a table with string keys, except `schema`, which is a number. A `u64` (an `EntityId`,
 a revision, an epoch, an object ID, a time in milliseconds) is written as its decimal
 text, because an `lv` number is a double. A list is a table with keys 1 to n. A
-nested Lua value (a group's or unit's extra keys, a captured ammunition table, an
-option value) is written as its own `lv` encoding inside a string, so a row's nesting
+nested Lua value (a group's or unit's extra keys, an option
+value) is written as its own `lv` encoding inside a string, so a row's nesting
 stays fixed. A reader ignores keys it does not know, and a missing key
 takes its default (nil, false, 0, the empty string or the empty table). So a field
 added in the same schema version reads back from an older file.
@@ -132,7 +132,7 @@ A commit writes:
 | Every group, unit or extension row whose spec, order, lifecycle, authority, policy, error, death, mark or object ID changed | Every commit |
 | `meta.world` and `meta.campaign` when they changed | Every commit |
 | The idempotency rows of calls answered | Every commit |
-| Positions, fuel, life, ammunition, warehouse stock: the sampled state | Only at a checkpoint |
+| Positions, fuel, life, warehouse stock: the sampled state | Only at a checkpoint |
 
 A checkpoint is a commit that also writes every row whose sampled state changed, and
 replaces the checkpoint row. It is taken every `checkpoint_s` while the campaign is
@@ -150,7 +150,7 @@ What each failure loses:
 |---|---|---|---|
 | Specs, orders, components, extensions | in the step or call that changes them, before any command that carries them reaches DCS and before the call answers | nothing | nothing |
 | Results, deaths, removals, revivals | at the end of the step that reads them, before the agent learns they were read | what DCS did in its last frames before the crash and had not yet written | nothing: unacknowledged records are read again |
-| Positions, fuel, life, ammunition, warehouse stock | every `checkpoint_s` | up to `checkpoint_s` | up to `checkpoint_s`; read again from the agent |
+| Positions, fuel, life, warehouse stock | every `checkpoint_s` | up to `checkpoint_s` | up to `checkpoint_s`; read again from the agent |
 | Events | at the end of the step that makes them, before they are published | nothing published | nothing published |
 | Effects | journalled as sent | may or may not have applied; never sent again | never sent again |
 | Owed mission load | in the activation's commit; cleared in the commit that journals its outcome | nothing | sent again at start if it never reached DCS |
@@ -176,14 +176,14 @@ point.
 
 ### Achieved periods
 
-The agent samples positions, vitals, ammunition and warehouse stock in tiers whose
+The agent samples positions, vitals and warehouse stock in tiers whose
 period stretches when the frame budget is short (spec/sampling.md). A value read in a
 starved tier can be much older than its target period. The checkpoint therefore
 records, per tier, the period achieved at that moment, in seconds, next to the target.
 A restore that uses a checkpointed value can tell how old it may be.
 
 `achieved` is a list of `{tier, target_s, achieved_s}`, where `tier` is `position`,
-`vitals`, `ammo`, `warehouse` or `enumeration`, the field names of the API's
+`vitals`, `warehouse` or `enumeration`, the field names of the API's
 `SampleRates`. `Campaign.last_checkpoint` shows the checkpoint as a `CheckpointInfo`:
 `taken` from `at_ms`, `sim` from `model_time` and `mission_gen`, and `achieved` from
 the achieved periods; the targets are not shown.

@@ -78,16 +78,16 @@ pub trait Backend: Send + 'static {
         None
     }
     /// The periods the sampling tiers achieve now, in seconds: position,
-    /// vitals, ammunition, warehouse, enumeration (the agent's metrics,
+    /// vitals, warehouse, enumeration (the agent's metrics,
     /// spec/transport.md); `None` when unknown.
-    fn achieved(&self) -> Option<[f64; 5]> {
+    fn achieved(&self) -> Option<[f64; 4]> {
         None
     }
 }
 
 /// The sampling tiers by their `SampleRates` field names, in the order of
 /// [`Backend::achieved`].
-const TIERS: [&str; 5] = ["position", "vitals", "ammo", "warehouse", "enumeration"];
+const TIERS: [&str; 4] = ["position", "vitals", "warehouse", "enumeration"];
 
 /// One campaign: its description, its store and what the API keeps beside
 /// the store.
@@ -1062,15 +1062,7 @@ impl Inner {
             .campaigns
             .get(&id)
             .and_then(|s| s.store.rates())
-            .map(|r| {
-                [
-                    r.position_s,
-                    r.vitals_s,
-                    r.ammo_s,
-                    r.warehouse_s,
-                    r.enumeration_s,
-                ]
-            })
+            .map(|r| [r.position_s, r.vitals_s, r.warehouse_s, r.enumeration_s])
             .unwrap_or_default();
         TIERS
             .iter()
@@ -1644,7 +1636,6 @@ pub fn checkpoint_info(c: &Checkpoint) -> pb::CheckpointInfo {
         match t.tier.as_str() {
             "position" => rates.position = d,
             "vitals" => rates.vitals = d,
-            "ammo" => rates.ammo = d,
             "warehouse" => rates.warehouse = d,
             "enumeration" => rates.enumeration = d,
             _ => {}

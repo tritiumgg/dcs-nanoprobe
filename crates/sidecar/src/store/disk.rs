@@ -1629,14 +1629,12 @@ fn enc_unit(v: &Unit) -> Lv {
         life0,
         pitch,
         roll,
-        ammo,
         life_percent,
     } = captured;
     let mut c = vec![
         ("life0", f(*life0)),
         ("pitch", f(*pitch)),
         ("roll", f(*roll)),
-        ("ammo", nested(ammo)),
     ];
     // Absent when not asked, so a row without them reads back as before.
     if let Some(p) = life_percent {
@@ -1681,7 +1679,6 @@ fn dec_unit(v: &Lv) -> Result<Unit, DiskError> {
                 life0: c.f("life0")?,
                 pitch: c.f("pitch")?,
                 roll: c.f("roll")?,
-                ammo: c.nested("ammo")?,
                 life_percent: c.opt_f("life_percent")?,
             }
         },
@@ -2450,14 +2447,12 @@ fn enc_rates(v: &Rates) -> Lv {
     let Rates {
         position_s,
         vitals_s,
-        ammo_s,
         warehouse_s,
         enumeration_s,
     } = v;
     t(vec![
         ("position_s", Lv::Number(*position_s)),
         ("vitals_s", Lv::Number(*vitals_s)),
-        ("ammo_s", Lv::Number(*ammo_s)),
         ("warehouse_s", Lv::Number(*warehouse_s)),
         ("enumeration_s", Lv::Number(*enumeration_s)),
     ])
@@ -2468,7 +2463,6 @@ fn dec_rates(v: &Lv) -> Result<Rates, DiskError> {
     Ok(Rates {
         position_s: r.f("position_s")?,
         vitals_s: r.f("vitals_s")?,
-        ammo_s: r.f("ammo_s")?,
         warehouse_s: r.f("warehouse_s")?,
         enumeration_s: r.f("enumeration_s")?,
     })

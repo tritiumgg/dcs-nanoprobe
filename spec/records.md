@@ -128,12 +128,13 @@ a character boundary, so the replacement always fits. An `EVENT`'s values are `l
 | 32 | POSITIONS | sample | Positions of a batch of objects |
 | 33 | VITALS | sample | Life and fuel of a batch of objects |
 | 34 | ATTITUDE | sample | Heading, pitch and roll of a batch of objects |
-| 35 | AMMO | sample | One unit's ammunition |
 | 36 | WAREHOUSE | sample | One warehouse's stock |
 | 37 | AIRBASE | sample | One airbase's owner |
 | 38 | EXTENSION | sample | One registered extension's run time |
 
 `FRAME` is written with the records it stamps and is never queued alone.
+
+Kind 35 is reserved and is not reused.
 
 ## Control records
 
@@ -586,8 +587,8 @@ time, not the time of the removal (an inference from the report's per-cause maxi
 UNVERIFIED).
 
 Whether a shooting-end event carries a count of rounds, and under what name, is
-UNVERIFIED (E32); where it does not, the sidecar fills the value from the
-ammunition difference. No allow-list holds `ROUNDS` until then. Codes are added and
+UNVERIFIED (E32); where it does not, the field is absent. No allow-list holds
+`ROUNDS` until then. Codes are added and
 never renumbered.
 
 ### Allow-lists
@@ -779,19 +780,13 @@ describes the same object.
 are read for a row once when it is added, after an `S_EVENT_HIT` names it as target, in
 the slow sweep every 60 s at the default `vitals_s`, and at a capture. A `SUBSCRIBE`
 changes that for the rows it names: their life and fuel are read periodically
-(`vitals_s`, 5 s by default), and their ammunition every `ammo_s` (30 s by default).
-Ammunition of any other unit is read only after an `S_EVENT_SHOT` or
-`S_EVENT_SHOOTING_END` names it, and at a capture.
-
-A unit that has not fired and is not subscribed has no `AMMO` record: its load is
-unknown, not full. A rearm sends no event, so it shows at the unit's next shot or at a
-capture.
+(`vitals_s`, 5 s by default). The platform does not read unit ammunition.
 
 For a consumer, the life of an AI unit, and the fuel of a ground unit or a ship, is
 current within about 1 s of a hit event that names the unit. Damage that sends no
 event shows within the 60 s life sweep, which takes 98 s under load (LIVE, S10).
 Subscribed rows are current within 5 s. Read the sample's age, not its presence. A
-capture reads life, fuel and ammunition itself.
+capture reads life and fuel itself.
 
 ### Layout: POSITIONS
 
@@ -827,15 +822,6 @@ capture reads life, fuel and ammunition itself.
 
 Attitude is not sampled periodically. The agent writes it on a capture, for a
 subscribed object, and once when an object stops.
-
-### Layout: AMMO
-
-| Offset | Type | Field | Meaning |
-|---|---|---|---|
-| 0x0000 | u64 | object | DCS object ID |
-| + | lv | ammo | An array of tables, each with `type` (string) and `count` (number) |
-
-No `AMMO` record for a unit means its ammunition is unknown, not full.
 
 ### Layout: WAREHOUSE
 

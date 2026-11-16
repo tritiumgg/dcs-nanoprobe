@@ -304,7 +304,6 @@ fn a_store_reads_back_exactly_as_written() {
         w.store.set_rates(Rates {
             position_s: 1.0,
             vitals_s: 60.0,
-            ammo_s: 5.0,
             warehouse_s: 60.0,
             enumeration_s: 30.0,
         });
@@ -716,7 +715,6 @@ fn suspend_a_activate_b_then_a_and_each_returns_as_left() {
     w.store.set_rates(Rates {
         position_s: 3.0,
         vitals_s: 60.0,
-        ammo_s: 5.0,
         warehouse_s: 60.0,
         enumeration_s: 30.0,
     });
@@ -756,7 +754,6 @@ fn suspend_a_activate_b_then_a_and_each_returns_as_left() {
     let rates = |p: f64| Rates {
         position_s: p,
         vitals_s: 60.0,
-        ammo_s: 5.0,
         warehouse_s: 60.0,
         enumeration_s: 30.0,
     };

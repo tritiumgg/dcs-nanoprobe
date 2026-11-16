@@ -78,8 +78,6 @@ pub struct Sampling {
     pub position_s: f64,
     /// Life and fuel.
     pub vitals_s: f64,
-    /// Ammunition.
-    pub ammo_s: f64,
     /// Warehouses and airbase owners.
     pub warehouse_s: f64,
     /// The full enumeration.
@@ -91,7 +89,6 @@ impl Default for Sampling {
         Sampling {
             position_s: 1.0,
             vitals_s: 5.0,
-            ammo_s: 30.0,
             warehouse_s: 60.0,
             enumeration_s: 60.0,
         }
@@ -170,7 +167,6 @@ impl AgentToml {
         for (name, v) in [
             ("position_s", s.position_s),
             ("vitals_s", s.vitals_s),
-            ("ammo_s", s.ammo_s),
             ("warehouse_s", s.warehouse_s),
             ("enumeration_s", s.enumeration_s),
         ] {
@@ -264,7 +260,7 @@ mod tests {
             "[budget]\noverhead_share = 0.0\n",
             "[budget]\ncommanded_ms = -1.0\n",
             "[budget]\ncommanded_ms = 1e300\n",
-            "[sampling]\nammo_s = 0.0\n",
+            "[sampling]\nwarehouse_s = 0.0\n",
         ] {
             assert!(AgentToml::parse(text).is_err(), "{text}");
         }

@@ -1169,7 +1169,7 @@ pub struct WorldEvent {
     #[prost(string, optional, tag = "10")]
     pub text: ::core::option::Option<::prost::alloc::string::String>,
     /// Rounds expended, for a shooting-end event: from the event where DCS
-    /// sends a count, otherwise from the ammunition difference.
+    /// sends a count, otherwise absent.
     #[prost(uint32, optional, tag = "11")]
     pub rounds: ::core::option::Option<u32>,
     /// Fields the platform read and has no typed field for.
@@ -1973,8 +1973,6 @@ pub struct SampleRates {
     pub position: ::core::option::Option<::prost_types::Duration>,
     #[prost(message, optional, tag = "2")]
     pub vitals: ::core::option::Option<::prost_types::Duration>,
-    #[prost(message, optional, tag = "3")]
-    pub ammo: ::core::option::Option<::prost_types::Duration>,
     #[prost(message, optional, tag = "4")]
     pub warehouse: ::core::option::Option<::prost_types::Duration>,
     #[prost(message, optional, tag = "5")]
@@ -3936,9 +3934,6 @@ pub struct Unit {
     /// A fraction of internal fuel.
     #[prost(double, optional, tag = "10")]
     pub fuel: ::core::option::Option<f64>,
-    /// Ammunition by weapon type name.
-    #[prost(btree_map = "string, uint32", tag = "11")]
-    pub ammo: ::prost::alloc::collections::BTreeMap<::prost::alloc::string::String, u32>,
     /// Player keys of the occupants, by seat.
     #[prost(string, repeated, tag = "12")]
     pub occupants: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
@@ -4865,8 +4860,6 @@ pub struct UnitSpec {
     pub life_percent: ::core::option::Option<f64>,
     #[prost(double, optional, tag = "9")]
     pub fuel: ::core::option::Option<f64>,
-    #[prost(btree_map = "string, uint32", tag = "10")]
-    pub ammo: ::prost::alloc::collections::BTreeMap<::prost::alloc::string::String, u32>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GroupSpec {
@@ -5319,8 +5312,6 @@ pub struct SetSampleRatesRequest {
     pub position_period: f64,
     #[prost(double, tag = "3")]
     pub vitals_period: f64,
-    #[prost(double, tag = "4")]
-    pub ammo_period: f64,
     #[prost(double, tag = "5")]
     pub warehouse_period: f64,
     #[prost(double, tag = "6")]

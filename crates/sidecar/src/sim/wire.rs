@@ -704,7 +704,7 @@ impl Command {
             Body::Rates(r) => {
                 w.f64(r.position_s)
                     .f64(r.vitals_s)
-                    .f64(r.ammo_s)
+                    .pad(8)
                     .f64(r.warehouse_s)
                     .f64(r.enumeration_s);
             }
@@ -904,13 +904,17 @@ impl Command {
                 r.skip(4)?;
                 Body::Burst(on)
             }
-            opcode::RATES => Body::Rates(Rates {
-                position_s: r.f64()?,
-                vitals_s: r.f64()?,
-                ammo_s: r.f64()?,
-                warehouse_s: r.f64()?,
-                enumeration_s: r.f64()?,
-            }),
+            opcode::RATES => {
+                let position_s = r.f64()?;
+                let vitals_s = r.f64()?;
+                r.skip(8)?;
+                Body::Rates(Rates {
+                    position_s,
+                    vitals_s,
+                    warehouse_s: r.f64()?,
+                    enumeration_s: r.f64()?,
+                })
+            }
             opcode::SUBSCRIBE => Body::Subscribe(Subscribe::decode(&payload[command::HEADER..])?),
             opcode::BIND => Body::Bind(Bind::decode(&payload[command::HEADER..])?),
             opcode::MODERATE => {
@@ -1537,7 +1541,6 @@ mod tests {
             Body::Rates(Rates {
                 position_s: 1.0,
                 vitals_s: 2.0,
-                ammo_s: 3.0,
                 warehouse_s: 4.0,
                 enumeration_s: 5.0,
             }),

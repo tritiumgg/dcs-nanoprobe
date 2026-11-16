@@ -105,7 +105,6 @@ local CAPABILITIES = {
   'Unit.getLife',
   'Unit.isDead',
   'Unit.getFuel',
-  'Unit.getAmmo',
   'Unit.getObjectID',
   'land.getHeight',
   'trigger.action.explosion',
@@ -396,8 +395,7 @@ local function register()
       agent.deaths(unpack(deaths))
     end
     -- The events that ask for a read (spec/sampling.md, "Tiers"): a hit for
-    -- the target's life, a shot for the shooter's ammunition, and a birth,
-    -- which the next pump resolves.
+    -- the target's life, and a birth, which the next pump resolves.
     local function ids(names)
       local out = {}
       for _, name in ipairs(names) do
@@ -410,11 +408,10 @@ local function register()
     end
     if type(agent.reads) == 'function' then
       agent.reads(1, unpack(ids({ 'S_EVENT_HIT' })))
-      agent.reads(2, unpack(ids({ 'S_EVENT_SHOT', 'S_EVENT_SHOOTING_END' })))
-      agent.reads(3, unpack(ids({ 'S_EVENT_BIRTH' })))
+      agent.reads(2, unpack(ids({ 'S_EVENT_BIRTH' })))
       -- A hit, a damage assessment or a kill asks for one check of whether
       -- its target still exists (spec/records.md, "The object table").
-      agent.reads(4, unpack(ids({ 'S_EVENT_HIT', 'S_EVENT_BDA', 'S_EVENT_KILL' })))
+      agent.reads(3, unpack(ids({ 'S_EVENT_HIT', 'S_EVENT_BDA', 'S_EVENT_KILL' })))
     end
   end
   if previous and previous.handler and not M.replaced then
@@ -447,7 +444,7 @@ end
 -- leaves that row out until an event or an enumeration settles it.
 
 local TIER_BIRTHS, TIER_ENUM, TIER_SUB, TIER_POS = 1, 2, 3, 4
-local TIER_STOPPED, TIER_VITALS, TIER_AMMO, TIER_WAREHOUSE = 5, 6, 7, 8
+local TIER_STOPPED, TIER_VITALS, TIER_WAREHOUSE = 5, 6, 7
 local OBJECT_UNIT, OBJECT_STATIC = 1, 2
 -- DCS Object.Category.CARGO: a static that can move (LIVE, S10).
 local CATEGORY_CARGO = 6
@@ -802,31 +799,6 @@ local function vitals(rows)
   end
 end
 
-local function ammo(rows)
-  for i = 1, rows do
-    local slot = buf[i]
-    current = slot
-    list[1] = slot
-    local n = 1
-    local o = T.objs[slot]
-    local a = o and o:getAmmo()
-    if type(a) == 'table' then
-      for _, entry in ipairs(a) do
-        local desc = type(entry) == 'table' and rawget(entry, 'desc')
-        local name = type(desc) == 'table' and rawget(desc, 'typeName')
-        local count = type(entry) == 'table' and rawget(entry, 'count')
-        if type(name) == 'string' and type(count) == 'number' and n < 128 then
-          list[n + 1], list[n + 2] = name, count
-          n = n + 2
-        end
-      end
-    end
-    if agent.ammo(unpack(list, 1, n)) then
-      return true
-    end
-  end
-end
-
 -- The stock of a warehouse as triples, from getInventory().
 local function stock(base)
   local inv = base:getWarehouse():getInventory()
@@ -876,7 +848,6 @@ local RUN = {
   [TIER_POS] = positions,
   [TIER_STOPPED] = stopped,
   [TIER_VITALS] = vitals,
-  [TIER_AMMO] = ammo,
   [TIER_WAREHOUSE] = warehouses,
 }
 
@@ -1316,22 +1287,6 @@ local function capture_one(o, is_unit)
   if is_unit then
     read('life0', 'getLife0')
     read('fuel', 'getFuel')
-    -- Each row is reduced to its type and count: the full desc of every row
-    -- would pass the read limit for a large armored group.
-    local ok_a, ammo = pcall(o.getAmmo, o)
-    if ok_a and type(ammo) == 'table' then
-      local rows = {}
-      for i = 1, #ammo do
-        local ok_r, row = pcall(function()
-          local r = ammo[i]
-          return { type = r.desc.typeName, count = r.count }
-        end)
-        if ok_r then
-          rows[#rows + 1] = row
-        end
-      end
-      t.ammo = rows
-    end
   end
   return t
 end

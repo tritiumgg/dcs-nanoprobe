@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use nanoprobe_transport::codec::{DecodeError, Lv};
 use nanoprobe_transport::layout::{gap_class, kind};
 use nanoprobe_transport::records::{
-    Airbase, Ammo, Attitude, EnumBegin, EnumEnd, Frame, Gap, Hello, Lifecycle, Object, ObjectGone,
+    Airbase, Attitude, EnumBegin, EnumEnd, Frame, Gap, Hello, Lifecycle, Object, ObjectGone,
     Positions, Seen, Vitals, Warehouse,
 };
 
@@ -60,8 +60,6 @@ pub struct Row {
     pub vitals: Option<Sample<(f32, f32)>>,
     /// The last heading, pitch and roll, radians.
     pub attitude: Option<Sample<[f32; 3]>>,
-    /// The last ammunition table.
-    pub ammo: Option<Sample<Lv>>,
     /// Positions taken for it.
     pub position_samples: u64,
     /// Real-time seconds between its last two positions, 0 before two.
@@ -219,12 +217,6 @@ impl Mirror {
                     self.attitude(a);
                 }
             }
-            kind::AMMO => {
-                let a = Ammo::decode(payload)?;
-                if self.sampling() {
-                    self.ammo(a);
-                }
-            }
             kind::WAREHOUSE => {
                 let w = Warehouse::decode(payload)?;
                 if self.sampling() {
@@ -380,7 +372,6 @@ impl Mirror {
                         position: None,
                         vitals: None,
                         attitude: None,
-                        ammo: None,
                         position_samples: 0,
                         position_interval: 0.0,
                         since,
@@ -538,17 +529,6 @@ impl Mirror {
                 }
                 None => self.counters.samples_unknown_object += 1,
             }
-        }
-    }
-
-    /// `AMMO`: the ammunition of a known object.
-    fn ammo(&mut self, a: Ammo) {
-        let at = self.stamp;
-        match self.rows.get_mut(&a.object) {
-            Some(row) => {
-                row.ammo = Some(Sample { value: a.ammo, at });
-            }
-            None => self.counters.samples_unknown_object += 1,
         }
     }
 
@@ -1194,7 +1174,6 @@ mod tests {
             kind::POSITIONS,
             kind::VITALS,
             kind::ATTITUDE,
-            kind::AMMO,
             kind::WAREHOUSE,
             kind::AIRBASE,
         ] {

@@ -434,12 +434,12 @@ Campaign column says `any`.
 |---|---|---|---|
 | 0x0000 | f64 | position_s | Target period of the position tier, seconds |
 | 0x0008 | f64 | vitals_s | Target period of the vitals tier |
-| 0x0010 | f64 | ammo_s | Target period of the ammunition tier |
+| 0x0010 | pad[8] | reserved | |
 | 0x0018 | f64 | warehouse_s | Target period of the warehouse and airbase tier |
 | 0x0020 | f64 | enumeration_s | Period of the full enumeration |
 
 A value of 0 keeps the default of spec/config.md. Rates are targets: the agent holds
-its time slice and lets the rates fall, in this order: ammunition and warehouses, then
+its time slice and lets the rates fall, in this order: warehouses, then
 vitals, then positions of objects no subscription names. Subscribed positions fall
 last. The full enumeration keeps its period.
 
@@ -555,7 +555,6 @@ raises leaves its key out.
 | `heading`, `pitch`, `roll` | Attitude, radians, from `getPosition()` |
 | `life`, `life0` | `getLife()` and `getLife0()` |
 | `fuel` | `getFuel()`; a static has none |
-| `ammo` | A list with one `{type, count}` per `getAmmo()` row, `type` from the row's `desc.typeName`; a row whose read raises is left out. Nil for a unit with none and for a static. Flares and chaff are not among the rows (LIVE, E8). |
 
 For a group that does not exist the value is nil. The sidecar never sends this command again
 after a `refused`, `unknown` or `TOO_LARGE` outcome: it takes the group's last

@@ -1140,7 +1140,6 @@ impl Reconciler {
                     life0: num("life0", prev_more.life0),
                     pitch: num("pitch", prev_more.pitch),
                     roll: num("roll", prev_more.roll),
-                    ammo: lv::get(item, "ammo").cloned().unwrap_or(prev_more.ammo),
                     // observe_capture cleared what a PutGroup asked for.
                     life_percent: None,
                 },
