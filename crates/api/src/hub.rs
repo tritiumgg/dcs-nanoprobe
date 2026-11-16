@@ -2544,7 +2544,11 @@ mod tests {
         assert!(states(&hub).is_empty(), "healthy publishes nothing");
         *verdict.lock().unwrap() = Health::Hung;
         steps(3);
-        assert_eq!(states(&hub), [pb::SimState::Hung as i32], "once on entering");
+        assert_eq!(
+            states(&hub),
+            [pb::SimState::Hung as i32],
+            "once on entering"
+        );
         *verdict.lock().unwrap() = Health::Gone;
         steps(3);
         assert_eq!(
@@ -2558,7 +2562,11 @@ mod tests {
         steps(1);
         let s = states(&hub);
         assert_eq!(s.len(), 4);
-        assert_eq!(s[3], pb::SimState::Unspecified as i32, "no lifecycle read yet");
+        assert_eq!(
+            s[3],
+            pb::SimState::Unspecified as i32,
+            "no lifecycle read yet"
+        );
     }
 
     /// The active campaign's owed mission load.

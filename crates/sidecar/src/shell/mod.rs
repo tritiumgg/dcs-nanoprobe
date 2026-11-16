@@ -57,8 +57,7 @@ impl Start {
 
     /// Milliseconds since the Unix epoch, in UTC.
     pub fn unix_ms(&self) -> i64 {
-        (days_from_civil(self.year, self.month, self.day) * 86_400 + i64::from(self.seconds))
-            * 1000
+        (days_from_civil(self.year, self.month, self.day) * 86_400 + i64::from(self.seconds)) * 1000
     }
 }
 
@@ -123,7 +122,9 @@ pub fn members(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
     let mut out = Vec::new();
     let mut total = 0usize;
     for i in 0..archive.len() {
-        let file = archive.by_index(i).map_err(|e| format!("not a .miz: {e}"))?;
+        let file = archive
+            .by_index(i)
+            .map_err(|e| format!("not a .miz: {e}"))?;
         if file.is_dir() {
             continue;
         }
@@ -177,7 +178,9 @@ pub fn check(bytes: &[u8], theater: &str) -> Result<(), String> {
     }
     let t = theatre_of(&m)?;
     if t != theater {
-        return Err(format!("the template is for theater {t:?}, not {theater:?}"));
+        return Err(format!(
+            "the template is for theater {t:?}, not {theater:?}"
+        ));
     }
     edit_mission(member(&m, "mission")?, &Runtime::default())?;
     edit_warehouses(member(&m, "warehouses")?, &[])?;

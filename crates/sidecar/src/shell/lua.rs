@@ -285,7 +285,9 @@ impl<'a> P<'a> {
                 let start = self.i;
                 self.number()?;
                 let text = std::str::from_utf8(&self.s[start..self.i]).expect("ASCII");
-                Ok(Key::Num(number_of(text).ok_or_else(|| self.err("a number"))?))
+                Ok(Key::Num(
+                    number_of(text).ok_or_else(|| self.err("a number"))?,
+                ))
             }
         }
     }
@@ -379,7 +381,12 @@ fn number_of(text: &str) -> Option<f64> {
     let v = if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
         u64::from_str_radix(h, 16).ok()? as f64
     } else {
-        if t.is_empty() || !t.bytes().next().is_some_and(|b| b.is_ascii_digit() || b == b'.') {
+        if t.is_empty()
+            || !t
+                .bytes()
+                .next()
+                .is_some_and(|b| b.is_ascii_digit() || b == b'.')
+        {
             return None;
         }
         t.parse::<f64>().ok()?
@@ -397,8 +404,14 @@ pub fn scalar_value(src: &[u8], node: &Node) -> Option<Lv> {
         b"true" => Some(Lv::Bool(true)),
         b"false" => Some(Lv::Bool(false)),
         b"nil" => Some(Lv::Nil),
-        _ if text.first().is_some_and(|b| matches!(b, b'"' | b'\'' | b'[')) => {
-            let mut p = P { s: src, i: node.span.start };
+        _ if text
+            .first()
+            .is_some_and(|b| matches!(b, b'"' | b'\'' | b'[')) =>
+        {
+            let mut p = P {
+                s: src,
+                i: node.span.start,
+            };
             if matches!(text[0], b'"' | b'\'') {
                 p.string().ok().map(Lv::String)
             } else {
@@ -593,14 +606,22 @@ mod tests {
         .unwrap();
         let text = String::from_utf8(out).unwrap();
         assert_eq!(text, SRC.replacen("28800", "3600", 1));
-        assert!(apply(
-            SRC.as_bytes(),
-            vec![
-                Edit { span: st.clone(), text: vec![] },
-                Edit { span: st.start..st.end + 1, text: vec![] },
-            ]
-        )
-        .is_err());
+        assert!(
+            apply(
+                SRC.as_bytes(),
+                vec![
+                    Edit {
+                        span: st.clone(),
+                        text: vec![]
+                    },
+                    Edit {
+                        span: st.start..st.end + 1,
+                        text: vec![]
+                    },
+                ]
+            )
+            .is_err()
+        );
     }
 
     #[test]

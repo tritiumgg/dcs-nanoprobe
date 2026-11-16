@@ -35,7 +35,10 @@ fn weather() -> Lv {
             s("wind"),
             Lv::Table(vec![(
                 s("atGround"),
-                Lv::Table(vec![(s("speed"), Lv::Number(7.5)), (s("dir"), Lv::Number(90.0))]),
+                Lv::Table(vec![
+                    (s("speed"), Lv::Number(7.5)),
+                    (s("dir"), Lv::Number(90.0)),
+                ]),
             )]),
         ),
         (s("name"), s("np \"weather\"")),
@@ -46,7 +49,11 @@ fn weather() -> Lv {
 fn the_committed_templates_pass_the_check() {
     check(CAUCASUS, "Caucasus").unwrap();
     check(AFGHANISTAN, "Afghanistan").unwrap();
-    assert!(check(CAUCASUS, "Afghanistan").unwrap_err().contains("theater"));
+    assert!(
+        check(CAUCASUS, "Afghanistan")
+            .unwrap_err()
+            .contains("theater")
+    );
     assert_eq!(theatre(CAUCASUS).unwrap(), "Caucasus");
 }
 
@@ -96,7 +103,10 @@ fn only_the_runtime_fields_change() {
     let rest = ["date", "start_time", "weather"];
     assert_eq!(without(ma, &rest), without(mb, &rest));
     assert_eq!(at(mb, &[Key::s("start_time")]), Lv::Number(51_234.0));
-    assert_eq!(at(mb, &[Key::s("date"), Key::s("Year")]), Lv::Number(2031.0));
+    assert_eq!(
+        at(mb, &[Key::s("date"), Key::s("Year")]),
+        Lv::Number(2031.0)
+    );
     assert_eq!(at(mb, &[Key::s("date"), Key::s("Month")]), Lv::Number(7.0));
     assert_eq!(at(mb, &[Key::s("date"), Key::s("Day")]), Lv::Number(4.0));
     assert_eq!(at(mb, &[Key::s("weather")]), weather());
@@ -116,7 +126,11 @@ fn only_the_runtime_fields_change() {
         let strip = |v: Lv| {
             let Lv::Table(p) = v else { panic!() };
             p.into_iter()
-                .filter(|(k, _)| !flags.iter().any(|f| *k == Lv::String(f.as_bytes().to_vec())))
+                .filter(|(k, _)| {
+                    !flags
+                        .iter()
+                        .any(|f| *k == Lv::String(f.as_bytes().to_vec()))
+                })
                 .collect::<Vec<_>>()
         };
         if id == 12.0 || id == 13.0 {
@@ -147,7 +161,11 @@ fn a_missing_flag_is_inserted() {
     assert_eq!(at(&out, &path("dynamicSpawn")), Lv::Bool(true));
     assert_eq!(at(&out, &path("allowHotStart")), Lv::Bool(false));
     assert_eq!(at(&out, &path("size")), Lv::Number(100.0));
-    assert!(String::from_utf8(out).unwrap().contains("\n\t\t\t[\"dynamicSpawn\"] = true,"));
+    assert!(
+        String::from_utf8(out)
+            .unwrap()
+            .contains("\n\t\t\t[\"dynamicSpawn\"] = true,")
+    );
 }
 
 #[test]
@@ -161,8 +179,16 @@ fn refuses_what_it_cannot_write() {
         dynamic,
         ..Runtime::default()
     };
-    assert!(write(CAUCASUS, &rt(vec![one(99_999)])).unwrap_err().contains("no airport"));
-    assert!(write(CAUCASUS, &rt(vec![one(12), one(12)])).unwrap_err().contains("twice"));
+    assert!(
+        write(CAUCASUS, &rt(vec![one(99_999)]))
+            .unwrap_err()
+            .contains("no airport")
+    );
+    assert!(
+        write(CAUCASUS, &rt(vec![one(12), one(12)]))
+            .unwrap_err()
+            .contains("twice")
+    );
     let bad_start = Runtime {
         start: Some(Start {
             year: 2000,
@@ -178,22 +204,36 @@ fn refuses_what_it_cannot_write() {
         ..Runtime::default()
     };
     assert!(write(CAUCASUS, &bad_weather).is_err());
-    assert!(write(b"not a zip", &Runtime::default()).unwrap_err().contains(".miz"));
+    assert!(
+        write(b"not a zip", &Runtime::default())
+            .unwrap_err()
+            .contains(".miz")
+    );
     // A template without `warehouses`.
     let mut w = ZipWriter::new(Cursor::new(Vec::new()));
     for (n, d) in members(CAUCASUS).unwrap() {
         if n != "warehouses" {
-            w.start_file(n.as_str(), SimpleFileOptions::default()).unwrap();
+            w.start_file(n.as_str(), SimpleFileOptions::default())
+                .unwrap();
             w.write_all(&d).unwrap();
         }
     }
     let partial = w.finish().unwrap().into_inner();
-    assert!(check(&partial, "Caucasus").unwrap_err().contains("warehouses"));
+    assert!(
+        check(&partial, "Caucasus")
+            .unwrap_err()
+            .contains("warehouses")
+    );
 }
 
 #[test]
 fn start_converts_both_ways() {
-    for ms in [0i64, 1_700_000_000_123 / 1000 * 1000, -86_400_000, 951_782_400_000] {
+    for ms in [
+        0i64,
+        1_700_000_000_123 / 1000 * 1000,
+        -86_400_000,
+        951_782_400_000,
+    ] {
         let s = Start::from_unix_ms(ms);
         assert_eq!(s.unix_ms(), ms.div_euclid(1000) * 1000, "{s:?}");
     }

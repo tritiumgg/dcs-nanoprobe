@@ -300,6 +300,50 @@ pub fn revision_of(path: &Path) -> Result<u64, DiskError> {
     Rd(&get_meta(&conn, "world")?).u("revision")
 }
 
+/// The next `EntityId` in the store file at `path`, read without opening
+/// the store.
+pub fn next_entity_of(path: &Path) -> Result<u64, DiskError> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    Rd(&get_meta(&conn, "world")?).u("next_entity")
+}
+
+/// Raise the store file at `path` above what another copy of the campaign
+/// handed out, for an offline restore (spec/persistence.md, "Restore a
+/// backup"): its next `EntityId` becomes at least `next_entity`, its
+/// revision the larger of its own and `revision` plus
+/// [`REVISION_RESERVE`], and it is marked closed. Every other key of
+/// `meta.world` keeps its bytes' meaning. Returns the new next `EntityId`
+/// and revision.
+pub fn rebase_world(path: &Path, next_entity: u64, revision: u64) -> Result<(u64, u64), DiskError> {
+    let mut conn = connect(path)?;
+    let world = get_meta(&conn, "world")?;
+    let (own_next, own_rev) = {
+        let r = Rd(&world);
+        (r.u("next_entity")?, r.u("revision")?)
+    };
+    let next = own_next.max(next_entity);
+    let rev = own_rev
+        .max(revision)
+        .checked_add(REVISION_RESERVE)
+        .ok_or_else(|| DiskError::Corrupt("revision overflow".into()))?;
+    let Lv::Table(pairs) = world else {
+        return Err(DiskError::Corrupt("meta world is not a table".into()));
+    };
+    // A zero or false value has no key (the encoders drop nil), so the
+    // three keys are replaced, not edited.
+    let ours = |k: &Lv| matches!(k, Lv::String(n) if [&b"next_entity"[..], b"revision", b"open"].contains(&n.as_slice()));
+    let mut pairs: Vec<(Lv, Lv)> = pairs.into_iter().filter(|(k, _)| !ours(k)).collect();
+    for (k, v) in [("next_entity", u(next)), ("revision", u(rev))] {
+        if !matches!(v, Lv::Nil) {
+            pairs.push((s(k), v));
+        }
+    }
+    let tx = conn.transaction()?;
+    put_meta(&tx, "world", &Lv::Table(pairs))?;
+    tx.commit()?;
+    Ok((next, rev))
+}
+
 /// A key kept in the store file at `path`, read without opening the store:
 /// for a finished campaign, whose store is never opened again.
 pub fn idempotency_of(path: &Path, key: &str) -> Result<Option<IdemRow>, DiskError> {
