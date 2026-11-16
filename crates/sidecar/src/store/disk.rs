@@ -1060,7 +1060,7 @@ impl Disk {
         }
         // Sampled state moves only at a checkpoint.
         let sample_time = if full { *sample_time } else { self.sample_time };
-        let world = encode(&t(vec![
+        let mut world_pairs = vec![
             ("next_entity", u(*next_entity)),
             ("open", b(self.open)),
             ("revision", u(*rev)),
@@ -1083,21 +1083,14 @@ impl Disk {
                 "owed_load",
                 owed_load.as_ref().map_or(Lv::Nil, enc_owed_load),
             ),
-            (
-                "mission_start_ms",
-                mission_start_ms.map_or(Lv::Nil, |v| s(&v.to_string())),
-            ),
-            ("next_mission", next_mission.clone().unwrap_or(Lv::Nil)),
-            (
-                "model0",
-                model0.map_or(Lv::Nil, |(a, g, t0)| {
-                    list(vec![s(&a.to_string()), s(&g.to_string()), Lv::Number(t0)])
-                }),
-            ),
-            (
-                "shell_slot",
-                shell_slot.map_or(Lv::Nil, |c| s(&char::from(c).to_string())),
-            ),
+        ];
+        world_pairs.extend(enc_world_mission(
+            *mission_start_ms,
+            next_mission,
+            *model0,
+            *shell_slot,
+        ));
+        world_pairs.extend([
             (
                 "countries",
                 countries.as_ref().map_or(Lv::Nil, enc_countries),
@@ -1107,7 +1100,8 @@ impl Disk {
                 "route_events",
                 list(route_events.iter().map(enc_route_event).collect()),
             ),
-        ]));
+        ]);
+        let world = encode(&t(world_pairs));
         if world != self.world {
             put_meta_raw(&tx, "world", &world)?;
         }
@@ -1570,6 +1564,34 @@ fn nested(v: &Lv) -> Lv {
     } else {
         Lv::String(encode(v))
     }
+}
+
+/// The keys of `meta.world` that follow the loaded mission: its start, the
+/// next mission's settings, the model time of the generation's first sample
+/// and the shell slot DCS may hold.
+fn enc_world_mission(
+    mission_start_ms: Option<i64>,
+    next_mission: &Option<Lv>,
+    model0: Option<(u64, u32, f64)>,
+    shell_slot: Option<u8>,
+) -> Vec<(&'static str, Lv)> {
+    vec![
+        (
+            "mission_start_ms",
+            mission_start_ms.map_or(Lv::Nil, |v| s(&v.to_string())),
+        ),
+        ("next_mission", next_mission.clone().unwrap_or(Lv::Nil)),
+        (
+            "model0",
+            model0.map_or(Lv::Nil, |(a, g, t0)| {
+                list(vec![s(&a.to_string()), s(&g.to_string()), Lv::Number(t0)])
+            }),
+        ),
+        (
+            "shell_slot",
+            shell_slot.map_or(Lv::Nil, |c| s(&char::from(c).to_string())),
+        ),
+    ]
 }
 
 fn opt_pair(v: Option<(u64, u32)>) -> Lv {
@@ -2944,25 +2966,19 @@ mod tests {
             // The S19 keys of `meta.world`, as the store writes them.
             (
                 "world.s19_keys".to_owned(),
-                encode(&t(vec![
-                    ("mission_start_ms", super::s(&(-5i64).to_string())),
-                    (
-                        "next_mission",
-                        t(vec![
-                            ("theater", super::s("Caucasus")),
-                            ("start_ms", super::s("1700000000000")),
-                            (
-                                "weather",
-                                Lv::String(encode(&t(vec![("k", Lv::Bool(true))]))),
-                            ),
-                        ]),
-                    ),
-                    (
-                        "model0",
-                        list(vec![super::s("11"), super::s("2"), Lv::Number(1.5)]),
-                    ),
-                    ("shell_slot", super::s("b")),
-                ])),
+                encode(&t(enc_world_mission(
+                    Some(-5),
+                    &Some(t(vec![
+                        ("theater", super::s("Caucasus")),
+                        ("start_ms", super::s("1700000000000")),
+                        (
+                            "weather",
+                            Lv::String(encode(&t(vec![("k", Lv::Bool(true))]))),
+                        ),
+                    ])),
+                    Some((11, 2, 1.5)),
+                    Some(b'b'),
+                ))),
             ),
         ];
         for (i, e) in s.entries().iter().enumerate() {

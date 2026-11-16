@@ -34,8 +34,9 @@ fn get<'a>(v: &'a Lv, key: &str) -> Option<&'a Lv> {
 }
 
 impl Next {
-    /// As kept in the store.
-    pub fn to_lv(&self) -> Lv {
+    /// As kept in the store; a weather too deep or too large to encode whole
+    /// is an error, never stored as nil.
+    pub fn to_lv(&self) -> Result<Lv, String> {
         let mut p = vec![(s("theater"), s(&self.theater))];
         if let Some(ms) = self.start_ms {
             p.push((s("start_ms"), s(&ms.to_string())));
@@ -43,6 +44,7 @@ impl Next {
         // A nested Lua value is its own encoding inside a string, so the
         // row's nesting stays fixed (spec/persistence.md, "Encodings").
         if let Some(w) = &self.weather {
+            nanoprobe_sidecar::store::check_lv(w)?;
             let mut wr = Writer::new();
             wr.lv(w);
             p.push((s("weather"), Lv::String(wr.finish())));
@@ -63,7 +65,7 @@ impl Next {
             })
             .collect();
         p.push((s("dynamic"), Lv::Table(dynamic)));
-        Lv::Table(p)
+        Ok(Lv::Table(p))
     }
 
     /// From the store.
@@ -131,9 +133,9 @@ mod tests {
                 hot_start: false,
             }],
         };
-        assert_eq!(Next::from_lv(&n.to_lv()), Ok(n));
+        assert_eq!(Next::from_lv(&n.to_lv().expect("encodes")), Ok(n));
         let empty = Next::default();
-        assert_eq!(Next::from_lv(&empty.to_lv()), Ok(empty));
+        assert_eq!(Next::from_lv(&empty.to_lv().expect("encodes")), Ok(empty));
         assert!(Next::from_lv(&Lv::Nil).is_err());
     }
 
@@ -150,5 +152,18 @@ mod tests {
         }))
         .expect_err("too deep");
         assert_eq!(e.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn to_lv_refuses_a_weather_too_deep_instead_of_storing_nil() {
+        let mut deep = Lv::Table(vec![]);
+        for _ in 0..40 {
+            deep = Lv::Table(vec![(s("k"), deep)]);
+        }
+        let n = Next {
+            weather: Some(deep),
+            ..Next::default()
+        };
+        assert!(n.to_lv().is_err());
     }
 }

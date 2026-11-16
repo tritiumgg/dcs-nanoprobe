@@ -109,7 +109,12 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
             "killed",
         ]
     } else {
-        &["conformance", "hello_rust", "hello_python"]
+        &[
+            "conformance",
+            "hello_rust",
+            "hello_python",
+            "hello_shells_written",
+        ]
     };
     let ok = result.is_ok()
         && keys
@@ -381,8 +386,9 @@ fn with_map(
     println!("== load a fresh shell mission");
     crate::live::load(&run.remote, "np-shell.miz", shell)?;
     // `[missions]`: the templates, the folder named as DCS opens it
-    // (spec/config.md). The S17 parts load the shell as the Caucasus
-    // template; the shell part writes shells from the committed templates.
+    // (spec/config.md). The shell part writes shells from the committed
+    // templates; the other parts use the S17 shell mission as the Caucasus
+    // template. Every activation writes its shell under `shells/`.
     if part == "shell" {
         for (file, bytes) in crate::shell_live::templates() {
             run.remote.write(&format!("{MISSIONS_DIR}/{file}"), bytes)?;
@@ -396,7 +402,7 @@ fn with_map(
         format!("{profile}/{MISSIONS_DIR}").replace('/', "\\")
     );
     let shell_path = format!("{dcs_missions}\\Caucasus.miz");
-    results["mission_path"] = json!(shell_path);
+    results["mission_template_path"] = json!(shell_path);
     // The points must be on land, or a ground group does not drive.
     let surface = run.eval(
         "server",
@@ -563,9 +569,10 @@ fn with_map(
                 common(SIDECAR_C),
                 u = uid.split(':').next().unwrap_or("0"),
                 g = uid.split(':').nth(1).unwrap_or("0"),
-                // The shell part writes shells, and keeps the sidecar
-                // across the DCS restarts it makes.
-                mode = if part == "shell" { "rw" } else { "ro" },
+                // Every activation writes its shell under the folder. The
+                // shell part also keeps the sidecar across the DCS restarts
+                // it makes.
+                mode = "rw",
                 restart = if part == "shell" { "--restart on-failure" } else { "" },
             ),
             &[args[0], args[1], args[2], args[3], args[4], &host_missions],
@@ -697,6 +704,10 @@ fn with_map(
                 "done": text.lines().find(|l| l.contains("hello campaign done")),
             });
         }
+        // Each activation wrote a shell under `shells/`, and DCS loaded it.
+        let shells = host.text("ls \"$1/shells\" 2>&1 || true", &[&host_missions])?;
+        let shell_written = shells.lines().any(is_shell_file_name);
+        results["hello_shells_written"] = json!({ "pass": shell_written, "listing": shells });
         forward.stop();
         let health = host.text(
             "docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' \"$1\"",
@@ -712,6 +723,17 @@ fn with_map(
         results["sidecar"]["exit_code_after_stop"] = json!(exit);
     }
     Ok(())
+}
+
+/// Whether `name` is `<campaign ID>.<slot>.miz`, as a shell is named.
+fn is_shell_file_name(name: &str) -> bool {
+    let Some(stem) = name.trim().strip_suffix(".miz") else {
+        return false;
+    };
+    let Some((id, slot)) = stem.split_once('.') else {
+        return false;
+    };
+    !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) && (slot == "a" || slot == "b")
 }
 
 /// Whether a hello's group materialized once, and only after DCS began
@@ -857,6 +879,15 @@ mod tests {
         assert_eq!(pair(&python, "START ="), HELLO_POINTS[0]);
         assert_eq!(pair(&python, "END ="), HELLO_POINTS[1]);
         assert_eq!(pair(&probe, "None =>"), HELLO_POINTS[0]);
+    }
+
+    #[test]
+    fn shell_file_names_are_recognized() {
+        assert!(is_shell_file_name("12.a.miz\n"));
+        assert!(is_shell_file_name("3.b.miz"));
+        assert!(!is_shell_file_name("Caucasus.miz"));
+        assert!(!is_shell_file_name("3.c.miz"));
+        assert!(!is_shell_file_name(".a.miz"));
     }
 
     #[test]

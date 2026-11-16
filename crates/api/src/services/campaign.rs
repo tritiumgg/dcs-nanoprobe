@@ -65,6 +65,13 @@ fn backup_pb(b: &Backup) -> nanoprobe_proto::v1alpha1::Backup {
 
 fn shown(g: &Inner, id: u64) -> PbCampaign {
     let mut c = g.campaigns[&id].meta.clone();
+    // The clock as the campaign runs it, not as the last checkpoint wrote it.
+    if let Some(ms) = g.clock_ms(id) {
+        c.clock = Some(prost_types::Timestamp {
+            seconds: ms.div_euclid(1000),
+            nanos: i32::try_from(ms.rem_euclid(1000) * 1_000_000).unwrap_or(0),
+        });
+    }
     // The loaded theater once the agent's frames carry this campaign; until
     // then the mission loading for it has not reported.
     if g.active == Some(id) && g.link.frame_campaign == id {

@@ -30,9 +30,15 @@ Other built items and their tests: `ResolveMember`
 the offline restore (`campaigns::tests::a_restore_keeps_ids_and_revisions_above_both_copies`,
 `a_restored_finished_backup_stays_finished`, `restore::tests::refuses_a_held_store_dir_and_restores_a_free_one`),
 export (`export::tests::exports_every_table_one_json_object_per_line`,
-`export_reload_and_delete_through_the_services`), free space
-(`a_full_file_system_refuses_a_copy_and_a_template`; the backup paths call the same
-`space_check`).
+`export_reload_and_delete_through_the_services`), delete refusals
+(`a_delete_without_a_name_needs_a_confirmation`,
+`a_delete_that_cannot_remove_the_folder_keeps_the_campaign`), a create whose
+activation fails (`a_create_whose_activation_fails_leaves_no_campaign`), a start for
+another theater kept (`a_start_for_another_theater_survives_a_shell_write`), the clock
+in `GetCampaign` (`get_campaign_shows_the_running_clock_before_any_checkpoint`), free space
+(`a_full_file_system_refuses_a_copy_and_a_template`;
+`a_full_file_system_refuses_a_backup_and_shows_in_the_health` covers a manual backup, a
+skipped scheduled backup and `store_space_low`).
 
 ## Live
 

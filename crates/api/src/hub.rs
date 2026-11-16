@@ -1113,7 +1113,7 @@ impl Inner {
     pub fn space(&self, id: Option<u64>) -> Option<(u64, u64)> {
         let files = self.files.as_ref()?;
         let free = nanoprobe_sidecar::space::free_bytes(files.dir()).ok()?;
-        let held = id.map_or(0, |id| {
+        let held = self.space_extra.saturating_add(id.map_or(0, |id| {
             let store = files.store_path(CampaignId(id));
             let mut wal = store.clone().into_os_string();
             wal.push("-wal");
@@ -1126,14 +1126,13 @@ impl Inner {
             .filter_map(|p| std::fs::metadata(p).ok())
             .map(|m| m.len())
             .sum()
-        });
+        }));
         Some((free, held))
     }
 
     /// Refuse with `SPACE_LOW` when the store's file system has less free
     /// space than campaign `id` holds there plus `extra` bytes.
     pub fn space_check(&self, id: u64, extra: u64) -> Result<(), Status> {
-        let extra = extra.saturating_add(self.space_extra);
         match self.space(Some(id)) {
             Some((free, held)) if free < held.saturating_add(extra) => Err(status(
                 Code::ResourceExhausted,
@@ -1612,7 +1611,11 @@ impl Inner {
         if theater.is_empty() || finished {
             return Ok(());
         }
-        self.mission_check(campaign, theater)
+        // A campaign the call creates has no settings to render yet.
+        if campaign == 0 {
+            return self.mission_check(campaign, theater);
+        }
+        self.render_shell(campaign, theater).map(|_| ())
     }
 
     /// Whether campaign `id` (0 for one a call creates) has a template it
@@ -1826,8 +1829,9 @@ impl Inner {
             .and_then(|v| crate::next::Next::from_lv(v).ok())
             && (next.theater.is_empty() || next.theater == theater)
             && next.start_ms.take().is_some()
+            && let Ok(lv) = next.to_lv()
         {
-            slot.store.set_next_mission(Some(next.to_lv()));
+            slot.store.set_next_mission(Some(lv));
         }
     }
 
@@ -2121,7 +2125,10 @@ impl Inner {
                 format!("{:?} is not one of the campaign's theaters", next.theater),
             ));
         }
-        slot.store.set_next_mission(Some(next.to_lv()));
+        let lv = next
+            .to_lv()
+            .map_err(|e| crate::convert::invalid("next.weather", e))?;
+        slot.store.set_next_mission(Some(lv));
         Ok(())
     }
 
@@ -4161,36 +4168,40 @@ mod tests {
         assert_eq!(mission_loads(&mut g).len(), loads, "a check sends nothing");
     }
 
-    #[test]
-    fn a_create_whose_activation_fails_leaves_no_campaign() {
-        let (dir, missions, cfg) = owed_setup();
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_create_whose_activation_fails_leaves_no_campaign() {
+        use nanoprobe_proto::v1alpha1::campaign_service_client::CampaignServiceClient;
+        use nanoprobe_proto::v1alpha1::session_service_client::SessionServiceClient;
+        let s = served_folder().await;
         // `shells` is a file: the shell cannot be saved.
-        std::fs::write(missions.dir.as_ref().expect("dir").join("shells"), b"x").expect("file");
-        let hub = folder_hub(&cfg, &missions, 0x1000);
-        hub.start();
-        let mut g = hub.lock();
-        g.mission_check(0, "Caucasus")
-            .expect("the template is fine");
-        g.add_campaign(
-            &cfg,
-            pb::Campaign {
-                id: 7,
-                name: "c7".into(),
-                ..pb::Campaign::default()
-            },
-            "Caucasus".into(),
-        )
-        .expect("add");
-        let e = g.activate(&cfg, 7).expect_err("no shell");
-        assert!(
-            e.message().contains("could not be written"),
-            "{}",
-            e.message()
-        );
-        g.delete_campaign(&cfg, 7, "c7")
-            .expect("cleanup as the service does");
-        assert!(g.campaigns.is_empty());
-        assert!(!dir.path().join("campaigns").join("7").exists());
+        std::fs::write(s._dirs.path().join("missions").join("shells"), b"x").expect("file");
+        let mut session = SessionServiceClient::new(s.channel.clone());
+        let mut campaigns = CampaignServiceClient::new(s.channel.clone());
+        let lease = session
+            .acquire_lease(pb::AcquireLeaseRequest {
+                client_name: "test".into(),
+            })
+            .await
+            .expect("lease")
+            .into_inner()
+            .lease
+            .expect("a lease");
+        let before = entries(&s.store);
+        let e = campaigns
+            .create_campaign(create(&lease, "c7", "Caucasus", true))
+            .await
+            .expect_err("no shell");
+        assert_eq!(e.code(), Code::FailedPrecondition, "{e}");
+        assert!(e.message().contains("could not be written"), "{e}");
+        let listed = campaigns
+            .list_campaigns(pb::ListCampaignsRequest {})
+            .await
+            .expect("list")
+            .into_inner();
+        assert!(listed.campaigns.is_empty(), "{:?}", listed.campaigns);
+        assert_eq!(entries(&s.store), before, "no folder for the refused one");
+        let _ = s.stop.send(());
+        s.task.await.expect("join").expect("serve");
     }
 
     #[test]
@@ -4274,7 +4285,8 @@ mod tests {
                 }],
             };
             let slot = g.campaigns.get_mut(&1).expect("slot");
-            slot.store.set_next_mission(Some(next.to_lv()));
+            slot.store
+                .set_next_mission(Some(next.to_lv().expect("encodes")));
             g.activate(&cfg, 1).expect("activate");
             assert_eq!(owed(&g).and_then(|o| o.start_ms), Some(start.unix_ms()));
         }
@@ -4714,6 +4726,298 @@ mod tests {
             assert_eq!(g.campaigns[&a].store.revision(), revision);
             assert_eq!(mission_loads(&mut g).len(), 1, "only a's MISSION_LOAD");
         }
+        let _ = s.stop.send(());
+        s.task.await.expect("join").expect("serve");
+    }
+
+    /// A lease of a served hub, for a test.
+    async fn lease_of(channel: &tonic::transport::Channel) -> pb::Lease {
+        use nanoprobe_proto::v1alpha1::session_service_client::SessionServiceClient;
+        SessionServiceClient::new(channel.clone())
+            .acquire_lease(pb::AcquireLeaseRequest {
+                client_name: "test".into(),
+            })
+            .await
+            .expect("lease")
+            .into_inner()
+            .lease
+            .expect("a lease")
+    }
+
+    /// A start set for another theater waits for a load of that theater.
+    #[test]
+    fn a_start_for_another_theater_survives_a_shell_write() {
+        let (_dir, missions, cfg) = owed_setup();
+        let hub = folder_hub(&cfg, &missions, 0x1000);
+        hub.start();
+        let mut g = hub.lock();
+        g.add_campaign(
+            &cfg,
+            pb::Campaign {
+                id: 1,
+                name: "c1".into(),
+                theaters: vec!["Caucasus".into(), "Afghanistan".into()],
+                ..pb::Campaign::default()
+            },
+            "Caucasus".into(),
+        )
+        .expect("add");
+        g.set_next(
+            1,
+            &crate::next::Next {
+                theater: "Afghanistan".into(),
+                start_ms: Some(1_900_000_000_000),
+                ..crate::next::Next::default()
+            },
+        )
+        .expect("next");
+        let start = |g: &Inner| {
+            crate::next::Next::from_lv(g.campaigns[&1].store.next_mission().expect("next"))
+                .expect("reads")
+                .start_ms
+        };
+        g.shell_written(1, "Caucasus");
+        assert_eq!(start(&g), Some(1_900_000_000_000), "kept for Afghanistan");
+        g.shell_written(1, "Afghanistan");
+        assert_eq!(start(&g), None, "used by the Afghanistan shell");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_full_file_system_refuses_a_backup_and_shows_in_the_health() {
+        use nanoprobe_proto::v1alpha1::campaign_service_client::CampaignServiceClient;
+        use nanoprobe_proto::v1alpha1::mission_service_client::MissionServiceClient;
+        let s = served_folder().await;
+        let lease = lease_of(&s.channel).await;
+        let mut campaigns = CampaignServiceClient::new(s.channel.clone());
+        let mut mission = MissionServiceClient::new(s.channel.clone());
+        let a = campaigns
+            .create_campaign(create(&lease, "a", "Caucasus", true))
+            .await
+            .expect("a")
+            .into_inner()
+            .campaign
+            .expect("campaign")
+            .id;
+        let status = |m: &mut MissionServiceClient<_>| {
+            let mut m = m.clone();
+            async move {
+                m.get_server_status(pb::GetServerStatusRequest {})
+                    .await
+                    .expect("status")
+                    .into_inner()
+                    .status
+                    .expect("status")
+            }
+        };
+        let ok = status(&mut mission).await;
+        assert!(!ok.store_space_low, "a temp folder has room");
+        assert!(ok.store_free_bytes.is_some());
+
+        s.hub.lock().space_extra = u64::MAX / 2;
+        let low = status(&mut mission).await;
+        assert!(low.store_space_low, "the verdict shows the shortage");
+        let backup = |key: &str| pb::BackupCampaignRequest {
+            lease: Some(lease.clone()),
+            campaign_id: a,
+            idempotency: Some(pb::Idempotency { key: key.into() }),
+        };
+        let e = campaigns
+            .backup_campaign(backup("bk-1"))
+            .await
+            .expect_err("space low");
+        assert_eq!(e.code(), Code::ResourceExhausted, "{e}");
+        assert_eq!(
+            nanoprobe_proto::errors::reason(&e),
+            nanoprobe_proto::v1alpha1::ErrorReason::SpaceLow
+        );
+        // A scheduled backup that is due is skipped, and the next one waits
+        // for the interval.
+        {
+            let cfg = s.hub.cfg.clone();
+            let mut g = s.hub.lock();
+            g.next_backup_ms = 0;
+            g.timers(&cfg);
+            assert!(g.backup_job.is_none(), "no scheduled backup was started");
+            assert!(g.next_backup_ms > wall_ms(), "the next one waits");
+            let files = g.files().expect("files");
+            assert!(files.backups(CampaignId(a)).expect("backups").is_empty());
+        }
+        s.hub.lock().space_extra = 0;
+        campaigns
+            .backup_campaign(backup("bk-2"))
+            .await
+            .expect("room again");
+        let _ = s.stop.send(());
+        s.task.await.expect("join").expect("serve");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_delete_without_a_name_needs_a_confirmation() {
+        use nanoprobe_proto::v1alpha1::campaign_service_client::CampaignServiceClient;
+        let s = served_folder().await;
+        let lease = lease_of(&s.channel).await;
+        let mut campaigns = CampaignServiceClient::new(s.channel.clone());
+        let b = campaigns
+            .create_campaign(create(&lease, "b", "Caucasus", false))
+            .await
+            .expect("b")
+            .into_inner()
+            .campaign
+            .expect("campaign")
+            .id;
+        let e = campaigns
+            .delete_campaign(pb::DeleteCampaignRequest {
+                lease: Some(lease.clone()),
+                campaign_id: b,
+                confirm_name: String::new(),
+                idempotency: Some(pb::Idempotency {
+                    key: "del-e".into(),
+                }),
+            })
+            .await
+            .expect_err("no name");
+        assert_eq!(e.code(), Code::FailedPrecondition, "{e}");
+        assert_eq!(
+            nanoprobe_proto::errors::reason(&e),
+            nanoprobe_proto::v1alpha1::ErrorReason::ConfirmationRequired
+        );
+        assert!(entries(&s.store).contains(&b.to_string()));
+        let _ = s.stop.send(());
+        s.task.await.expect("join").expect("serve");
+    }
+
+    /// A folder that cannot be emptied: the delete answers `INTERNAL` and
+    /// the campaign is still listed, with its events log open.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_delete_that_cannot_remove_the_folder_keeps_the_campaign() {
+        use nanoprobe_proto::v1alpha1::campaign_service_client::CampaignServiceClient;
+        use nanoprobe_proto::v1alpha1::events_service_client::EventsServiceClient;
+        use std::os::unix::fs::PermissionsExt;
+        let s = served_folder().await;
+        let lease = lease_of(&s.channel).await;
+        let mut campaigns = CampaignServiceClient::new(s.channel.clone());
+        let mut events = EventsServiceClient::new(s.channel.clone());
+        let b = campaigns
+            .create_campaign(create(&lease, "b", "Caucasus", false))
+            .await
+            .expect("b")
+            .into_inner()
+            .campaign
+            .expect("campaign")
+            .id;
+        let folder = s.store.join(b.to_string());
+        let set = |mode| {
+            std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(mode)).expect("mode")
+        };
+        set(0o555);
+        // A user that ignores permissions (root) can remove it: skip.
+        if std::fs::File::create(folder.join("probe")).is_ok() {
+            let _ = std::fs::remove_file(folder.join("probe"));
+            set(0o755);
+            return;
+        }
+        let r = campaigns
+            .delete_campaign(pb::DeleteCampaignRequest {
+                lease: Some(lease.clone()),
+                campaign_id: b,
+                confirm_name: "b".into(),
+                idempotency: Some(pb::Idempotency {
+                    key: "del-x".into(),
+                }),
+            })
+            .await;
+        set(0o755);
+        let e = r.expect_err("not removable");
+        assert_eq!(e.code(), Code::Internal, "{e}");
+        assert_eq!(
+            nanoprobe_proto::errors::reason(&e),
+            nanoprobe_proto::v1alpha1::ErrorReason::Internal
+        );
+        let listed = campaigns
+            .list_campaigns(pb::ListCampaignsRequest {})
+            .await
+            .expect("list")
+            .into_inner();
+        assert_eq!(listed.campaigns.len(), 1, "{:?}", listed.campaigns);
+        events
+            .read_events(pb::ReadEventsRequest {
+                filter: Some(pb::EventFilter {
+                    campaign_id: b,
+                    ..pb::EventFilter::default()
+                }),
+                after_sequence: 0,
+                limit: 0,
+            })
+            .await
+            .expect("the campaign's events still read");
+        let _ = s.stop.send(());
+        s.task.await.expect("join").expect("serve");
+    }
+
+    /// `GetCampaign` shows the clock the campaign runs, not the one the last
+    /// checkpoint wrote.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_campaign_shows_the_running_clock_before_any_checkpoint() {
+        use nanoprobe_proto::v1alpha1::campaign_service_client::CampaignServiceClient;
+        use nanoprobe_sidecar::shell::Start;
+        let s = served_folder().await;
+        let lease = lease_of(&s.channel).await;
+        let mut campaigns = CampaignServiceClient::new(s.channel.clone());
+        let a = campaigns
+            .create_campaign(create(&lease, "a", "Caucasus", false))
+            .await
+            .expect("a")
+            .into_inner()
+            .campaign
+            .expect("campaign")
+            .id;
+        let start = Start {
+            year: 2040,
+            month: 2,
+            day: 3,
+            seconds: 7_200,
+        }
+        .unix_ms();
+        s.hub
+            .lock()
+            .set_next(
+                a,
+                &crate::next::Next {
+                    start_ms: Some(start),
+                    ..crate::next::Next::default()
+                },
+            )
+            .expect("next");
+        campaigns
+            .activate_campaign(pb::ActivateCampaignRequest {
+                lease: Some(lease.clone()),
+                campaign_id: a,
+                idempotency: Some(pb::Idempotency {
+                    key: "act-a".into(),
+                }),
+            })
+            .await
+            .expect("activate");
+        for _ in 0..400 {
+            if s.hub.lock().campaigns[&a].store.owed_load().is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let c = campaigns
+            .get_campaign(pb::GetCampaignRequest { campaign_id: a })
+            .await
+            .expect("get")
+            .into_inner()
+            .campaign
+            .expect("campaign");
+        let clock = c.clock.expect("clock");
+        let ms = clock.seconds * 1000 + i64::from(clock.nanos) / 1_000_000;
+        assert!(
+            ms >= start && ms < start + 3_600_000,
+            "the clock shows the shell's start: {ms}"
+        );
         let _ = s.stop.send(());
         s.task.await.expect("join").expect("serve");
     }

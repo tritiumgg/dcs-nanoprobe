@@ -637,20 +637,34 @@ pub fn drive(
         // or says it is dynamic (field names UNVERIFIED: every field is
         // recorded).
         let airport_s = airport.to_string();
-        let dynamic = slot_list.iter().any(|s| {
+        // Every field arrives as text: a dynamic field counts when it is
+        // "true" or a non-zero number.
+        let flagged = |v: &serde_json::Value| match v {
+            serde_json::Value::Bool(b) => *b,
+            serde_json::Value::Number(n) => n.as_f64().is_some_and(|n| n != 0.0),
+            serde_json::Value::String(t) => t == "true" || t.parse::<f64>().is_ok_and(|n| n != 0.0),
+            _ => false,
+        };
+        let dynamic_rule = slot_list.iter().find_map(|s| {
             // A fixed client unit parked there is not a dynamic slot.
             let fixed_unit = s["unitId"]
                 .as_str()
                 .is_some_and(|id| client_ids.iter().any(|c| c == id));
-            !fixed_unit
-                && s.as_object().is_some_and(|o| {
-                    o.iter().any(|(k, v)| {
-                        let k = k.to_lowercase();
-                        (k.contains("dynamic") && v != "false" && v != "nil")
-                            || (k.contains("airdrome") && v.as_str() == Some(airport_s.as_str()))
-                    })
-                })
+            if fixed_unit {
+                return None;
+            }
+            s.as_object()?.iter().find_map(|(k, v)| {
+                let k = k.to_lowercase();
+                if k.contains("dynamic") && flagged(v) {
+                    Some(format!("field {k} is {v}"))
+                } else if k.contains("airdrome") && v.as_str() == Some(airport_s.as_str()) {
+                    Some(format!("field {k} names airport {airport_s}"))
+                } else {
+                    None
+                }
+            })
         });
+        let dynamic = dynamic_rule.is_some();
         let pass = same_members
             && unchanged.len() == others
             && mission_rest
@@ -671,6 +685,7 @@ pub fn drive(
             "template_rules": tpl_rules,
             "fixed_slot": fixed,
             "dynamic_slot": dynamic,
+            "dynamic_slot_rule": dynamic_rule,
             "seen": seen,
             "slots": slots,
         });
