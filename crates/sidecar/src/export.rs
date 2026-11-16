@@ -336,12 +336,14 @@ mod tests {
         s.set_template("Caucasus", Some(b"miz".to_vec()));
         s.commit().expect("commit");
         let mut ev = EventFile::open(&c.events_path(id), 3).expect("events");
-        ev.push(EventRow {
-            seq: ev.next_seq(),
-            wall_ms: 9,
-            source: Some("1:2".into()),
-            body: vec![1, 2, 3],
-        });
+        for source in ["1:1", "1:2"] {
+            ev.push(EventRow {
+                seq: ev.next_seq(),
+                wall_ms: 9,
+                source: Some(source.into()),
+                body: vec![1, 2, 3],
+            });
+        }
         ev.commit().expect("commit");
         let mut lines = Vec::new();
         // One row a page: every paged query reads more than one page.
@@ -393,6 +395,7 @@ mod tests {
             assert_eq!(count(kind), rows(table), "{kind}");
         }
         assert_eq!(count("entity"), 9, "three groups of two units");
+        assert_eq!(count("event"), 2, "two events, one a page");
         assert!(count("journal") > 1);
         let order = [
             "header",
@@ -418,6 +421,11 @@ mod tests {
             (t["theater"].as_str(), t["size"].as_u64()),
             (Some("Caucasus"), Some(3))
         );
+        let want: String = sha2::Sha256::digest(b"miz")
+            .iter()
+            .map(|x| format!("{x:02x}"))
+            .collect();
+        assert_eq!(t["sha256"].as_str(), Some(want.as_str()));
         let event = parsed.last().expect("event");
         assert_eq!(event["kind"], "event");
         assert_eq!(event["event_b64"], "AQID");

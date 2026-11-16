@@ -31,7 +31,8 @@ the offline restore (`campaigns::tests::a_restore_keeps_ids_and_revisions_above_
 `a_restored_finished_backup_stays_finished`, `restore::tests::refuses_a_held_store_dir_and_restores_a_free_one`),
 export (`export::tests::exports_every_table_one_json_object_per_line`,
 `export_reload_and_delete_through_the_services`), free space
-(`a_full_file_system_refuses_a_backup_a_copy_and_a_template`).
+(`a_full_file_system_refuses_a_copy_and_a_template`; the backup paths call the same
+`space_check`).
 
 ## Live
 

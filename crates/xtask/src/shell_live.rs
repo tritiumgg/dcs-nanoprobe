@@ -57,9 +57,11 @@ const AFGHANISTAN: &[u8] = include_bytes!("../../../templates/afghanistan.miz");
 /// How long a mission load may take before the step fails. Not a design
 /// limit (a load has no fixed duration); only when this test gives up.
 const LOAD_LIMIT: Duration = Duration::from_secs(900);
-/// How long a hung verdict may take after the crash: `heartbeat_stale_s`
-/// (10 s by default) plus the status poll and the sidecar's own read.
-const HUNG_LIMIT: Duration = Duration::from_secs(25);
+/// `[health] heartbeat_stale_s` as the part's `sidecar.toml` sets it.
+pub const HEARTBEAT_STALE_S: u64 = 10;
+/// How long a hung verdict may take after the crash: the configured limit
+/// plus this test's tolerance for the status poll and the sidecar's read.
+const HUNG_LIMIT: Duration = Duration::from_secs(HEARTBEAT_STALE_S + 15);
 /// The start the reload writes: 2031-07-04 15:30:00.
 const START_S: i64 = 1_940_945_400;
 
@@ -454,6 +456,8 @@ pub fn drive(
         .campaign
         .and_then(|c| c.clock)
         .map(|t| t.seconds);
+    // The campaign clock took the requested start.
+    let pass = pass && clock.is_some_and(|c| (START_S..START_S + 3 * 3600).contains(&c));
     results["reload"] =
         json!({ "pass": pass, "seen": seen, "clock_s": clock, "want_start_s": START_S });
     println!("   {} {seen}", if pass { "ok  " } else { "FAIL" });
@@ -634,13 +638,18 @@ pub fn drive(
         // recorded).
         let airport_s = airport.to_string();
         let dynamic = slot_list.iter().any(|s| {
-            s.as_object().is_some_and(|o| {
-                o.iter().any(|(k, v)| {
-                    let k = k.to_lowercase();
-                    (k.contains("dynamic") && v != "false" && v != "nil")
-                        || (k.contains("airdrome") && v.as_str() == Some(airport_s.as_str()))
+            // A fixed client unit parked there is not a dynamic slot.
+            let fixed_unit = s["unitId"]
+                .as_str()
+                .is_some_and(|id| client_ids.iter().any(|c| c == id));
+            !fixed_unit
+                && s.as_object().is_some_and(|o| {
+                    o.iter().any(|(k, v)| {
+                        let k = k.to_lowercase();
+                        (k.contains("dynamic") && v != "false" && v != "nil")
+                            || (k.contains("airdrome") && v.as_str() == Some(airport_s.as_str()))
+                    })
                 })
-            })
         });
         let pass = same_members
             && unchanged.len() == others
@@ -648,6 +657,7 @@ pub fn drive(
             && warehouses_rest
             && spawn_flag
             && seen["zone_found"] == json!(true)
+            && tpl_rules > 0
             && seen["rules"].as_u64() == Some(tpl_rules as u64)
             && fixed
             && dynamic;
@@ -773,6 +783,7 @@ pub fn drive(
         "pass": pass,
         "hung_after_s": hung_after.map(|d| d.as_secs_f64()),
         "limit_s": HUNG_LIMIT.as_secs(),
+        "heartbeat_stale_s": HEARTBEAT_STALE_S,
         "lifecycle_event": event,
         "verdicts": verdicts,
         "processes": processes,

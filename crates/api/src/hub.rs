@@ -3486,6 +3486,13 @@ mod tests {
         let mut g = hub.lock();
         assert!(mission_loads(&mut g).is_empty(), "no second MISSION_LOAD");
         assert!(owed(&g).is_none());
+        // DCS may have taken the file: the next shell goes to the other slot.
+        assert_eq!(g.campaigns[&1].store.shell_slot(), Some(b'a'));
+        let o = g
+            .write_shell(1, "Caucasus")
+            .expect("shell")
+            .expect("a file");
+        assert!(o.path.ends_with("1.b.miz"), "{}", o.path);
     }
 
     #[test]
@@ -4045,7 +4052,116 @@ mod tests {
     }
 
     #[test]
-    fn a_full_file_system_refuses_a_backup_a_copy_and_a_template() {
+    fn a_reload_is_refused_before_it_captures_anything() {
+        let (_dir, missions, cfg) = owed_setup();
+        let hub = folder_hub(&cfg, &missions, 0x1000);
+        hub.start();
+        {
+            let mut g = hub.lock();
+            g.add_campaign(
+                &cfg,
+                pb::Campaign {
+                    id: 1,
+                    name: "c1".into(),
+                    theaters: vec!["Caucasus".into(), "Afghanistan".into()],
+                    ..pb::Campaign::default()
+                },
+                "Caucasus".into(),
+            )
+            .expect("add");
+            g.activate(&cfg, 1).expect("activate");
+        }
+        // While the activation's load is owed.
+        let lease = {
+            let grant = hub
+                .lock()
+                .leases
+                .acquire(Instant::now(), wall_ms(), "t".into())
+                .expect("lease");
+            pb::Lease {
+                epoch: grant.epoch,
+                lease_id: grant.lease_id,
+            }
+        };
+        let e = hub
+            .lock()
+            .reload_check(None, Some(&lease), 0)
+            .expect_err("owed");
+        assert_eq!(e.code(), Code::FailedPrecondition);
+        steps(&hub, 300);
+        let mut g = hub.lock();
+        // No template for the next theater, and an airport the template lacks.
+        let next = |theater: &str, dynamic| crate::next::Next {
+            theater: theater.into(),
+            dynamic,
+            ..crate::next::Next::default()
+        };
+        g.set_next(1, &next("Afghanistan", Vec::new()))
+            .expect("next");
+        let e = g
+            .reload_check(None, Some(&lease), 0)
+            .expect_err("no template");
+        assert!(
+            e.message().contains("no template for theater"),
+            "{}",
+            e.message()
+        );
+        g.set_next(
+            1,
+            &next(
+                "",
+                vec![nanoprobe_sidecar::shell::DynamicSpawn {
+                    airbase: 99_999,
+                    enabled: true,
+                    hot_start: false,
+                }],
+            ),
+        )
+        .expect("next");
+        let e = g
+            .reload_check(None, Some(&lease), 0)
+            .expect_err("no airport");
+        assert_eq!(e.code(), Code::InvalidArgument);
+        let loads = mission_loads(&mut g).len();
+        g.set_next(1, &next("", Vec::new())).expect("next");
+        g.reload_check(None, Some(&lease), 0).expect("accepted");
+        assert_eq!(mission_loads(&mut g).len(), loads, "a check sends nothing");
+    }
+
+    #[test]
+    fn a_create_whose_activation_fails_leaves_no_campaign() {
+        let (dir, missions, cfg) = owed_setup();
+        // `shells` is a file: the shell cannot be saved.
+        std::fs::write(missions.dir.as_ref().expect("dir").join("shells"), b"x").expect("file");
+        let hub = folder_hub(&cfg, &missions, 0x1000);
+        hub.start();
+        let mut g = hub.lock();
+        g.mission_check(0, "Caucasus")
+            .expect("the template is fine");
+        g.add_campaign(
+            &cfg,
+            pb::Campaign {
+                id: 7,
+                name: "c7".into(),
+                ..pb::Campaign::default()
+            },
+            "Caucasus".into(),
+        )
+        .expect("add");
+        let e = g.activate(&cfg, 7).expect_err("no shell");
+        assert!(
+            e.message().contains("could not be written"),
+            "{}",
+            e.message()
+        );
+        g.delete_campaign(&cfg, 7, "c7")
+            .expect("cleanup as the service does");
+        assert!(g.campaigns.is_empty());
+        assert!(!dir.path().join("campaigns").join("7").exists());
+    }
+
+    #[test]
+    fn a_full_file_system_refuses_a_copy_and_a_template() {
         let (_dir, missions, cfg) = owed_setup();
         let hub = folder_hub(&cfg, &missions, 0x1000);
         hub.start();
