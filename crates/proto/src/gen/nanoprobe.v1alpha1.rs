@@ -1134,7 +1134,8 @@ pub struct Unit {
     /// A player-occupied unit's ammunition by weapon type name, as `getAmmo`
     /// listed it at the read that `ammo_read` names. Empty for an AI unit, for a
     /// unit with no read yet, and for one with no ammunition. DCS sends no event
-    /// for a rearm, so a rearm is not read (spec/world.md, "Ammunition").
+    /// for a rearm of an AI unit (E38), and none is known for a player aircraft,
+    /// so a rearm is not read (spec/world.md, "Ammunition").
     #[prost(btree_map = "string, uint32", tag = "11")]
     pub ammo: ::prost::alloc::collections::BTreeMap<::prost::alloc::string::String, u32>,
     /// The read that gave `ammo`: its cause and the stamps it was read under.

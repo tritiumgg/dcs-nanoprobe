@@ -866,7 +866,8 @@ speedboat, left DCS at 50 % and stayed at 80 %; a PERRY frigate read back 80 % a
 (LIVE, E39). The setter does nothing to a static, which is why `DAMAGE` takes only a
 unit. The sidecar also queues a `DAMAGE` right after a `GROUP_SPAWN` to give a unit
 its stored life (spec/world.md, "Spawn state"); E39 found it applies in the spawn's
-frame, paused or not. On a dedicated server a setting of 10 killed a ground unit and the
+frame while paused, and later with the simulation running; the running same-frame case
+is UNVERIFIED. On a dedicated server a setting of 10 killed a ground unit and the
 death did not reach a connected client (LIVE,
 docs/results/2026-11-11-first-dll-and-spikes.md, E18).
 

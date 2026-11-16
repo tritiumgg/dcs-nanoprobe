@@ -842,9 +842,13 @@ a unit with no player name gets no read and no record, so an AI unit never has a
 with the later cause. A pump reads at most a few marked units (spec/sampling.md,
 "Loadout reads"), and nothing reads ammunition on a period.
 
-No DCS event announces a rise in ammunition: every fall has a shot event, and a rearm
-has none (LIVE, E38, docs/results/2026-11-14-e38-life-and-ammunition.md). So a rearm is
-not read; the record shows the load at the birth or the takeoff it names. Flares and
+Every fall in ammunition has a shot event. No event named an AI M-1 rearmed by a truck
+(LIVE, E38, docs/results/2026-11-14-e38-life-and-ammunition.md). Whether DCS sends one
+when ground crew rearm a player aircraft is UNVERIFIED, an open item for a live check.
+A rearm is not read; the record shows the load at the birth or the takeoff it names.
+The ring can drop an `AMMO` record, as it drops any sample ("Delivery classes"). The
+agent then keeps the unit's loadout mark and reads the unit again on a later pump, within
+the 600 pumps a mark waits (spec/sampling.md, "Loadout reads"). Flares and
 chaff are not among the rows (LIVE, E8). A unit with no ammunition rows gets a record
 with an empty array. A unit that has no `AMMO` record has an unknown load, not a full
 one.

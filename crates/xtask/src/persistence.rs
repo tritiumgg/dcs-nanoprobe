@@ -997,8 +997,25 @@ impl Target for FakeTarget {
         Ok(json!({ "string_integer_keys": [], "keys": 0, "on": "the fake" }))
     }
 
-    fn unit_state(&mut self, _units: &[String]) -> Result<Value, String> {
-        Ok(json!({}))
+    /// The life of each unit as the fake DCS holds it (the fake sidecar
+    /// logs it), 1 for a unit no `DAMAGE` set; `life0` is 1.
+    fn unit_state(&mut self, units: &[String]) -> Result<Value, String> {
+        let log = std::fs::read_to_string(&self.log).unwrap_or_default();
+        let lives = log
+            .lines()
+            .rev()
+            .filter(|l| l.contains("\"ev\":\"fake_lives\""))
+            .find_map(|l| serde_json::from_str::<Value>(l.trim()).ok())
+            .map_or(json!({}), |v| v["lives"].clone());
+        let mut out = serde_json::Map::new();
+        for u in units {
+            let entity = nanoprobe_transport::names::parse(u).map(|p| p.entity.to_string());
+            let percent = entity
+                .and_then(|e| lives[e.as_str()].as_f64())
+                .unwrap_or(100.0);
+            out.insert(u.clone(), json!({ "life": percent / 100.0, "life0": 1.0 }));
+        }
+        Ok(Value::Object(out))
     }
 
     fn option_ids(&mut self) -> Result<Value, String> {

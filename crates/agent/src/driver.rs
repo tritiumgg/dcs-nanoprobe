@@ -565,6 +565,11 @@ fn report(d: &mut Driver, r: &Report) {
     let pending = d.sampler.pending_len();
     let pending_counts = d.sampler.pending_counts();
     let enum_end_abandoned = d.sampler.enum_end_abandoned();
+    let loadouts = (
+        d.sampler.loadouts_waiting(),
+        d.sampler.loadouts_dropped(),
+        d.sampler.loadout_reads(),
+    );
     record(
         d,
         Level::Info,
@@ -679,6 +684,9 @@ fn report(d: &mut Driver, r: &Report) {
             ("pending_overflow", Value::Int(pending_counts[1] as i64)),
             ("pending_expired", Value::Int(pending_counts[2] as i64)),
             ("enum_end_abandoned", Value::Int(enum_end_abandoned as i64)),
+            ("loadouts_waiting", Value::Int(loadouts.0 as i64)),
+            ("loadouts_dropped", Value::Int(loadouts.1 as i64)),
+            ("loadout_reads", Value::Int(loadouts.2 as i64)),
         ],
     );
     if r.starved > 0 {

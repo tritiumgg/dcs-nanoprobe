@@ -927,8 +927,13 @@ pub struct Sampler {
     /// Loadout reads a birth or a takeoff event asked for, in the order
     /// they came, one entry per object.
     loadouts: Vec<LoadoutMark>,
+    /// The marks the last [`Sampler::loadouts`] handed out. A read whose
+    /// `AMMO` the ring dropped puts its mark back.
+    loadouts_handed: Vec<LoadoutMark>,
     /// Loadout marks dropped because the list was full.
     loadouts_dropped: u64,
+    /// Loadout reads made, since start: one per `ammo` call for a unit row.
+    loadout_reads: u64,
     /// A sample record's payload while it is written, kept for its
     /// capacity.
     scratch: Vec<u8>,
@@ -1178,7 +1183,9 @@ impl Sampler {
             recount: false,
             life_marks: Vec::new(),
             loadouts: Vec::new(),
+            loadouts_handed: Vec::new(),
             loadouts_dropped: 0,
+            loadout_reads: 0,
             scratch: Vec::new(),
             xcall_seen: 0.0,
         }
@@ -1301,6 +1308,7 @@ impl Sampler {
         self.stopped.clear();
         self.life_marks.clear();
         self.loadouts.clear();
+        self.loadouts_handed.clear();
         self.idle_units = 0;
         self.cargo = 0;
         self.idle_cargo = 0;
@@ -1897,6 +1905,12 @@ impl Sampler {
         self.loadouts_dropped
     }
 
+    /// Loadout reads made since start, a retry after a dropped `AMMO`
+    /// counted again.
+    pub fn loadout_reads(&self) -> u64 {
+        self.loadout_reads
+    }
+
     /// The slot of the unit row a loadout mark names, once its row exists.
     fn loadout_slot(&self, object: u64) -> Option<u32> {
         let &slot = self.by_object.get(&object)?;
@@ -1904,27 +1918,34 @@ impl Sampler {
         (row.unit() && !row.suspect).then_some(slot)
     }
 
-    /// Whether a loadout mark has its row: a pump has a read to make.
+    /// Whether a loadout mark has its row and no birth waits: a pump has a
+    /// read to make. Births come first, so a pump a birth waits for is not
+    /// worth its call for a mark.
     fn loadouts_ready(&self) -> bool {
-        self.loadouts
-            .iter()
-            .any(|m| self.loadout_slot(m.object).is_some())
+        self.births == 0
+            && self
+                .loadouts
+                .iter()
+                .any(|m| self.loadout_slot(m.object).is_some())
     }
 
     /// Fill `out` with at most `LOADOUTS_PER_PUMP` pairs of a unit's slot and
     /// the cause of its read, and return how many. A pump hands out as many
-    /// as its budget pays for at a vitals row's cost each, at least one.
-    /// The marks of rows that do not exist yet wait; one that waits
-    /// `LOADOUT_WAIT_PUMPS` pumps is dropped. Nothing when the pump is not
-    /// sampling.
+    /// as the budget left after the tiers pays for at a vitals row's cost
+    /// each, at least one. Births come first: while a birth waits for the
+    /// pump, nothing is handed out, and the marks wait with their waits
+    /// unchanged. The marks of rows that do not exist yet wait; one that
+    /// waits `LOADOUT_WAIT_PUMPS` pumps with no birth pending is dropped.
+    /// Nothing when the pump is not sampling.
     pub fn loadouts(&mut self, out: &mut Vec<(u32, u32)>) -> usize {
         out.clear();
-        if !self.sampling || self.loadouts.is_empty() {
+        self.loadouts_handed.clear();
+        if !self.sampling || self.loadouts.is_empty() || self.births > 0 {
             return 0;
         }
         let cost = self.tiers[Tier::Vitals.index()].cost;
         let afford = if cost > 0.0 {
-            (self.budget.budget.max(0.0) / cost) as usize
+            (self.remaining_us(Instant::now()).max(0.0) / cost) as usize
         } else {
             LOADOUTS_PER_PUMP
         };
@@ -1933,7 +1954,10 @@ impl Sampler {
         let mut kept = Vec::with_capacity(marks.len());
         for mut mark in marks {
             match self.loadout_slot(mark.object) {
-                Some(slot) if out.len() < most => out.push((slot, mark.cause)),
+                Some(slot) if out.len() < most => {
+                    out.push((slot, mark.cause));
+                    self.loadouts_handed.push(mark);
+                }
                 // A row that exists waits its turn.
                 Some(_) => kept.push(mark),
                 None => {
@@ -1965,6 +1989,7 @@ impl Sampler {
             return;
         };
         let object = row.found.object;
+        self.loadout_reads += 1;
         let list = items
             .iter()
             .enumerate()
@@ -1992,7 +2017,27 @@ impl Sampler {
             link.flush();
             self.dirty = false;
         }
-        link.sample(kind::AMMO as u16, &payload);
+        if !link.sample(kind::AMMO as u16, &payload) {
+            self.loadout_retry(object);
+        }
+    }
+
+    /// The ring dropped a unit's `AMMO`: its mark goes back, so a later pump
+    /// reads the unit again. Each retry counts as a pump that waited, so the
+    /// retries end with `LOADOUT_WAIT_PUMPS`; a newer mark for the unit
+    /// stands.
+    fn loadout_retry(&mut self, object: u64) {
+        let Some(i) = self.loadouts_handed.iter().position(|m| m.object == object) else {
+            return;
+        };
+        let mut mark = self.loadouts_handed.swap_remove(i);
+        mark.waits += 1;
+        if mark.waits <= LOADOUT_WAIT_PUMPS
+            && self.loadouts.len() < LOADOUT_MARKS_MAX
+            && !self.loadouts.iter().any(|m| m.object == object)
+        {
+            self.loadouts.push(mark);
+        }
     }
 
     /// The command destroyed these objects: each row held leaves as
@@ -2121,6 +2166,7 @@ impl Sampler {
         self.stopped.retain(|s| *s != slot);
         self.life_marks.retain(|s| *s != slot);
         self.loadouts.retain(|m| m.object != object);
+        self.loadouts_handed.retain(|m| m.object != object);
         self.put(link, kind::OBJECT_GONE as u16, gone_record.encode());
         self.resolve_miss(link, object, false);
         slot + 1

@@ -405,11 +405,17 @@ The life is `getLife` over `getLife0` as a percentage: `getLife` from the last s
 capture, `getLife0` from the capture or the unit's `OBJECT` record. A `PutGroup` may give
 a unit's `life_percent` instead; it stands until DCS reads the unit's life. When the life
 is below 99.95 %, the sidecar queues a `DAMAGE` right after the `GROUP_SPAWN`: ring order
-runs it after the spawn, which names the unit, and it sets the life in the spawn's frame,
-paused or not (LIVE, E39, docs/results/2026-11-16-e39-spawn-state.md). Until that
-`DAMAGE` is applied, a sample or capture of the unit does not replace the life the store
-holds, so a read at the life the spawn gave cannot overwrite it. A `DAMAGE` that DCS
-does not apply is counted (`lives_lost`), and the next sample shows the unit's life.
+runs it after the spawn, which names the unit. It sets the life in the spawn's frame
+while the simulation is paused, and later with the simulation running (LIVE, E39,
+docs/results/2026-11-16-e39-spawn-state.md); that it sets it in the spawn's frame with
+the simulation running is UNVERIFIED. Until that `DAMAGE` is answered, a sample or
+capture of the unit does not replace the life the store holds, so a read at the life the
+spawn gave cannot overwrite it. The store holds the last life it read, or the
+percentage a `PutGroup` asked for. A `DAMAGE` that DCS does not apply, or that no
+`RESULT` answers before a `HELLO` resolves it, is counted (`lives_lost`) and the sidecar
+writes a warning to its standard error naming the unit's entity ID. The count is in
+`Reconciler::counters()`; no other operator surface carries the reconciler's counters.
+The next sample shows the unit's life.
 
 A unit spawns with the fuel, ammunition, flares and chaff its payload or type gives
 (owner's decision, after E39).
@@ -424,9 +430,11 @@ replaces the one before. A controller reads it for a loadout check.
 
 An AI unit has no ammunition read: its `ammo` is empty and it has no `ammo_read`. So has
 a player unit before its first read, and one with no ammunition rows. Nothing sees a
-rearm, because DCS sends no event for one (LIVE, E38,
-docs/results/2026-11-14-e38-life-and-ammunition.md): the loadout is the one at the last
-birth or takeoff. The sidecar keeps it in memory with the unit. It is not stored on
+rearm. No event named an AI M-1 rearmed by a truck (LIVE, E38,
+docs/results/2026-11-14-e38-life-and-ammunition.md); whether DCS sends one for a player
+aircraft rearmed by ground crew is UNVERIFIED, an open item for a live check. The
+loadout is the one at the last birth or takeoff. A read whose record the ring drops is
+made again on a later pump (spec/sampling.md, "Loadout reads"). The sidecar keeps it in memory with the unit. It is not stored on
 disk, not part of a capture and not carried by a restore, and a new mission generation
 clears it. A unit the store holds shows it on its `Unit`. The units the sidecar adopts
 have no entity in the store (above, "Managed and unmanaged"), so the API shows no `Unit`

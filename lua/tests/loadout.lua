@@ -39,13 +39,69 @@ local function uint(hex, off, n)
   return v
 end
 
--- The recording's AMMO records, in order: object, cause and payload length.
+-- An IEEE 754 double, little-endian, at byte `off` of a hex string.
+local function f64(hex, off)
+  local b = {}
+  for i = 1, 8 do
+    b[i] = uint(hex, off + i - 1, 1)
+  end
+  local sign = b[8] >= 128 and -1 or 1
+  local e = (b[8] % 128) * 16 + math.floor(b[7] / 16)
+  local m = b[7] % 16
+  for i = 6, 1, -1 do
+    m = m * 256 + b[i]
+  end
+  if e == 0 then
+    return sign * m * 2 ^ -1074
+  end
+  return sign * (1 + m / 2 ^ 52) * 2 ^ (e - 1023)
+end
+
+-- The `lv` at byte `off` of a hex string (spec/transport.md, "Codes: lv_tag"):
+-- the value and the offset after it.
+local function lv(hex, off)
+  local tag = uint(hex, off, 1)
+  off = off + 1
+  if tag == 0 then
+    return nil, off
+  elseif tag == 1 or tag == 2 then
+    return tag == 2, off
+  elseif tag == 3 then
+    return f64(hex, off), off + 8
+  elseif tag == 4 then
+    local n = uint(hex, off, 4)
+    off = off + 4
+    local s = hex:sub(off * 2 + 1, (off + n) * 2):gsub('%x%x', function(h)
+      return string.char(tonumber(h, 16))
+    end)
+    return s, off + n
+  elseif tag == 5 then
+    local n = uint(hex, off, 4)
+    off = off + 4
+    local t = {}
+    for _ = 1, n do
+      local k, v
+      k, off = lv(hex, off)
+      v, off = lv(hex, off)
+      t[k] = v
+    end
+    return t, off
+  end
+  error('lv tag ' .. tag)
+end
+
+-- The recording's AMMO records, in order: object, cause and the rows of the
+-- `ammo` array, each with `type` and `count`.
 local function ammo_records()
   local list = {}
   for _, line in ipairs(S.lines(recording)) do
     local ok, r = pcall(S.json, line)
     if ok and type(r) == 'table' and r.kind == AMMO then
-      list[#list + 1] = { object = uint(r.payload, 0, 8), cause = uint(r.payload, 8, 4) }
+      list[#list + 1] = {
+        object = uint(r.payload, 0, 8),
+        cause = uint(r.payload, 8, 4),
+        rows = (lv(r.payload, 16)),
+      }
     end
   end
   return list
@@ -82,6 +138,14 @@ local function main()
   host:run('hook', profile .. 'Scripts/Hooks/nanoprobe-hook.lua')
   host:load_mission('sampling')
   local sim = host.sim
+  -- Count the `getAmmo` calls on each unit.
+  local Unit = host.states.server.Unit
+  local real_getAmmo = Unit.getAmmo
+  local ammo_calls = {}
+  rawset(Unit, 'getAmmo', function(self, ...)
+    ammo_calls[self.id_] = (ammo_calls[self.id_] or 0) + 1
+    return real_getAmmo(self, ...)
+  end)
 
   assert(os.execute(string.format(
     '%s --map %s --port %d --token-file %s --seconds 600 --record %s >> %s 2>&1 & echo $! > %s',
@@ -136,6 +200,16 @@ local function main()
   assert(n == 1, 'the player unit has ' .. n .. ' AMMO records after its birth, wanted 1')
   assert(first.cause == BIRTH, 'the birth read has cause ' .. first.cause)
   assert(count(ai.id) == 0, 'the AI unit has an AMMO record after its birth')
+  -- The rows are the ones the mock's getAmmo gives, by type name and count.
+  local want = real_getAmmo(Unit.getByName('np-ld-player-1'))
+  assert(want and #want > 0, 'the mock gives the player unit no ammunition')
+  assert(#first.rows == #want, 'the AMMO record has ' .. #first.rows .. ' rows, wanted ' .. #want)
+  for i, row in ipairs(want) do
+    assert(first.rows[i].type == row.desc.typeName, 'row ' .. i .. ' has type ' .. tostring(first.rows[i].type))
+    assert(first.rows[i].count == row.count, 'row ' .. i .. ' has count ' .. tostring(first.rows[i].count))
+  end
+  assert((ammo_calls[pilot.id] or 0) >= 1, 'the shim did not read the player unit\'s ammunition')
+  assert((ammo_calls[ai.id] or 0) == 0, 'the shim called getAmmo on the AI unit after its birth')
   S.ok('a player unit\'s birth gives exactly one AMMO record with cause birth; an AI unit\'s gives none')
 
   -- (c) The takeoffs: one more record for the player, none for the AI unit.
@@ -149,6 +223,7 @@ local function main()
   assert(m == 2, 'the player unit has ' .. m .. ' AMMO records after its takeoff, wanted 2')
   assert(last.cause == TAKEOFF, 'the takeoff read has cause ' .. last.cause)
   assert(count(ai.id) == 0, 'the AI unit has an AMMO record after its takeoff')
+  assert((ammo_calls[ai.id] or 0) == 0, 'the shim called getAmmo on the AI unit after its takeoff')
   S.ok('a player unit\'s takeoff gives exactly one AMMO record with cause takeoff; an AI unit\'s gives none')
 
   -- (d) Nothing reads ammunition on a period: many pumps, no new record.

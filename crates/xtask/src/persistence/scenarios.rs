@@ -994,7 +994,12 @@ pub fn spawn_state(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Value
     };
     let near = |v: Option<f64>, x: f64| v.is_some_and(|v| (v - x).abs() <= 0.5);
     let held = |s: &Value| near(pct(s, &jet_unit), 60.0) && near(pct(s, &tank_unit), 40.0);
-    let pass = (!t.live() || (held(&s0) && held(&s1) && held(&s2)))
+    // The fake's reload starts the sidecar again over a new fake DCS, and the
+    // store keeps a sampled life only at a checkpoint (spec/persistence.md),
+    // so the fake checks the life up to the reload.
+    let pass = held(&s0)
+        && held(&s1)
+        && (!t.live() || held(&s2))
         && outcome == Some(pb::Outcome::Applied as i32);
     Ok(json!({
         "campaign": c,

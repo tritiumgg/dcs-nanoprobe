@@ -243,11 +243,17 @@ A second event for a marked object replaces its cause: the later one is kept. A 
 an object that has a row that is not a unit is not kept; a mark whose object has no row
 after 600 pumps is dropped; a removed row loses its mark.
 
-The pump makes the reads after its tiers, so the births it resolved are in the table. It
-takes at most 8 marks, and at most as many as the pump's remaining budget pays for at the
-cost of a vitals row each, and at least one; the rest wait for the next pump. A pump
-with a mark that has its row counts as having work ("The pump's worth"). The list holds at
-most 1,024 marks; a mark past that is dropped and counted. For each mark the shim calls
+The pump makes the reads after its tiers, so the births it resolved are in the table.
+Births come first. Every unit birth and takeoff is marked, AI units included, and the
+player check runs in the pump, so a spawn of thousands of AI units leaves thousands of
+marks. While any birth waits for the pump, no mark is handed out and a pump does not count
+a mark as work, so the marks never take the pump from the births. A mark's wait of 600
+pumps counts only pumps in which it could have been handed out, those with no birth
+pending, so a long spawn does not expire a player's mark. With no birth pending, a pump
+takes at most 8 marks, and at most as many as the budget left after the tiers pays for at
+the cost of a vitals row each, and at least one; the rest wait for the next pump. A pump
+with no birth pending and a mark that has its row counts as having work ("The pump's
+worth"). The list holds at most 1,024 marks; a mark past that is dropped and counted. For each mark the shim calls
 `Unit.getPlayerName` under `pcall`, in the pump and never in the event handler. A unit with
 no player name is dropped with no further read and no record. For a unit with one, the
 shim calls `getAmmo`, reduces each row to its type name (`desc.typeName`) and count, keeps
@@ -257,10 +263,16 @@ at most 64 rows, and the agent writes one `AMMO` record with the cause (spec/rec
 The cost of a birth or a takeoff of an AI unit is one `getPlayerName` call. The cost of a
 player unit's is that call and one `getAmmo` call, twice in a unit's life at most.
 
-A rearm is not read. DCS sends no event for a rise in ammunition: every fall has a shot
-event, and a rearm has none (LIVE, E38,
-docs/results/2026-11-14-e38-life-and-ammunition.md). The `AMMO` record shows the load at
-the birth or the takeoff it names. The first call of `getPlayerName` on a running DCS is
+A sample the ring has no room for is dropped (spec/records.md, "Delivery classes"). When
+the `AMMO` record of a read is dropped, the agent puts the unit's mark back: a later pump
+reads the unit again. Each such retry counts as one of the 600 pumps a mark waits, so the
+retries end with it. `loadout_reads` counts each read.
+
+A rearm is not read. Every fall in ammunition has a shot event. No event named an AI M-1
+rearmed by a truck (LIVE, E38, docs/results/2026-11-14-e38-life-and-ammunition.md).
+Whether DCS sends one when ground crew rearm a player aircraft is UNVERIFIED, an open
+item for a live check. The `AMMO` record shows the load at the birth or the takeoff it
+names. The first call of `getPlayerName` on a running DCS is
 UNVERIFIED: that it returns nil, or an empty string, for an AI unit is the shim's
 assumption, and either one drops the unit.
 
@@ -539,6 +551,8 @@ message `sampling` and these `data` keys:
 | `gone_dead`, `gone_removed`, `gone_missing` | Rows that left the table after an existence check, since the agent started, by the reason the reads gave (spec/records.md, "The object table") |
 | `classifier_anomalies`, `classifier_faults` | Since the agent started: `classifier_anomalies` counts existence checks whose reads gave no decision, including a death-event mark over a `MISSING` or anomalous result. `classifier_faults` counts rows that left as `REMOVED` and that a death event named, whether by a mark at the check or by a later event (spec/records.md, "Death events") |
 | `enum_end_abandoned` | Since the agent started: enumerations whose hold on pending misses lasted one enumeration period and ended with no `ENUM_END` (spec/records.md, "Layout: ENUM_END") |
+| `loadouts_waiting` | Loadout marks waiting for a pump now ("Loadout reads") |
+| `loadouts_dropped`, `loadout_reads` | Since the agent started: marks dropped because the list was full, and loadout reads made, a retry after a dropped `AMMO` counted again ("Loadout reads") |
 | `marks_cleared` | Since the agent started: death-event marks cleared because `isExist` returned true at its check |
 | `revivals` | Since the agent started: objects of the dead set that were found alive and added again (spec/records.md, "The object table") |
 | `pending_destroy` | IDs in the pending-destroy set now (spec/commands.md, "A destroy while paused is pending") |

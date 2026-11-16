@@ -9,6 +9,8 @@ use nanoprobe_transport::records::Ammo;
 struct Rec {
     records: Vec<(u64, Vec<u8>)>,
     began: Instant,
+    /// The ring has no room for a sample.
+    full: bool,
 }
 
 impl Rec {
@@ -16,6 +18,7 @@ impl Rec {
         Rec {
             records: Vec::new(),
             began: Instant::now(),
+            full: false,
         }
     }
 
@@ -34,6 +37,9 @@ impl Port for Rec {
         self.records.push((u64::from(kind), payload));
     }
     fn sample(&mut self, kind: u16, payload: &[u8]) -> bool {
+        if self.full {
+            return false;
+        }
         self.records.push((u64::from(kind), payload.to_vec()));
         true
     }
@@ -87,6 +93,8 @@ fn table(n: u64) -> (Sampler, Rec) {
     let mut rec = Rec::new();
     s.sampling = true;
     s.hellos_seen = 1;
+    // A pump with its budget ahead of it.
+    s.budget.deadline = Some(Instant::now() + Duration::from_secs(1));
     for id in 1..=n {
         s.add(&mut rec, found(id, object_kind::UNIT), false);
     }
@@ -254,4 +262,106 @@ fn the_read_writes_one_ammo_record_with_its_cause_and_rows() {
     assert_eq!(rec.ammo().len(), 1);
     s.ammo(&mut rec, slot_of(&s, 1), Ammo::BIRTH, &[]);
     assert_eq!(rec.ammo().len(), 2);
+}
+
+#[test]
+fn a_pump_whose_tiers_used_the_budget_hands_out_one_loadout() {
+    let (mut s, _rec) = table(4);
+    for id in 1..=4 {
+        s.mark_loadout(Some(id as f64), Ammo::BIRTH);
+    }
+    s.tiers[Tier::Vitals.index()].cost = 10.0;
+    // The whole budget of the frame is 1 s; what the tiers left is none.
+    s.budget.budget = 1e6;
+    s.budget.deadline = Some(Instant::now());
+    let mut out = Vec::new();
+    assert_eq!(s.loadouts(&mut out), 1);
+    assert_eq!(s.loadouts_waiting(), 3);
+}
+
+#[test]
+fn a_dropped_ammo_keeps_its_mark_until_a_read_is_written() {
+    let (mut s, mut rec) = table(1);
+    s.mark_loadout(Some(1.0), Ammo::BIRTH);
+    let mut out = Vec::new();
+    rec.full = true;
+    assert_eq!(s.loadouts(&mut out), 1);
+    s.ammo(&mut rec, out[0].0, out[0].1, &[(b"gun".to_vec(), 5.0)]);
+    assert!(rec.ammo().is_empty());
+    assert_eq!(s.loadouts_waiting(), 1, "the mark is kept");
+    // The next pump reads the unit again, and the record is written.
+    rec.full = false;
+    assert_eq!(s.loadouts(&mut out), 1);
+    s.ammo(&mut rec, out[0].0, out[0].1, &[(b"gun".to_vec(), 5.0)]);
+    assert_eq!(rec.ammo().len(), 1);
+    assert_eq!(s.loadouts_waiting(), 0);
+}
+
+#[test]
+fn the_retries_of_a_dropped_ammo_end_with_the_wait() {
+    let (mut s, mut rec) = table(1);
+    s.mark_loadout(Some(1.0), Ammo::BIRTH);
+    rec.full = true;
+    let mut out = Vec::new();
+    let mut pumps = 0;
+    while s.loadouts(&mut out) == 1 {
+        s.ammo(&mut rec, out[0].0, out[0].1, &[]);
+        pumps += 1;
+        assert!(pumps <= LOADOUT_WAIT_PUMPS + 1, "retries never end");
+    }
+    assert_eq!(s.loadouts_waiting(), 0);
+}
+
+#[test]
+fn no_loadout_is_handed_out_while_a_birth_is_pending() {
+    let (mut s, _rec) = table(3);
+    s.direct = true;
+    for id in 1..=3 {
+        s.mark_loadout(Some(id as f64), Ammo::BIRTH);
+    }
+    s.set_pending(5, 0);
+    let mut out = Vec::new();
+    assert_eq!(s.loadouts(&mut out), 0);
+    assert_eq!(s.loadouts_waiting(), 3);
+    // A mark with a row does not make the pump worth its call.
+    assert!(!s.loadouts_ready());
+    s.set_pending(0, 0);
+    assert!(s.loadouts_ready());
+}
+
+#[test]
+fn a_marks_wait_does_not_run_down_while_births_are_pending() {
+    let (mut s, mut rec) = table(1);
+    s.mark_loadout(Some(9.0), Ammo::BIRTH);
+    let mut out = Vec::new();
+    s.set_pending(1, 0);
+    for _ in 0..LOADOUT_WAIT_PUMPS * 2 {
+        assert_eq!(s.loadouts(&mut out), 0);
+    }
+    assert_eq!(s.loadouts_waiting(), 1);
+    // The births drain and the row appears: the mark is still there.
+    s.set_pending(0, 0);
+    s.add(&mut rec, found(9, object_kind::UNIT), false);
+    assert_eq!(s.loadouts(&mut out), 1);
+    assert_eq!(out, [(slot_of(&s, 9), Ammo::BIRTH)]);
+}
+
+#[test]
+fn loadouts_are_handed_out_after_the_births_drain() {
+    let n = LOADOUTS_PER_PUMP as u64 * 2;
+    let (mut s, _rec) = table(n);
+    for id in 1..=n {
+        s.mark_loadout(Some(id as f64), Ammo::BIRTH);
+    }
+    s.set_pending(3, 0);
+    let mut out = Vec::new();
+    assert_eq!(s.loadouts(&mut out), 0);
+    s.set_pending(0, 0);
+    let mut total = 0;
+    while s.loadouts_waiting() > 0 {
+        let k = s.loadouts(&mut out);
+        assert!((1..=LOADOUTS_PER_PUMP).contains(&k));
+        total += k;
+    }
+    assert_eq!(total as u64, n);
 }

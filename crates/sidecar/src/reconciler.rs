@@ -286,8 +286,10 @@ pub struct Reconciler {
     /// A restored unit's life, as DCS reads it, held until the `DAMAGE` that
     /// sets it is applied: a sample or capture before then, at the life the
     /// spawn gave, does not replace it (spec/world.md, "Spawn state"). By
-    /// unit, with the (epoch, seq) of that `DAMAGE`.
-    life_held: HashMap<EntityId, (f32, (u64, u64))>,
+    /// unit, with the (epoch, seq) of that `DAMAGE`. The life is None for a
+    /// unit whose life is the percentage a `PutGroup` asked for: the store
+    /// keeps that percentage until the `DAMAGE` is applied.
+    life_held: HashMap<EntityId, (Option<f32>, (u64, u64))>,
     /// The controller options the current spawn of each group applied.
     option_held: HashMap<EntityId, BTreeMap<u32, Lv>>,
     /// An option value DCS refused, by group and option; not sent again until
@@ -609,8 +611,11 @@ impl Reconciler {
                 if self.current(store, r.agent_boot) {
                     for v in rows {
                         if let Some(b) = self.binding.get(&v.object) {
-                            let life = self.life_held.get(&b.unit).map_or(v.life, |h| h.0);
-                            store.observe_vitals(b.unit, life);
+                            match self.life_held.get(&b.unit) {
+                                None => store.observe_vitals(b.unit, v.life),
+                                Some((Some(held), _)) => store.observe_vitals(b.unit, *held),
+                                Some((None, _)) => {}
+                            }
                         }
                     }
                 }
@@ -796,6 +801,9 @@ impl Reconciler {
         res: Option<&CommandResult>,
     ) {
         self.inflight.remove(&(c.epoch, c.seq));
+        if c.opcode == opcode::DAMAGE {
+            self.life_resolved((c.epoch, c.seq), outcome);
+        }
         store.journal(Entry::Outcome {
             epoch: c.epoch,
             seq: c.seq,
@@ -1130,7 +1138,7 @@ impl Reconciler {
                     },
                     heading: num("heading", prev.heading),
                     life: match self.life_held.get(&p.entity) {
-                        Some(h) => h.0,
+                        Some((held, _)) => held.unwrap_or(prev.life),
                         None => num("life", f64::from(prev.life)) as f32,
                     },
                 },
@@ -1141,8 +1149,12 @@ impl Reconciler {
                     life0: num("life0", prev_more.life0),
                     pitch: num("pitch", prev_more.pitch),
                     roll: num("roll", prev_more.roll),
-                    // observe_capture cleared what a PutGroup asked for.
-                    life_percent: None,
+                    // observe_capture cleared what a PutGroup asked for;
+                    // a held percentage stays until its DAMAGE is applied.
+                    life_percent: match self.life_held.get(&p.entity) {
+                        Some((None, _)) => prev_more.life_percent,
+                        _ => None,
+                    },
                 },
                 num("id", 0.0) as u64,
             );
@@ -1160,9 +1172,6 @@ impl Reconciler {
         };
         let outcome = classify(r.code, c.opcode);
         self.resolve(store, &c, outcome, Some(r));
-        if c.opcode == opcode::DAMAGE {
-            self.life_resolved((r.epoch, r.seq), outcome);
-        }
         if c.opcode == opcode::GROUP_SPAWN && outcome == Outcome::Applied && r.object != 0 {
             for row in self
                 .binding
@@ -2033,13 +2042,20 @@ impl Reconciler {
                 && self.send(store, sim, unit, 0, Body::Damage { life_percent: p })
             {
                 self.counters.lives_restored += 1;
-                if life > 0.0 {
-                    self.life_held.insert(unit, (life, key));
-                }
+                self.life_held
+                    .insert(unit, ((life > 0.0).then_some(life), key));
             } else {
-                self.counters.lives_lost += 1;
+                self.life_lost(unit);
             }
         }
+    }
+
+    /// A restored life DCS did not take: counted, and reported once.
+    fn life_lost(&mut self, unit: EntityId) {
+        self.counters.lives_lost += 1;
+        eprintln!(
+            "nanoprobe: the life restore of unit {unit} was not applied; it runs at the life DCS gave it"
+        );
     }
 
     /// A `DAMAGE` that restored a life is answered: the life is no longer
@@ -2055,7 +2071,7 @@ impl Reconciler {
         };
         self.life_held.remove(&unit);
         if outcome != Outcome::Applied {
-            self.counters.lives_lost += 1;
+            self.life_lost(unit);
         }
     }
 
