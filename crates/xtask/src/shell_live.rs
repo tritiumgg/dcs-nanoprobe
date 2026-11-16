@@ -464,6 +464,7 @@ pub fn drive(
         api.reload()?;
         generation = loaded(run, &mut api, theater, generation)?;
         if i == 0 {
+            results["e7_airbase_ids"]["Afghanistan"] = airbase_ids(run, AFGHANISTAN)?;
             // A point on land near the first airbase of the map.
             let p = run.eval(
                 "server",
@@ -771,6 +772,33 @@ pub fn drive(
     };
     let _ = api.rt.block_on(api.campaigns.suspend_campaign(req));
     Ok(())
+}
+
+/// E7: whether every airdrome's `getID()` on the loaded map is a key of
+/// the template's `warehouses` airports (the ruling's condition for
+/// `Airbase.id`).
+fn airbase_ids(run: &Run, template: &[u8]) -> Result<Value, String> {
+    let ids = run.eval(
+        "server",
+        "s19-airbase-ids",
+        "local out = {}\nfor _, a in ipairs(world.getAirbases()) do local d = a:getDesc()\nif d and d.category == Airbase.Category.AIRDROME then out[#out + 1] = { name = a:getName(), id = tonumber(a:getID()) } end end\nreturn out\n",
+        60,
+    )?;
+    let keys = shell::airports(template)?;
+    let missing: Vec<&Value> = ids
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter(|v| v["id"].as_u64().is_none_or(|id| !keys.contains(&id)))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(json!({
+        "airdromes": ids.as_array().map_or(0, Vec::len),
+        "warehouse_airports": keys.len(),
+        "not_in_warehouses": missing,
+        "equal": ids.as_array().is_some_and(|a| !a.is_empty()) && missing.is_empty(),
+    }))
 }
 
 /// Whether member `name` of two `.miz` files is equal apart from the root
