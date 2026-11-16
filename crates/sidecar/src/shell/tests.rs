@@ -245,16 +245,23 @@ fn start_converts_both_ways() {
 #[test]
 fn save_writes_only_the_shell_inside_the_folder() {
     let dir = tempfile::tempdir().unwrap();
-    let p = save(dir.path(), 42, b"x").unwrap();
-    assert_eq!(p, dir.path().join("shells").join("42.miz"));
+    let p = save(dir.path(), 42, b'a', b"x").unwrap();
+    assert_eq!(p, dir.path().join("shells").join("42.a.miz"));
     assert_eq!(std::fs::read(&p).unwrap(), b"x");
-    save(dir.path(), 42, b"yz").unwrap();
+    save(dir.path(), 42, b'a', b"yz").unwrap();
     assert_eq!(std::fs::read(&p).unwrap(), b"yz");
+    std::fs::write(dir.path().join("shells").join(".42.b.miz.tmp"), b"cut").unwrap();
+    clear_temps(dir.path());
     let names: Vec<_> = std::fs::read_dir(dir.path().join("shells"))
         .unwrap()
         .map(|e| e.unwrap().file_name())
         .collect();
-    assert_eq!(names, vec![std::ffi::OsString::from("42.miz")]);
+    assert_eq!(names, vec![std::ffi::OsString::from("42.a.miz")]);
+    assert_eq!(slot_of(42, "Z:\\m\\shells\\42.b.miz"), Some(b'b'));
+    assert_eq!(slot_of(42, "Z:\\m\\shells\\142.b.miz"), None);
+    assert_eq!(other_slot(Some(b'a')), b'b');
+    assert_eq!(other_slot(None), b'a');
+    assert!(airports(CAUCASUS).unwrap().contains(&12));
 }
 
 #[test]
@@ -276,4 +283,15 @@ fn the_start_reads_back_from_a_shell() {
     )
     .unwrap();
     assert_eq!(start_of(&out).unwrap(), want);
+}
+
+#[test]
+fn placed_names_are_read_from_the_coalition_table() {
+    // The committed templates place nothing: only the coalitions' own names.
+    assert_eq!(placed_names(CAUCASUS).unwrap(), ["neutrals", "blue", "red"]);
+    let src = b"mission = { [\"coalition\"] = { [\"blue\"] = { [\"country\"] = { [1] = { [\"name\"] = \"USA\", [\"vehicle\"] = { [\"group\"] = { [1] = { [\"name\"] = \"np!abc1\", [\"units\"] = { [1] = { [\"name\"] = \"u1\" } } } } } } } } } }";
+    let d = lua::parse(src).unwrap();
+    let mut out = Vec::new();
+    collect_names(src, d.root.get(&Key::s("coalition")).unwrap(), &mut out);
+    assert_eq!(out, ["USA", "np!abc1", "u1"]);
 }

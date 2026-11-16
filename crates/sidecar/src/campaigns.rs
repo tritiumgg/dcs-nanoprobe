@@ -89,6 +89,11 @@ impl Campaigns {
         })
     }
 
+    /// The store dir.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     /// The changes a store keeps for a watch to resume from.
     pub fn changes_keep(&self) -> usize {
         self.changes_keep

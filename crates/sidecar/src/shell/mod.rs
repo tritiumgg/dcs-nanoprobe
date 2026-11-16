@@ -355,19 +355,34 @@ fn show(path: &[Key]) -> String {
 /// The folder under `[missions] dir` that holds the shells.
 pub const SHELLS: &str = "shells";
 
-/// A campaign's shell file name.
-pub fn shell_name(campaign: u64) -> String {
-    format!("{campaign}.miz")
+/// A campaign's shell file name in slot `slot` (`a` or `b`).
+pub fn shell_name(campaign: u64, slot: u8) -> String {
+    format!("{campaign}.{}.miz", char::from(slot))
 }
 
-/// Write `bytes` as campaign `campaign`'s shell under `dir`: to a temporary
-/// file in `<dir>/shells`, flushed, then renamed over the shell. Writes
-/// nothing outside `dir`. Returns the shell's path.
-pub fn save(dir: &Path, campaign: u64, bytes: &[u8]) -> std::io::Result<PathBuf> {
+/// The slot a shell file name names, if it is one of `campaign`'s.
+pub fn slot_of(campaign: u64, path: &str) -> Option<u8> {
+    b"ab".iter().copied().find(|&s| {
+        let name = shell_name(campaign, s);
+        path.strip_suffix(&name)
+            .is_some_and(|rest| rest.ends_with(['/', '\\']))
+    })
+}
+
+/// The other slot.
+pub fn other_slot(slot: Option<u8>) -> u8 {
+    if slot == Some(b'a') { b'b' } else { b'a' }
+}
+
+/// Write `bytes` as campaign `campaign`'s shell in `slot` under `dir`: to
+/// a temporary file in `<dir>/shells`, flushed, then renamed over the
+/// shell. Writes nothing outside `dir`. Returns the shell's path.
+pub fn save(dir: &Path, campaign: u64, slot: u8, bytes: &[u8]) -> std::io::Result<PathBuf> {
     let shells = dir.join(SHELLS);
     std::fs::create_dir_all(&shells)?;
-    let path = shells.join(shell_name(campaign));
-    let tmp = shells.join(format!(".{campaign}.miz.tmp"));
+    let name = shell_name(campaign, slot);
+    let path = shells.join(&name);
+    let tmp = shells.join(format!(".{name}{TMP}"));
     {
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(bytes)?;
@@ -375,6 +390,66 @@ pub fn save(dir: &Path, campaign: u64, bytes: &[u8]) -> std::io::Result<PathBuf>
     }
     std::fs::rename(&tmp, &path)?;
     Ok(path)
+}
+
+/// The suffix of a shell being written.
+const TMP: &str = ".tmp";
+
+/// Remove the temporary files a stopped sidecar left in `<dir>/shells`.
+pub fn clear_temps(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir.join(SHELLS)) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') && name.ends_with(TMP) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// Every `name` in the `coalition` table of a template's `mission`: the
+/// names of the groups, units and statics the author placed.
+pub fn placed_names(bytes: &[u8]) -> Result<Vec<String>, String> {
+    let m = members(bytes)?;
+    let src = member(&m, "mission")?;
+    let d = parse_named(src, "mission")?;
+    let Some(c) = d.root.get(&Key::s("coalition")) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    collect_names(src, c, &mut out);
+    Ok(out)
+}
+
+fn collect_names(src: &[u8], n: &lua::Node, out: &mut Vec<String>) {
+    for (k, v) in &n.fields {
+        if v.table {
+            collect_names(src, v, out);
+        } else if *k == Key::s("name")
+            && let Some(Lv::String(b)) = lua::scalar_value(src, v)
+        {
+            out.push(String::from_utf8_lossy(&b).into_owned());
+        }
+    }
+}
+
+/// The airport IDs in a template's `warehouses` member.
+pub fn airports(bytes: &[u8]) -> Result<Vec<u64>, String> {
+    let m = members(bytes)?;
+    let src = member(&m, "warehouses")?;
+    let d = parse_named(src, "warehouses")?;
+    let Some(a) = d.root.get(&Key::s("airports")).filter(|n| n.table) else {
+        return Err("`warehouses` has no airports table".into());
+    };
+    Ok(a.fields
+        .iter()
+        .filter_map(|(k, _)| match k {
+            Key::Num(n) if *n >= 0.0 && n.fract() == 0.0 => Some(*n as u64),
+            _ => None,
+        })
+        .collect())
 }
 
 #[cfg(test)]

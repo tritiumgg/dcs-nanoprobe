@@ -29,6 +29,7 @@ impl MissionService for Mission {
         require(&req, Access::Observer)?;
         let g = self.0.lock();
         let health = g.backend.health();
+        let space = g.space(g.active);
         let age = g.backend.heartbeat_age().map(|d| prost_types::Duration {
             seconds: i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
             nanos: i32::try_from(d.subsec_nanos()).unwrap_or(0),
@@ -55,6 +56,8 @@ impl MissionService for Mission {
                 attached: g.link.attached,
                 attach_error: g.backend.attach_error(),
                 agent_interface: g.link.agent_interface,
+                store_free_bytes: space.map(|(free, _)| free),
+                store_space_low: space.is_some_and(|(free, held)| free < held),
                 ..ServerStatus::default()
             }),
         }))
@@ -150,6 +153,14 @@ fn next_of(n: Option<&NextMission>) -> Result<Next, Status> {
         theater: n.theater.clone(),
         start_ms: n.start.as_ref().map(ms_of_timestamp),
         weather,
-        dynamic: Vec::new(),
+        dynamic: n
+            .dynamic_spawn
+            .iter()
+            .map(|d| nanoprobe_sidecar::shell::DynamicSpawn {
+                airbase: d.airbase_id,
+                enabled: d.enabled,
+                hot_start: d.hot_start,
+            })
+            .collect(),
     })
 }

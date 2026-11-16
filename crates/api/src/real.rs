@@ -28,8 +28,8 @@ pub struct Missions {
     pub dcs_dir: String,
 }
 
-/// The longest shell name: `shells`, a separator, 20 digits and `.miz`.
-const SHELL_MAX: usize = "shells".len() + 1 + 20 + ".miz".len();
+/// The longest shell name: `shells`, a separator, 20 digits and `.a.miz`.
+const SHELL_MAX: usize = "shells".len() + 1 + 20 + ".a.miz".len();
 
 impl Missions {
     /// Refuse a `dcs_dir` whose join with the longest shell name would pass
@@ -78,9 +78,9 @@ impl Missions {
         std::fs::read(dir.join(&name)).map_err(|e| none(&e.to_string()))
     }
 
-    /// Campaign `campaign`'s shell as DCS opens it: `dcs_dir` joined to
-    /// `shells/<campaign>.miz` with `dcs_dir`'s separator.
-    pub fn shell_dcs_path(&self, campaign: u64) -> String {
+    /// Campaign `campaign`'s shell in `slot` as DCS opens it: `dcs_dir`
+    /// joined to `shells/<campaign>.<slot>.miz` with `dcs_dir`'s separator.
+    pub fn shell_dcs_path(&self, campaign: u64, slot: u8) -> String {
         let base = self.dcs_dir.trim_end_matches(['\\', '/']);
         let sep = if self.dcs_dir.contains('\\') {
             '\\'
@@ -90,7 +90,7 @@ impl Missions {
         format!(
             "{base}{sep}{}{sep}{}",
             nanoprobe_sidecar::shell::SHELLS,
-            nanoprobe_sidecar::shell::shell_name(campaign)
+            nanoprobe_sidecar::shell::shell_name(campaign, slot)
         )
     }
 }

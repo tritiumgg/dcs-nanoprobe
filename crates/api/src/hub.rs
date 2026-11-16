@@ -138,16 +138,16 @@ fn owed_load(
                 store.set_owed_load(None);
                 if owed.start_ms.is_some() {
                     store.set_mission_start_ms(owed.start_ms);
-                    store.set_sample_time(0.0);
-                    // A start the controller set is used once; the next
-                    // load carries the clock (spec/persistence.md).
-                    if let Some(mut next) = store
-                        .next_mission()
-                        .and_then(|v| crate::next::Next::from_lv(v).ok())
-                        && next.start_ms.take().is_some()
-                    {
-                        store.set_next_mission(Some(next.to_lv()));
-                    }
+                }
+                if let Some(slot) = owed
+                    .path
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .and_then(|n| n.strip_suffix(".miz"))
+                    .and_then(|n| n.rsplit('.').next())
+                    .filter(|s| *s == "a" || *s == "b")
+                {
+                    store.set_shell_slot(Some(slot.as_bytes()[0]));
                 }
                 // Hold until the store records a mission other than the
                 // one the load was sent in.
@@ -873,6 +873,9 @@ impl Inner {
             .list()
             .map_err(|e| format!("the store folder {}: {e}", sf.dir.display()))?;
         let mut active = Vec::new();
+        if let Some(dir) = self.backend.missions().and_then(|m| m.dir().ok()) {
+            nanoprobe_sidecar::shell::clear_temps(dir);
+        }
         for (id, r) in listed {
             // Read copies a stopped sidecar left behind.
             files.clear_read_copies(id);
@@ -909,7 +912,11 @@ impl Inner {
             self.campaigns.insert(
                 id.0,
                 Slot {
-                    meta: meta_from(id.0, schema, &record, cp.as_ref()),
+                    meta: pb::Campaign {
+                        templates: nanoprobe_sidecar::store::template_theaters_of(&path)
+                            .unwrap_or_default(),
+                        ..meta_from(id.0, schema, &record, cp.as_ref())
+                    },
                     store: Store::new(id, cfg.world_changes_keep),
                     events,
                     on_lost: self.on_lost,
@@ -989,43 +996,62 @@ impl Inner {
         Ok(id)
     }
 
-    /// The campaign a read names, active or not; 0 is the active one.
+    /// The campaign a read names, active or not; 0 is the active one. A
+    /// read opens no store: a campaign whose store is not open, finished or
+    /// suspended, is read through a migrated copy ([`Inner::read_store`]).
     pub fn resolve_read(&mut self, id: u64) -> Result<u64, Status> {
-        self.resolve(id, Need::Campaign).or_else(|e| {
-            // Reads accept a finished campaign.
-            if nanoprobe_proto::errors::reason(&e) == ErrorReason::CampaignReadOnly {
-                Ok(id)
-            } else {
-                Err(e)
-            }
-        })
+        let id = if id == 0 {
+            self.active.ok_or_else(|| {
+                status(
+                    Code::FailedPrecondition,
+                    ErrorReason::NoActiveCampaign,
+                    "no campaign is active",
+                    0,
+                    "campaign_id",
+                )
+            })?
+        } else {
+            id
+        };
+        if !self.campaigns.contains_key(&id) {
+            return Err(status(
+                Code::NotFound,
+                ErrorReason::CampaignNotFound,
+                format!("no campaign {id}"),
+                0,
+                "campaign_id",
+            ));
+        }
+        self.open_archive(id)?;
+        Ok(id)
     }
 
     /// The store a read of campaign `id` sees: for a finished campaign on
     /// disk, the migrated copy [`Inner::open_archive`] made; otherwise its
     /// own.
     pub fn read_store(&self, id: u64) -> &Store {
+        let slot = &self.campaigns[&id];
         match self.archive.get(&id) {
-            Some((copy, _)) => copy.store(),
-            None => &self.campaigns[&id].store,
+            Some((copy, _)) if !slot.opened => copy.store(),
+            _ => &slot.store,
         }
     }
 
-    /// Make or keep the read copy of a finished campaign on disk; nothing
-    /// for any other campaign. A copy no read named for [`ARCHIVE_KEEP`] is
-    /// dropped by the step.
+    /// Make or keep the read copy of a campaign on disk whose store is not
+    /// open (spec/persistence.md, "Reading a campaign that is not open");
+    /// nothing for any other. A copy no read named for [`ARCHIVE_KEEP`], or
+    /// of a campaign whose store opened since, is dropped by the step.
     pub fn open_archive(&mut self, id: u64) -> Result<(), Status> {
-        let finished = self
-            .campaigns
-            .get(&id)
-            .is_some_and(|s| s.meta.state == pb::CampaignState::Finished as i32);
-        let Some(files) = self.files.as_ref().filter(|_| finished) else {
+        let closed = self.campaigns.get(&id).is_some_and(|s| !s.opened);
+        if !closed || self.files.is_none() {
             return Ok(());
-        };
+        }
         if let Some((_, at)) = self.archive.get_mut(&id) {
             *at = Instant::now();
             return Ok(());
         }
+        self.space_check(id, 0)?;
+        let files = self.files.as_ref().expect("checked");
         let copy = files
             .read_copy(CampaignId(id), wall_ms())
             .map_err(|e| disk_status(id, &e))?;
@@ -1035,8 +1061,51 @@ impl Inner {
 
     /// Drop the read copies no read named for [`ARCHIVE_KEEP`].
     fn expire_archives(&mut self) {
-        self.archive
-            .retain(|_, (_, at)| at.elapsed() < ARCHIVE_KEEP);
+        let campaigns = &self.campaigns;
+        self.archive.retain(|id, (_, at)| {
+            at.elapsed() < ARCHIVE_KEEP && campaigns.get(id).is_some_and(|s| !s.opened)
+        });
+    }
+
+    /// Free bytes on the store's file system and the bytes campaign `id`
+    /// holds there: its store, the store's WAL and its events file
+    /// (spec/persistence.md, "Free space"). `None` with the store off.
+    pub fn space(&self, id: Option<u64>) -> Option<(u64, u64)> {
+        let files = self.files.as_ref()?;
+        let free = nanoprobe_sidecar::space::free_bytes(files.dir()).ok()?;
+        let held = id.map_or(0, |id| {
+            let store = files.store_path(CampaignId(id));
+            let mut wal = store.clone().into_os_string();
+            wal.push("-wal");
+            [
+                store,
+                std::path::PathBuf::from(wal),
+                files.events_path(CampaignId(id)),
+            ]
+            .iter()
+            .filter_map(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+            .sum()
+        });
+        Some((free, held))
+    }
+
+    /// Refuse with `SPACE_LOW` when the store's file system has less free
+    /// space than campaign `id` holds there plus `extra` bytes.
+    pub fn space_check(&self, id: u64, extra: u64) -> Result<(), Status> {
+        match self.space(Some(id)) {
+            Some((free, held)) if free < held.saturating_add(extra) => Err(status(
+                Code::ResourceExhausted,
+                ErrorReason::SpaceLow,
+                format!(
+                    "the store's file system has {free} bytes free; campaign {id} needs {}",
+                    held.saturating_add(extra)
+                ),
+                0,
+                "",
+            )),
+            _ => Ok(()),
+        }
     }
 
     /// The campaign folders, when the stores are on disk.
@@ -1280,6 +1349,16 @@ impl Inner {
                 Err(e) => panic!("campaign {id} could not be checkpointed, stopping: {e}"),
             }
             self.next_checkpoint_ms = now.saturating_add(ms(sf.checkpoint));
+        }
+        if now >= self.next_backup_ms
+            && !self.backing_up.contains(&id)
+            && let Err(e) = self.space_check(id, 0)
+        {
+            eprintln!(
+                "nanoprobe: the scheduled backup of campaign {id} is skipped: {}",
+                e.message()
+            );
+            self.next_backup_ms = now.saturating_add(ms(sf.backup_interval));
         }
         if now >= self.next_backup_ms && !self.backing_up.contains(&id) {
             // The copy reads the file: write the store and its events first.
@@ -1542,7 +1621,7 @@ impl Inner {
         if slot.opened
             && let Some(start) = slot.store.mission_start_ms()
         {
-            let model_ms = (slot.store.sample_time().max(0.0) * 1000.0) as i64;
+            let model_ms = (slot.store.model_elapsed() * 1000.0) as i64;
             return Some(start.saturating_add(model_ms));
         }
         slot.meta.clock.as_ref().map(ms_of)
@@ -1576,8 +1655,11 @@ impl Inner {
 
     /// Write campaign `id`'s shell for `theater` into `[missions] dir` and
     /// return the load it owes; `None` for a backend that loads its missions
-    /// itself (spec/persistence.md, "Campaign operations"). It changes only
-    /// the shell file: a refusal leaves every campaign as it was.
+    /// itself (spec/persistence.md, "Campaign operations"). The shell goes to
+    /// the slot the last owed or applied load did not name, so a file DCS
+    /// may hold open is never rewritten. It changes only that file: a
+    /// refusal leaves every campaign as it was. The caller then calls
+    /// [`Inner::shell_written`].
     pub fn write_shell(&self, id: u64, theater: &str) -> Result<Option<OwedLoad>, Status> {
         use nanoprobe_sidecar::shell::{self, Runtime, Start};
         let Some(template) = self.template_for(id, theater)? else {
@@ -1590,6 +1672,16 @@ impl Inner {
         shell::check(&template, theater)
             .map_err(|e| precondition(format!("the template for theater {theater:?}: {e}")))?;
         let next = self.next_of(id);
+        let airports = shell::airports(&template).map_err(precondition)?;
+        if let Some(d) = next.dynamic.iter().find(|d| !airports.contains(&d.airbase)) {
+            return Err(crate::convert::invalid(
+                "next.dynamic_spawn",
+                format!(
+                    "airport {} is not in the {theater} template's warehouses",
+                    d.airbase
+                ),
+            ));
+        }
         let start = match next.start_ms.or_else(|| self.clock_ms(id)) {
             Some(ms) => Start::from_unix_ms(ms),
             None => shell::start_of(&template).map_err(precondition)?,
@@ -1602,20 +1694,59 @@ impl Inner {
         let bytes = shell::write(&template, &rt)
             .map_err(|e| precondition(format!("the shell for theater {theater:?}: {e}")))?;
         let dir = m.dir().map_err(precondition)?;
-        shell::save(dir, id, &bytes).map_err(|e| {
-            status(
-                Code::Unavailable,
-                ErrorReason::Unspecified,
-                format!("the shell of campaign {id} could not be written: {e}"),
-                0,
-                "",
-            )
+        let slot = shell::other_slot(self.last_slot(id));
+        shell::save(dir, id, slot, &bytes).map_err(|e| {
+            precondition(format!(
+                "the shell of campaign {id} could not be written: {e}"
+            ))
         })?;
         Ok(Some(OwedLoad {
-            path: m.shell_dcs_path(id),
+            path: m.shell_dcs_path(id, slot),
             cmd: None,
             start_ms: Some(start.unix_ms()),
         }))
+    }
+
+    /// The shell slot campaign `id`'s owed load names, else the slot of the
+    /// last load DCS applied, from its store, opened or not.
+    fn last_slot(&self, id: u64) -> Option<u8> {
+        let slot = self.campaigns.get(&id)?;
+        if let Some(o) = slot.store.owed_load() {
+            return nanoprobe_sidecar::shell::slot_of(id, &o.path);
+        }
+        if slot.opened {
+            return slot.store.shell_slot();
+        }
+        let files = self.files.as_ref()?;
+        nanoprobe_sidecar::store::shell_slot_of(&files.store_path(CampaignId(id)))
+            .ok()
+            .flatten()
+    }
+
+    /// After a shell was written for campaign `id` with `owed`: the start
+    /// it was written with is the campaign clock and is cleared from the
+    /// next-mission settings, in the commit that owes the load
+    /// (spec/persistence.md, "Campaign operations").
+    fn shell_written(&mut self, id: u64, owed: &OwedLoad) {
+        let Some(slot) = self.campaigns.get_mut(&id) else {
+            return;
+        };
+        slot.store.set_mission_start_ms(None);
+        if let Some(mut next) = slot
+            .store
+            .next_mission()
+            .and_then(|v| crate::next::Next::from_lv(v).ok())
+            && next.start_ms.take().is_some()
+        {
+            slot.store.set_next_mission(Some(next.to_lv()));
+        }
+        if let Some(ms) = owed.start_ms {
+            slot.meta.clock = Some(prost_types::Timestamp {
+                seconds: ms.div_euclid(1000),
+                nanos: i32::try_from(ms.rem_euclid(1000) * 1_000_000).unwrap_or(0),
+            });
+            self.sync_clock(id);
+        }
     }
 
     /// Make a campaign the active one, suspending the one before. The
@@ -1649,8 +1780,11 @@ impl Inner {
         // (spec/persistence.md, "Writes").
         self.hold_after = None;
         let loads_itself = owed.is_none();
-        if let (Some(owed), Some(s)) = (owed, self.campaigns.get_mut(&id)) {
-            s.store.set_owed_load(Some(owed));
+        if let Some(owed) = owed {
+            self.shell_written(id, &owed);
+            if let Some(s) = self.campaigns.get_mut(&id) {
+                s.store.set_owed_load(Some(owed));
+            }
         }
         self.set_state(id, CampaignState::Active);
         if let Some(s) = self.campaigns.get_mut(&id) {
@@ -1715,7 +1849,20 @@ impl Inner {
         }
         self.hold_after = None;
         match owed {
-            Some(o) => slot.store.set_owed_load(Some(o)),
+            Some(o) => {
+                self.shell_written(id, &o);
+                let slot = self.campaigns.get_mut(&id).expect("resolved");
+                slot.store.set_owed_load(Some(o));
+                // The checkpoint goes into the commit that owes the load.
+                let achieved = self.achieved(id);
+                let slot = self.campaigns.get_mut(&id).expect("resolved");
+                if slot.opened
+                    && slot.store.on_disk()
+                    && let Err(e) = slot.store.checkpoint(wall_ms(), achieved)
+                {
+                    panic!("campaign {id} could not be checkpointed, stopping: {e}");
+                }
+            }
             None => {
                 self.restart(cfg);
                 self.backend.load_mission(&theater);
@@ -1773,11 +1920,51 @@ impl Inner {
             })?;
         }
         if let Some(dir) = self.backend.missions().and_then(|m| m.dir().ok()) {
-            let shell = dir
-                .join(nanoprobe_sidecar::shell::SHELLS)
-                .join(nanoprobe_sidecar::shell::shell_name(id));
-            let _ = std::fs::remove_file(shell);
+            for slot in *b"ab" {
+                let shell = dir
+                    .join(nanoprobe_sidecar::shell::SHELLS)
+                    .join(nanoprobe_sidecar::shell::shell_name(id, slot));
+                let _ = std::fs::remove_file(shell);
+            }
         }
+        Ok(())
+    }
+
+    /// Set or remove campaign `id`'s own template for `theater` (plan
+    /// revision 35). An empty `miz` removes it.
+    pub fn set_template(&mut self, id: u64, theater: &str, miz: &[u8]) -> Result<(), Status> {
+        use nanoprobe_sidecar::shell;
+        let slot = self.campaigns.get(&id).expect("resolved");
+        if !slot.meta.theaters.iter().any(|t| t == theater) {
+            return Err(crate::convert::invalid(
+                "theater",
+                format!("{theater:?} is not one of the campaign's theaters"),
+            ));
+        }
+        if !miz.is_empty() {
+            if miz.len() > shell::TEMPLATE_MAX {
+                return Err(crate::convert::invalid(
+                    "miz",
+                    format!("a template is at most {} bytes", shell::TEMPLATE_MAX),
+                ));
+            }
+            self.space_check(id, miz.len() as u64)?;
+            shell::check(miz, theater).map_err(|e| crate::convert::invalid("miz", e))?;
+            let names = shell::placed_names(miz).map_err(|e| crate::convert::invalid("miz", e))?;
+            if let Some(n) = names
+                .iter()
+                .find(|n| nanoprobe_transport::names::parse(n).is_some())
+            {
+                return Err(crate::convert::invalid(
+                    "miz",
+                    format!("the template places {n:?}, which reads as a platform name"),
+                ));
+            }
+        }
+        let slot = self.campaigns.get_mut(&id).expect("resolved");
+        slot.store
+            .set_template(theater, (!miz.is_empty()).then(|| miz.to_vec()));
+        slot.meta.templates = slot.store.template_theaters().map(str::to_owned).collect();
         Ok(())
     }
 
@@ -2035,6 +2222,7 @@ fn meta_from(id: u64, schema: u32, r: &CampaignRecord, cp: Option<&Checkpoint>) 
         platform_schema: schema,
         component_schemas: r.component_schemas.clone().into_iter().collect(),
         created: Some(timestamp_ms(r.created_ms)),
+        templates: Vec::new(),
         outcome: r
             .outcome
             .as_ref()
@@ -2267,6 +2455,7 @@ impl Hub {
                     return Ok(None);
                 };
                 if !g.backing_up.contains(&id) {
+                    g.space_check(id, 0)?;
                     g.commit_events();
                     g.commit(id);
                     g.backing_up.insert(id);
@@ -2960,7 +3149,7 @@ mod tests {
         let mut g = hub.lock();
         assert_eq!(
             mission_loads(&mut g),
-            ["Z:\\profile\\nanoprobe\\missions\\shells\\1.miz"],
+            ["Z:\\profile\\nanoprobe\\missions\\shells\\1.a.miz"],
             "exactly one MISSION_LOAD, with dcs_dir joined to the file name"
         );
         let revision = g.campaigns[&1].store.revision();
@@ -3141,7 +3330,7 @@ mod tests {
             assert!(owed(&hub.lock()).is_some(), "the owed load was on disk");
             steps(&hub, 300);
             let mut g = hub.lock();
-            assert_eq!(mission_loads(&mut g), ["Z:\\m\\shells\\1.miz"]);
+            assert_eq!(mission_loads(&mut g), ["Z:\\m\\shells\\1.a.miz"]);
             assert!(owed(&g).is_none(), "APPLIED clears it");
             g.close_all().expect("close");
         }
@@ -3394,7 +3583,15 @@ mod tests {
             (State::Live, State::Virtual)
         );
         let mut g = hub.lock();
-        assert_eq!(mission_loads(&mut g).len(), 3);
+        assert_eq!(
+            mission_loads(&mut g),
+            [
+                "Z:\\m\\shells\\1.a.miz",
+                "Z:\\m\\shells\\1.b.miz",
+                "Z:\\m\\shells\\1.a.miz"
+            ],
+            "each shell goes to the slot the last load did not name"
+        );
         let e = g
             .set_next(
                 1,
@@ -3458,7 +3655,7 @@ mod tests {
             g.activate(&cfg, 1).expect("activate");
             assert_eq!(owed(&g).and_then(|o| o.start_ms), Some(start.unix_ms()));
         }
-        let written = std::fs::read(dir.path().join("shells").join("1.miz")).expect("shell");
+        let written = std::fs::read(dir.path().join("shells").join("1.a.miz")).expect("shell");
         assert_eq!(shell::start_of(&written), Ok(start));
         let warehouses = shell::members(&written)
             .expect("members")
@@ -3489,6 +3686,95 @@ mod tests {
     }
 
     #[test]
+    fn a_campaign_template_is_checked_kept_and_written_into_its_shell() {
+        use nanoprobe_sidecar::shell;
+        let (_dir, missions, cfg) = owed_setup();
+        let hub = folder_hub(&cfg, &missions, 0x1000);
+        hub.start();
+        let mut g = hub.lock();
+        let meta = pb::Campaign {
+            id: 1,
+            name: "c1".into(),
+            theaters: vec!["Caucasus".into()],
+            ..pb::Campaign::default()
+        };
+        g.add_campaign(&cfg, meta, "Caucasus".into()).expect("add");
+        let code = |r: Result<(), Status>| r.expect_err("refused").code();
+        assert_eq!(
+            code(g.set_template(1, "Syria", TEMPLATE)),
+            Code::InvalidArgument
+        );
+        assert_eq!(
+            code(g.set_template(1, "Caucasus", b"not a zip")),
+            Code::InvalidArgument
+        );
+        // A placed group whose name reads as a platform name.
+        let platform = nanoprobe_transport::names::name(
+            nanoprobe_transport::names::Kind::Group,
+            nanoprobe_transport::names::tag_of(1),
+            5,
+        );
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (n, d) in shell::members(TEMPLATE).expect("members") {
+            let d = if n == "mission" {
+                String::from_utf8(d)
+                    .expect("utf-8")
+                    .replacen(
+                        "[\"name\"] = \"blue\"",
+                        &format!("[\"name\"] = {platform:?}"),
+                        1,
+                    )
+                    .into_bytes()
+            } else {
+                d
+            };
+            w.start_file(n.as_str(), zip::write::SimpleFileOptions::default())
+                .expect("start");
+            std::io::Write::write_all(&mut w, &d).expect("write");
+        }
+        let named = w.finish().expect("zip").into_inner();
+        let e = g
+            .set_template(1, "Caucasus", &named)
+            .expect_err("platform name");
+        assert!(e.message().contains("platform name"), "{}", e.message());
+
+        // The campaign's own template, with weather of its own, wins.
+        let weather = nanoprobe_transport::codec::Lv::Table(vec![(
+            nanoprobe_transport::codec::Lv::String(b"own".to_vec()),
+            nanoprobe_transport::codec::Lv::Bool(true),
+        )]);
+        let own = shell::write(
+            TEMPLATE,
+            &shell::Runtime {
+                weather: Some(weather.clone()),
+                ..shell::Runtime::default()
+            },
+        )
+        .expect("own");
+        g.set_template(1, "Caucasus", &own).expect("set");
+        assert_eq!(g.campaigns[&1].meta.templates, ["Caucasus"]);
+        g.activate(&cfg, 1).expect("activate");
+        let path = missions
+            .dir
+            .as_ref()
+            .expect("dir")
+            .join("shells")
+            .join("1.a.miz");
+        let written = std::fs::read(path).expect("shell");
+        let mission = shell::members(&written)
+            .expect("members")
+            .into_iter()
+            .find(|(n, _)| n == "mission")
+            .expect("mission")
+            .1;
+        let d = shell::lua::parse(&mission).expect("parse");
+        let w = d.root.get(&shell::lua::Key::s("weather")).expect("weather");
+        assert_eq!(shell::lua::value(&mission, w), Some(weather));
+        g.set_template(1, "Caucasus", b"").expect("remove");
+        assert!(g.campaigns[&1].meta.templates.is_empty());
+    }
+
+    #[test]
     fn a_theater_name_is_a_file_name_and_nothing_else() {
         let dir = tempfile::tempdir().expect("dir");
         std::fs::write(dir.path().join("Caucasus.miz"), TEMPLATE).expect("miz");
@@ -3497,7 +3783,10 @@ mod tests {
             dcs_dir: "/profile/missions".into(),
         };
         assert_eq!(m.template("Caucasus").as_deref(), Ok(TEMPLATE));
-        assert_eq!(m.shell_dcs_path(42), "/profile/missions/shells/42.miz");
+        assert_eq!(
+            m.shell_dcs_path(42, b'b'),
+            "/profile/missions/shells/42.b.miz"
+        );
         for bad in ["", "caucasus", "../Caucasus", "Cau/casus", "Caucasus.miz"] {
             assert!(m.template(bad).is_err(), "{bad:?}");
         }
@@ -4165,7 +4454,7 @@ mod tests {
         let mut g = hub.lock();
         assert_eq!(
             mission_loads(&mut g),
-            ["Z:\\missions\\shells\\1.miz"],
+            ["Z:\\missions\\shells\\1.a.miz"],
             "sent again after NotSent"
         );
         assert!(owed(&g).is_none());

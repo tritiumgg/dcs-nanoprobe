@@ -163,6 +163,8 @@ enum ErrorReason {
   ERROR_REASON_OUTCOME_NOT_FOUND = 25;
   ERROR_REASON_INTERNAL = 26;
   ERROR_REASON_UNVERIFIED = 27;
+  // The store's file system has less free space than the store needs.
+  ERROR_REASON_SPACE_LOW = 28;
 }
 
 // Carried in the details of every failed call's gRPC status.

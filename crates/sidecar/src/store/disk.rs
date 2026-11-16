@@ -330,6 +330,26 @@ pub fn template_of(path: &Path, theater: &str) -> Result<Option<Vec<u8>>, DiskEr
         .optional()?)
 }
 
+/// The theaters the store file at `path` holds a campaign template for,
+/// read without opening the store.
+pub fn template_theaters_of(path: &Path) -> Result<Vec<String>, DiskError> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let has_table = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'template'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !has_table {
+        return Ok(Vec::new());
+    }
+    let mut q = conn.prepare("SELECT theater FROM template ORDER BY theater")?;
+    let rows = q.query_map([], |r| r.get::<_, String>(0))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
 /// The next mission's settings in the store file at `path`, read without
 /// opening the store.
 pub fn next_mission_of(path: &Path) -> Result<Option<Lv>, DiskError> {
@@ -337,6 +357,16 @@ pub fn next_mission_of(path: &Path) -> Result<Option<Lv>, DiskError> {
     Ok(match Rd(&get_meta(&conn, "world")?).get("next_mission") {
         Lv::Nil => None,
         v => Some(v.clone()),
+    })
+}
+
+/// The shell slot of the last load applied, in the store file at `path`,
+/// read without opening the store.
+pub fn shell_slot_of(path: &Path) -> Result<Option<u8>, DiskError> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    Ok(match Rd(&get_meta(&conn, "world")?).get("shell_slot") {
+        Lv::String(b) if b.len() == 1 => Some(b[0]),
+        _ => None,
     })
 }
 
@@ -847,6 +877,8 @@ impl Disk {
             rates,
             owed_load,
             mission_start_ms,
+            model0,
+            shell_slot,
             next_mission,
             templates,
             templates_dirty,
@@ -999,6 +1031,16 @@ impl Disk {
                 mission_start_ms.map_or(Lv::Nil, |v| s(&v.to_string())),
             ),
             ("next_mission", next_mission.clone().unwrap_or(Lv::Nil)),
+            (
+                "model0",
+                model0.map_or(Lv::Nil, |(a, g, t0)| {
+                    list(vec![s(&a.to_string()), s(&g.to_string()), Lv::Number(t0)])
+                }),
+            ),
+            (
+                "shell_slot",
+                shell_slot.map_or(Lv::Nil, |c| s(&char::from(c).to_string())),
+            ),
             (
                 "countries",
                 countries.as_ref().map_or(Lv::Nil, enc_countries),
@@ -1180,6 +1222,21 @@ fn load(path: &Path, conn: Connection, changes_keep: usize) -> Result<Store, Dis
             v => Some(dec_rates(v)?),
         };
         store.mission_start_ms = opt_i64(w.get("mission_start_ms"), "mission_start_ms")?;
+        store.model0 = match w.list("model0")?.as_slice() {
+            [] => None,
+            [a, g, Lv::Number(t0)] => Some((
+                dec_u(a, "model0")?,
+                u32::try_from(dec_u(g, "model0")?)
+                    .map_err(|_| DiskError::Corrupt("model0".into()))?,
+                *t0,
+            )),
+            _ => return Err(DiskError::Corrupt("model0".into())),
+        };
+        store.shell_slot = match w.get("shell_slot") {
+            Lv::Nil => None,
+            Lv::String(b) if b.as_slice() == b"a" || b.as_slice() == b"b" => Some(b[0]),
+            _ => return Err(DiskError::Corrupt("shell_slot".into())),
+        };
         store.next_mission = match w.get("next_mission") {
             Lv::Nil => None,
             v => Some(v.clone()),
@@ -2281,6 +2338,9 @@ fn enc_entry(e: &Entry) -> Lv {
         ),
         Entry::Captured { entity } => k("captured", vec![("entity", u(entity.0))]),
         Entry::Death { unit } => k("death", vec![("unit", u(unit.0))]),
+        Entry::Resolve { unit, dead } => {
+            k("resolve", vec![("unit", u(unit.0)), ("dead", b(*dead))])
+        }
         Entry::Left { unit, object, how } => k(
             "left",
             vec![
@@ -2384,6 +2444,10 @@ fn dec_entry(v: &Lv) -> Result<Entry, DiskError> {
         },
         "captured" => Entry::Captured { entity: entity()? },
         "death" => Entry::Death { unit: unit()? },
+        "resolve" => Entry::Resolve {
+            unit: unit()?,
+            dead: r.b("dead")?,
+        },
         "left" => Entry::Left {
             unit: unit()?,
             object: r.u("object")?,

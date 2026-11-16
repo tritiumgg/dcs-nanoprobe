@@ -373,6 +373,8 @@ pub enum ErrorReason {
     OutcomeNotFound = 25,
     Internal = 26,
     Unverified = 27,
+    /// The store's file system has less free space than the store needs.
+    SpaceLow = 28,
 }
 impl ErrorReason {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -409,6 +411,7 @@ impl ErrorReason {
             Self::OutcomeNotFound => "ERROR_REASON_OUTCOME_NOT_FOUND",
             Self::Internal => "ERROR_REASON_INTERNAL",
             Self::Unverified => "ERROR_REASON_UNVERIFIED",
+            Self::SpaceLow => "ERROR_REASON_SPACE_LOW",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -442,6 +445,7 @@ impl ErrorReason {
             "ERROR_REASON_OUTCOME_NOT_FOUND" => Some(Self::OutcomeNotFound),
             "ERROR_REASON_INTERNAL" => Some(Self::Internal),
             "ERROR_REASON_UNVERIFIED" => Some(Self::Unverified),
+            "ERROR_REASON_SPACE_LOW" => Some(Self::SpaceLow),
             _ => None,
         }
     }
@@ -2033,6 +2037,13 @@ pub struct ServerStatus {
     /// ABI between the DLL and its Lua hook and shim. Reported, not checked.
     #[prost(uint32, tag = "17")]
     pub agent_interface: u32,
+    /// Free bytes on the store's file system; unset with the store off.
+    #[prost(uint64, optional, tag = "18")]
+    pub store_free_bytes: ::core::option::Option<u64>,
+    /// Free space is below the active store, its WAL and its events file:
+    /// backups are refused. Not part of health.
+    #[prost(bool, tag = "19")]
+    pub store_space_low: bool,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetServerStatusRequest {}
@@ -2046,12 +2057,30 @@ pub struct NextMission {
     /// The theater to load. Empty keeps the loaded one.
     #[prost(string, tag = "1")]
     pub theater: ::prost::alloc::string::String,
-    /// The mission's date and start time. Absent carries the campaign clock.
+    /// The mission's date and start time, the mission's own calendar time in
+    /// a Timestamp with no time-zone conversion. Absent carries the campaign
+    /// clock. Used by the next shell written, then cleared.
     #[prost(message, optional, tag = "2")]
     pub start: ::core::option::Option<::prost_types::Timestamp>,
     /// The DCS weather table. Absent keeps the template's.
     #[prost(message, optional, tag = "3")]
     pub weather: ::core::option::Option<::prost_types::Struct>,
+    /// Dynamic-spawn flags of airports, by their ID in the template's
+    /// warehouses (DCS `Airbase:getID()`). Airports not named keep the
+    /// template's flags. An ID the template does not hold is INVALID_FIELD.
+    #[prost(message, repeated, tag = "4")]
+    pub dynamic_spawn: ::prost::alloc::vec::Vec<DynamicSpawn>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DynamicSpawn {
+    #[prost(uint64, tag = "1")]
+    pub airbase_id: u64,
+    /// `dynamicSpawn`: players may spawn aircraft from the airport's stock.
+    #[prost(bool, tag = "2")]
+    pub enabled: bool,
+    /// `allowHotStart`.
+    #[prost(bool, tag = "3")]
+    pub hot_start: bool,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SetNextMissionRequest {
@@ -2601,6 +2630,9 @@ pub struct Campaign {
     /// The last checkpoint written to the store, absent before the first.
     #[prost(message, optional, tag = "11")]
     pub last_checkpoint: ::core::option::Option<CheckpointInfo>,
+    /// The theaters the campaign has its own template for.
+    #[prost(string, repeated, tag = "12")]
+    pub templates: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 /// A checkpoint of the observed state (spec/persistence.md, "Writes").
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
@@ -2766,6 +2798,23 @@ pub struct ListCampaignBackupsRequest {
 pub struct ListCampaignBackupsResponse {
     #[prost(message, repeated, tag = "1")]
     pub backups: ::prost::alloc::vec::Vec<Backup>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetCampaignTemplateRequest {
+    #[prost(message, optional, tag = "1")]
+    pub write: ::core::option::Option<Write>,
+    /// One of the campaign's theaters; the template's `theatre` member must
+    /// name it exactly.
+    #[prost(string, tag = "2")]
+    pub theater: ::prost::alloc::string::String,
+    /// The .miz file, at most 16 MiB. Empty removes the campaign's template.
+    #[prost(bytes = "vec", tag = "3")]
+    pub miz: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SetCampaignTemplateResponse {
+    #[prost(message, optional, tag = "1")]
+    pub campaign: ::core::option::Option<Campaign>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
@@ -3163,11 +3212,10 @@ pub mod campaign_service_client {
             self.inner.unary(req, path, codec).await
         }
         /// Take a backup of the campaign's store now (spec/persistence.md,
-        /// "Backups"). There is no restore call. To restore backup <n>: suspend the
-        /// campaign; stop the server; delete store.sqlite-wal and store.sqlite-shm
-        /// in the campaign's folder if they are there; copy backups/<n>/store.sqlite
-        /// over the folder's store.sqlite; start the server; activate the campaign.
-        /// events.sqlite is not rolled back and keeps the events after the backup.
+        /// "Backups"). Refused with SPACE_LOW when the store's file system has less
+        /// free space than the store, its WAL and its events file. There is no
+        /// restore call: `nanoprobe restore`, with the server stopped, restores a
+        /// backup (spec/persistence.md, "Restore a backup").
         pub async fn backup_campaign(
             &mut self,
             request: impl tonic::IntoRequest<super::BackupCampaignRequest>,
@@ -3223,6 +3271,39 @@ pub mod campaign_service_client {
                     GrpcMethod::new(
                         "nanoprobe.v1alpha1.CampaignService",
                         "ListCampaignBackups",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Set or remove the campaign's own template for one of its theaters: a
+        /// mission the author saved in the Mission Editor, used in place of the
+        /// shared one in \[missions\] dir. Its units stay unmanaged. Kept in the
+        /// campaign's store, so a backup or a copy of the campaign carries it.
+        pub async fn set_campaign_template(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SetCampaignTemplateRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SetCampaignTemplateResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nanoprobe.v1alpha1.CampaignService/SetCampaignTemplate",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "nanoprobe.v1alpha1.CampaignService",
+                        "SetCampaignTemplate",
                     ),
                 );
             self.inner.unary(req, path, codec).await
@@ -3310,11 +3391,10 @@ pub mod campaign_service_server {
             tonic::Status,
         >;
         /// Take a backup of the campaign's store now (spec/persistence.md,
-        /// "Backups"). There is no restore call. To restore backup <n>: suspend the
-        /// campaign; stop the server; delete store.sqlite-wal and store.sqlite-shm
-        /// in the campaign's folder if they are there; copy backups/<n>/store.sqlite
-        /// over the folder's store.sqlite; start the server; activate the campaign.
-        /// events.sqlite is not rolled back and keeps the events after the backup.
+        /// "Backups"). Refused with SPACE_LOW when the store's file system has less
+        /// free space than the store, its WAL and its events file. There is no
+        /// restore call: `nanoprobe restore`, with the server stopped, restores a
+        /// backup (spec/persistence.md, "Restore a backup").
         async fn backup_campaign(
             &self,
             request: tonic::Request<super::BackupCampaignRequest>,
@@ -3328,6 +3408,17 @@ pub mod campaign_service_server {
             request: tonic::Request<super::ListCampaignBackupsRequest>,
         ) -> std::result::Result<
             tonic::Response<super::ListCampaignBackupsResponse>,
+            tonic::Status,
+        >;
+        /// Set or remove the campaign's own template for one of its theaters: a
+        /// mission the author saved in the Mission Editor, used in place of the
+        /// shared one in \[missions\] dir. Its units stay unmanaged. Kept in the
+        /// campaign's store, so a backup or a copy of the campaign carries it.
+        async fn set_campaign_template(
+            &self,
+            request: tonic::Request<super::SetCampaignTemplateRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SetCampaignTemplateResponse>,
             tonic::Status,
         >;
     }
@@ -3858,6 +3949,55 @@ pub mod campaign_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = ListCampaignBackupsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/nanoprobe.v1alpha1.CampaignService/SetCampaignTemplate" => {
+                    #[allow(non_camel_case_types)]
+                    struct SetCampaignTemplateSvc<T: CampaignService>(pub Arc<T>);
+                    impl<
+                        T: CampaignService,
+                    > tonic::server::UnaryService<super::SetCampaignTemplateRequest>
+                    for SetCampaignTemplateSvc<T> {
+                        type Response = super::SetCampaignTemplateResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SetCampaignTemplateRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as CampaignService>::set_campaign_template(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SetCampaignTemplateSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -5085,6 +5225,21 @@ pub struct RemoveEntityResponse {
     pub revision: u64,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ResolveMemberRequest {
+    #[prost(message, optional, tag = "1")]
+    pub write: ::core::option::Option<Write>,
+    /// A unit whose left is MISSING or REMOVED.
+    #[prost(uint64, tag = "2")]
+    pub unit: u64,
+    #[prost(enumeration = "Resolution", tag = "3")]
+    pub resolution: i32,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ResolveMemberResponse {
+    #[prost(uint64, tag = "1")]
+    pub revision: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SetLostPolicyRequest {
     #[prost(message, optional, tag = "1")]
     pub write: ::core::option::Option<Write>,
@@ -5356,6 +5511,37 @@ pub struct GetOutcomeResponse {
     /// The campaign the call resolved to, 0 for none.
     #[prost(uint64, tag = "4")]
     pub campaign_id: u64,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum Resolution {
+    Unspecified = 0,
+    /// A death fact with no killer, now.
+    Dead = 1,
+    /// The mark is cleared; the group's next spawn includes the member.
+    Restore = 2,
+}
+impl Resolution {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "RESOLUTION_UNSPECIFIED",
+            Self::Dead => "RESOLUTION_DEAD",
+            Self::Restore => "RESOLUTION_RESTORE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "RESOLUTION_UNSPECIFIED" => Some(Self::Unspecified),
+            "RESOLUTION_DEAD" => Some(Self::Dead),
+            "RESOLUTION_RESTORE" => Some(Self::Restore),
+            _ => None,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
@@ -5711,6 +5897,38 @@ pub mod commands_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Release a member held out of spawns (Unit.left MISSING or REMOVED, no
+        /// death fact): DEAD records a death fact, RESTORE lets the next spawn of
+        /// its group include it. Store-only, so it works on a suspended campaign.
+        pub async fn resolve_member(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ResolveMemberRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ResolveMemberResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nanoprobe.v1alpha1.CommandsService/ResolveMember",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "nanoprobe.v1alpha1.CommandsService",
+                        "ResolveMember",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn set_lost_policy(
             &mut self,
             request: impl tonic::IntoRequest<super::SetLostPolicyRequest>,
@@ -6008,6 +6226,16 @@ pub mod commands_service_server {
             request: tonic::Request<super::RemoveEntityRequest>,
         ) -> std::result::Result<
             tonic::Response<super::RemoveEntityResponse>,
+            tonic::Status,
+        >;
+        /// Release a member held out of spawns (Unit.left MISSING or REMOVED, no
+        /// death fact): DEAD records a death fact, RESTORE lets the next spawn of
+        /// its group include it. Store-only, so it works on a suspended campaign.
+        async fn resolve_member(
+            &self,
+            request: tonic::Request<super::ResolveMemberRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ResolveMemberResponse>,
             tonic::Status,
         >;
         async fn set_lost_policy(
@@ -6454,6 +6682,52 @@ pub mod commands_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = RemoveEntitySvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/nanoprobe.v1alpha1.CommandsService/ResolveMember" => {
+                    #[allow(non_camel_case_types)]
+                    struct ResolveMemberSvc<T: CommandsService>(pub Arc<T>);
+                    impl<
+                        T: CommandsService,
+                    > tonic::server::UnaryService<super::ResolveMemberRequest>
+                    for ResolveMemberSvc<T> {
+                        type Response = super::ResolveMemberResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ResolveMemberRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as CommandsService>::resolve_member(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ResolveMemberSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

@@ -32,3 +32,4 @@ nanoprobe-sim-fake = { path = "../sim-fake" }
 proptest = "1"
 serde_json = "1.0.154"
 tempfile = "3.27.0"
+zip = { version = "9.5.1", default-features = false, features = ["deflate"] }

@@ -64,6 +64,11 @@ message ServerStatus {
   // The agent DLL's interface version from its last HELLO, 0 before one: the
   // ABI between the DLL and its Lua hook and shim. Reported, not checked.
   uint32 agent_interface = 17;
+  // Free bytes on the store's file system; unset with the store off.
+  optional uint64 store_free_bytes = 18;
+  // Free space is below the active store, its WAL and its events file:
+  // backups are refused. Not part of health.
+  bool store_space_low = 19;
 }
 
 message GetServerStatusRequest {}
@@ -75,10 +80,24 @@ message GetServerStatusResponse {
 message NextMission {
   // The theater to load. Empty keeps the loaded one.
   string theater = 1;
-  // The mission's date and start time. Absent carries the campaign clock.
+  // The mission's date and start time, the mission's own calendar time in
+  // a Timestamp with no time-zone conversion. Absent carries the campaign
+  // clock. Used by the next shell written, then cleared.
   google.protobuf.Timestamp start = 2;
   // The DCS weather table. Absent keeps the template's.
   google.protobuf.Struct weather = 3;
+  // Dynamic-spawn flags of airports, by their ID in the template's
+  // warehouses (DCS `Airbase:getID()`). Airports not named keep the
+  // template's flags. An ID the template does not hold is INVALID_FIELD.
+  repeated DynamicSpawn dynamic_spawn = 4;
+}
+
+message DynamicSpawn {
+  uint64 airbase_id = 1;
+  // `dynamicSpawn`: players may spawn aircraft from the airport's stock.
+  bool enabled = 2;
+  // `allowHotStart`.
+  bool hot_start = 3;
 }
 
 message SetNextMissionRequest {

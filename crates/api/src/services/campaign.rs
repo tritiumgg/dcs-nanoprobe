@@ -17,7 +17,8 @@ use nanoprobe_proto::v1alpha1::{
     ExportCampaignRequest, ExportCampaignResponse, FinishCampaignRequest, FinishCampaignResponse,
     GetCampaignRequest, GetCampaignResponse, ListCampaignBackupsRequest,
     ListCampaignBackupsResponse, ListCampaignsRequest, ListCampaignsResponse,
-    SuspendCampaignRequest, SuspendCampaignResponse,
+    SetCampaignTemplateRequest, SetCampaignTemplateResponse, SuspendCampaignRequest,
+    SuspendCampaignResponse,
 };
 use tonic::{Code, Request, Response, Status};
 
@@ -165,6 +166,7 @@ impl CampaignService for Campaigns {
                             created: Some(timestamp_now()),
                             outcome: None,
                             last_checkpoint: None,
+                            templates: Vec::new(),
                         },
                         first,
                     )?;
@@ -414,6 +416,42 @@ impl CampaignService for Campaigns {
                 |g: &mut Inner, _| {
                     g.delete_campaign(r.campaign_id, &r.confirm_name)?;
                     Ok((DeleteCampaignResponse {}, 0))
+                },
+            )
+            .await?;
+        Ok(Response::new(resp))
+    }
+
+    async fn set_campaign_template(
+        &self,
+        req: Request<SetCampaignTemplateRequest>,
+    ) -> Result<Response<SetCampaignTemplateResponse>, Status> {
+        require(&req, Access::Controller)?;
+        let r = req.into_inner();
+        let w = r.write.clone().unwrap_or_default();
+        let mut hashed = r.clone();
+        if let Some(h) = hashed.write.as_mut() {
+            h.lease = None;
+        }
+        let resp = self
+            .0
+            .write(
+                Call {
+                    method: "SetCampaignTemplate",
+                    key: w.idempotency.as_ref(),
+                    lease: w.lease.as_ref(),
+                    campaign: w.campaign_id,
+                    need: Need::Campaign,
+                },
+                &hashed,
+                |g: &mut Inner, id| {
+                    g.set_template(id, &r.theater, &r.miz)?;
+                    Ok((
+                        SetCampaignTemplateResponse {
+                            campaign: Some(shown(g, id)),
+                        },
+                        id,
+                    ))
                 },
             )
             .await?;
