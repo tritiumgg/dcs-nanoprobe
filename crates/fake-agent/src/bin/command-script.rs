@@ -42,6 +42,7 @@
 //! | `WAREHOUSE_ADJUST` | `airbase`, `delta` (an `lv`) |
 //! | `DAMAGE` | `life_percent` |
 //! | `SOUND` | `scope`, `target`, `file` (text) |
+//! | `CLEAR_DEBRIS` | `volume`, `x`, `y`, `z`, `x2`, `y2`, `z2`, `radius` |
 //! | `PICTURE` | `scope`, `target`, `file`, `seconds`, `clear_view`, `size`, `horizontal`, `vertical`, `size_units` |
 //! | any | `payload_hex`, appended after what the opcode writes |
 //!
@@ -240,6 +241,13 @@ fn parse_step(step: &Value, campaign: u64) -> Result<Step, String> {
                     .and_then(Value::as_f64)
                     .unwrap_or(0.0),
             );
+        }
+        opcode::CLEAR_DEBRIS => {
+            let real = |name: &str| step.get(name).and_then(Value::as_f64).unwrap_or(0.0);
+            w.u32(u64_field(step, "volume")?.unwrap_or(0) as u32).pad(4);
+            for name in ["x", "y", "z", "x2", "y2", "z2", "radius"] {
+                w.f64(real(name));
+            }
         }
         opcode::SOUND => {
             w.u32(u64_field(step, "scope")?.unwrap_or(0) as u32)

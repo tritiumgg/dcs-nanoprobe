@@ -216,14 +216,19 @@ codes! {
         MENU_REMOVE = 30, EXTENSION_SET = 31, EXTENSION_REMOVE = 32, EXPLOSION = 48,
         MESSAGE = 49, SOUND = 50, SMOKE = 51, FLARE = 52, ILLUMINATION = 53, DAMAGE = 54,
         CHAT = 55, MISSION_LOAD = 56, EXTENSION_INVOKE = 57, EVAL = 58,
-        WAREHOUSE_ADJUST = 59, PICTURE = 60, PICTURE_STOP = 61, MODERATE = 62, CAPTURE = 64,
-        COUNTRIES = 65, PLAYERS = 66, BANS = 67,
+        WAREHOUSE_ADJUST = 59, PICTURE = 60, PICTURE_STOP = 61, MODERATE = 62,
+        CLEAR_DEBRIS = 63, CAPTURE = 64, COUNTRIES = 65, PLAYERS = 66, BANS = 67,
     }
 }
 
 codes! {
     /// `MODERATE` actions (spec/commands.md, "Codes: moderation").
     moderation "moderation" { KICK = 1, BAN = 2, UNBAN = 3, SLOT = 4, }
+}
+
+codes! {
+    /// `CLEAR_DEBRIS` volume shapes (spec/commands.md, "Codes: volume").
+    volume "volume" { SPHERE = 1, BOX = 2, }
 }
 
 /// The delivery class of a command (spec/commands.md, "Delivery classes").
@@ -322,6 +327,7 @@ pub const fn opcode_row(code: u64) -> Option<Opcode> {
             }
         }),
         57 | 58 => row(Effect, None, true, false),
+        63 => row(Effect, None, false, true),
         64 => row(Query, None, true, true),
         65 => row(Query, None, false, true),
         66 | 67 => Some(Opcode {
@@ -456,6 +462,7 @@ mod tests {
         same_codes(result::SECTION, result::ALL);
         same_codes(opcode::SECTION, opcode::ALL);
         same_codes(moderation::SECTION, moderation::ALL);
+        same_codes(volume::SECTION, volume::ALL);
     }
 
     #[test]

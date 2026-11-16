@@ -5434,9 +5434,57 @@ pub struct Picture {
 /// Take every picture off screen.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct PictureStop {}
+/// A sphere, in DCS coordinates.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Sphere {
+    #[prost(message, optional, tag = "1")]
+    pub center: ::core::option::Option<Position>,
+    /// Meters, above 0.
+    #[prost(double, tag = "2")]
+    pub radius: f64,
+}
+/// A box aligned with the axes, in DCS coordinates. Each of `min`'s
+/// coordinates is at most the same one of `max`.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Box {
+    #[prost(message, optional, tag = "1")]
+    pub min: ::core::option::Option<Position>,
+    #[prost(message, optional, tag = "2")]
+    pub max: ::core::option::Option<Position>,
+}
+/// The map: x and z from -2,000 km to 2,000 km. That this covers every
+/// theater is UNVERIFIED.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WholeMap {}
+/// Remove wrecks, craters and debris. DCS removes the wrecks of ground units
+/// that have stopped burning; craters count as junk too (inferred from the
+/// count). It leaves every live unit and static, a wreck that is still
+/// burning, a dead static's object and destroyed scenery. Around a dead
+/// aircraft or a dead static it removes something; what is UNVERIFIED. A burning wreck it
+/// leaves still explodes and sends its death events. Coordinates and sizes
+/// are within 10,000 km of 0.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ClearDebris {
+    #[prost(oneof = "clear_debris::Volume", tags = "1, 2, 3")]
+    pub volume: ::core::option::Option<clear_debris::Volume>,
+}
+/// Nested message and enum types in `ClearDebris`.
+pub mod clear_debris {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Volume {
+        #[prost(message, tag = "1")]
+        Sphere(super::Sphere),
+        #[prost(message, tag = "2")]
+        Box(super::Box),
+        /// Sent to DCS as several boxes, so that no single command clears the
+        /// whole map at once.
+        #[prost(message, tag = "3")]
+        WholeMap(super::WholeMap),
+    }
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Effect {
-    #[prost(oneof = "effect::Effect", tags = "1, 2, 3, 4, 5, 6, 7, 8")]
+    #[prost(oneof = "effect::Effect", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9")]
     pub effect: ::core::option::Option<effect::Effect>,
 }
 /// Nested message and enum types in `Effect`.
@@ -5459,6 +5507,8 @@ pub mod effect {
         Picture(super::Picture),
         #[prost(message, tag = "8")]
         PictureStop(super::PictureStop),
+        #[prost(message, tag = "9")]
+        ClearDebris(super::ClearDebris),
     }
 }
 /// At-most-once: an effect is never sent to DCS twice.
@@ -5473,6 +5523,12 @@ pub struct DoEffectRequest {
 pub struct DoEffectResponse {
     #[prost(message, optional, tag = "1")]
     pub result: ::core::option::Option<CommandResult>,
+    /// For ClearDebris: how many junk objects DCS removed, craters and debris
+    /// included. For a whole-map clear that did not apply, the count of the
+    /// boxes that did. Absent when the clear has no result (unknown, not_sent)
+    /// and for any other effect.
+    #[prost(uint64, optional, tag = "2")]
+    pub debris_removed: ::core::option::Option<u64>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SetSampleRatesRequest {
@@ -5513,6 +5569,9 @@ pub struct GetOutcomeResponse {
     /// The campaign the call resolved to, 0 for none.
     #[prost(uint64, tag = "4")]
     pub campaign_id: u64,
+    /// For ClearDebris, as DoEffectResponse gave it.
+    #[prost(uint64, optional, tag = "5")]
+    pub debris_removed: ::core::option::Option<u64>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]

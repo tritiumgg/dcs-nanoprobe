@@ -373,6 +373,41 @@ message Picture {
 // Take every picture off screen.
 message PictureStop {}
 
+// A sphere, in DCS coordinates.
+message Sphere {
+  Position center = 1;
+  // Meters, above 0.
+  double radius = 2;
+}
+
+// A box aligned with the axes, in DCS coordinates. Each of `min`'s
+// coordinates is at most the same one of `max`.
+message Box {
+  Position min = 1;
+  Position max = 2;
+}
+
+// The map: x and z from -2,000 km to 2,000 km. That this covers every
+// theater is UNVERIFIED.
+message WholeMap {}
+
+// Remove wrecks, craters and debris. DCS removes the wrecks of ground units
+// that have stopped burning; craters count as junk too (inferred from the
+// count). It leaves every live unit and static, a wreck that is still
+// burning, a dead static's object and destroyed scenery. Around a dead
+// aircraft or a dead static it removes something; what is UNVERIFIED. A burning wreck it
+// leaves still explodes and sends its death events. Coordinates and sizes
+// are within 10,000 km of 0.
+message ClearDebris {
+  oneof volume {
+    Sphere sphere = 1;
+    Box box = 2;
+    // Sent to DCS as several boxes, so that no single command clears the
+    // whole map at once.
+    WholeMap whole_map = 3;
+  }
+}
+
 message Effect {
   oneof effect {
     Explosion explosion = 1;
@@ -383,6 +418,7 @@ message Effect {
     Sound sound = 6;
     Picture picture = 7;
     PictureStop picture_stop = 8;
+    ClearDebris clear_debris = 9;
   }
 }
 
@@ -394,6 +430,11 @@ message DoEffectRequest {
 
 message DoEffectResponse {
   CommandResult result = 1;
+  // For ClearDebris: how many junk objects DCS removed, craters and debris
+  // included. For a whole-map clear that did not apply, the count of the
+  // boxes that did. Absent when the clear has no result (unknown, not_sent)
+  // and for any other effect.
+  optional uint64 debris_removed = 2;
 }
 
 message SetSampleRatesRequest {
@@ -423,4 +464,6 @@ message GetOutcomeResponse {
   Entity entity = 3;
   // The campaign the call resolved to, 0 for none.
   uint64 campaign_id = 4;
+  // For ClearDebris, as DoEffectResponse gave it.
+  optional uint64 debris_removed = 5;
 }

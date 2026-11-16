@@ -91,6 +91,8 @@ pub mod opcode {
     pub const PICTURE_STOP: u16 = 61;
     /// `COUNTRIES`
     pub const COUNTRIES: u16 = 65;
+    /// `CLEAR_DEBRIS`
+    pub const CLEAR_DEBRIS: u16 = 63;
     /// Every opcode here, by name, for the golden check.
     pub const ALL: &[(&str, u16)] = &[
         ("CAMPAIGN", CAMPAIGN),
@@ -130,6 +132,7 @@ pub mod opcode {
         ("PICTURE_STOP", PICTURE_STOP),
         ("CAPTURE", CAPTURE),
         ("COUNTRIES", COUNTRIES),
+        ("CLEAR_DEBRIS", CLEAR_DEBRIS),
     ];
 }
 
@@ -482,6 +485,8 @@ pub enum Body {
     },
     /// `PICTURE_STOP`
     PictureStop,
+    /// `CLEAR_DEBRIS`
+    ClearDebris(Debris),
     /// `MARK_SET`
     MarkSet {
         /// A `scope` code: `ALL`, `COALITION` or `GROUP`.
@@ -609,6 +614,33 @@ pub enum Body {
     Bans,
 }
 
+/// A `CLEAR_DEBRIS` volume (spec/commands.md, "Layout: CLEAR_DEBRIS").
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Debris {
+    /// A sphere: its center and radius, meters.
+    Sphere {
+        /// The center, DCS `x`, `y`, `z`.
+        center: [f64; 3],
+        /// Meters, above 0.
+        radius: f64,
+    },
+    /// A box aligned with the axes, from `min` to `max`.
+    Box {
+        /// The lowest corner, DCS `x`, `y`, `z`.
+        min: [f64; 3],
+        /// The highest corner.
+        max: [f64; 3],
+    },
+}
+
+/// `volume` codes (spec/commands.md, "Codes: volume").
+pub mod volume {
+    /// `SPHERE`
+    pub const SPHERE: u32 = 1;
+    /// `BOX`
+    pub const BOX: u32 = 2;
+}
+
 /// `moderation` codes (spec/commands.md, "Codes: moderation").
 pub mod moderation {
     /// `KICK`
@@ -637,6 +669,7 @@ impl Body {
             Body::Sound { .. } => opcode::SOUND,
             Body::Picture { .. } => opcode::PICTURE,
             Body::PictureStop => opcode::PICTURE_STOP,
+            Body::ClearDebris(_) => opcode::CLEAR_DEBRIS,
             Body::GroupSpawn { .. } => opcode::GROUP_SPAWN,
             Body::GroupOrder(_) => opcode::GROUP_ORDER,
             Body::GroupDestroy => opcode::GROUP_DESTROY,
@@ -756,6 +789,16 @@ impl Command {
             }
             Body::Damage { life_percent } => {
                 w.f64(*life_percent);
+            }
+            Body::ClearDebris(d) => {
+                let (shape, a, b, radius) = match *d {
+                    Debris::Sphere { center, radius } => (volume::SPHERE, center, [0.0; 3], radius),
+                    Debris::Box { min, max } => (volume::BOX, min, max, 0.0),
+                };
+                w.u32(shape).pad(4);
+                for x in a.into_iter().chain(b).chain([radius]) {
+                    w.f64(x);
+                }
             }
             Body::Sound {
                 scope,
@@ -957,6 +1000,26 @@ impl Command {
             opcode::DAMAGE => Body::Damage {
                 life_percent: r.f64()?,
             },
+            opcode::CLEAR_DEBRIS => {
+                let shape = r.u32()?;
+                r.skip(4)?;
+                let mut v = [0.0; 7];
+                for x in &mut v {
+                    *x = r.f64()?;
+                }
+                let [x, y, z, x2, y2, z2, radius] = v;
+                match shape {
+                    volume::SPHERE => Body::ClearDebris(Debris::Sphere {
+                        center: [x, y, z],
+                        radius,
+                    }),
+                    volume::BOX => Body::ClearDebris(Debris::Box {
+                        min: [x, y, z],
+                        max: [x2, y2, z2],
+                    }),
+                    _ => return Ok(None),
+                }
+            }
             opcode::SOUND => {
                 let scope = r.u32()?;
                 r.skip(4)?;
@@ -1356,6 +1419,22 @@ mod tests {
         let d = body(Body::Damage { life_percent: 10.0 });
         assert_eq!(d, 10.0f64.to_le_bytes());
         assert_eq!(d.len(), golden::layout("DAMAGE").unwrap().fixed);
+        let c = body(Body::ClearDebris(Debris::Box {
+            min: [1.0, 2.0, 3.0],
+            max: [4.0, 5.0, 6.0],
+        }));
+        assert_eq!(&c[..4], &volume::BOX.to_le_bytes());
+        assert_eq!(&c[4..8], &[0; 4]);
+        assert_eq!(&c[8..16], &1.0f64.to_le_bytes());
+        assert_eq!(&c[56..64], &0.0f64.to_le_bytes());
+        assert_eq!(c.len(), golden::layout("CLEAR_DEBRIS").unwrap().fixed);
+        let c = body(Body::ClearDebris(Debris::Sphere {
+            center: [1.0, 2.0, 3.0],
+            radius: 9.0,
+        }));
+        assert_eq!(&c[..4], &volume::SPHERE.to_le_bytes());
+        assert_eq!(&c[32..56], &[0; 24]);
+        assert_eq!(&c[56..64], &9.0f64.to_le_bytes());
         let sound = body(Body::Sound {
             scope: 2,
             target: 1,
@@ -1558,6 +1637,14 @@ mod tests {
                 delta: lv::obj(vec![("liquids", lv::list(vec![lv::n(-5.0)]))]),
             },
             Body::Damage { life_percent: 12.5 },
+            Body::ClearDebris(Debris::Sphere {
+                center: [10.0, -2.0, 3.5],
+                radius: 40.0,
+            }),
+            Body::ClearDebris(Debris::Box {
+                min: [-1.0, -2.0, -3.0],
+                max: [1.0, 2.0, 3.0],
+            }),
             Body::Sound {
                 scope: 5,
                 target: 80,

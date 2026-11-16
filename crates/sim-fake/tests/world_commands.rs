@@ -743,3 +743,53 @@ fn an_unresolved_set_holds_only_the_items_it_names() {
         assert_eq!(d.stock.get(&b), Some(2.0), "offset {offset}");
     }
 }
+
+#[test]
+fn a_whole_map_clear_folds_its_tiles_and_a_restart_leaves_it_unknown() {
+    use nanoprobe_sidecar::sim::wire::Debris;
+    use nanoprobe_transport::codec::Lv;
+    let mut w = world(1, 0);
+    let value = |w: &World, key| {
+        let r = w.rec.effect_result(key).expect("answered");
+        (r.outcome, r.result.as_ref().map(|x| x.value.clone()))
+    };
+    let key = w
+        .rec
+        .clear_debris(
+            &mut w.store,
+            &mut w.sim,
+            Debris::Sphere {
+                center: [1.0, 2.0, 3.0],
+                radius: 10.0,
+            },
+        )
+        .expect("sent");
+    ticks(&mut w, 6);
+    assert_eq!(value(&w, key), (Outcome::Applied, Some(Lv::Number(3.0))));
+
+    let key = w
+        .rec
+        .clear_debris_everywhere(&mut w.store, &mut w.sim)
+        .expect("sent");
+    ticks(&mut w, 100);
+    assert_eq!(sent(&w, opcode::CLEAR_DEBRIS), 1 + 256);
+    assert_eq!(
+        value(&w, key),
+        (Outcome::Applied, Some(Lv::Number(3.0 * 256.0)))
+    );
+    // Only the folded result is kept: no tile has one of its own.
+    assert!(w.rec.effect_result((key.0, key.1 - 1)).is_none());
+
+    // A restart in the middle loses the fold: the call gets no result and
+    // nothing is left in flight, so it settles as `unknown`.
+    let key = w
+        .rec
+        .clear_debris_everywhere(&mut w.store, &mut w.sim)
+        .expect("sent");
+    ticks(&mut w, 3);
+    w.apply(&Op::SidecarRestart).unwrap();
+    ticks(&mut w, 150);
+    assert!(w.rec.effect_result(key).is_none());
+    assert!(w.rec.inflight().all(|j| (j.epoch, j.seq) != key));
+    assert!(w.rec.effect_result((key.0, key.1 - 1)).is_none());
+}

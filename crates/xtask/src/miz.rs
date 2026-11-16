@@ -31,6 +31,9 @@ pub struct Changes {
     pub start_time: Option<u32>,
     /// The airport (by its airbase ID) whose warehouse is made limited.
     pub limited_airport: Option<u32>,
+    /// The FARP or other static (by its unit ID) whose warehouse is made
+    /// limited.
+    pub limited_warehouse: Option<u32>,
     /// Resource files to pack: `l10n/DEFAULT/<file>` members, each with a
     /// `mapResource` entry from its key to the file name.
     pub resources: Vec<Resource>,
@@ -202,6 +205,13 @@ pub fn generate(template: &[u8], changes: &Changes) -> Result<Vec<u8>, String> {
             .expect("checked above");
         warehouses.1 = limit_warehouse(&warehouses.1, id)?;
     }
+    if let Some(id) = changes.limited_warehouse {
+        let warehouses = members
+            .iter_mut()
+            .find(|(n, _)| n == "warehouses")
+            .expect("checked above");
+        warehouses.1 = limit_section(&warehouses.1, "warehouses", id)?;
+    }
 
     if !changes.resources.is_empty() {
         let map = members
@@ -278,65 +288,95 @@ const LIMITED_AIRCRAFTS: &str = "{ [\"plane\"] = { [\"F-15C\"] = { [\"initialAmo
 const LIMITED_WEAPONS: &str =
     "{ [1] = { [\"initialAmount\"] = 100, [\"wsType\"] = { 4, 5, 9, 31 } } },";
 
-/// Make the warehouse of airport `id` limited: the three `unlimited*` flags
-/// false, and the aircraft and weapon tables hold the counts above (ED-CODE:
-/// the `warehouses` member of a `.miz`). Fuel keeps its `InitFuel` values.
+/// Make the warehouse of airport `id` limited: see [`limit_section`].
 fn limit_warehouse(warehouses: &[u8], id: u32) -> Result<Vec<u8>, String> {
+    limit_section(warehouses, "airports", id)
+}
+
+/// Make warehouse `id` of `section` (`airports`, by airbase ID, or
+/// `warehouses`, by the unit ID of a FARP or other static that has one)
+/// limited: the three `unlimited*` flags false, and an empty aircraft or
+/// weapon table holds the counts above (ED-CODE: the `warehouses` member of a
+/// `.miz`). A table that already lists items keeps them. Fuel keeps its
+/// `InitFuel` values. Only a direct entry of `section` matches: an entry
+/// with the same ID in the other section is never changed.
+fn limit_section(warehouses: &[u8], section: &str, id: u32) -> Result<Vec<u8>, String> {
     let text =
         std::str::from_utf8(warehouses).map_err(|_| "`warehouses` is not UTF-8".to_owned())?;
     let opening = format!("[{id}] =");
+    let heading = format!("[\"{section}\"]");
     let mut out = String::with_capacity(text.len());
-    let (mut in_airports, mut inside, mut depth, mut found) = (false, false, 0i32, false);
-    let mut changed = 0;
+    let (mut inside, mut depth, mut found) = (false, 0i32, false);
+    // The section's brace depth while the scan is in it: 1 between its own
+    // braces, where its entries open. None outside it.
+    let mut section_depth: Option<i32> = None;
+    let (mut changed, mut flags, mut tables) = (0, 0, 0);
     for line in text.split_inclusive('\n') {
         let t = line.trim();
         let mut replacement: Option<String> = None;
+        let braces = line.matches('{').count() as i32 - line.matches('}').count() as i32;
         if !inside {
-            if t.starts_with("[\"airports\"]") {
-                in_airports = true;
-            } else if in_airports && t.starts_with(&opening) {
+            if section_depth.is_none() && t.starts_with(&heading) {
+                section_depth = Some(0);
+            } else if section_depth == Some(1) && t.starts_with(&opening) {
                 inside = true;
                 found = true;
                 depth = 0;
             }
         } else {
-            let key = |k: &str| t.starts_with(&format!("[\"{k}\"] = "));
+            // `t` is trimmed, so a table opened on the next line ends in `=`.
+            let key = |k: &str| t.starts_with(&format!("[\"{k}\"] ="));
             let indent = &line[..line.len() - line.trim_start().len()];
             let eol = if line.ends_with("\r\n") { "\r\n" } else { "\n" };
             if depth == 1 {
                 for flag in ["unlimitedMunitions", "unlimitedAircrafts", "unlimitedFuel"] {
                     if key(flag) {
                         replacement = Some(format!("{indent}[\"{flag}\"] = false,{eol}"));
+                        flags += 1;
                     }
                 }
-                if key("aircrafts") && t.ends_with("{},") {
-                    replacement = Some(format!(
-                        "{indent}[\"aircrafts\"] = {LIMITED_AIRCRAFTS}{eol}"
-                    ));
+                if key("aircrafts") {
+                    tables += 1;
+                    if t.ends_with("{},") {
+                        replacement = Some(format!(
+                            "{indent}[\"aircrafts\"] = {LIMITED_AIRCRAFTS}{eol}"
+                        ));
+                    }
                 }
-                if key("weapons") && t.ends_with("{},") {
-                    replacement = Some(format!("{indent}[\"weapons\"] = {LIMITED_WEAPONS}{eol}"));
+                if key("weapons") {
+                    tables += 1;
+                    if t.ends_with("{},") {
+                        replacement =
+                            Some(format!("{indent}[\"weapons\"] = {LIMITED_WEAPONS}{eol}"));
+                    }
                 }
             }
         }
         if inside {
-            depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+            depth += braces;
             if replacement.is_some() {
                 changed += 1;
             }
             if depth <= 0 && line.contains('}') {
                 inside = false;
-                in_airports = false;
+            }
+        }
+        if let Some(d) = section_depth.as_mut() {
+            *d += braces;
+            if *d <= 0 && line.contains('}') {
+                section_depth = None;
             }
         }
         out.push_str(replacement.as_deref().unwrap_or(line));
     }
     if !found {
-        return Err(format!("`warehouses` has no airport {id}"));
+        return Err(format!("`warehouses` has no {section} entry {id}"));
     }
-    if changed != 5 {
+    // An entry without both tables would leave a limited warehouse with no
+    // aircraft or no weapons at all.
+    if flags != 3 || tables != 2 || changed > 5 {
         return Err(format!(
-            "airport {id}: changed {changed} of 5 fields (three flags, aircrafts, weapons)"
+            "{section} {id}: changed {flags} of 3 flags, found {tables} of 2 tables (aircrafts, weapons), {changed} fields changed"
         ));
     }
     Ok(out.into_bytes())
@@ -472,6 +512,56 @@ mod tests {
         assert_eq!(&png[1..4], b"PNG");
         assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
         assert_eq!(members.last().unwrap().0, "theatre");
+    }
+
+    #[test]
+    fn limits_a_farp_and_keeps_listed_items() {
+        let text = "warehouses = \n{\n\t[\"warehouses\"] = \n\t{\n\t\t[8624] = \n\t\t{\n\t\t\t[\"unlimitedMunitions\"] = true,\n\t\t\t[\"unlimitedAircrafts\"] = true,\n\t\t\t[\"unlimitedFuel\"] = true,\n\t\t\t[\"aircrafts\"] = \n\t\t\t{\n\t\t\t\t[\"helicopters\"] = {},\n\t\t\t}, -- end of [\"aircrafts\"]\n\t\t\t[\"weapons\"] = {},\n\t\t}, -- end of [8624]\n\t}, -- end of [\"warehouses\"]\n\t[\"airports\"] = \n\t{\n\t\t[12] = \n\t\t{\n\t\t\t[\"unlimitedFuel\"] = true,\n\t\t}, -- end of [12]\n\t}, -- end of [\"airports\"]\n}\n";
+        let out =
+            String::from_utf8(limit_section(text.as_bytes(), "warehouses", 8624).unwrap()).unwrap();
+        let (farp, airports) = out.split_once("[\"airports\"]").unwrap();
+        assert_eq!(farp.matches("= false,").count(), 3, "{farp}");
+        assert!(farp.contains("[\"helicopters\"] = {},"), "{farp}");
+        assert!(farp.contains("[\"initialAmount\"] = 100,"), "{farp}");
+        assert!(
+            airports.contains("[\"unlimitedFuel\"] = true"),
+            "{airports}"
+        );
+    }
+
+    /// An entry that is complete but sits in the other section, in either
+    /// order of the two sections.
+    #[test]
+    fn matches_only_its_own_section() {
+        let entry = |id: u32| {
+            format!(
+                "\t\t[{id}] = \n\t\t{{\n\t\t\t[\"unlimitedMunitions\"] = true,\n\t\t\t[\"unlimitedAircrafts\"] = true,\n\t\t\t[\"unlimitedFuel\"] = true,\n\t\t\t[\"aircrafts\"] = {{}},\n\t\t\t[\"weapons\"] = {{}},\n\t\t}}, -- end of [{id}]\n"
+            )
+        };
+        let section = |name: &str, id: u32| {
+            format!(
+                "\t[\"{name}\"] = \n\t{{\n{}\t}}, -- end of [\"{name}\"]\n",
+                entry(id)
+            )
+        };
+        for (first, second) in [("airports", "warehouses"), ("warehouses", "airports")] {
+            let ids = |name: &str| if name == "airports" { 12 } else { 8624 };
+            let text = format!(
+                "warehouses = \n{{\n{}{}}}\n",
+                section(first, ids(first)),
+                section(second, ids(second))
+            );
+            let error = limit_section(text.as_bytes(), "warehouses", 12).unwrap_err();
+            assert!(error.contains("no warehouses entry 12"), "{error}");
+            let error = limit_section(text.as_bytes(), "airports", 8624).unwrap_err();
+            assert!(error.contains("no airports entry 8624"), "{error}");
+            let out =
+                String::from_utf8(limit_section(text.as_bytes(), "airports", 12).unwrap()).unwrap();
+            assert_eq!(out.matches("= false,").count(), 3, "{out}");
+            let farp = out.split_once("[8624] =").unwrap().1;
+            let farp = farp.split_once("end of [8624]").unwrap().0;
+            assert!(!farp.contains("= false,"), "{out}");
+        }
     }
 
     #[test]
