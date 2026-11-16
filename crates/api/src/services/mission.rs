@@ -107,7 +107,11 @@ impl MissionService for Mission {
             h.lease = None;
         }
         let cfg = self.0.cfg.clone();
-        // The groups DCS holds are captured first: the load ends them.
+        // The refusals come first; then the groups DCS holds are captured:
+        // the load ends them.
+        self.0
+            .lock()
+            .reload_check(w.idempotency.as_ref(), w.lease.as_ref(), w.campaign_id)?;
         self.0
             .capture_live(w.idempotency.as_ref(), w.lease.as_ref(), w.campaign_id)
             .await;

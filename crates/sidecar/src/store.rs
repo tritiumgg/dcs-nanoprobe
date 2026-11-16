@@ -1751,6 +1751,18 @@ impl Store {
         }
     }
 
+    /// Count the model time from the next generation's first sample: until
+    /// one arrives, [`Store::model_elapsed`] is 0. For a load just applied,
+    /// whose mission has not started yet.
+    pub fn await_generation(&mut self) {
+        let (b, g) = self
+            .loaded
+            .as_ref()
+            .map_or((0, 0), |l| (l.agent_boot, l.mission_gen));
+        // The running generation's zero is past any of its samples.
+        self.model0 = Some((b, g, f64::MAX));
+    }
+
     /// The model time since the running generation's first sample, seconds.
     pub fn model_elapsed(&self) -> f64 {
         match (&self.loaded, self.model0) {

@@ -19,7 +19,8 @@ pub const PATH_MAX: usize = 1024;
 /// template of each theater and, under `shells/`, the shell of each
 /// campaign, named once as the sidecar opens it and once as DCS opens it.
 /// A theater's template is `<theater>.miz`, the name exactly as
-/// `LIFECYCLE` carries it; a campaign's shell is `shells/<campaign ID>.miz`.
+/// `LIFECYCLE` carries it; a campaign's shells are `shells/<campaign ID>.a.miz`
+/// and `.b.miz`.
 #[derive(Clone, Debug, Default)]
 pub struct Missions {
     /// `dir`; `None` when the key is empty.

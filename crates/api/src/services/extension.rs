@@ -162,6 +162,7 @@ impl ExtensionService for Extension {
         require(&req, Access::Observer)?;
         let mut g = self.0.lock();
         let c = g.resolve_read(req.get_ref().campaign_id)?;
+        g.open_archive(c)?;
         // The agent's answers and records are about the active campaign.
         let live = g.active == Some(c);
         let extensions = g

@@ -170,8 +170,13 @@ impl CampaignService for Campaigns {
                         },
                         first,
                     )?;
-                    if r.activate {
-                        g.activate(&cfg, id)?;
+                    // An activation refused after the folder was made (its
+                    // shell could not be written) leaves no campaign.
+                    if r.activate
+                        && let Err(e) = g.activate(&cfg, id)
+                    {
+                        let _ = g.delete_campaign(&cfg, id, &r.name);
+                        return Err(e);
                     }
                     Ok((
                         CreateCampaignResponse {
@@ -402,6 +407,7 @@ impl CampaignService for Campaigns {
         let r = req.into_inner();
         let mut hashed = r.clone();
         hashed.lease = None;
+        let cfg = self.0.cfg.clone();
         let resp = self
             .0
             .write(
@@ -414,7 +420,7 @@ impl CampaignService for Campaigns {
                 },
                 &hashed,
                 |g: &mut Inner, _| {
-                    g.delete_campaign(r.campaign_id, &r.confirm_name)?;
+                    g.delete_campaign(&cfg, r.campaign_id, &r.confirm_name)?;
                     Ok((DeleteCampaignResponse {}, 0))
                 },
             )

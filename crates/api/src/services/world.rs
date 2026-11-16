@@ -429,6 +429,7 @@ impl WorldService for World {
         let filter = Filter::new(f, true)?;
         let mut g = self.0.lock();
         let campaign = g.resolve_read(f.map_or(0, |f| f.campaign_id))?;
+        g.open_archive(campaign)?;
         let (revision, entities) = snapshot(&g, campaign, &filter);
         Ok(Response::new(QueryAreaResponse {
             revision,

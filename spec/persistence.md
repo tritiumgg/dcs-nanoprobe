@@ -154,7 +154,7 @@ What each failure loses:
 | Positions, fuel, life, ammunition, warehouse stock | every `checkpoint_s` | up to `checkpoint_s` | up to `checkpoint_s`; read again from the agent |
 | Events | at the end of the step that makes them, before they are published | nothing published | nothing published |
 | Effects | journalled as sent | may or may not have applied; never sent again | never sent again |
-| Owed mission load | in the activation's commit; cleared in the commit that journals its outcome | nothing | sent again at start if it never reached DCS |
+| Owed mission load | in the activation's or the reload's commit (with a checkpoint for a reload); cleared in the commit that journals its outcome | nothing | sent again at start if it never reached DCS |
 
 ### A crash between the two commits
 
@@ -354,7 +354,7 @@ What each operation of the Campaign service does to the files:
 | Finish | As suspend, with state `finished` and the outcome record. A finished store is read-only: it is never activated or migrated again, only read. |
 | Set a template | `SetCampaignTemplate` writes or removes a row of the `template` table. Refused: a theater that is not one of the campaign's (`INVALID_FIELD`), a file over 16 MiB, one whose `theatre` member does not name the theater exactly, one whose `mission` or `warehouses` does not parse with the fields the shell writer changes, one that places a group, unit or static whose name reads as a platform name (spec/world.md, "Names"), and, under "Free space", one the file system has no room for. |
 | Backup | A backup with reason `manual` (`BackupCampaign`), refused under "Free space". `ListCampaignBackups` reads the folder without opening the store. |
-| Export | `ExportCampaign` streams the campaign's store and event history as JSON lines (see "Export"). |
+| Export | `ExportCampaign` streams the campaign's store and event history as JSON lines (see "Export"). It reads the files and makes no copy. |
 | Delete | `DeleteCampaign` (admin), with the campaign's name to confirm, on a campaign that is not active and has no backup running: its store is closed and its folder and shells removed. Never automatic. |
 
 A switch of the active campaign (`ActivateCampaign`, or `CreateCampaign` that
@@ -406,12 +406,19 @@ temporary file that is flushed and renamed, so a file DCS may still hold is neve
 rewritten. The owed load names its slot, and a resend after `NOT_SENT` loads the file
 already written.
 
-`NextMission` is kept in `meta.world` until `SetNextMission` replaces it whole. Its
-`start` is used once: the commit that owes the load sets the campaign clock to it and
+`NextMission` is kept in `meta.world` until `SetNextMission` replaces it whole. It
+applies to a shell for its theater, or for any theater when it names none; a shell for
+another theater is written with the template's weather and flags and the campaign clock.
+Its `start` is used once: the commit that owes the load sets the campaign clock to it and
 clears it. The campaign clock is the start written into the running mission's shell
 plus the model time since that generation's first sample; with no mission of its own
 running it is the clock in the campaign record, which suspend, finish, checkpoints and
-every shell write update. Dates and times are the mission's own calendar time, carried
+every shell write update. A load's start takes over at its `APPLIED`, counted from the
+next generation's first sample; a load refused or rejected keeps the running mission's
+start. A DCS restart runs a mission the campaign did not load: the clock reached before
+it is written to the record, and the clock stays there until the campaign's next load.
+A load whose outcome is `UNKNOWN`, or that left the commands in flight, and one a suspend
+dropped after it was sent, count as holding their slot. Dates and times are the mission's own calendar time, carried
 in Timestamp fields with no time-zone conversion.
 
 ### Reading a campaign that is not open
@@ -419,7 +426,8 @@ in Timestamp fields with no time-zone conversion.
 A read of a campaign whose store is not open, finished or suspended, opens no store: the
 sidecar takes a consistent copy of it with `VACUUM INTO` under `.read/` in the
 campaign's folder, migrates the copy if it is older, opens it, and serves the World
-lists from it. The copy is dropped once no read named the campaign for 60 s, or when the
+lists, the area query and the Lua extension list from it. The other reads (the campaign
+record, events, occupancy, export) read the files and make no copy. The copy is dropped once no read named the campaign for 60 s, or when the
 campaign's own store opens. A copy is refused under "Free space". Watches stay on the
 active campaign.
 
@@ -428,7 +436,8 @@ active campaign.
 `ExportCampaign` streams JSON lines, each a whole object with a `kind`: a `header` line
 (export format 1, the campaign ID, the store's schema version, and the Protobuf package
 of the events), then `meta` (each key, its value decoded), `entity` (each row, kind and
-body decoded), `extension`, `journal`, `inflight` and `checkpoint` rows, then `event`
+body decoded), `extension`, `journal`, `inflight`, `template` (theater, size and SHA-256
+of the file) and `checkpoint` rows, then `event`
 rows with the event's Protobuf encoding in base 64 (`event_b64`). A stored body is
 decoded to JSON by the rule of spec/world.md, "Lua tables in the API"; a string that is
 not UTF-8 is `{"bytes_b64": ...}`. The store is read in one read transaction on a
@@ -449,14 +458,16 @@ logged, and tried one interval later. A failed store write still stops the sidec
 `nanoprobe restore --store <dir> --campaign <id> --backup <n>`, with the sidecar
 stopped, restores backup `n` over a campaign's store. It takes the store dir's lock, so
 it refuses while a sidecar runs. It copies the current store, with its WAL applied, to
-`restore-<unix ms>/store.sqlite` in the campaign's folder; removes the store's WAL
-files; copies the backup in under a temporary name and renames it over the store. Then
+`restore-<unix ms>/store.sqlite` in the campaign's folder before it removes anything;
+removes the store's WAL files; copies the backup in under a temporary name and renames
+it over the store. A crash after the WAL files go and before the rename leaves the store
+without its last commits; the copy aside holds them. Then
 the restored store's next `EntityId` is the larger of the two copies', and its revision
 the larger of the two plus 2^32, so no ID or revision handed out before is given again;
 it is marked closed, its record is `suspended` unless the backup is `finished`, and its
 commands in flight, its owed mission load and a start set for the next shell are
-cleared. The event history is not rolled back: `events.sqlite` keeps the events after
-the backup.
+cleared; its shell slot is the replaced store's, since DCS may hold that file. The event
+history is not rolled back: `events.sqlite` keeps the events after the backup.
 
 ### Timers
 

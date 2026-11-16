@@ -8,6 +8,7 @@ use std::path::Path;
 use nanoprobe_transport::codec::Lv;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Map, Value, json};
+use sha2::Digest as _;
 
 use crate::eventfile::PACKAGE;
 use crate::store::{DiskError, schema_of};
@@ -33,6 +34,17 @@ pub fn export(
     store: &Path,
     events: &Path,
     out: &mut dyn FnMut(Vec<u8>) -> bool,
+) -> Result<(), DiskError> {
+    export_paged(campaign, store, events, out, PAGE)
+}
+
+/// [`export`] reading `page` rows per query.
+fn export_paged(
+    campaign: u64,
+    store: &Path,
+    events: &Path,
+    out: &mut dyn FnMut(Vec<u8>) -> bool,
+    page_rows: i64,
 ) -> Result<(), DiskError> {
     let schema = schema_of(store)?;
     let mut emit = |v: Value| {
@@ -79,7 +91,7 @@ pub fn export(
             "SELECT id, kind, body FROM entity WHERE (id, kind) > (?1, ?2) ORDER BY id, kind LIMIT ?3",
         )?;
         let page: Vec<(i64, String, Vec<u8>)> = q
-            .query_map(rusqlite::params![last.0, last.1, PAGE], |r| {
+            .query_map(rusqlite::params![last.0, last.1, page_rows], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?))
             })?
             .collect::<Result<_, _>>()?;
@@ -107,7 +119,7 @@ pub fn export(
             "SELECT seq, at_ms, kind, entity, body FROM journal WHERE seq > ?1 ORDER BY seq LIMIT ?2",
         )?;
         let page: Vec<(i64, i64, String, i64, Vec<u8>)> = q
-            .query_map(rusqlite::params![seq, PAGE], |r| {
+            .query_map(rusqlite::params![seq, page_rows], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
             })?
             .collect::<Result<_, _>>()?;
@@ -136,6 +148,32 @@ pub fn export(
             return Ok(());
         }
     }
+    // A template is a whole .miz: its size and hash stand for it.
+    let has_templates = s
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'template'",
+            [],
+            |_| Ok(()),
+        )
+        .is_ok();
+    if has_templates {
+        let mut t = s.prepare("SELECT theater, body FROM template ORDER BY theater")?;
+        let rows = t.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })?;
+        for row in rows {
+            let (theater, b) = row?;
+            let hash: String = sha2::Sha256::digest(&b)
+                .iter()
+                .map(|x| format!("{x:02x}"))
+                .collect();
+            if !emit(json!({
+                "kind": "template", "theater": theater, "size": b.len(), "sha256": hash,
+            })) {
+                return Ok(());
+            }
+        }
+    }
     let mut cp = s.prepare("SELECT seq, body FROM checkpoint ORDER BY seq")?;
     let rows = cp.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?;
     for row in rows {
@@ -154,7 +192,7 @@ pub fn export(
              ORDER BY seq LIMIT ?3",
         )?;
         let page: Vec<(i64, i64, Option<String>, Vec<u8>)> = q
-            .query_map(rusqlite::params![seq, last, PAGE], |r| {
+            .query_map(rusqlite::params![seq, last, page_rows], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
             })?
             .collect::<Result<_, _>>()?;
@@ -279,7 +317,23 @@ mod tests {
             outcome: None,
         };
         let mut s = c.create(id, record).expect("create");
-        s.adopt_id().expect("id");
+        for _ in 0..3 {
+            s.create_group(crate::store::NewGroup {
+                theater: "Caucasus".into(),
+                country: 2,
+                category: 2,
+                coalition: 2,
+                units: vec![
+                    crate::store::NewUnit::new("M-113", crate::store::UnitState::default()),
+                    crate::store::NewUnit::new("M-113", crate::store::UnitState::default()),
+                ],
+                authority: crate::store::Authority::Campaign,
+                label: String::new(),
+                extra: Lv::Nil,
+            })
+            .expect("group");
+        }
+        s.set_template("Caucasus", Some(b"miz".to_vec()));
         s.commit().expect("commit");
         let mut ev = EventFile::open(&c.events_path(id), 3).expect("events");
         ev.push(EventRow {
@@ -290,10 +344,17 @@ mod tests {
         });
         ev.commit().expect("commit");
         let mut lines = Vec::new();
-        export(3, &c.store_path(id), &c.events_path(id), &mut |l| {
-            lines.push(l);
-            true
-        })
+        // One row a page: every paged query reads more than one page.
+        export_paged(
+            3,
+            &c.store_path(id),
+            &c.events_path(id),
+            &mut |l| {
+                lines.push(l);
+                true
+            },
+            1,
+        )
         .expect("export");
         let parsed: Vec<Value> = lines
             .iter()
@@ -311,6 +372,52 @@ mod tests {
             .find(|v| v["kind"] == "meta" && v["key"] == "campaign")
             .expect("record");
         assert_eq!(campaign["value"]["name"], "c");
+        // Each kind has one line per row of its table, in the spec's order.
+        let conn = Connection::open(c.store_path(id)).expect("conn");
+        let rows = |table: &str| -> usize {
+            conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .expect("count") as usize
+        };
+        let count = |kind: &str| kinds.iter().filter(|k| **k == kind).count();
+        for (kind, table) in [
+            ("meta", "meta"),
+            ("entity", "entity"),
+            ("extension", "extension"),
+            ("journal", "journal"),
+            ("inflight", "inflight"),
+            ("template", "template"),
+            ("checkpoint", "checkpoint"),
+        ] {
+            assert_eq!(count(kind), rows(table), "{kind}");
+        }
+        assert_eq!(count("entity"), 9, "three groups of two units");
+        assert!(count("journal") > 1);
+        let order = [
+            "header",
+            "meta",
+            "entity",
+            "extension",
+            "journal",
+            "inflight",
+            "template",
+            "checkpoint",
+            "event",
+        ];
+        let rank = |k: &str| order.iter().position(|o| *o == k).expect("known kind");
+        assert!(
+            kinds.windows(2).all(|w| rank(w[0]) <= rank(w[1])),
+            "{kinds:?}"
+        );
+        let t = parsed
+            .iter()
+            .find(|v| v["kind"] == "template")
+            .expect("template");
+        assert_eq!(
+            (t["theater"].as_str(), t["size"].as_u64()),
+            (Some("Caucasus"), Some(3))
+        );
         let event = parsed.last().expect("event");
         assert_eq!(event["kind"], "event");
         assert_eq!(event["event_b64"], "AQID");

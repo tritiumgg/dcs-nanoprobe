@@ -378,13 +378,17 @@ impl Campaigns {
         // What the current store handed out, read with its WAL applied.
         let next_entity = next_entity_of(&path)?;
         let revision = revision_of(&path)?;
+        let shell_slot = crate::store::shell_slot_of(&path)?;
         let aside_dir = self.folder(id).join(format!("restore-{at_ms}"));
         fs::create_dir(&aside_dir)?;
         let aside = aside_dir.join(STORE);
         backup_file(&path, &aside)?;
         sync_file(&aside)?;
-        // The copy goes in under a temporary name, then over the store, so a
-        // crash leaves the old store or the whole backup.
+        // The current store, with its WAL applied, is aside before anything
+        // is removed. The backup goes in under a temporary name, then over
+        // the store; a crash after the WAL files go and before the rename
+        // leaves the store without its last commits, which the aside copy
+        // holds.
         let tmp = self.folder(id).join(".restore.sqlite");
         let _ = fs::remove_file(&tmp);
         fs::copy(&source, &tmp)?;
@@ -398,7 +402,7 @@ impl Campaigns {
             }
         }
         fs::rename(&tmp, &path)?;
-        let (next_entity, revision) = rebase_world(&path, next_entity, revision)?;
+        let (next_entity, revision) = rebase_world(&path, next_entity, revision, shell_slot)?;
         Ok(Restored {
             backup,
             aside,

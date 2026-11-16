@@ -136,19 +136,13 @@ fn owed_load(
         Some(key) => match rec.effect_result(key).map(|r| r.outcome) {
             Some(Outcome::Applied) => {
                 store.set_owed_load(None);
+                // The new shell's start counts from the new generation's
+                // first sample, not from the running one's.
                 if owed.start_ms.is_some() {
                     store.set_mission_start_ms(owed.start_ms);
+                    store.await_generation();
                 }
-                if let Some(slot) = owed
-                    .path
-                    .rsplit(['/', '\\'])
-                    .next()
-                    .and_then(|n| n.strip_suffix(".miz"))
-                    .and_then(|n| n.rsplit('.').next())
-                    .filter(|s| *s == "a" || *s == "b")
-                {
-                    store.set_shell_slot(Some(slot.as_bytes()[0]));
-                }
+                store.set_shell_slot(slot_in(&owed.path));
                 // Hold until the store records a mission other than the
                 // one the load was sent in.
                 // The command's row is read before the step that folds its
@@ -169,6 +163,10 @@ fn owed_load(
                     owed.path
                 );
                 store.set_owed_load(None);
+                // DCS may have taken the file: it is not written over next.
+                if other == Outcome::Unknown {
+                    store.set_shell_slot(slot_in(&owed.path));
+                }
             }
             None if !store.unanswered().iter().any(|c| (c.epoch, c.seq) == key) => {
                 eprintln!(
@@ -176,10 +174,21 @@ fn owed_load(
                     owed.path
                 );
                 store.set_owed_load(None);
+                store.set_shell_slot(slot_in(&owed.path));
             }
             None => {}
         },
     }
+}
+
+/// The shell slot a load's path names.
+fn slot_in(path: &str) -> Option<u8> {
+    path.rsplit(['/', '\\'])
+        .next()
+        .and_then(|n| n.strip_suffix(".miz"))
+        .and_then(|n| n.rsplit('.').next())
+        .filter(|s| *s == "a" || *s == "b")
+        .map(|s| s.as_bytes()[0])
 }
 
 /// A moderation call sent to DCS, waiting for its result. An applied one
@@ -513,6 +522,18 @@ impl Inner {
     /// checkpoint and backup timers.
     fn step(&mut self, cfg: &Config) {
         self.backend.frame();
+        // The clock and the agent boot before the step: a DCS restart runs
+        // a mission the campaign did not load, and the clock carries on
+        // from where it was.
+        let before = self.active.map(|id| {
+            (
+                id,
+                self.clock_ms(id),
+                self.campaigns
+                    .get(&id)
+                    .and_then(|s| s.store.loaded().map(|l| l.agent_boot)),
+            )
+        });
         let records = match (self.active, self.rec.as_mut()) {
             (Some(id), Some(rec)) => {
                 let slot = self.campaigns.get_mut(&id).expect("active campaign");
@@ -573,6 +594,14 @@ impl Inner {
             }
             _ => self.backend.sim().read(),
         };
+        if let Some((id, Some(clock), Some(boot))) = before
+            && let Some(slot) = self.campaigns.get_mut(&id)
+            && slot.store.mission_start_ms().is_some()
+            && slot.store.loaded().is_some_and(|l| l.agent_boot != boot)
+        {
+            slot.store.set_mission_start_ms(None);
+            self.write_clock(id, clock);
+        }
         let now = wall_ms() as f64 / 1000.0;
         let mut reads = Vec::new();
         // The roster adopts the unmanaged units players occupy: it reaches
@@ -997,8 +1026,9 @@ impl Inner {
     }
 
     /// The campaign a read names, active or not; 0 is the active one. A
-    /// read opens no store: a campaign whose store is not open, finished or
-    /// suspended, is read through a migrated copy ([`Inner::read_store`]).
+    /// read opens no store; one that reads a store's contents makes a
+    /// migrated copy of one that is not open first ([`Inner::open_archive`],
+    /// [`Inner::read_store`]).
     pub fn resolve_read(&mut self, id: u64) -> Result<u64, Status> {
         let id = if id == 0 {
             self.active.ok_or_else(|| {
@@ -1022,7 +1052,6 @@ impl Inner {
                 "campaign_id",
             ));
         }
-        self.open_archive(id)?;
         Ok(id)
     }
 
@@ -1630,9 +1659,14 @@ impl Inner {
     /// Write the campaign clock into its record, in memory and in its open
     /// store.
     fn sync_clock(&mut self, id: u64) {
-        let Some(ms) = self.clock_ms(id) else {
-            return;
-        };
+        if let Some(ms) = self.clock_ms(id) {
+            self.write_clock(id, ms);
+        }
+    }
+
+    /// Write `ms` as campaign `id`'s clock into its record, in memory and in
+    /// its open store.
+    fn write_clock(&mut self, id: u64, ms: i64) {
         let Some(slot) = self.campaigns.get_mut(&id) else {
             return;
         };
@@ -1671,7 +1705,10 @@ impl Inner {
             .expect("a template comes from [missions]");
         shell::check(&template, theater)
             .map_err(|e| precondition(format!("the template for theater {theater:?}: {e}")))?;
-        let next = self.next_of(id);
+        // Settings made for another theater wait for a load of it.
+        let next = Some(self.next_of(id))
+            .filter(|n| n.theater.is_empty() || n.theater == theater)
+            .unwrap_or_default();
         let airports = shell::airports(&template).map_err(precondition)?;
         if let Some(d) = next.dynamic.iter().find(|d| !airports.contains(&d.airbase)) {
             return Err(crate::convert::invalid(
@@ -1731,7 +1768,7 @@ impl Inner {
         let Some(slot) = self.campaigns.get_mut(&id) else {
             return;
         };
-        slot.store.set_mission_start_ms(None);
+        // The running mission's start stays until the load is applied.
         if let Some(mut next) = slot
             .store
             .next_mission()
@@ -1740,12 +1777,11 @@ impl Inner {
         {
             slot.store.set_next_mission(Some(next.to_lv()));
         }
+        // The record holds the start; the running mission's clock goes on
+        // until the load is applied, and a checkpoint writes it back if the
+        // load is refused.
         if let Some(ms) = owed.start_ms {
-            slot.meta.clock = Some(prost_types::Timestamp {
-                seconds: ms.div_euclid(1000),
-                nanos: i32::try_from(ms.rem_euclid(1000) * 1_000_000).unwrap_or(0),
-            });
-            self.sync_clock(id);
+            self.write_clock(id, ms);
         }
     }
 
@@ -1808,30 +1844,7 @@ impl Inner {
     /// mission's theater, or the loaded one, and owe the load as an
     /// activation does. The caller captured the live groups first.
     pub fn reload(&mut self, cfg: &Config, id: u64) -> Result<(), Status> {
-        let slot = self.campaigns.get(&id).expect("resolved");
-        if slot.store.owed_load().is_some() {
-            return Err(status(
-                Code::FailedPrecondition,
-                ErrorReason::Unspecified,
-                "a mission load is owed already; wait for its new mission",
-                0,
-                "",
-            ));
-        }
-        let next = self.next_of(id);
-        let theater = if !next.theater.is_empty() {
-            next.theater.clone()
-        } else if let Some(l) = slot.store.loaded().filter(|l| !l.theater.is_empty()) {
-            l.theater.clone()
-        } else {
-            slot.theater.clone()
-        };
-        if !slot.meta.theaters.contains(&theater) {
-            return Err(crate::convert::invalid(
-                "next.theater",
-                format!("{theater:?} is not one of the campaign's theaters"),
-            ));
-        }
+        let theater = self.reload_theater(id)?;
         // The clock goes into the shell before the running mission ends.
         self.sync_clock(id);
         let owed = self.write_shell(id, &theater)?;
@@ -1874,7 +1887,7 @@ impl Inner {
     /// Delete a campaign that is not active: close its store, remove its
     /// folder and its shell (spec/persistence.md, "Campaign operations").
     /// `confirm` must equal its name.
-    pub fn delete_campaign(&mut self, id: u64, confirm: &str) -> Result<(), Status> {
+    pub fn delete_campaign(&mut self, cfg: &Config, id: u64, confirm: &str) -> Result<(), Status> {
         let slot = self.campaigns.get(&id).ok_or_else(|| {
             status(
                 Code::NotFound,
@@ -1907,17 +1920,31 @@ impl Inner {
             self.close_store(id, state, None);
         }
         self.closing.retain(|(c, ..)| *c != id);
-        self.campaigns.remove(&id);
-        if let Some(files) = self.files.as_ref() {
-            files.delete(CampaignId(id)).map_err(|e| {
-                status(
-                    Code::Unavailable,
-                    ErrorReason::Unspecified,
-                    format!("the folder of campaign {id} could not be removed: {e}"),
-                    0,
-                    "",
-                )
-            })?;
+        // Every file of the folder is closed before it is removed: a read
+        // copy and the events file too (an open file stops a removal on
+        // Windows).
+        self.archive.remove(&id);
+        let mut slot = self.campaigns.remove(&id).expect("checked");
+        let keep = cfg.events_keep;
+        drop(std::mem::replace(&mut slot.events, EventLog::new(keep)));
+        if let Some(files) = self.files.as_ref()
+            && let Err(e) = files.delete(CampaignId(id))
+        {
+            // What is left is still the campaign: it stays listed.
+            if let Ok(l) = files
+                .events(CampaignId(id))
+                .and_then(|f| EventLog::open(f, keep))
+            {
+                slot.events = l;
+            }
+            self.campaigns.insert(id, slot);
+            return Err(status(
+                Code::Unavailable,
+                ErrorReason::Unspecified,
+                format!("the folder of campaign {id} could not be removed: {e}"),
+                0,
+                "",
+            ));
         }
         if let Some(dir) = self.backend.missions().and_then(|m| m.dir().ok()) {
             for slot in *b"ab" {
@@ -1968,6 +1995,69 @@ impl Inner {
         Ok(())
     }
 
+    /// The theater a reload of campaign `id` loads, after the refusals that
+    /// come before anything is captured: an owed load, a theater not the
+    /// campaign's, and no template for it.
+    fn reload_theater(&self, id: u64) -> Result<String, Status> {
+        let slot = self.campaigns.get(&id).expect("resolved");
+        if slot.store.owed_load().is_some() {
+            return Err(status(
+                Code::FailedPrecondition,
+                ErrorReason::Unspecified,
+                "a mission load is owed already; wait for its new mission",
+                0,
+                "",
+            ));
+        }
+        let next = self.next_of(id);
+        let theater = if !next.theater.is_empty() {
+            next.theater.clone()
+        } else if let Some(l) = slot.store.loaded().filter(|l| !l.theater.is_empty()) {
+            l.theater.clone()
+        } else {
+            slot.theater.clone()
+        };
+        if !slot.meta.theaters.contains(&theater) {
+            return Err(crate::convert::invalid(
+                "next.theater",
+                format!("{theater:?} is not one of the campaign's theaters"),
+            ));
+        }
+        self.mission_check(id, &theater)?;
+        Ok(theater)
+    }
+
+    /// The checks of a `Reload` before the call captures anything, as
+    /// [`Inner::activation_check`] does for an activation: a repeat of an
+    /// answered or running key, and a call without the lease, are left to
+    /// the write.
+    pub fn reload_check(
+        &mut self,
+        key: Option<&pb::Idempotency>,
+        lease: Option<&pb::Lease>,
+        campaign: u64,
+    ) -> Result<(), Status> {
+        let now = Instant::now();
+        if let Some(k) = key.map(|k| k.key.as_str()).filter(|k| !k.is_empty()) {
+            if self.idem.running(k) || self.idem.get(now, k).is_some() {
+                return Ok(());
+            }
+            if let Some((d, done, age)) = self.recall(k, campaign) {
+                self.idem.restore(now, k, d, done, age);
+                return Ok(());
+            }
+        }
+        if self
+            .leases
+            .check(now, lease.map(|l| (l.epoch, l.lease_id.as_str())))
+            .is_err()
+        {
+            return Ok(());
+        }
+        let id = self.resolve(campaign, Need::Active)?;
+        self.reload_theater(id).map(|_| ())
+    }
+
     /// Set campaign `id`'s next-mission settings.
     pub fn set_next(&mut self, id: u64, next: &crate::next::Next) -> Result<(), Status> {
         let slot = self.campaigns.get_mut(&id).expect("resolved");
@@ -1995,6 +2085,11 @@ impl Inner {
         }
         self.sync_clock(id);
         if let Some(s) = self.campaigns.get_mut(&id) {
+            // A load already sent may still run: its file is not written
+            // over next.
+            if let Some(o) = s.store.owed_load().filter(|o| o.cmd.is_some()).cloned() {
+                s.store.set_shell_slot(slot_in(&o.path));
+            }
             s.store.set_owed_load(None);
             s.store.set_mission_start_ms(None);
         }

@@ -383,9 +383,15 @@ pub fn next_entity_of(path: &Path) -> Result<u64, DiskError> {
 /// revision the larger of its own and `revision` plus
 /// [`REVISION_RESERVE`], and it is marked closed; its record is
 /// `suspended` unless it is `finished`; its commands in flight, its owed
-/// mission load and a start set for the next shell are cleared. Returns
+/// mission load and a start set for the next shell are cleared; its shell
+/// slot is `shell_slot`, the replaced store's. Returns
 /// the new next `EntityId` and revision.
-pub fn rebase_world(path: &Path, next_entity: u64, revision: u64) -> Result<(u64, u64), DiskError> {
+pub fn rebase_world(
+    path: &Path,
+    next_entity: u64,
+    revision: u64,
+    shell_slot: Option<u8>,
+) -> Result<(u64, u64), DiskError> {
     let mut conn = connect(path)?;
     let world = get_meta(&conn, "world")?;
     let (own_next, own_rev) = {
@@ -424,7 +430,11 @@ pub fn rebase_world(path: &Path, next_entity: u64, revision: u64) -> Result<(u64
             (k, v)
         })
         .collect();
-    pairs.retain(|(k, _)| *k != s("mission_start_ms"));
+    pairs.retain(|(k, _)| *k != s("mission_start_ms") && *k != s("shell_slot"));
+    // The slot DCS may hold is the replaced store's, not the backup's.
+    if let Some(c) = shell_slot {
+        pairs.push((s("shell_slot"), s(&char::from(c).to_string())));
+    }
     let mut record = dec_record(&get_meta(&conn, "campaign")?)?;
     if record.state != CampaignState::Finished {
         record.state = CampaignState::Suspended;
@@ -2895,7 +2905,7 @@ mod tests {
             (
                 "world.owed_load".to_owned(),
                 encode(&enc_owed_load(&OwedLoad {
-                    path: "Z:\\m\\shells\\9.miz".into(),
+                    path: "Z:\\m\\shells\\9.a.miz".into(),
                     cmd: Some((3, 7)),
                     start_ms: Some(1_700_000_000_000),
                 })),
