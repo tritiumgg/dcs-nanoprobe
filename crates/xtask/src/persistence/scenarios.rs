@@ -114,12 +114,12 @@ pub trait Target {
 pub const ORIGIN: (f64, f64) = (-290_000.0, 680_000.0);
 /// A ground unit type every server has.
 const GROUND: &str = "M-113";
-/// An aircraft type the server spawns, and its payload by pylon from ED's
-/// `MissionEditor/data/scripts/UnitPayloads/F-15C.lua` (ED-CODE): AIM-120B
-/// on 2, 6 and 10, the C8E06185 store on 1 and 11.
+/// An aircraft type the server spawns, and its launchers, named as
+/// `get_weapon_display_name_by_wstype` names their weapons (LIVE, E39):
+/// the 610-gallon tank and AIM-120B.
 const AIRCRAFT: &str = "F-15C";
-const AIM120B: &str = "{E1F29B21-F291-4589-9FD8-3272EEC69506}";
-const C8E: &str = "{C8E06185-7CD6-4C90-959F-044679E90751}";
+const TANK610: &str = "{E1F29B21-F291-4589-9FD8-3272EEC69506}";
+const AIM120B: &str = "{C8E06185-7CD6-4C90-959F-044679E90751}";
 /// USA.
 const COUNTRY: u32 = 2;
 
@@ -159,11 +159,11 @@ fn aircraft(theater: &str, label: &str, at0: (f64, f64), alt: f64) -> pb::GroupS
         "callsign": { "1": 1, "2": 1, "3": 1, "name": "Enfield11" },
         "payload": {
             "pylons": {
-                "1": { "CLSID": C8E },
-                "2": { "CLSID": AIM120B },
-                "6": { "CLSID": AIM120B },
-                "10": { "CLSID": AIM120B },
-                "11": { "CLSID": C8E },
+                "1": { "CLSID": AIM120B },
+                "2": { "CLSID": TANK610 },
+                "6": { "CLSID": TANK610 },
+                "10": { "CLSID": TANK610 },
+                "11": { "CLSID": AIM120B },
             },
             "fuel": 6103,
             "flare": 60,
@@ -972,11 +972,11 @@ pub fn tables(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Value, Str
         (air_at.0 + 3000.0, air_at.1),
         4000.0,
         &[
-            (1, C8E),
-            (2, AIM120B),
-            (6, AIM120B),
-            (10, AIM120B),
-            (11, C8E),
+            (1, AIM120B),
+            (2, TANK610),
+            (6, TANK610),
+            (10, TANK610),
+            (11, AIM120B),
         ],
     )?;
     let jet_unit = names::name(
@@ -1005,6 +1005,65 @@ pub fn tables(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Value, Str
         "jet_loaded_as_control": as_control,
         "jet_in_air": air,
         "keys": keys,
+        "pass": pass,
+    }))
+}
+
+/// 8. Spawning with a unit's life (spec/world.md, "Spawn state"): an
+///    F-15C put at 60 % and an M-113 at 40 %. DCS must hold those lives, and
+///    hold them again after a capture, a dematerialize and materialize, and
+///    a mission reload.
+pub fn spawn_state(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Value, String> {
+    let theater = t.theater();
+    let c = campaign(t, api, &format!("s19-life-{tag}"))?;
+    let places = land_grid(t, (ORIGIN.0 + 9000.0, ORIGIN.1 + 1500.0), 1, 400.0)?;
+    let air_at = (ORIGIN.0 + 12_000.0, ORIGIN.1 + 6000.0);
+    let mut jet_spec = aircraft(&theater, "ljet", air_at, 4000.0);
+    jet_spec.units[0].life_percent = Some(60.0);
+    let jet = api
+        .put_group(c, jet_spec, Some(orbit(&theater, air_at, 4000.0)))?
+        .group_id;
+    let mut tank_spec = ground(&theater, "ltank", 1, places[0], 0.0);
+    tank_spec.units[0].life_percent = Some(40.0);
+    let tank = api.put_group(c, tank_spec, None)?.group_id;
+    all_live(t, api, c, &[jet, tank], 300.0, true)?;
+    t.hold(5.0)?;
+    let groups = api.groups(c)?;
+    let jet_unit = names::name(Kind::Unit, names::tag_of(c), groups[&jet].units[0].id);
+    let tank_unit = names::name(Kind::Unit, names::tag_of(c), groups[&tank].units[0].id);
+    let names_ = vec![jet_unit.clone(), tank_unit.clone()];
+    let s0 = t.unit_state(&names_)?;
+    let captured = api.capture(c, jet)?;
+    let outcome = captured.result.as_ref().map(|r| r.outcome);
+    api.materialize(c, &[jet, tank], false)?;
+    wait(t, api, "virtual", 120.0, 2.0, true, |api, _| {
+        let g = api.groups(c)?;
+        Ok([jet, tank]
+            .iter()
+            .all(|id| g.get(id).is_some_and(|g| state(g) == EntityState::Virtual))
+            .then_some(()))
+    })?;
+    api.materialize(c, &[jet, tank], true)?;
+    all_live(t, api, c, &[jet, tank], 300.0, true)?;
+    t.hold(5.0)?;
+    let s1 = t.unit_state(&names_)?;
+    reload(t, api)?;
+    t.hold(5.0)?;
+    all_live(t, api, c, &[jet, tank], 300.0, true)?;
+    t.hold(5.0)?;
+    let s2 = t.unit_state(&names_)?;
+    let pct = |s: &Value, n: &str| -> Option<f64> {
+        let (l, l0) = (s[n]["life"].as_f64()?, s[n]["life0"].as_f64()?);
+        (l0 > 0.0).then(|| 100.0 * l / l0)
+    };
+    let near = |v: Option<f64>, x: f64| v.is_some_and(|v| (v - x).abs() <= 0.5);
+    let held = |s: &Value| near(pct(s, &jet_unit), 60.0) && near(pct(s, &tank_unit), 40.0);
+    let pass = (!t.live() || (held(&s0) && held(&s1) && held(&s2)))
+        && outcome == Some(pb::Outcome::Applied as i32);
+    Ok(json!({
+        "campaign": c,
+        "capture_outcome": outcome,
+        "spawned": s0, "after_rematerialize": s1, "after_reload": s2,
         "pass": pass,
     }))
 }
@@ -1128,8 +1187,8 @@ fn reconnect<'r>(t: &mut dyn Target, api: &Api<'r>) -> Result<Api<'r>, String> {
 }
 
 /// The scenarios by name, in the order `all` runs them.
-pub const ALL: [&str; 7] = [
-    "reload", "burst", "switch", "death", "tables", "owed", "cost",
+pub const ALL: [&str; 8] = [
+    "reload", "burst", "switch", "death", "tables", "owed", "cost", "state",
 ];
 
 /// Run the scenarios named, each with its own connection, recording each
@@ -1162,6 +1221,7 @@ pub fn run(
             "tables" => tables(t, &mut api, tag),
             "owed" => owed_load(t, &mut api, tag),
             "cost" => write_cost(t, &mut api, tag, 200, 120.0),
+            "state" => spawn_state(t, &mut api, tag),
             other => Err(format!("no scenario {other}")),
         };
         api.release();

@@ -395,6 +395,26 @@ With persistence off (spec/config.md) the stores are in memory. They last as lon
 the sidecar process. The author reads state with the capture call and writes it back
 as specs after a restart.
 
+## Spawn state
+
+Every spawn of a unit, a first materialization, a restore after a mission load or a DCS
+restart, and a materialize after a dematerialize, gives it the state the store knows:
+its position and heading in the unit table, and its life.
+
+The life is `getLife` over `getLife0` as a percentage: `getLife` from the last sample or
+capture, `getLife0` from the capture or the unit's `OBJECT` record. A `PutGroup` may give
+a unit's `life_percent` instead; it stands until DCS reads the unit's life. When the life
+is below 99.95 %, the sidecar queues a `DAMAGE` right after the `GROUP_SPAWN`: ring order
+runs it after the spawn, which names the unit, and it sets the life in the spawn's frame,
+paused or not (LIVE, E39, docs/results/2026-11-16-e39-spawn-state.md). Until that
+`DAMAGE` is applied, a sample or capture of the unit does not replace the life the store
+holds, so a read at the life the spawn gave cannot overwrite it. A `DAMAGE` that DCS
+does not apply is counted (`lives_lost`), and the next sample shows the unit's life.
+
+A unit spawns with the fuel, ammunition, flares and chaff its payload or type gives
+(owner's decision, after E39). A `PutGroup` that gives a unit `fuel` or `ammo` is
+refused.
+
 ## Lua tables in the API
 
 The API carries DCS tables as JSON-like values (`google.protobuf.Struct`), whose keys

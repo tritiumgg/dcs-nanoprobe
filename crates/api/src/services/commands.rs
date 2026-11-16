@@ -203,6 +203,35 @@ fn set_components(
     Ok(())
 }
 
+/// Check a unit's spawn life (spec/world.md, "Spawn state"): a percentage
+/// from 0 to 100. Fuel and ammunition are not restored.
+fn spawn_state_ok(u: &pb::UnitSpec, f: &str) -> Result<(), Status> {
+    if let Some(p) = u.life_percent
+        && !(p.is_finite() && (0.0..=100.0).contains(&p))
+    {
+        return Err(invalid(
+            &format!("{f}.life_percent"),
+            "a percentage from 0 to 100",
+        ));
+    }
+    if u.fuel.is_some() || !u.ammo.is_empty() {
+        return Err(invalid(
+            f,
+            "a unit spawns with its payload's fuel and ammunition; only its life can be given",
+        ));
+    }
+    Ok(())
+}
+
+/// Store a unit's spawn life, when the spec gives one. A replacement that
+/// gives none keeps what the store knows.
+fn set_spawn_life(s: &mut Store, uid: EntityId, u: &pb::UnitSpec) -> Result<(), Status> {
+    if let Some(p) = u.life_percent {
+        s.set_spawn_life(uid, p).map_err(store_error)?;
+    }
+    Ok(())
+}
+
 fn put_group(g: &mut Inner, c: u64, r: &PutGroupRequest) -> Result<PutGroupResponse, Status> {
     let spec = r
         .spec
@@ -220,12 +249,7 @@ fn put_group(g: &mut Inner, c: u64, r: &PutGroupRequest) -> Result<PutGroupRespo
         if u.r#type.is_empty() {
             return Err(invalid(&format!("{f}.type"), "a unit needs its DCS type"));
         }
-        if u.life_percent.is_some() || u.fuel.is_some() || !u.ammo.is_empty() {
-            return Err(invalid(
-                &f,
-                "spawning with a captured life, fuel or ammunition is not built yet",
-            ));
-        }
+        spawn_state_ok(u, &f)?;
         finite(u.heading, &format!("{f}.heading"))?;
     }
     // Every check comes before the first store write: a call that fails
@@ -296,6 +320,10 @@ fn put_group(g: &mut Inner, c: u64, r: &PutGroupRequest) -> Result<PutGroupRespo
         })
         .map_err(store_error)?;
     set_components(&mut slot.store, id, &spec.components)?;
+    let members = slot.store.group(id).expect("created").members.clone();
+    for (u, uid) in spec.units.iter().zip(members) {
+        set_spawn_life(&mut slot.store, uid, u)?;
+    }
     if let Some(o) = order {
         slot.store.set_order(id, o).map_err(store_error)?;
     }
@@ -384,6 +412,7 @@ fn replace_group(
         if cur.type_name != u.r#type {
             s.set_unit_type(uid, &u.r#type).map_err(store_error)?;
         }
+        set_spawn_life(s, uid, u)?;
     }
     set_components(s, id, &spec.components)?;
     if let Some(o) = order {

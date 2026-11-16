@@ -144,6 +144,9 @@ pub struct CapturedMore {
     pub roll: f64,
     /// `getAmmo()` as DCS returns it, or nil.
     pub ammo: Lv,
+    /// The life a `PutGroup` asked the unit to spawn with, as a percentage
+    /// of its initial life, until DCS reads the unit's life.
+    pub life_percent: Option<f64>,
 }
 
 impl Default for CapturedMore {
@@ -153,6 +156,7 @@ impl Default for CapturedMore {
             pitch: 0.0,
             roll: 0.0,
             ammo: Lv::Nil,
+            life_percent: None,
         }
     }
 }
@@ -194,6 +198,29 @@ pub struct Unit {
     /// Further keys of the DCS unit or static table: payload, livery,
     /// callsign and so on (spec/world.md, "Lua tables in the API"). Spec.
     pub extra: Lv,
+}
+
+impl Unit {
+    /// Whether DCS has read the unit's life or fuel: the store keeps 0 for
+    /// both until the first read.
+    pub fn vitals_read(&self) -> bool {
+        self.state.life != 0.0 || self.state.fuel != 0.0
+    }
+
+    /// The life to spawn the unit with, as a percentage of its initial life
+    /// (spec/world.md, "Spawn state"): what DCS last read, else what a
+    /// `PutGroup` asked for. None when neither is known.
+    pub fn spawn_life_percent(&self) -> Option<f64> {
+        if self.dead {
+            return None;
+        }
+        if self.vitals_read() && self.captured.life0 > 0.0 && self.state.life > 0.0 {
+            return Some(
+                (100.0 * f64::from(self.state.life) / self.captured.life0).clamp(0.0, 100.0),
+            );
+        }
+        self.captured.life_percent
+    }
 }
 
 /// A managed group or static.
@@ -1721,24 +1748,56 @@ impl Store {
         }
     }
 
-    /// Sampled life and fuel.
+    /// Sampled life and fuel. They replace the life a `PutGroup` asked for.
     pub fn observe_vitals(&mut self, unit: EntityId, life: f32, fuel: f32) {
         if let Some(u) = self.units.get_mut(&unit)
             && !u.dead
-            && (u.state.life, u.state.fuel) != (life, fuel)
+            && ((u.state.life, u.state.fuel) != (life, fuel) || u.captured.life_percent.is_some())
         {
             u.state.life = life;
             u.state.fuel = fuel;
+            u.captured.life_percent = None;
             self.touch(unit);
         }
     }
 
-    /// A captured state replaces the unit's.
+    /// The life the unit started with, from its `OBJECT` record, when DCS
+    /// gave one. A capture's reading replaces it.
+    pub fn observe_life0(&mut self, unit: EntityId, life0: f64) {
+        if let Some(u) = self.units.get_mut(&unit)
+            && life0.is_finite()
+            && life0 > 0.0
+            && u.captured.life0 != life0
+        {
+            u.captured.life0 = life0;
+            self.touch(unit);
+        }
+    }
+
+    /// The life a `PutGroup` asks a unit to spawn with, as a percentage of
+    /// its initial life (spec/world.md, "Spawn state"). It replaces what DCS
+    /// read until DCS reads the unit's life again, and is a spec change, so
+    /// the group spawns again with it.
+    pub fn set_spawn_life(&mut self, unit: EntityId, life_percent: f64) -> Result<u64, StoreError> {
+        let u = self
+            .units
+            .get_mut(&unit)
+            .ok_or(StoreError::NoSuchEntity(unit))?;
+        // What DCS read no longer stands for the unit.
+        u.state.life = 0.0;
+        u.state.fuel = 0.0;
+        u.captured.life_percent = Some(life_percent);
+        let gid = u.group;
+        self.spec_changed(gid)
+    }
+
+    /// A captured state replaces the unit's, and what a `PutGroup` asked for.
     pub fn observe_capture(&mut self, unit: EntityId, state: UnitState) {
         if let Some(u) = self.units.get_mut(&unit)
             && !u.dead
         {
             u.state = state;
+            u.captured.life_percent = None;
             let theater = self.groups[&u.group].theater.clone();
             self.grid.set(unit, &theater, state.at.x, state.at.z);
             self.touch(unit);

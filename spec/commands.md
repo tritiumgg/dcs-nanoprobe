@@ -864,8 +864,11 @@ an integer and a `c_unit_dead` guard: a dead unit is `NOT_BOUND`. A call that fa
 What the setter does (LIVE, E16, step S15): at 50 % an aircraft, a helicopter and a
 ground unit read back half their initial life. At 0 they leave DCS; only an airborne
 aircraft logged an event (`UNIT_LOST`, `EJECTION`). The one ship type tried, a
-speedboat, left DCS at 50 %. The setter does nothing to a static, which is why
-`DAMAGE` takes only a unit. On a dedicated server a setting of 10 killed a ground unit and the
+speedboat, left DCS at 50 % and stayed at 80 %; a PERRY frigate read back 80 % and 50 %
+(LIVE, E39). The setter does nothing to a static, which is why `DAMAGE` takes only a
+unit. The sidecar also queues a `DAMAGE` right after a `GROUP_SPAWN` to give a unit
+its stored life (spec/world.md, "Spawn state"); E39 found it applies in the spawn's
+frame, paused or not. On a dedicated server a setting of 10 killed a ground unit and the
 death did not reach a connected client (LIVE,
 docs/results/2026-11-11-first-dll-and-spikes.md, E18).
 

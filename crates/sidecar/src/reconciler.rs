@@ -138,6 +138,11 @@ pub struct Counters {
     /// `OBJECT` records whose coalition differs from the one the country map
     /// gives for the object's country (spec/commands.md, `COUNTRIES`).
     pub coalition_disagreements: u64,
+    /// `DAMAGE` commands sent to give a spawned unit its captured life.
+    pub lives_restored: u64,
+    /// Those that DCS did not apply, or that could not be sent: the unit
+    /// runs at the life DCS gave it, and the next life sample says so.
+    pub lives_lost: u64,
 }
 
 impl Counters {
@@ -162,6 +167,8 @@ impl Counters {
         self.respawns_held += o.respawns_held;
         self.enumerate_requests += o.enumerate_requests;
         self.coalition_disagreements += o.coalition_disagreements;
+        self.lives_restored += o.lives_restored;
+        self.lives_lost += o.lives_lost;
     }
 }
 
@@ -276,6 +283,11 @@ pub struct Reconciler {
     /// the loaded generation. A live entity whose store `spec_rev` is ahead
     /// of it is spawned again, in place (spec/world.md, "Revisions").
     spawn_applied: HashMap<EntityId, u64>,
+    /// A restored unit's life, as DCS reads it, held until the `DAMAGE` that
+    /// sets it is applied: a sample or capture before then, at the life the
+    /// spawn gave, does not replace it (spec/world.md, "Spawn state"). By
+    /// unit, with the (epoch, seq) of that `DAMAGE`.
+    life_held: HashMap<EntityId, (f32, (u64, u64))>,
     /// The controller options the current spawn of each group applied.
     option_held: HashMap<EntityId, BTreeMap<u32, Lv>>,
     /// An option value DCS refused, by group and option; not sent again until
@@ -386,6 +398,7 @@ impl Reconciler {
             drift_destroy_failures: HashMap::new(),
             spawn_rejected: HashMap::new(),
             spawn_applied: HashMap::new(),
+            life_held: HashMap::new(),
             option_held: HashMap::new(),
             option_refused: HashMap::new(),
             opt_sent: HashMap::new(),
@@ -596,7 +609,8 @@ impl Reconciler {
                 if self.current(store, r.agent_boot) {
                     for v in rows {
                         if let Some(b) = self.binding.get(&v.object) {
-                            store.observe_vitals(b.unit, v.life, v.fuel);
+                            let life = self.life_held.get(&b.unit).map_or(v.life, |h| h.0);
+                            store.observe_vitals(b.unit, life, v.fuel);
                         }
                     }
                 }
@@ -674,6 +688,7 @@ impl Reconciler {
         self.pins_forget(store, false);
         self.spawn_rejected.clear();
         self.spawn_applied.clear();
+        self.life_held.clear();
         self.drift_destroy_failures.clear();
         self.held.clear();
         self.run = None;
@@ -1112,7 +1127,10 @@ impl Reconciler {
                         z: num("z", prev.at.z),
                     },
                     heading: num("heading", prev.heading),
-                    life: num("life", f64::from(prev.life)) as f32,
+                    life: match self.life_held.get(&p.entity) {
+                        Some(h) => h.0,
+                        None => num("life", f64::from(prev.life)) as f32,
+                    },
                     fuel: num("fuel", f64::from(prev.fuel)) as f32,
                 },
             );
@@ -1123,6 +1141,8 @@ impl Reconciler {
                     pitch: num("pitch", prev_more.pitch),
                     roll: num("roll", prev_more.roll),
                     ammo: lv::get(item, "ammo").cloned().unwrap_or(prev_more.ammo),
+                    // observe_capture cleared what a PutGroup asked for.
+                    life_percent: None,
                 },
                 num("id", 0.0) as u64,
             );
@@ -1140,6 +1160,9 @@ impl Reconciler {
         };
         let outcome = classify(r.code, c.opcode);
         self.resolve(store, &c, outcome, Some(r));
+        if c.opcode == opcode::DAMAGE {
+            self.life_resolved((r.epoch, r.seq), outcome);
+        }
         if c.opcode == opcode::GROUP_SPAWN && outcome == Outcome::Applied && r.object != 0 {
             for row in self
                 .binding
@@ -1233,6 +1256,7 @@ impl Reconciler {
         }
         store.set_missing(row.unit, false);
         store.set_object(row.unit, o.object);
+        store.observe_life0(row.unit, f64::from(o.life0));
         store.observe_coalition(row.group, o.coalition);
         if let Some(c) = store.country_coalition(o.country)
             && c != o.coalition
@@ -1931,6 +1955,7 @@ impl Reconciler {
                 .expect("materializing");
             return false;
         }
+        let mut owed = Vec::new();
         let body = match g.kind {
             Kind::Group => {
                 let name = ids::name(NameKind::Group, campaign, id);
@@ -1947,6 +1972,11 @@ impl Reconciler {
                         ];
                         if !u.skill.is_empty() {
                             t.push(("skill", lv::s(&u.skill)));
+                        }
+                        if let Some(p) = u.spawn_life_percent()
+                            && p < FULL_LIFE
+                        {
+                            owed.push((u.id, p, u.state.life));
                         }
                         with_extra(lv::obj(t), &u.extra)
                     })
@@ -1980,7 +2010,53 @@ impl Reconciler {
                 }
             }
         };
-        self.send(store, sim, id, g.spec_rev, body)
+        let sent = self.send(store, sim, id, g.spec_rev, body);
+        if sent {
+            self.restore_lives(store, sim, owed);
+        }
+        sent
+    }
+
+    /// Queue a `DAMAGE` for each spawned unit owed a life, right after its
+    /// spawn: ring order runs it after the spawn, which names the unit
+    /// (spec/world.md, "Spawn state"). The life a sample would replace is
+    /// held until DCS applies the `DAMAGE`.
+    fn restore_lives(
+        &mut self,
+        store: &mut Store,
+        sim: &mut dyn SimAdapter,
+        owed: Vec<(EntityId, f64, f32)>,
+    ) {
+        for (unit, p, life) in owed {
+            let key = (self.epoch, self.next_seq);
+            if self.effect_ready(store)
+                && self.send(store, sim, unit, 0, Body::Damage { life_percent: p })
+            {
+                self.counters.lives_restored += 1;
+                if life > 0.0 {
+                    self.life_held.insert(unit, (life, key));
+                }
+            } else {
+                self.counters.lives_lost += 1;
+            }
+        }
+    }
+
+    /// A `DAMAGE` that restored a life is answered: the life is no longer
+    /// held. One that DCS did not apply is counted.
+    fn life_resolved(&mut self, key: (u64, u64), outcome: Outcome) {
+        let Some(unit) = self
+            .life_held
+            .iter()
+            .find(|(_, (_, k))| *k == key)
+            .map(|(u, _)| *u)
+        else {
+            return;
+        };
+        self.life_held.remove(&unit);
+        if outcome != Outcome::Applied {
+            self.counters.lives_lost += 1;
+        }
     }
 
     /// Send each controller option the group's current spawn has not
@@ -2475,6 +2551,9 @@ impl Reconciler {
 /// A DCS table with the author's further keys added. A key the platform
 /// sets (name, type, position, heading, units, skill) keeps the platform's
 /// value: the platform's names are how it finds its objects again.
+/// A life at or above this percentage is spawned as is: no `DAMAGE` follows.
+const FULL_LIFE: f64 = 99.95;
+
 fn with_extra(table: Lv, extra: &Lv) -> Lv {
     let (Lv::Table(mut pairs), Lv::Table(more)) = (table.clone(), extra) else {
         // No further keys (nil), or a value that is not a table.

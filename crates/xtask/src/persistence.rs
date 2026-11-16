@@ -824,7 +824,7 @@ for _, n in ipairs({ __UNITS__ }) do
       end
     end
     local okc, cs = pcall(u.getCallsign, u)
-    out[n] = { ammo = rows, callsign = okc and cs or nil, fuel = u:getFuel() }
+    out[n] = { ammo = rows, callsign = okc and cs or nil, fuel = u:getFuel(), life = u:getLife(), life0 = u:getLife0() }
   end
 end
 return out

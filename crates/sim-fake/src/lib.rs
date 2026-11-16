@@ -1424,6 +1424,11 @@ impl FakeSim {
         self.lose_result = true;
     }
 
+    /// Take at most `n` commands a frame from now on; 0 stalls the ring.
+    pub fn set_commands_per_frame(&mut self, n: usize) {
+        self.cfg.commands_per_frame = n;
+    }
+
     /// The agent's active campaign changes, as a `CAMPAIGN` command from a
     /// sidecar of another campaign does: the agent discards the binding and
     /// the applied revisions, and binds again only the rows whose platform
@@ -3006,6 +3011,7 @@ impl FakeSim {
                     ("z", lv::n(o.at.z)),
                     ("heading", lv::n(0.0)),
                     ("life", lv::n(self.life.get(m).map_or(1.0, |p| p / 100.0))),
+                    ("life0", lv::n(1.0)),
                     ("fuel", lv::n(0.5)),
                 ])
             })
