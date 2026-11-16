@@ -762,14 +762,16 @@ pub fn drive(
         results["hung"] = json!({ "skipped": format!("{n} players connected") });
         return Ok(());
     }
-    // No result comes back: DCS crashes.
+    // No result comes back: DCS crashes. The clock starts before the fault
+    // is sent; the eval's own return time is recorded apart.
+    let crashed = Instant::now();
     let _ = run.eval(
         "server",
         "s19-fault",
         "local E = ...\nlocal agent = E.lib('agent').open()\nagent.crumb(91, 'S19 hung verdict')\nagent.fault()\nreturn 'not reached'\n",
-        10,
+        2,
     );
-    let crashed = Instant::now();
+    let eval_returned = crashed.elapsed();
     let deadline = crashed + HUNG_LIMIT + Duration::from_secs(35);
     let mut verdicts = Vec::new();
     let mut hung_after = None;
@@ -797,6 +799,7 @@ pub fn drive(
     results["hung"] = json!({
         "pass": pass,
         "hung_after_s": hung_after.map(|d| d.as_secs_f64()),
+        "fault_eval_returned_s": eval_returned.as_secs_f64(),
         "limit_s": HUNG_LIMIT.as_secs(),
         "heartbeat_stale_s": HEARTBEAT_STALE_S,
         "lifecycle_event": event,
@@ -833,6 +836,11 @@ pub fn drive(
     }
     let before = api.status()?;
     let killed = kill()?;
+    // The new DCS process is told by its health leaving Healthy and coming
+    // back Healthy and Running, or by its frame count falling below the
+    // one before the kill. `mission_generation` restarts in each process,
+    // so it is only recorded.
+    let mut left_healthy = false;
     let back = wait(
         run,
         &mut api,
@@ -840,11 +848,14 @@ pub fn drive(
         "DCS back after the kill",
         |api| {
             let s = api.status()?;
-            Ok((s.health == pb::Health::Healthy as i32
-                && s.agent_build == before.agent_build
-                && s.now.as_ref().map(|n| n.mission_generation)
-                    != before.now.as_ref().map(|n| n.mission_generation)
-                && s.sim_state == pb::SimState::Running as i32)
+            let healthy = s.health == pb::Health::Healthy as i32;
+            if !healthy {
+                left_healthy = true;
+            }
+            let frame_fell = s.now.as_ref().map(|n| n.frame) < before.now.as_ref().map(|n| n.frame);
+            Ok((healthy
+                && s.sim_state == pb::SimState::Running as i32
+                && (left_healthy || frame_fell))
                 .then_some(s))
         },
     )?;
@@ -857,6 +868,8 @@ pub fn drive(
         "pass": pass,
         "kill": killed,
         "theater_after": back.theater,
+        "generation_before": before.now.as_ref().map(|n| n.mission_generation),
+        "generation_after": back.now.as_ref().map(|n| n.mission_generation),
         "restored_group": restored.as_ref().ok(),
         "error": restored.err(),
     });

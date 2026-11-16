@@ -2070,17 +2070,17 @@ impl Inner {
         let next = self.next_of(id);
         let theater = if !next.theater.is_empty() {
             next.theater.clone()
-        } else if let Some(l) = slot.store.loaded().filter(|l| !l.theater.is_empty()) {
+        } else if let Some(l) = slot
+            .store
+            .loaded()
+            .filter(|l| !l.theater.is_empty() && slot.meta.theaters.contains(&l.theater))
+        {
+            // A DCS restart can leave a mission on a map the campaign lacks:
+            // the reload then brings the campaign back to its own map.
             l.theater.clone()
         } else {
             slot.theater.clone()
         };
-        if !slot.meta.theaters.contains(&theater) {
-            return Err(crate::convert::invalid(
-                "next.theater",
-                format!("{theater:?} is not one of the campaign's theaters"),
-            ));
-        }
         // Every refusal of the shell but its save comes before the capture.
         self.render_shell(id, &theater)?;
         Ok(theater)
@@ -4861,6 +4861,82 @@ mod tests {
             clock >= running && clock < running + 3_600_000,
             "the clock stays with the record's: {clock} against {running}"
         );
+    }
+
+    /// The clock of a create is a date a mission can carry, as a next
+    /// mission's start is.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_create_clock_outside_years_1_to_9999_is_refused() {
+        use nanoprobe_proto::v1alpha1::campaign_service_client::CampaignServiceClient;
+        let s = served_folder().await;
+        let lease = lease_of(&s.channel).await;
+        let mut campaigns = CampaignServiceClient::new(s.channel.clone());
+        let mut n = 0;
+        for (seconds, nanos, ok) in [
+            (-62_135_596_800, 0, true),
+            (253_402_300_799, 999_999_999, true),
+            (-62_135_596_801, 0, false),
+            (253_402_300_800, 0, false),
+            (i64::MAX, 0, false),
+            (0, -1, false),
+        ] {
+            n += 1;
+            let mut r = create(&lease, &format!("c{n}"), "Caucasus", false);
+            r.clock = Some(prost_types::Timestamp { seconds, nanos });
+            let before = entries(&s.store).len();
+            let got = campaigns.create_campaign(r).await;
+            if ok {
+                got.expect("in range");
+                continue;
+            }
+            let e = got.expect_err("out of range");
+            assert_eq!(e.code(), Code::InvalidArgument, "{seconds} {nanos}");
+            assert_eq!(
+                nanoprobe_proto::errors::detail(&e).expect("detail").field,
+                "clock"
+            );
+            assert_eq!(entries(&s.store).len(), before, "no campaign was made");
+        }
+        let listed = campaigns
+            .list_campaigns(pb::ListCampaignsRequest {})
+            .await
+            .expect("list")
+            .into_inner();
+        assert_eq!(listed.campaigns.len(), 2);
+        let _ = s.stop.send(());
+        s.task.await.expect("join").expect("serve");
+    }
+
+    /// DCS restarts into a mission on a map the campaign lacks; a reload with
+    /// no next theater brings the campaign back to its own map.
+    #[test]
+    fn a_reload_after_a_restart_on_a_foreign_theater_uses_the_campaign_s_own() {
+        let (_dir, missions, cfg) = owed_setup();
+        let hub = folder_hub(&cfg, &missions, 0x1000);
+        hub.start();
+        add_and_activate(&hub, &cfg, true);
+        steps(&hub, 300);
+        {
+            let mut g = hub.lock();
+            let fake = g
+                .backend
+                .as_any()
+                .expect("fake")
+                .downcast_mut::<nanoprobe_sim_fake::FakeSim>()
+                .expect("fake");
+            fake.restart_dcs();
+            fake.load_mission_on("Afghanistan");
+            let boot = g.sidecar_boot;
+            g.backend.attach(boot);
+        }
+        steps(&hub, 300);
+        let g = hub.lock();
+        assert_eq!(
+            g.campaigns[&1].store.loaded().map(|l| l.theater.clone()),
+            Some("Afghanistan".into()),
+            "DCS runs a map the campaign lacks"
+        );
+        assert_eq!(g.reload_theater(1).expect("theater"), "Caucasus");
     }
 
     /// A start set for another theater waits for a load of that theater.

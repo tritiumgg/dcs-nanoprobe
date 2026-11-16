@@ -188,4 +188,41 @@ mod tests {
         crate::services::mission::next_of(Some(&start(253_402_300_799, 999_999_999)))
             .expect("year 9999");
     }
+
+    /// The store writes `Next::to_lv` as the `next_mission` of `meta.world`;
+    /// the golden file pins that layout.
+    #[test]
+    fn to_lv_is_the_golden_next_mission() {
+        let golden = include_str!("../../../spec/persistence.golden");
+        let hex = golden
+            .lines()
+            .find_map(|l| l.strip_prefix("store.world.s19_keys "))
+            .expect("the golden row")
+            .trim();
+        let bytes: Vec<u8> = (0..hex.len() / 2)
+            .map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).expect("hex"))
+            .collect();
+        let world = nanoprobe_transport::codec::Reader::new(&bytes)
+            .lv()
+            .expect("decodes");
+        let Lv::Table(pairs) = world else {
+            panic!("not a table");
+        };
+        let golden_next = pairs
+            .into_iter()
+            .find(|(k, _)| *k == s("next_mission"))
+            .expect("next_mission")
+            .1;
+        let n = Next {
+            theater: "Caucasus".into(),
+            start_ms: Some(1_700_000_000_000),
+            weather: Some(Lv::Table(vec![(s("k"), Lv::Bool(true))])),
+            dynamic: vec![DynamicSpawn {
+                airbase: 12,
+                enabled: true,
+                hot_start: false,
+            }],
+        };
+        assert_eq!(n.to_lv().expect("encodes"), golden_next);
+    }
 }

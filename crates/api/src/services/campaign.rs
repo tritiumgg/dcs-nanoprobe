@@ -149,6 +149,9 @@ impl CampaignService for Campaigns {
                             "name",
                         ));
                     }
+                    if let Some(c) = &r.clock {
+                        crate::convert::mission_date(c, "clock")?;
+                    }
                     let first = if r.first_theater.is_empty() {
                         r.theaters[0].clone()
                     } else {
