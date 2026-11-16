@@ -256,3 +256,24 @@ fn save_writes_only_the_shell_inside_the_folder() {
         .collect();
     assert_eq!(names, vec![std::ffi::OsString::from("42.miz")]);
 }
+
+#[test]
+fn the_start_reads_back_from_a_shell() {
+    let tpl = start_of(CAUCASUS).unwrap();
+    assert_eq!(tpl.seconds, 28_800);
+    let want = Start {
+        year: 2031,
+        month: 7,
+        day: 4,
+        seconds: 51_234,
+    };
+    let out = write(
+        CAUCASUS,
+        &Runtime {
+            start: Some(want),
+            ..Runtime::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(start_of(&out).unwrap(), want);
+}

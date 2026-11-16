@@ -330,6 +330,16 @@ pub fn template_of(path: &Path, theater: &str) -> Result<Option<Vec<u8>>, DiskEr
         .optional()?)
 }
 
+/// The next mission's settings in the store file at `path`, read without
+/// opening the store.
+pub fn next_mission_of(path: &Path) -> Result<Option<Lv>, DiskError> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    Ok(match Rd(&get_meta(&conn, "world")?).get("next_mission") {
+        Lv::Nil => None,
+        v => Some(v.clone()),
+    })
+}
+
 /// The next `EntityId` in the store file at `path`, read without opening
 /// the store.
 pub fn next_entity_of(path: &Path) -> Result<u64, DiskError> {

@@ -24,7 +24,8 @@ mod disk;
 pub use disk::{
     CampaignRecord, CampaignState, Checkpoint, DiskError, MIGRATIONS, Migration, REVISION_RESERVE,
     SCHEMA, TierPeriod, backup_file, checkpoint_of, idempotency_of, ident_of, journal_of,
-    next_entity_of, rebase_world, record_of, revision_of, schema_of, state_of, template_of,
+    next_entity_of, next_mission_of, rebase_world, record_of, revision_of, schema_of, state_of,
+    template_of,
 };
 
 /// Without the `disk` feature a store lives in memory only: its slot is
@@ -1693,6 +1694,11 @@ impl Store {
         self.units
             .get(&unit)
             .is_some_and(|u| !u.dead && (u.missing || u.removed))
+    }
+
+    /// The model time of the last samples.
+    pub fn sample_time(&self) -> f64 {
+        self.sample_time
     }
 
     /// Set the model time of the position samples that follow: the last

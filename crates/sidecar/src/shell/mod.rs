@@ -187,6 +187,31 @@ pub fn check(bytes: &[u8], theater: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The date and start time a `.miz` holds.
+pub fn start_of(bytes: &[u8]) -> Result<Start, String> {
+    let m = members(bytes)?;
+    let src = member(&m, "mission")?;
+    let d = parse_named(src, "mission")?;
+    let num = |path: &[Key]| -> Result<i64, String> {
+        match d.root.at(path).and_then(|n| lua::scalar_value(src, n)) {
+            Some(Lv::Number(n)) if n.fract() == 0.0 => Ok(n as i64),
+            _ => Err(format!("`mission` has no whole number at {}", show(path))),
+        }
+    };
+    let date = |k: &str| [Key::s("date"), Key::s(k)];
+    let start = Start {
+        year: i32::try_from(num(&date("Year"))?).map_err(|e| e.to_string())?,
+        month: u32::try_from(num(&date("Month"))?).map_err(|e| e.to_string())?,
+        day: u32::try_from(num(&date("Day"))?).map_err(|e| e.to_string())?,
+        seconds: u32::try_from(num(&[Key::s("start_time")])?).map_err(|e| e.to_string())?,
+    };
+    if start.seconds >= 86_400 || !(1..=12).contains(&start.month) || !(1..=31).contains(&start.day)
+    {
+        return Err(format!("not a mission start: {start:?}"));
+    }
+    Ok(start)
+}
+
 /// Write a shell from `template`.
 pub fn write(template: &[u8], rt: &Runtime) -> Result<Vec<u8>, String> {
     let mut m = members(template)?;

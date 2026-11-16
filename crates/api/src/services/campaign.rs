@@ -144,7 +144,7 @@ impl CampaignService for Campaigns {
                     };
                     // An activation with no mission file creates nothing.
                     if r.activate {
-                        g.mission_check(&first)?;
+                        g.mission_check(0, &first)?;
                     }
                     let id = g.new_campaign_id();
                     g.add_campaign(

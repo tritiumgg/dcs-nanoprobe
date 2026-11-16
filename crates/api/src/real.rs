@@ -1,7 +1,7 @@
 //! The server's backend over a real DCS: [`RealSim`] behind
 //! [`Backend`](crate::hub::Backend).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use nanoprobe_proto::v1alpha1::Health;
@@ -10,15 +10,16 @@ use nanoprobe_sidecar::sim::real::{RealSim, Verdict};
 
 use crate::hub::Backend;
 
-/// The longest theater name a mission file may carry, bytes.
+/// The longest theater name a template file may carry, bytes.
 pub const THEATER_MAX: usize = 64;
 /// The longest path the agent takes in a `MISSION_LOAD`, bytes.
 pub const PATH_MAX: usize = 1024;
 
-/// `[missions]` (spec/config.md): the folder that holds a mission file per
-/// theater, named once as the sidecar opens it and once as DCS opens it. A
-/// theater's mission is `<theater>.miz`, the name exactly as `LIFECYCLE`
-/// carries it.
+/// `[missions]` (spec/config.md): the folder that holds the shared
+/// template of each theater and, under `shells/`, the shell of each
+/// campaign, named once as the sidecar opens it and once as DCS opens it.
+/// A theater's template is `<theater>.miz`, the name exactly as
+/// `LIFECYCLE` carries it; a campaign's shell is `shells/<campaign ID>.miz`.
 #[derive(Clone, Debug, Default)]
 pub struct Missions {
     /// `dir`; `None` when the key is empty.
@@ -27,23 +28,33 @@ pub struct Missions {
     pub dcs_dir: String,
 }
 
+/// The longest shell name: `shells`, a separator, 20 digits and `.miz`.
+const SHELL_MAX: usize = "shells".len() + 1 + 20 + ".miz".len();
+
 impl Missions {
-    /// Refuse a `dcs_dir` whose join with the longest file name would pass
+    /// Refuse a `dcs_dir` whose join with the longest shell name would pass
     /// the agent's path limit.
     pub fn check(&self) -> Result<(), String> {
-        let longest = self.dcs_dir.len() + 1 + THEATER_MAX + ".miz".len();
+        let longest = self.dcs_dir.len() + 1 + SHELL_MAX;
         if longest > PATH_MAX {
             return Err(format!(
-                "[missions] dcs_dir: joined to a {THEATER_MAX}-byte theater name it is {longest} bytes, over the agent's {PATH_MAX}"
+                "[missions] dcs_dir: joined to the longest shell name it is {longest} bytes, over the agent's {PATH_MAX}"
             ));
         }
         Ok(())
     }
 
-    /// The file for `theater`, as DCS opens it, when `<dir>/<theater>.miz`
-    /// exists.
-    pub fn file(&self, theater: &str) -> Result<String, String> {
-        let none = |why: &str| format!("no mission for theater {theater:?}: {why}");
+    /// `dir`, when both keys are set.
+    pub fn dir(&self) -> Result<&Path, String> {
+        match (&self.dir, self.dcs_dir.is_empty()) {
+            (Some(dir), false) => Ok(dir),
+            _ => Err("[missions] dir and dcs_dir are not both set".into()),
+        }
+    }
+
+    /// The shared template of `theater`: the bytes of `<dir>/<theater>.miz`.
+    pub fn template(&self, theater: &str) -> Result<Vec<u8>, String> {
+        let none = |why: &str| format!("no template for theater {theater:?}: {why}");
         let named = !theater.is_empty()
             && theater.len() <= THEATER_MAX
             && theater
@@ -52,9 +63,7 @@ impl Missions {
         if !named {
             return Err(none("not a theater name"));
         }
-        let (Some(dir), false) = (&self.dir, self.dcs_dir.is_empty()) else {
-            return Err(none("[missions] dir and dcs_dir are not both set"));
-        };
+        let dir = self.dir().map_err(|e| none(&e))?;
         let name = format!("{theater}.miz");
         // Exactly this name, also on a file system that ignores case.
         let found = std::fs::read_dir(dir)
@@ -66,13 +75,23 @@ impl Missions {
         if !found {
             return Err(none(&format!("{} is missing", dir.join(&name).display())));
         }
+        std::fs::read(dir.join(&name)).map_err(|e| none(&e.to_string()))
+    }
+
+    /// Campaign `campaign`'s shell as DCS opens it: `dcs_dir` joined to
+    /// `shells/<campaign>.miz` with `dcs_dir`'s separator.
+    pub fn shell_dcs_path(&self, campaign: u64) -> String {
         let base = self.dcs_dir.trim_end_matches(['\\', '/']);
         let sep = if self.dcs_dir.contains('\\') {
             '\\'
         } else {
             '/'
         };
-        Ok(format!("{base}{sep}{name}"))
+        format!(
+            "{base}{sep}{}{sep}{}",
+            nanoprobe_sidecar::shell::SHELLS,
+            nanoprobe_sidecar::shell::shell_name(campaign)
+        )
     }
 }
 
@@ -99,12 +118,12 @@ impl Backend for Real {
         self.0.detach();
     }
 
-    /// Never called: [`Real::mission_file`] always names a file or refuses,
-    /// and the reconciler sends the `MISSION_LOAD`.
+    /// Never called: a real DCS loads the shell the hub writes, with the
+    /// `MISSION_LOAD` the reconciler sends.
     fn load_mission(&mut self, _theater: &str) {}
 
-    fn mission_file(&self, theater: &str) -> Result<Option<String>, String> {
-        self.1.file(theater).map(Some)
+    fn missions(&self) -> Option<&Missions> {
+        Some(&self.1)
     }
 
     fn health(&self) -> Health {

@@ -50,15 +50,13 @@ pub trait Backend: Send + 'static {
     fn detach(&mut self);
     /// Load the campaign's mission on `theater` (plan 4.6, "Activate"), for
     /// a backend that loads its missions itself: the fake loads its one
-    /// mission. Called only when [`Backend::mission_file`] gave `None`.
+    /// mission. Called only when [`Backend::missions`] gives `None`.
     fn load_mission(&mut self, theater: &str);
-    /// The mission file, as DCS opens it, that activation loads for
-    /// `theater` with a `MISSION_LOAD` the reconciler sends
-    /// (spec/config.md, `[missions]`); `Ok(None)` for a backend that loads
-    /// its missions itself. `Err` names why there is none, and activation
-    /// is refused before anything changes.
-    fn mission_file(&self, _theater: &str) -> Result<Option<String>, String> {
-        Ok(None)
+    /// The mission folder (spec/config.md, `[missions]`): the hub writes a
+    /// campaign's shell there and the reconciler sends a `MISSION_LOAD` of
+    /// it. `None` for a backend that loads its missions itself.
+    fn missions(&self) -> Option<&crate::real::Missions> {
+        None
     }
     /// The health verdict (spec/errors.md, "Health").
     fn health(&self) -> Health;
@@ -138,6 +136,19 @@ fn owed_load(
         Some(key) => match rec.effect_result(key).map(|r| r.outcome) {
             Some(Outcome::Applied) => {
                 store.set_owed_load(None);
+                if owed.start_ms.is_some() {
+                    store.set_mission_start_ms(owed.start_ms);
+                    store.set_sample_time(0.0);
+                    // A start the controller set is used once; the next
+                    // load carries the clock (spec/persistence.md).
+                    if let Some(mut next) = store
+                        .next_mission()
+                        .and_then(|v| crate::next::Next::from_lv(v).ok())
+                        && next.start_ms.take().is_some()
+                    {
+                        store.set_next_mission(Some(next.to_lv()));
+                    }
+                }
                 // Hold until the store records a mission other than the
                 // one the load was sent in.
                 // The command's row is read before the step that folds its
@@ -336,6 +347,17 @@ pub fn lease_status(e: LeaseError) -> Status {
             "lease",
         ),
     }
+}
+
+/// `FAILED_PRECONDITION` naming the theater.
+fn precondition(msg: String) -> Status {
+    status(
+        Code::FailedPrecondition,
+        ErrorReason::Unspecified,
+        msg,
+        0,
+        "theater",
+    )
 }
 
 /// The state the server reports for DCS: hung and gone from the verdict,
@@ -1201,6 +1223,7 @@ impl Inner {
             return;
         }
         if now >= self.next_checkpoint_ms {
+            self.sync_clock(id);
             let achieved = self.achieved(id);
             let slot = self.campaigns.get_mut(&id).expect("active campaign");
             match slot.store.checkpoint(now, achieved) {
@@ -1391,23 +1414,159 @@ impl Inner {
         if theater.is_empty() || finished {
             return Ok(());
         }
-        self.mission_check(theater).map(|_| ())
+        self.mission_check(campaign, theater)
     }
 
-    /// The mission file activation loads for `theater`; `None` for a
-    /// backend that loads its missions itself. A theater with no file is
-    /// refused (spec/errors.md), before anything is created, suspended,
-    /// opened or sent.
-    pub fn mission_check(&self, theater: &str) -> Result<Option<String>, Status> {
-        self.backend.mission_file(theater).map_err(|e| {
-            status(
-                Code::FailedPrecondition,
-                ErrorReason::Unspecified,
-                e,
-                0,
-                "theater",
-            )
+    /// Whether campaign `id` (0 for one a call creates) has a template it
+    /// can load on `theater`: its own, or the shared one in `[missions]
+    /// dir` (spec/config.md). A theater with none is refused, before
+    /// anything is created, suspended, opened or sent. A backend that loads
+    /// its missions itself needs none.
+    pub fn mission_check(&self, id: u64, theater: &str) -> Result<(), Status> {
+        let Some(template) = self.template_for(id, theater)? else {
+            return Ok(());
+        };
+        nanoprobe_sidecar::shell::check(&template, theater)
+            .map_err(|e| precondition(format!("the template for theater {theater:?}: {e}")))
+    }
+
+    /// The template campaign `id` loads on `theater`: its own (plan
+    /// revision 35), else the shared one; `None` for a backend that loads
+    /// its missions itself.
+    fn template_for(&self, id: u64, theater: &str) -> Result<Option<Vec<u8>>, Status> {
+        let Some(m) = self.backend.missions() else {
+            return Ok(None);
+        };
+        if let Some(own) = self.own_template(id, theater)? {
+            return Ok(Some(own));
+        }
+        m.template(theater).map(Some).map_err(precondition)
+    }
+
+    /// Campaign `id`'s own template for `theater`, read from its store,
+    /// opened or not.
+    fn own_template(&self, id: u64, theater: &str) -> Result<Option<Vec<u8>>, Status> {
+        let Some(slot) = self.campaigns.get(&id) else {
+            return Ok(None);
+        };
+        if slot.opened {
+            return Ok(slot.store.template(theater).map(<[u8]>::to_vec));
+        }
+        match self.files.as_ref() {
+            Some(f) => {
+                nanoprobe_sidecar::store::template_of(&f.store_path(CampaignId(id)), theater)
+                    .map_err(|e| disk_status(id, &e))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Campaign `id`'s next-mission settings, from its store, opened or
+    /// not. A value that does not read is logged and taken as none.
+    pub fn next_of(&self, id: u64) -> crate::next::Next {
+        let Some(slot) = self.campaigns.get(&id) else {
+            return crate::next::Next::default();
+        };
+        let lv = if slot.opened {
+            slot.store.next_mission().cloned()
+        } else {
+            self.files.as_ref().and_then(|f| {
+                nanoprobe_sidecar::store::next_mission_of(&f.store_path(CampaignId(id)))
+                    .ok()
+                    .flatten()
+            })
+        };
+        lv.map(|v| {
+            crate::next::Next::from_lv(&v).unwrap_or_else(|e| {
+                eprintln!("campaign {id}: {e}; the next mission keeps the template's settings");
+                crate::next::Next::default()
+            })
         })
+        .unwrap_or_default()
+    }
+
+    /// Campaign `id`'s clock, ms since the Unix epoch: the start written
+    /// into the running mission's shell plus the model time of the last
+    /// samples, else the clock its record holds (plan 4.6, "Clock").
+    pub fn clock_ms(&self, id: u64) -> Option<i64> {
+        let slot = self.campaigns.get(&id)?;
+        if slot.opened
+            && let Some(start) = slot.store.mission_start_ms()
+        {
+            let model_ms = (slot.store.sample_time().max(0.0) * 1000.0) as i64;
+            return Some(start.saturating_add(model_ms));
+        }
+        slot.meta.clock.as_ref().map(ms_of)
+    }
+
+    /// Write the campaign clock into its record, in memory and in its open
+    /// store.
+    fn sync_clock(&mut self, id: u64) {
+        let Some(ms) = self.clock_ms(id) else {
+            return;
+        };
+        let Some(slot) = self.campaigns.get_mut(&id) else {
+            return;
+        };
+        let ts = prost_types::Timestamp {
+            seconds: ms.div_euclid(1000),
+            nanos: i32::try_from(ms.rem_euclid(1000) * 1_000_000).unwrap_or(0),
+        };
+        slot.meta.clock = Some(ts);
+        if slot.opened
+            && slot.store.on_disk()
+            && let Some(mut r) = slot.store.record().cloned()
+            && r.clock_ms != Some(ms)
+        {
+            r.clock_ms = Some(ms);
+            if let Err(e) = slot.store.set_record(r) {
+                panic!("the store of campaign {id} could not be written, stopping: {e}");
+            }
+        }
+    }
+
+    /// Write campaign `id`'s shell for `theater` into `[missions] dir` and
+    /// return the load it owes; `None` for a backend that loads its missions
+    /// itself (spec/persistence.md, "Campaign operations"). It changes only
+    /// the shell file: a refusal leaves every campaign as it was.
+    pub fn write_shell(&self, id: u64, theater: &str) -> Result<Option<OwedLoad>, Status> {
+        use nanoprobe_sidecar::shell::{self, Runtime, Start};
+        let Some(template) = self.template_for(id, theater)? else {
+            return Ok(None);
+        };
+        let m = self
+            .backend
+            .missions()
+            .expect("a template comes from [missions]");
+        shell::check(&template, theater)
+            .map_err(|e| precondition(format!("the template for theater {theater:?}: {e}")))?;
+        let next = self.next_of(id);
+        let start = match next.start_ms.or_else(|| self.clock_ms(id)) {
+            Some(ms) => Start::from_unix_ms(ms),
+            None => shell::start_of(&template).map_err(precondition)?,
+        };
+        let rt = Runtime {
+            start: Some(start),
+            weather: next.weather.clone(),
+            dynamic: next.dynamic.clone(),
+        };
+        let bytes = shell::write(&template, &rt)
+            .map_err(|e| precondition(format!("the shell for theater {theater:?}: {e}")))?;
+        let dir = m.dir().map_err(precondition)?;
+        shell::save(dir, id, &bytes).map_err(|e| {
+            status(
+                Code::Unavailable,
+                ErrorReason::Unspecified,
+                format!("the shell of campaign {id} could not be written: {e}"),
+                0,
+                "",
+            )
+        })?;
+        Ok(Some(OwedLoad {
+            path: m.shell_dcs_path(id),
+            cmd: None,
+            start_ms: Some(start.unix_ms()),
+        }))
     }
 
     /// Make a campaign the active one, suspending the one before. The
@@ -1423,7 +1582,7 @@ impl Inner {
             .get(&id)
             .map(|s| s.theater.clone())
             .unwrap_or_default();
-        let file = self.mission_check(&theater)?;
+        let owed = self.write_shell(id, &theater)?;
         if let Some(old) = self.active.take() {
             self.close_store(old, CampaignState::Suspended, None);
             if let Some(s) = self.campaigns.get_mut(&old) {
@@ -1440,12 +1599,9 @@ impl Inner {
         // The load is owed in the same commit as the state `active`
         // (spec/persistence.md, "Writes").
         self.hold_after = None;
-        if let (Some(path), Some(s)) = (&file, self.campaigns.get_mut(&id)) {
-            s.store.set_owed_load(Some(OwedLoad {
-                path: path.clone(),
-                cmd: None,
-                start_ms: None,
-            }));
+        let loads_itself = owed.is_none();
+        if let (Some(owed), Some(s)) = (owed, self.campaigns.get_mut(&id)) {
+            s.store.set_owed_load(Some(owed));
         }
         self.set_state(id, CampaignState::Active);
         if let Some(s) = self.campaigns.get_mut(&id) {
@@ -1458,7 +1614,7 @@ impl Inner {
         // reconciler learns the loaded theater from the load's LIFECYCLE.
         // A real DCS loads the owed file once the reconciler can send
         // (`step`); the fake loads its mission now.
-        if file.is_none() {
+        if loads_itself {
             self.backend.load_mission(&theater);
         }
         Ok(())
@@ -1476,8 +1632,10 @@ impl Inner {
             self.hold_after = None;
             self.send_no_campaign();
         }
+        self.sync_clock(id);
         if let Some(s) = self.campaigns.get_mut(&id) {
             s.store.set_owed_load(None);
+            s.store.set_mission_start_ms(None);
         }
         let state = if finished {
             CampaignState::Finished
@@ -1531,6 +1689,9 @@ impl Inner {
         // The next sidecar may take the store dir, even while handlers of
         // this one still hold the hub.
         self.lock = None;
+        if let Some(id) = self.active {
+            self.sync_clock(id);
+        }
         let ids: Vec<u64> = self.campaigns.keys().copied().collect();
         for id in ids {
             let achieved = self.achieved(id);
@@ -2394,6 +2555,9 @@ impl Hub {
 mod tests {
     use super::*;
 
+    /// The committed Caucasus template.
+    const TEMPLATE: &[u8] = include_bytes!("../../../templates/caucasus.miz");
+
     /// A DCS that never answers.
     struct Silent;
 
@@ -2478,8 +2642,8 @@ mod tests {
         fn load_mission(&mut self, _theater: &str) {
             unreachable!("a folder backend's missions are files")
         }
-        fn mission_file(&self, theater: &str) -> Result<Option<String>, String> {
-            self.1.file(theater).map(Some)
+        fn missions(&self) -> Option<&crate::real::Missions> {
+            Some(&self.1)
         }
         fn health(&self) -> Health {
             Health::Healthy
@@ -2588,7 +2752,7 @@ mod tests {
     #[test]
     fn activation_loads_the_theater_s_file_or_changes_nothing() {
         let dir = tempfile::tempdir().expect("dir");
-        std::fs::write(dir.path().join("Caucasus.miz"), b"shell").expect("miz");
+        std::fs::write(dir.path().join("Caucasus.miz"), TEMPLATE).expect("miz");
         let missions = crate::real::Missions {
             dir: Some(dir.path().to_path_buf()),
             dcs_dir: "Z:\\profile\\nanoprobe\\missions\\".into(),
@@ -2621,14 +2785,14 @@ mod tests {
         let mut g = hub.lock();
         assert_eq!(
             mission_loads(&mut g),
-            ["Z:\\profile\\nanoprobe\\missions\\Caucasus.miz"],
+            ["Z:\\profile\\nanoprobe\\missions\\shells\\1.miz"],
             "exactly one MISSION_LOAD, with dcs_dir joined to the file name"
         );
         let revision = g.campaigns[&1].store.revision();
         let e = g.activate(&cfg, 2).expect_err("no Afghanistan.miz");
         assert_eq!(e.code(), Code::FailedPrecondition);
         assert!(
-            e.message().contains("no mission for theater"),
+            e.message().contains("no template for theater"),
             "{}",
             e.message()
         );
@@ -2656,7 +2820,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("dir");
         let m = dir.path().join("missions");
         std::fs::create_dir(&m).expect("missions");
-        std::fs::write(m.join("Caucasus.miz"), b"shell").expect("miz");
+        std::fs::write(m.join("Caucasus.miz"), TEMPLATE).expect("miz");
         let missions = crate::real::Missions {
             dir: Some(m),
             dcs_dir: "Z:\\m".into(),
@@ -2723,7 +2887,7 @@ mod tests {
             assert!(owed(&hub.lock()).is_some(), "the owed load was on disk");
             steps(&hub, 300);
             let mut g = hub.lock();
-            assert_eq!(mission_loads(&mut g), ["Z:\\m\\Caucasus.miz"]);
+            assert_eq!(mission_loads(&mut g), ["Z:\\m\\shells\\1.miz"]);
             assert!(owed(&g).is_none(), "APPLIED clears it");
             g.close_all().expect("close");
         }
@@ -2807,7 +2971,7 @@ mod tests {
     #[test]
     fn nothing_materializes_before_the_owed_load_s_generation() {
         let missions_dir = tempfile::tempdir().expect("dir");
-        std::fs::write(missions_dir.path().join("Caucasus.miz"), b"shell").expect("miz");
+        std::fs::write(missions_dir.path().join("Caucasus.miz"), TEMPLATE).expect("miz");
         let missions = crate::real::Missions {
             dir: Some(missions_dir.path().to_path_buf()),
             dcs_dir: "Z:\\m".into(),
@@ -2883,25 +3047,104 @@ mod tests {
     }
 
     #[test]
+    fn activation_writes_the_shell_from_the_next_mission_and_the_clock_follows() {
+        use nanoprobe_sidecar::shell::{self, DynamicSpawn, Start};
+        let dir = tempfile::tempdir().expect("dir");
+        std::fs::write(dir.path().join("Caucasus.miz"), TEMPLATE).expect("miz");
+        let missions = crate::real::Missions {
+            dir: Some(dir.path().to_path_buf()),
+            dcs_dir: "Z:\\m".into(),
+        };
+        let cfg = Config::default();
+        let hub = Hub::new(
+            cfg.clone(),
+            Box::new(Folder(
+                nanoprobe_sim_fake::FakeSim::new(nanoprobe_sim_fake::Config::default()),
+                missions,
+            )),
+        );
+        hub.start();
+        let start = Start {
+            year: 2030,
+            month: 6,
+            day: 1,
+            seconds: 36_000,
+        };
+        {
+            let mut g = hub.lock();
+            g.add_campaign(
+                &cfg,
+                pb::Campaign {
+                    id: 1,
+                    name: "c".into(),
+                    ..pb::Campaign::default()
+                },
+                "Caucasus".into(),
+            )
+            .expect("add");
+            let next = crate::next::Next {
+                theater: String::new(),
+                start_ms: Some(start.unix_ms()),
+                weather: None,
+                dynamic: vec![DynamicSpawn {
+                    airbase: 12,
+                    enabled: true,
+                    hot_start: true,
+                }],
+            };
+            let slot = g.campaigns.get_mut(&1).expect("slot");
+            slot.store.set_next_mission(Some(next.to_lv()));
+            g.activate(&cfg, 1).expect("activate");
+            assert_eq!(owed(&g).and_then(|o| o.start_ms), Some(start.unix_ms()));
+        }
+        let written = std::fs::read(dir.path().join("shells").join("1.miz")).expect("shell");
+        assert_eq!(shell::start_of(&written), Ok(start));
+        let warehouses = shell::members(&written)
+            .expect("members")
+            .into_iter()
+            .find(|(n, _)| n == "warehouses")
+            .expect("warehouses")
+            .1;
+        let text = String::from_utf8(warehouses).expect("utf-8");
+        let airport = &text[text.find("[12] =").expect("airport 12")..];
+        let airport = &airport[..airport.find("end of [12]").expect("end")];
+        assert!(airport.contains("[\"dynamicSpawn\"] = true,"), "{airport}");
+        assert!(airport.contains("[\"allowHotStart\"] = true,"), "{airport}");
+        for _ in 0..300 {
+            hub.step().expect("step");
+        }
+        let g = hub.lock();
+        assert!(owed(&g).is_none(), "APPLIED");
+        let s = &g.campaigns[&1].store;
+        assert_eq!(s.mission_start_ms(), Some(start.unix_ms()));
+        let next = crate::next::Next::from_lv(s.next_mission().expect("next")).expect("reads");
+        assert_eq!(next.start_ms, None, "a set start is used once");
+        assert_eq!(next.dynamic.len(), 1, "the rest is kept");
+        let clock = g.clock_ms(1).expect("clock");
+        assert!(
+            clock >= start.unix_ms() && clock < start.unix_ms() + 3_600_000,
+            "the clock runs from the shell's start: {clock}"
+        );
+    }
+
+    #[test]
     fn a_theater_name_is_a_file_name_and_nothing_else() {
         let dir = tempfile::tempdir().expect("dir");
-        std::fs::write(dir.path().join("Caucasus.miz"), b"shell").expect("miz");
+        std::fs::write(dir.path().join("Caucasus.miz"), TEMPLATE).expect("miz");
         let m = crate::real::Missions {
             dir: Some(dir.path().to_path_buf()),
             dcs_dir: "/profile/missions".into(),
         };
-        assert_eq!(
-            m.file("Caucasus").as_deref(),
-            Ok("/profile/missions/Caucasus.miz")
-        );
+        assert_eq!(m.template("Caucasus").as_deref(), Ok(TEMPLATE));
+        assert_eq!(m.shell_dcs_path(42), "/profile/missions/shells/42.miz");
         for bad in ["", "caucasus", "../Caucasus", "Cau/casus", "Caucasus.miz"] {
-            assert!(m.file(bad).is_err(), "{bad:?}");
+            assert!(m.template(bad).is_err(), "{bad:?}");
         }
         let unset = crate::real::Missions {
             dir: Some(dir.path().to_path_buf()),
             dcs_dir: String::new(),
         };
-        assert!(unset.file("Caucasus").is_err());
+        assert!(unset.template("Caucasus").is_err());
         let long = crate::real::Missions {
             dir: None,
             dcs_dir: "x".repeat(crate::real::PATH_MAX),
@@ -2926,7 +3169,7 @@ mod tests {
         let store = dirs.path().join("store");
         std::fs::create_dir_all(&missions).expect("missions");
         std::fs::create_dir_all(&store).expect("store");
-        std::fs::write(missions.join("Caucasus.miz"), b"shell").expect("miz");
+        std::fs::write(missions.join("Caucasus.miz"), TEMPLATE).expect("miz");
         let cfg = Config {
             store: Some(crate::config::StoreFiles::new(store.clone())),
             ..Config::default()
@@ -3303,7 +3546,7 @@ mod tests {
     #[test]
     fn the_hold_is_stamped_when_the_result_and_the_generation_fold_together() {
         let missions_dir = tempfile::tempdir().expect("dir");
-        std::fs::write(missions_dir.path().join("Caucasus.miz"), b"shell").expect("miz");
+        std::fs::write(missions_dir.path().join("Caucasus.miz"), TEMPLATE).expect("miz");
         let missions = crate::real::Missions {
             dir: Some(missions_dir.path().to_path_buf()),
             dcs_dir: "Z:\\m".into(),
@@ -3396,7 +3639,7 @@ mod tests {
     #[test]
     fn a_mission_load_the_agent_never_took_is_sent_again() {
         let dir = tempfile::tempdir().expect("dir");
-        std::fs::write(dir.path().join("Caucasus.miz"), b"shell").expect("miz");
+        std::fs::write(dir.path().join("Caucasus.miz"), TEMPLATE).expect("miz");
         let cfg = Config::default();
         let hub = Hub::new(
             cfg.clone(),
@@ -3445,7 +3688,7 @@ mod tests {
         let mut g = hub.lock();
         assert_eq!(
             mission_loads(&mut g),
-            ["Z:\\missions\\Caucasus.miz"],
+            ["Z:\\missions\\shells\\1.miz"],
             "sent again after NotSent"
         );
         assert!(owed(&g).is_none());
