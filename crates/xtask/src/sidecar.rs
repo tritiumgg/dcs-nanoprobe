@@ -106,7 +106,11 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
         template.as_deref(),
         &mut results,
     );
-    let keys: &[&str] = if part == "shell" {
+    // A person hold (NP_SHELL_PERSON) runs only its own item; what the person
+    // saw is recorded by hand.
+    let keys: &[&str] = if part == "shell" && results.get("person").is_some() {
+        &[]
+    } else if part == "shell" {
         &[
             "reload",
             "theaters",
@@ -148,9 +152,16 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
         serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?,
     )
     .map_err(|e| format!("{}: {e}", path.display()))?;
+    // A person hold has no verdict of its own: "HELD" says only that the
+    // hold ran and ended cleanly.
+    let held = results.get("person").is_some();
     println!(
         "== {}: {}",
-        if ok { "PASS" } else { "FAIL" },
+        match (held, ok) {
+            (true, true) => "HELD",
+            (_, true) => "PASS",
+            (_, false) => "FAIL",
+        },
         path.display()
     );
     result?;

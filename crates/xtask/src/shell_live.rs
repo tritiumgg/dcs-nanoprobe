@@ -359,6 +359,92 @@ fn wait<T>(
     }
 }
 
+/// The longest a person test holds the shell.
+const PERSON_HOLD: Duration = Duration::from_secs(45 * 60);
+
+/// With `NP_SHELL_PERSON=<stop file>`: activate a campaign with `template` as
+/// its own template and dynamic spawn on its first airport, as step 3 does,
+/// then keep the lease while a person at a client looks at the slot screen.
+/// Ends when the stop file exists on this machine, or after `PERSON_HOLD`.
+/// The dynamic-spawn reads and the hook's slot list are recorded at the start
+/// and at the end.
+fn person(
+    run: &Run,
+    api: &mut Api,
+    t: &[u8],
+    generation: u32,
+    stop: &str,
+    results: &mut Value,
+) -> Result<(), String> {
+    println!("== person: own template with dynamic spawn, held");
+    let theater = shell::theatre(t)?;
+    let c = api.create("s19-person", &[theater.as_str()], false)?;
+    let airport = shell::airports(t)?.into_iter().next().ok_or("no airport")?;
+    let req = pb::SetCampaignTemplateRequest {
+        write: api.write("template", c),
+        theater: theater.clone(),
+        miz: t.to_vec(),
+    };
+    api.rt
+        .block_on(api.campaigns.set_campaign_template(req))
+        .map_err(status_text("SetCampaignTemplate"))?;
+    api.next(
+        c,
+        pb::NextMission {
+            dynamic_spawn: vec![pb::DynamicSpawn {
+                airbase_id: airport,
+                enabled: true,
+                hot_start: false,
+            }],
+            ..pb::NextMission::default()
+        },
+    )?;
+    let req = pb::ActivateCampaignRequest {
+        lease: api.lease.clone(),
+        campaign_id: c,
+        idempotency: api.key("activate"),
+    };
+    api.rt
+        .block_on(api.campaigns.activate_campaign(req))
+        .map_err(status_text("ActivateCampaign"))?;
+    loaded(run, api, &theater, generation)?;
+    let read = format!(
+        "local out = {{ airport = {airport}, slots = {{}} }}\nlocal ok, s = pcall(DCS.getDynamicSpawnSettings, {airport}, true)\nout.settings = ok and type(s) == 'table' and (tostring(s.dynamicSpawnAvailable) .. ',' .. tostring(s.allowHotSpawn)) or tostring(s)\nfor _, side in ipairs({{ 'red', 'blue' }}) do for _, s in ipairs(DCS.getAvailableSlots(side) or {{}}) do local e = {{ side = side }}\nfor k, v in pairs(s) do e[tostring(k)] = tostring(v) end\nout.slots[#out.slots + 1] = e end end\nout.players = #(net.get_player_list() or {{}})\nreturn out\n"
+    );
+    let start = run.eval("hook", "s19-person-start", &read, 60)?;
+    println!("   held: {start}");
+    // A stop file left from an earlier hold would end this one at once.
+    let stop = std::path::Path::new(stop);
+    if stop.exists() {
+        std::fs::remove_file(stop).map_err(|e| format!("{}: {e}", stop.display()))?;
+    }
+    println!("   touch {} to end the hold", stop.display());
+    let held = Instant::now();
+    while held.elapsed() < PERSON_HOLD && !stop.exists() {
+        std::thread::sleep(Duration::from_secs(15));
+        api.keep();
+    }
+    let ended = if stop.exists() {
+        "stop_file"
+    } else {
+        "timeout"
+    };
+    let _ = std::fs::remove_file(stop);
+    let end = run.eval("hook", "s19-person-end", &read, 60)?;
+    // No verdict: what the person saw is recorded by hand.
+    results["person"] = json!({
+        "verdict": "recorded by hand",
+        "ended": ended,
+        "campaign": c,
+        "airport": airport,
+        "held_s": held.elapsed().as_secs(),
+        "start": start,
+        "end": end,
+    });
+    println!("== HELD ({ended}); the verdict is the person's, recorded by hand");
+    Ok(())
+}
+
 /// Wait for the mission on `theater` loaded after `generation`.
 fn loaded(run: &Run, api: &mut Api, theater: &str, after_gen: u32) -> Result<u32, String> {
     wait(
@@ -410,6 +496,12 @@ pub fn drive(
 ) -> Result<(), String> {
     let mut api = Api::connect(endpoint, token)?;
     let mut generation = api.status()?.now.map_or(0, |n| n.mission_generation);
+
+    // A person test: only the own-template shell, held for a client.
+    if let Ok(stop) = std::env::var("NP_SHELL_PERSON") {
+        let t = template.ok_or("NP_SHELL_PERSON needs --template")?;
+        return person(run, &mut api, t, generation, &stop, results);
+    }
 
     // 1. Weather and time across a commanded reload.
     println!("== reload: start and weather");
