@@ -1444,6 +1444,7 @@ impl Inner {
             s.store.set_owed_load(Some(OwedLoad {
                 path: path.clone(),
                 cmd: None,
+                start_ms: None,
             }));
         }
         self.set_state(id, CampaignState::Active);

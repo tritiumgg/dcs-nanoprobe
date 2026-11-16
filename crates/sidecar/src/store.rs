@@ -6,7 +6,7 @@
 //! tables and the journal in a per-campaign SQLite file; here they are in
 //! memory, and a test keeps the [`Store`] across a simulated restart.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use nanoprobe_transport::codec::Lv;
 use nanoprobe_transport::records::Rates;
@@ -24,7 +24,7 @@ mod disk;
 pub use disk::{
     CampaignRecord, CampaignState, Checkpoint, DiskError, MIGRATIONS, Migration, REVISION_RESERVE,
     SCHEMA, TierPeriod, backup_file, checkpoint_of, idempotency_of, ident_of, journal_of,
-    next_entity_of, rebase_world, record_of, revision_of, schema_of, state_of,
+    next_entity_of, rebase_world, record_of, revision_of, schema_of, state_of, template_of,
 };
 
 /// Without the `disk` feature a store lives in memory only: its slot is
@@ -284,6 +284,9 @@ pub struct OwedLoad {
     pub path: String,
     /// The `MISSION_LOAD`'s epoch and sequence number once sent.
     pub cmd: Option<(u64, u64)>,
+    /// The date and start time written into the shell, milliseconds since
+    /// the Unix epoch; `None` for a file the sidecar did not write.
+    pub start_ms: Option<i64>,
 }
 
 /// How a unit left DCS without a death fact.
@@ -563,6 +566,16 @@ pub struct Store {
     stocks: BTreeMap<(String, String), DesiredStock>,
     rates: Option<Rates>,
     owed_load: Option<OwedLoad>,
+    /// The start written into the shell of the mission that runs now, ms
+    /// since the Unix epoch: the campaign clock is it plus the model time.
+    mission_start_ms: Option<i64>,
+    /// What the next shell is written with, in the API's encoding; opaque
+    /// to the store.
+    next_mission: Option<Lv>,
+    /// The campaign's own templates by theater (plan revision 35).
+    templates: BTreeMap<String, Vec<u8>>,
+    /// Theaters whose template changed since the last commit.
+    templates_dirty: BTreeSet<String>,
     countries: Option<BTreeMap<u32, u32>>,
     sample_time: f64,
     route_events: Vec<RouteEvent>,
@@ -682,6 +695,10 @@ impl Store {
             stocks: BTreeMap::new(),
             rates: None,
             owed_load: None,
+            mission_start_ms: None,
+            next_mission: None,
+            templates: BTreeMap::new(),
+            templates_dirty: BTreeSet::new(),
             countries: None,
             sample_time: 0.0,
             route_events: Vec::new(),
@@ -928,6 +945,53 @@ impl Store {
     /// commit, in `meta.world`.
     pub fn set_owed_load(&mut self, owed: Option<OwedLoad>) {
         self.owed_load = owed;
+    }
+
+    /// The start written into the running mission's shell, ms since the
+    /// Unix epoch.
+    pub fn mission_start_ms(&self) -> Option<i64> {
+        self.mission_start_ms
+    }
+
+    /// Set the running mission's start. It goes to disk with the next
+    /// commit, in `meta.world`.
+    pub fn set_mission_start_ms(&mut self, start: Option<i64>) {
+        self.mission_start_ms = start;
+    }
+
+    /// What the next shell is written with.
+    pub fn next_mission(&self) -> Option<&Lv> {
+        self.next_mission.as_ref()
+    }
+
+    /// Set what the next shell is written with. It goes to disk with the
+    /// next commit, in `meta.world`.
+    pub fn set_next_mission(&mut self, next: Option<Lv>) {
+        self.next_mission = next;
+    }
+
+    /// The campaign's own template for `theater`.
+    pub fn template(&self, theater: &str) -> Option<&[u8]> {
+        self.templates.get(theater).map(Vec::as_slice)
+    }
+
+    /// The theaters the campaign has its own template for.
+    pub fn template_theaters(&self) -> impl Iterator<Item = &str> {
+        self.templates.keys().map(String::as_str)
+    }
+
+    /// Set or remove the campaign's own template for `theater`. It goes to
+    /// disk with the next commit.
+    pub fn set_template(&mut self, theater: &str, bytes: Option<Vec<u8>>) {
+        match bytes {
+            Some(b) => {
+                self.templates.insert(theater.to_owned(), b);
+            }
+            None => {
+                self.templates.remove(theater);
+            }
+        }
+        self.templates_dirty.insert(theater.to_owned());
     }
 
     /// Set the sample rates the agent is told.
