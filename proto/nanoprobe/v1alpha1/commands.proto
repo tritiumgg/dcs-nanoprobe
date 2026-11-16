@@ -53,7 +53,7 @@ message UnitSpec {
   // Integer keys are written as decimal strings (spec/world.md).
   google.protobuf.Struct extra = 7;
   // State to spawn with, as a capture returned it. Absent spawns it new.
-  // Life is a percentage of the type's initial life, 0 to 100.
+  // Life is a percentage of the type's initial life, above 0 and up to 100.
   optional double life_percent = 8;
   reserved 9, 10;
   reserved "fuel", "ammo";

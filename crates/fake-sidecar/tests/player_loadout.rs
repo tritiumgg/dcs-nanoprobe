@@ -509,13 +509,16 @@ async fn a_read_before_the_bind_still_reaches_the_player_and_the_event() {
     let key = players_now(&ch).await[0].key.clone();
 
     // The object and its `AMMO` record come before the birth that seats the
-    // player, so the sidecar has no `EntityId` for the object at the read.
+    // player, so the sidecar has no `EntityId` for the object at the read:
+    // it holds the read, and the player shows no ammunition yet.
     let object = fake(&hub, |s| {
         let o = s.place_client_unit_in("m1", 77, "F-16C_50");
         s.emit_ammo(o, 1, &[(AIM9, 2.0), (AIM9, 2.0), (GUN, 100.0)]);
-        s.birth_event(o, Some("m1"));
         o
     });
+    until(|| async { hub.lock().loadouts.held_len() == 1 }).await;
+    assert!(players_now(&ch).await[0].ammo.is_empty());
+    fake(&hub, |s| s.birth_event(object, Some("m1")));
     until(|| async { !players_now(&ch).await[0].ammo.is_empty() }).await;
     let p = players_now(&ch).await.remove(0);
     // The agent takes the `BIND` a step after the sidecar sends it.
@@ -551,4 +554,48 @@ async fn a_read_before_the_bind_still_reaches_the_player_and_the_event() {
         0,
         "nothing stays held after the bind"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_read_with_no_ammunition_rows_is_a_read_and_a_departed_player_clears_the_unit() {
+    let (hub, ch) = in_process(cfg(), fake_config()).await.expect("server");
+    let (l, c) = setup(&ch).await;
+    until(|| async { fake(&hub, |s| s.attached()) }).await;
+    let (object, unit, _, _) = managed_unit(
+        &hub,
+        &ch,
+        &l,
+        c,
+        "air",
+        "F-15C",
+        pb::GroupCategory::Airplane,
+    )
+    .await;
+    fake(&hub, |s| {
+        s.connect_client(3, UCID_B, "Bob", 2);
+        s.client_slot(3, 2, "m2");
+    });
+    until(|| async { players_now(&ch).await.len() == 1 }).await;
+    fake(&hub, |s| s.birth_event(object, Some("m2")));
+    until(|| async { players_now(&ch).await[0].unit_id == unit }).await;
+    fake(&hub, |s| s.emit_ammo(object, 1, &[]));
+    until(|| async { players_now(&ch).await[0].ammo_read.is_some() }).await;
+    let p = players_now(&ch).await.remove(0);
+    assert!(p.ammo.is_empty());
+    assert_eq!(
+        p.ammo_read.as_ref().expect("read").cause,
+        AmmoReadCause::Birth as i32
+    );
+    until(|| async { store_unit(&ch, c, unit).await.ammo_read.is_some() }).await;
+    assert!(store_unit(&ch, c, unit).await.ammo.is_empty());
+
+    // The last player leaves: the unit shows no read either.
+    fake(&hub, |s| s.emit_ammo(object, 1, &[(AIM9, 2.0)]));
+    until(|| async { !store_unit(&ch, c, unit).await.ammo.is_empty() }).await;
+    fake(&hub, |s| s.disconnect_client(3));
+    until(|| async {
+        let u = store_unit(&ch, c, unit).await;
+        u.ammo.is_empty() && u.ammo_read.is_none()
+    })
+    .await;
 }

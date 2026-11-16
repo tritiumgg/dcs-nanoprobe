@@ -253,7 +253,8 @@ pending, so a long spawn does not expire a player's mark. With no birth pending,
 takes at most 8 marks, and at most as many as the budget left after the tiers pays for at
 the cost of a vitals row each, and at least one; the rest wait for the next pump. A pump
 with no birth pending and a mark that has its row counts as having work ("The pump's
-worth"). The list holds at most 1,024 marks; a mark past that is dropped and counted. For each mark the shim calls
+worth"). The list holds at most 1,024 marks; when it is full, a new mark drops the oldest and
+the drop is counted, so a player's slot-in after a large spawn keeps its mark. For each mark the shim calls
 `Unit.getPlayerName` under `pcall`, in the pump and never in the event handler. A unit with
 no player name is dropped with no further read and no record. For a unit with one, the
 shim calls `getAmmo`, reduces each row to its type name (`desc.typeName`) and count, keeps
@@ -345,6 +346,10 @@ With the sweep in `frame` the pump is called only when it has work worth its cal
   not renew or restart the mark, so pumps that come more than once a second for other
   tiers cannot keep the tier out. A planned row of the tier clears the mark, and rows
   skipped because the sweep is behind or the rank is strict do not set it;
+- or no birth waits and a loadout mark has its unit row ("Loadout reads"). Such a pump
+  is not counted in `W` below, so the bound of 5 a second does not hold it. Marks come
+  only from birth and takeoff events, and each pump takes at most 8, so a mark makes one
+  pump;
 - or they owe anything and the last pump is 1 s old.
 
 A pump not wanted for the subscribed rows read with their attitude reads none of them:

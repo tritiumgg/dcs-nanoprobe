@@ -2090,7 +2090,8 @@ fn a_refused_damage_is_counted_and_the_next_sample_is_taken() {
 }
 
 /// A `DAMAGE` answered by a `HELLO` instead of a `RESULT` releases the held
-/// life, and counts as lost.
+/// life. DCS applied it and the result was lost, so the outcome is Unknown:
+/// a warning, no count.
 #[test]
 fn a_damage_resolved_by_a_hello_releases_the_held_life() {
     let mut w = World::with_config(1, 0, LostPolicy::Report, one_command_a_frame());
@@ -2103,8 +2104,59 @@ fn a_damage_resolved_by_a_hello_releases_the_held_life() {
     w.apply(&Op::Detach).unwrap();
     w.apply(&Op::Reattach).unwrap();
     w.settle().unwrap();
-    assert_eq!(w.rec.counters().lives_lost, 1);
+    assert_eq!(w.rec.counters().lives_lost, 0);
     w.sim.emit_vitals(object, 5.0);
     w.tick().unwrap();
     assert_eq!(w.store.unit(unit).unwrap().state.life, 5.0);
+}
+
+/// spec/world.md, "Spawn state": the restore `DAMAGE`s are the sidecar's
+/// own. They stay out of the effect results, so a restore of more units than
+/// the table keeps does not push out an API effect's result.
+#[test]
+fn a_big_restore_leaves_an_api_effects_result_in_the_table() {
+    let mut w = World::new(1100, 0, LostPolicy::Report);
+    w.settle().unwrap();
+    let units: Vec<_> = w.store.groups().map(|g| g.members[0]).collect();
+    let key = w
+        .rec
+        .damage(&mut w.store, &mut w.sim, units[0], 50.0)
+        .expect("sent");
+    w.settle().unwrap();
+    assert!(w.rec.effect_result(key).is_some(), "answered");
+    for u in &units {
+        w.store.observe_life0(*u, 4.0);
+        w.store.observe_vitals(*u, 1.0);
+    }
+    let before = w.rec.counters().lives_restored;
+    w.apply(&Op::RestartDcs).unwrap();
+    w.settle().unwrap();
+    assert!(w.rec.counters().lives_restored >= before + 1100);
+    assert!(
+        w.rec.effect_result(key).is_some(),
+        "the API effect's result is still kept"
+    );
+}
+
+/// spec/world.md, "Spawn state": while a group's respawn is owed, a sample of
+/// the old spawn does not replace the life a `PutGroup` asked for.
+#[test]
+fn a_sample_of_the_old_spawn_keeps_a_putgroup_life() {
+    let mut w = World::with_config(1, 0, LostPolicy::Report, one_command_a_frame());
+    let unit = w.store.groups().next().unwrap().members[0];
+    w.sim.set_life0(unit.0, 5.0);
+    w.settle().unwrap();
+    let object = w
+        .units_in_dcs()
+        .into_iter()
+        .find(|(_, e)| *e == unit.0)
+        .map(|(o, _)| o)
+        .expect("live");
+    w.store.set_spawn_life(unit, 40.0).unwrap();
+    // The old object reads at full life before the respawn is sent.
+    w.sim.emit_vitals(object, 5.0);
+    w.tick().unwrap();
+    assert_eq!(w.store.unit(unit).unwrap().spawn_life_percent(), Some(40.0));
+    w.settle().unwrap();
+    assert_eq!(w.sim.life_percent_of(unit.0), Some(40.0));
 }

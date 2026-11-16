@@ -262,6 +262,13 @@ async fn a_life_out_of_range_is_refused() {
             },
         ),
         (
+            "life-zero",
+            UnitSpec {
+                life_percent: Some(0.0),
+                ..unit("F-15C", 0.0)
+            },
+        ),
+        (
             "life-nan",
             UnitSpec {
                 life_percent: Some(f64::NAN),

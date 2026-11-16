@@ -91,7 +91,8 @@ pub trait Target {
     /// path carries, for the units named.
     fn integer_keys(&mut self, units: &[String]) -> Result<Value, String>;
     /// DCS's own reads of the units named, by name: callsign and life.
-    /// An empty object on the fake.
+    /// On the fake, each unit's life as the fake DCS holds it (the
+    /// `fake_lives` log line), 1 when no `DAMAGE` set it; `life0` is 1.
     fn unit_state(&mut self, units: &[String]) -> Result<Value, String>;
     /// DCS's controller option IDs and values the scenario sets.
     fn option_ids(&mut self) -> Result<Value, String>;

@@ -204,14 +204,14 @@ fn set_components(
 }
 
 /// Check a unit's spawn life (spec/world.md, "Spawn state"): a percentage
-/// from 0 to 100.
+/// above 0 and up to 100. At 0 a unit leaves DCS with no death fact.
 fn spawn_state_ok(u: &pb::UnitSpec, f: &str) -> Result<(), Status> {
     if let Some(p) = u.life_percent
-        && !(p.is_finite() && (0.0..=100.0).contains(&p))
+        && !(p.is_finite() && p > 0.0 && p <= 100.0)
     {
         return Err(invalid(
             &format!("{f}.life_percent"),
-            "a percentage from 0 to 100",
+            "a percentage above 0 and up to 100",
         ));
     }
     Ok(())

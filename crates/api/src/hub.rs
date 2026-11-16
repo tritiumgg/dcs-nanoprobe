@@ -589,6 +589,13 @@ impl Inner {
                     && self.roster.players_of(*object).is_empty()
                 {
                     self.loadouts.forget(*object);
+                    if let Some(e) = env.as_ref() {
+                        let mut g = e.borrow_mut();
+                        let (rec, store, _) = &mut *g;
+                        if let Some((unit, _)) = rec.entity_of(store, *object) {
+                            store.forget_loadout(EntityId(unit));
+                        }
+                    }
                 }
             }
             self.loadouts

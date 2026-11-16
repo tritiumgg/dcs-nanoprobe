@@ -930,7 +930,7 @@ pub struct Sampler {
     /// The marks the last [`Sampler::loadouts`] handed out. A read whose
     /// `AMMO` the ring dropped puts its mark back.
     loadouts_handed: Vec<LoadoutMark>,
-    /// Loadout marks dropped because the list was full.
+    /// Oldest loadout marks dropped because the list was full.
     loadouts_dropped: u64,
     /// Loadout reads made, since start: one per `ammo` call for a unit row.
     loadout_reads: u64,
@@ -1884,9 +1884,13 @@ impl Sampler {
         }
         if let Some(mark) = self.loadouts.iter_mut().find(|m| m.object == object) {
             mark.cause = cause;
-        } else if self.loadouts.len() >= LOADOUT_MARKS_MAX {
-            self.loadouts_dropped += 1;
         } else {
+            // A full list drops its oldest mark: a player's slot-in comes
+            // after the AI births of a large spawn.
+            if self.loadouts.len() >= LOADOUT_MARKS_MAX {
+                self.loadouts.remove(0);
+                self.loadouts_dropped += 1;
+            }
             self.loadouts.push(LoadoutMark {
                 object,
                 cause,
@@ -1973,13 +1977,13 @@ impl Sampler {
         out.len()
     }
 
-    /// Whether the object has a row that is no readable unit: a static, or a
-    /// unit left out of every tier.
+    /// Whether the object has a row that is not a unit, a static. A unit row
+    /// marked suspect is a unit: its mark waits for the row to clear.
     fn has_other_row(&self, object: u64) -> bool {
         self.by_object
             .get(&object)
             .and_then(|&slot| self.rows[slot as usize].as_ref())
-            .is_some()
+            .is_some_and(|row| !row.unit())
     }
 
     /// A player-occupied unit's ammunition: pairs of type name and count,

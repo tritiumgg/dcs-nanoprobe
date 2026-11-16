@@ -4929,7 +4929,7 @@ pub struct UnitSpec {
     #[prost(message, optional, tag = "7")]
     pub extra: ::core::option::Option<::prost_types::Struct>,
     /// State to spawn with, as a capture returned it. Absent spawns it new.
-    /// Life is a percentage of the type's initial life, 0 to 100.
+    /// Life is a percentage of the type's initial life, above 0 and up to 100.
     #[prost(double, optional, tag = "8")]
     pub life_percent: ::core::option::Option<f64>,
 }

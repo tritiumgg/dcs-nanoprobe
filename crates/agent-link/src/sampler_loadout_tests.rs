@@ -183,6 +183,41 @@ fn the_mark_list_is_bounded() {
 }
 
 #[test]
+fn a_full_list_drops_its_oldest_mark_so_a_players_mark_is_kept() {
+    let (mut s, _rec) = table(1);
+    s.direct = true;
+    // The AI births of a large spawn have no row in the table here.
+    for id in 0..1100u64 {
+        s.mark_loadout(Some(10_000.0 + id as f64), Ammo::BIRTH);
+    }
+    s.mark_loadout(Some(1.0), Ammo::BIRTH);
+    assert_eq!(s.loadouts_waiting(), LOADOUT_MARKS_MAX);
+    assert_eq!(s.loadouts_dropped(), 1101 - LOADOUT_MARKS_MAX as u64);
+    let mut out = Vec::new();
+    s.set_pending(5, 0);
+    assert_eq!(s.loadouts(&mut out), 0);
+    s.set_pending(0, 0);
+    assert_eq!(s.loadouts(&mut out), 1);
+    assert_eq!(out, [(slot_of(&s, 1), Ammo::BIRTH)]);
+}
+
+#[test]
+fn a_mark_for_a_suspect_unit_row_waits_for_the_row_to_clear() {
+    let (mut s, _rec) = table(1);
+    let slot = slot_of(&s, 1);
+    s.mark_loadout(Some(1.0), Ammo::BIRTH);
+    s.rows[slot as usize].as_mut().expect("row").suspect = true;
+    let mut out = Vec::new();
+    for _ in 0..5 {
+        assert_eq!(s.loadouts(&mut out), 0);
+        assert_eq!(s.loadouts_waiting(), 1, "the mark waits");
+    }
+    s.rows[slot as usize].as_mut().expect("row").suspect = false;
+    assert_eq!(s.loadouts(&mut out), 1);
+    assert_eq!(out, [(slot, Ammo::BIRTH)]);
+}
+
+#[test]
 fn a_birth_mark_waits_for_its_row_and_a_static_is_ignored() {
     let (mut s, mut rec) = table(1);
     // The birth event comes before the pump adds the row.
@@ -288,12 +323,14 @@ fn a_dropped_ammo_keeps_its_mark_until_a_read_is_written() {
     assert_eq!(s.loadouts(&mut out), 1);
     s.ammo(&mut rec, out[0].0, out[0].1, &[(b"gun".to_vec(), 5.0)]);
     assert!(rec.ammo().is_empty());
+    assert_eq!(s.loadout_reads(), 1);
     assert_eq!(s.loadouts_waiting(), 1, "the mark is kept");
     // The next pump reads the unit again, and the record is written.
     rec.full = false;
     assert_eq!(s.loadouts(&mut out), 1);
     s.ammo(&mut rec, out[0].0, out[0].1, &[(b"gun".to_vec(), 5.0)]);
     assert_eq!(rec.ammo().len(), 1);
+    assert_eq!(s.loadout_reads(), 2);
     assert_eq!(s.loadouts_waiting(), 0);
 }
 
@@ -310,6 +347,7 @@ fn the_retries_of_a_dropped_ammo_end_with_the_wait() {
         assert!(pumps <= LOADOUT_WAIT_PUMPS + 1, "retries never end");
     }
     assert_eq!(s.loadouts_waiting(), 0);
+    assert_eq!(s.loadout_reads(), u64::from(pumps));
 }
 
 #[test]

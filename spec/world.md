@@ -403,7 +403,9 @@ its position and heading in the unit table, and its life.
 
 The life is `getLife` over `getLife0` as a percentage: `getLife` from the last sample or
 capture, `getLife0` from the capture or the unit's `OBJECT` record. A `PutGroup` may give
-a unit's `life_percent` instead; it stands until DCS reads the unit's life. When the life
+a unit's `life_percent` instead, above 0 and up to 100 (at 0 a unit leaves DCS with no
+death fact); it stands until DCS reads the unit's life. While the group's respawn is owed,
+a sample or capture of the old spawn does not replace it. When the life
 is below 99.95 %, the sidecar queues a `DAMAGE` right after the `GROUP_SPAWN`: ring order
 runs it after the spawn, which names the unit. It sets the life in the spawn's frame
 while the simulation is paused, and later with the simulation running (LIVE, E39,
@@ -411,11 +413,21 @@ docs/results/2026-11-16-e39-spawn-state.md); that it sets it in the spawn's fram
 the simulation running is UNVERIFIED. Until that `DAMAGE` is answered, a sample or
 capture of the unit does not replace the life the store holds, so a read at the life the
 spawn gave cannot overwrite it. The store holds the last life it read, or the
-percentage a `PutGroup` asked for. A `DAMAGE` that DCS does not apply, or that no
-`RESULT` answers before a `HELLO` resolves it, is counted (`lives_lost`) and the sidecar
-writes a warning to its standard error naming the unit's entity ID. The count is in
-`Reconciler::counters()`; no other operator surface carries the reconciler's counters.
-The next sample shows the unit's life.
+percentage a `PutGroup` asked for. A `DAMAGE` that DCS refuses or rejects, or that the
+agent never took, is counted (`lives_lost`), and the sidecar writes a warning to its
+standard error naming the unit's entity ID. A `DAMAGE` rejected only for its moment is not
+counted: its spawn is sent again with a new `DAMAGE`. A `DAMAGE` that no `RESULT` answers
+before a `HELLO` of the same agent boot and mission generation resolves it may have been
+applied: the sidecar warns and does not count it, and the next sample shows the unit's
+life. A new mission generation drops the hold without a count, because the restore runs
+again with the next spawn. The count is in `Reconciler::counters()`; no other operator
+surface carries the reconciler's counters. The next sample shows the unit's life.
+
+The setter removes some units at some percentages: a speedboat left DCS at 50 % (LIVE,
+E16), while a PERRY kept 50 % and a speedboat kept 80 % (LIVE, E39). A restore `DAMAGE`
+that removes a unit leaves the member REMOVED or MISSING like any removal; no death fact
+follows and the sidecar does not spawn the group again. Which other ship types and
+thresholds remove a unit is UNVERIFIED, an open item.
 
 A unit spawns with the fuel, ammunition, flares and chaff its payload or type gives
 (owner's decision, after E39).
@@ -429,7 +441,8 @@ carries the stamps of the read. Rows with the same type name add up. The newest 
 replaces the one before. A controller reads it for a loadout check.
 
 An AI unit has no ammunition read: its `ammo` is empty and it has no `ammo_read`. So has
-a player unit before its first read, and one with no ammunition rows. Nothing sees a
+a player unit before its first read. A player unit read with no ammunition rows has an
+empty `ammo` and an `ammo_read`. Nothing sees a
 rearm. No event named an AI M-1 rearmed by a truck (LIVE, E38,
 docs/results/2026-11-14-e38-life-and-ammunition.md); whether DCS sends one for a player
 aircraft rearmed by ground crew is UNVERIFIED, an open item for a live check. The

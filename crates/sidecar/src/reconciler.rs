@@ -619,6 +619,7 @@ impl Reconciler {
                     for v in rows {
                         if let Some(b) = self.binding.get(&v.object) {
                             match self.life_held.get(&b.unit) {
+                                None if self.life_asked(store, b.unit) => {}
                                 None => store.observe_vitals(b.unit, v.life),
                                 Some((Some(held), _)) => store.observe_vitals(b.unit, *held),
                                 Some((None, _)) => {}
@@ -808,8 +809,11 @@ impl Reconciler {
         res: Option<&CommandResult>,
     ) {
         self.inflight.remove(&(c.epoch, c.seq));
+        // A life-restore DAMAGE is the sidecar's own: nothing reads its
+        // result, so it stays out of the effect results.
+        let mut restore = false;
         if c.opcode == opcode::DAMAGE {
-            self.life_resolved((c.epoch, c.seq), outcome);
+            restore = self.life_resolved((c.epoch, c.seq), outcome, res.map(|r| r.code));
         }
         store.journal(Entry::Outcome {
             epoch: c.epoch,
@@ -819,24 +823,26 @@ impl Reconciler {
         if c.opcode == opcode::CLEAR_DEBRIS && self.fold_debris(c.epoch, c.seq, outcome, res) {
             return;
         }
-        if matches!(
-            c.opcode,
-            opcode::EXTENSION_INVOKE
-                | opcode::WAREHOUSE_ADJUST
-                | opcode::DAMAGE
-                | opcode::SOUND
-                | opcode::PICTURE
-                | opcode::PICTURE_STOP
-                | opcode::CAPTURE
-                | opcode::MESSAGE
-                | opcode::CHAT
-                | opcode::EVAL
-                | opcode::MISSION_LOAD
-                | opcode::MODERATE
-                | opcode::PLAYERS
-                | opcode::BANS
-                | opcode::CLEAR_DEBRIS
-        ) {
+        if !restore
+            && matches!(
+                c.opcode,
+                opcode::EXTENSION_INVOKE
+                    | opcode::WAREHOUSE_ADJUST
+                    | opcode::DAMAGE
+                    | opcode::SOUND
+                    | opcode::PICTURE
+                    | opcode::PICTURE_STOP
+                    | opcode::CAPTURE
+                    | opcode::MESSAGE
+                    | opcode::CHAT
+                    | opcode::EVAL
+                    | opcode::MISSION_LOAD
+                    | opcode::MODERATE
+                    | opcode::PLAYERS
+                    | opcode::BANS
+                    | opcode::CLEAR_DEBRIS
+            )
+        {
             self.effects.insert(
                 (c.epoch, c.seq),
                 EffectResult {
@@ -1139,6 +1145,7 @@ impl Reconciler {
             }
             let u = store.unit(p.entity).expect("unit");
             let (prev, prev_more) = (u.state, u.captured.clone());
+            let asked = self.life_asked(store, p.entity);
             let num = |k: &str, d: f64| lv::num_at(item, k).unwrap_or(d);
             store.observe_capture(
                 p.entity,
@@ -1151,6 +1158,7 @@ impl Reconciler {
                     heading: num("heading", prev.heading),
                     life: match self.life_held.get(&p.entity) {
                         Some((held, _)) => held.unwrap_or(prev.life),
+                        None if asked => prev.life,
                         None => num("life", f64::from(prev.life)) as f32,
                     },
                 },
@@ -1165,6 +1173,7 @@ impl Reconciler {
                     // a held percentage stays until its DAMAGE is applied.
                     life_percent: match self.life_held.get(&p.entity) {
                         Some((None, _)) => prev_more.life_percent,
+                        None if asked => prev_more.life_percent,
                         _ => None,
                     },
                 },
@@ -2062,6 +2071,20 @@ impl Reconciler {
         }
     }
 
+    /// Whether a `PutGroup` life stands for the unit while its group's
+    /// respawn is owed: what DCS reads of the old spawn does not replace it.
+    fn life_asked(&self, store: &Store, unit: EntityId) -> bool {
+        let Some(u) = store.unit(unit) else {
+            return false;
+        };
+        u.captured.life_percent.is_some()
+            && store.group(u.group).is_some_and(|g| {
+                self.spawn_applied
+                    .get(&g.id)
+                    .is_some_and(|applied| *applied < g.spec_rev)
+            })
+    }
+
     /// A restored life DCS did not take: counted, and reported once.
     fn life_lost(&mut self, unit: EntityId) {
         self.counters.lives_lost += 1;
@@ -2071,20 +2094,29 @@ impl Reconciler {
     }
 
     /// A `DAMAGE` that restored a life is answered: the life is no longer
-    /// held. One that DCS did not apply is counted.
-    fn life_resolved(&mut self, key: (u64, u64), outcome: Outcome) {
+    /// held. One that DCS refused, rejected or never took is counted. One
+    /// rejected only for its moment is sent again with its spawn, and one
+    /// whose result was lost may have been applied: neither is counted.
+    /// Returns whether the key was a life restore.
+    fn life_resolved(&mut self, key: (u64, u64), outcome: Outcome, code: Option<u16>) -> bool {
         let Some(unit) = self
             .life_held
             .iter()
             .find(|(_, (_, k))| *k == key)
             .map(|(u, _)| *u)
         else {
-            return;
+            return false;
         };
         self.life_held.remove(&unit);
-        if outcome != Outcome::Applied {
-            self.life_lost(unit);
+        match outcome {
+            Outcome::Applied => {}
+            Outcome::Unknown => eprintln!(
+                "nanoprobe: the life restore of unit {unit} may not have been applied; the next sample shows its life"
+            ),
+            Outcome::Rejected if code.is_some_and(rejected_for_now) => {}
+            _ => self.life_lost(unit),
         }
+        true
     }
 
     /// Send each controller option the group's current spawn has not

@@ -1798,6 +1798,16 @@ impl Store {
         }
     }
 
+    /// The last player left the unit: it shows no ammunition read.
+    pub fn forget_loadout(&mut self, unit: EntityId) {
+        if let Some(u) = self.units.get_mut(&unit)
+            && u.loadout.is_some()
+        {
+            u.loadout = None;
+            self.touch(unit);
+        }
+    }
+
     /// The life the unit started with, from its `OBJECT` record, when DCS
     /// gave one. A capture's reading replaces it.
     pub fn observe_life0(&mut self, unit: EntityId, life0: f64) {
