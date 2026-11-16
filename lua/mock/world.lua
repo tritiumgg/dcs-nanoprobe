@@ -221,6 +221,49 @@ function Sim:remove_static(static)
   self.gone_statics[static.id] = static
 end
 
+-- Whether a point lies inside a world.removeJunk volume: a sphere (id 2) or
+-- a box (id 1). Any other shape holds nothing.
+local function inside(volume, p)
+  local params = type(volume) == 'table' and volume.params
+  if type(params) ~= 'table' then
+    error('mock: removeJunk takes a volume', 3)
+  end
+  if volume.id == 2 then
+    local c, r = params.point, params.radius
+    local dx, dy, dz = p.x - c.x, p.y - c.y, p.z - c.z
+    return dx * dx + dy * dy + dz * dz <= r * r
+  elseif volume.id == 1 then
+    local lo, hi = params.min, params.max
+    return p.x >= lo.x and p.x <= hi.x and p.y >= lo.y and p.y <= hi.y and p.z >= lo.z and p.z <= hi.z
+  end
+  return false
+end
+
+-- world.removeJunk: the wrecks of killed units and statics inside the volume
+-- leave the world, as Object.destroy on a wreck does. Returns how many. A
+-- test sets `sim.junk_raises` to make the call raise.
+function Sim:remove_junk(volume)
+  if self.junk_raises then
+    error('mock: removeJunk raises', 3)
+  end
+  local n = 0
+  for id, unit in pairs(self.dead) do
+    if inside(volume, unit) then
+      self.dead[id] = nil
+      self.removed[id] = unit
+      n = n + 1
+    end
+  end
+  for id, static in pairs(self.dead_statics) do
+    if inside(volume, static) then
+      self.dead_statics[id] = nil
+      self.gone_statics[id] = static
+      n = n + 1
+    end
+  end
+  return n
+end
+
 -- Bring a killed unit back with its full life: the same object ID, listed by
 -- its group again, no event. Returns whether it was dead.
 function Sim:revive(unit)
@@ -1260,6 +1303,7 @@ local function scripting(host, name)
   state.trigger.action.outSoundForUnit = sound('outSoundForUnit', true)
 
   state.land = ns(name, 'land', {
+    SurfaceType = { LAND = 1, SHALLOW_WATER = 2, WATER = 3, ROAD = 4, RUNWAY = 5 },
     getHeight = function()
       return 0
     end,
@@ -1298,6 +1342,9 @@ local function scripting(host, name)
   if name == 'server' then
     rawset(state.world, 'getAirbases', airbases)
     rawset(state.world, 'searchObjects', search)
+    rawset(state.world, 'removeJunk', function(volume)
+      return sim:remove_junk(volume)
+    end)
     -- The marks and drawings on the map, as a list of panels. The field
     -- names are UNVERIFIED: the mock gives id, text, pos and coalition.
     rawset(state.world, 'getMarkPanels', function()
@@ -1352,6 +1399,9 @@ local function scripting(host, name)
       end,
       getAirbases = airbases,
       searchObjects = search,
+      removeJunk = function(volume)
+        return sim:remove_junk(volume)
+      end,
     })
   end
 

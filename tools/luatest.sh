@@ -119,7 +119,7 @@ for script in "$ROOT"/lua/tests/*.lua; do
             "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" world
             "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" world-gone
             "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" destroyed-overflow
-            for name in hook-order hook-budget hook-no-result hook-no-shim sound picture \
+            for name in hook-order hook-budget hook-no-result hook-no-shim sound clear-debris picture \
                 marks menus message extension-eval chat mission-load players moderate \
                 emit emit-objects emit-off extension-hooks extension-errors extension-budget \
                 extension-records extension-env extension-stop menu-record; do
@@ -130,6 +130,7 @@ for script in "$ROOT"/lua/tests/*.lua; do
             "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" groups
             "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" paused
             "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" names
+            "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" debris
             ;;
         players_exit.lua)
             for name in functional-on functional-off mismatch moderation moderation-fails; do

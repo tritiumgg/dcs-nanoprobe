@@ -270,8 +270,10 @@ late event from before a revival changes nothing. A death event with any other c
 such as scenery (5), or with no category, changes nothing (LIVE: most deaths near an
 explosion are scenery, docs/results/2026-11-13-event-catalogue.md).
 
-DCS sends a ground unit's death events when its wreck explodes, 0 to 84 s after the unit
-ceased to exist, and none for an object a script removed (LIVE, Windows and Wine). A
+DCS sends a ground unit's death events when its wreck explodes, 0 to 103 s after the unit
+ceased to exist, and none for an object a script removed (LIVE, Windows and Wine; the
+103 s on Wine, docs/results/2026-11-16-clear-debris.md). The delay is observed, not a
+bound DCS states. A
 script that destroys a burning wreck cancels its death events (LIVE). A cargo static
 killed by gunfire sends no death event at all (LIVE, 4 of 4). So the agent does not wait
 for an event to learn that an object is gone.

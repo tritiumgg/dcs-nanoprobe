@@ -2,7 +2,7 @@
 -- strict mock, the host-native agent, and `command-probe --part world` as the
 -- sidecar, over a real mapped file and a real loopback handshake. The agent's
 -- state lasts as long as the process, so tools/luatest.sh runs one scenario
--- per process: `groups` and `paused`.
+-- per process: `groups`, `paused`, `names` and `debris`.
 --
 -- groups: 100 groups of 4 units are spawned and removed. The agent's commanded
 -- work budget is 0.05 ms, so a frame's commands run over it and the probe's
@@ -14,14 +14,20 @@
 -- holds one group of that name with the new units, and every old unit's
 -- OBJECT_GONE came. The mock repeats what a
 -- paused destroy does under Wine (the removal waits for the resume).
+--
+-- debris: the grid's units are killed in the mock when the probe reports them
+-- spawned, and the probe clears a sphere, a box and the whole map with
+-- CLEAR_DEBRIS: every clear removes the wrecks inside it, the control group
+-- stays, and the 256 tiles run under the budget's attribution rule.
 
 local S = dofile((arg[0]:match('^(.*/)') or './') .. 'support.lua')
 local root = S.root()
 local mock = dofile(root .. 'lua/mock/dcs.lua')
 
 local MODULE, _, PROBE, _, _, SCENARIO = ...
-assert(MODULE and PROBE and (SCENARIO == 'groups' or SCENARIO == 'paused' or SCENARIO == 'names'),
-  'usage: lua lua/tests/world_exit.lua <module> <version> <link-probe> <inspect> <xtask> groups|paused|names')
+assert(MODULE and PROBE and (SCENARIO == 'groups' or SCENARIO == 'paused' or SCENARIO == 'names'
+  or SCENARIO == 'debris'),
+  'usage: lua lua/tests/world_exit.lua <module> <version> <link-probe> <inspect> <xtask> groups|paused|names|debris')
 local COMMAND_PROBE = PROBE:gsub('link%-probe$', 'command-probe')
 
 local now = os.clock
@@ -169,7 +175,33 @@ local function names()
     spawned.group, spawned.static, v.spawns_after_restart))
 end
 
-local scenarios = { groups = groups, paused = paused, names = names }
+local function debris()
+  local v = run('debris', 9, '--groups 4 --units 4', function(host, e)
+    if e.name == 'spawned' then
+      for _, n in ipairs(e.kill) do
+        host.sim:doom(assert(host.sim.by_name[n], 'no unit ' .. n))
+      end
+      S.write(control .. 'go', '0.0')
+    end
+  end)
+  local removed = {}
+  for _, c in ipairs(v.clears) do
+    assert(c.applied, c.clear .. ' was not applied')
+    removed[c.clear] = c.removed
+  end
+  -- The mock's removeJunk counts the dead units inside: a group each for the
+  -- sphere and the box, the other two groups for the whole map.
+  assert(removed.sphere == 4 and removed.box == 4 and removed['whole map'] == 8,
+    'removed ' .. tostring(removed.sphere) .. ', ' .. tostring(removed.box) .. ', ' .. tostring(removed['whole map']))
+  assert(v.tiles == 256, v.tiles .. ' whole-map tiles answered, not 256')
+  assert(v.control_live and #v.control_gone == 0, 'a control unit went')
+  assert(v.tile_frames > 1 and v.over_frames > 0 and v.counter_ok,
+    'the budget did not spread the tiles: ' .. v.tile_frames .. ' frames, ' .. v.over_frames .. ' over budget')
+  S.ok(string.format('debris: a sphere, a box and the whole map cleared in %d frames, %d over-budget frames '
+    .. 'all attributed', v.tile_frames, v.over_frames))
+end
+
+local scenarios = { groups = groups, paused = paused, names = names, debris = debris }
 local ok, err = pcall(scenarios[SCENARIO])
 local pid = (S.read(pidfile) or ''):match('%d+')
 if pid then
