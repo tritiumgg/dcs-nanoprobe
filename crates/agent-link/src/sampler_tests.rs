@@ -524,6 +524,8 @@ struct Run {
     checks: Vec<usize>,
     /// Frames over 250 µs.
     over_250: usize,
+    /// Every report the run wrote.
+    reports: Vec<Report>,
 }
 
 fn run(s: &mut Sampler, rec: &mut Rec, w: &mut World, secs: f64, fps: f64, syscall_us: f64) -> Run {
@@ -564,6 +566,7 @@ fn run_x(
     let (mut first_worth, mut first_pump) = (None, None);
     let mut checks = Vec::new();
     let mut over_250 = 0;
+    let mut reports = Vec::new();
     let mut report = None;
     for f in 0..frames {
         let t0 = start + Duration::from_nanos((f as f64 * interval * 1000.0) as u64);
@@ -669,6 +672,7 @@ fn run_x(
             for (sum, rows) in tier_rows.iter_mut().zip(r.spend.tier_rows) {
                 *sum += rows;
             }
+            reports.push(r);
         }
         agent += clock.0.saturating_duration_since(t0).as_secs_f64();
         if f % (fps as usize).max(1) == 0 {
@@ -699,6 +703,7 @@ fn run_x(
         first_pump,
         checks,
         over_250,
+        reports,
     }
 }
 
@@ -3654,6 +3659,9 @@ fn at_a_tenth_pending_births_cause_no_empty_pumps_and_still_resolve() {
 
 #[path = "sampler_sweep_tests.rs"]
 mod sweep;
+
+#[path = "sampler_fill_tests.rs"]
+mod fill;
 
 /// One 110 Hz frame of `frame_us` microseconds, with `excused_us` of it
 /// commanded work; returns the sampler's debt, credit and window agent time.
