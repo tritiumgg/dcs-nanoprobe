@@ -114,3 +114,14 @@ client sees of a kick, a ban or a slot move; arms, then reports on the next run)
 `s16-chat.lua` (sends chat lines) and `s16-slot-race.lua` (E35: takes a slot and
 asks to spawn in one step). A rejoin is `cargo xtask client join`, which runs
 `e30-join.lua`.
+
+## E39
+
+The snippets in `e39/` belong to experiment E39, on spawning with a captured unit
+state. The runner does not pick them up: each is run alone with
+`cargo xtask eval <target> <state> <file>`, in the state its header names, on a server
+with no players, and cleans up what it adds. `recon.lua` (`server`) reads the unit
+database and each type's default spawn; `spawn.lua` (`hook`) spawns aircraft, ground
+units and ships with a state and sets life in three ways, about 10 s of model time;
+`guns.lua` (`server`) reads the full gun counts. `lua/tests/e39.lua` rehearses them on
+the mock. The results are in `docs/results/2026-11-16-e39-spawn-state.md`.
