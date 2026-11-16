@@ -119,7 +119,7 @@ what is left goes on:
 | 3 | Subscribed positions | the rows `SUBSCRIBE` names | its `period_s` | as for positions, and `getPosition` when it asks for attitude |
 | 4 | Positions | every unit, and every static that can move | `position_s`; five times it for a row that has not moved | `DCS.getUnitPositionByObjectId` |
 | 5 | Attitude when stopped | units that stopped since their last attitude | each pump | `getPosition` |
-| 6 | Vitals | every row | `vitals_s` for a row `SUBSCRIBE` names; twelve times it for any other row, the slow sweep | `getLife`, and `getFuel` for a unit; `isExist` on each row the slow sweep visits |
+| 6 | Vitals | every row | `vitals_s` for a row `SUBSCRIBE` names; twelve times it for any other row, the slow sweep | `getLife`; `isExist` on each row the slow sweep visits |
 | 7 | Warehouses and airbases | every airbase of the mission | `warehouse_s` | `getCoalition`, `getWarehouse():getInventory()` |
 
 Which rows a sweep reads:
@@ -135,21 +135,18 @@ Which rows a sweep reads:
 - **A static that cannot move** has no place in the positions tier. The shim reads its
   `getPoint` when it adds the row and each time an enumeration finds it, and the agent
   writes it in a `POSITIONS` record after the `OBJECT` records of that batch.
-- **Life and fuel.** Those of a row `SUBSCRIBE` names are read on every vitals sweep.
+- **Life.** Those of a row `SUBSCRIBE` names are read on every vitals sweep.
   Any other row's, with no exception for aircraft, are read once in twelve vitals
   sweeps, the slow sweep (60 s at the default `vitals_s`); once when the row is added; and after an
   `S_EVENT_HIT` names the row as its target, no sooner than 1 s after the row's last
-  read. Fuel comes with each of those reads and has no schedule of its own: a ground
-  unit's or a ship's reads 1.0 moving or halted (LIVE), and an aircraft's is as old as
-  its row's last read. The slow sweep also checks `isExist` on each row it visits, which
-  finds a kill that sent no hit event (spec/records.md, "The object table"). A sidecar subscribes the units players occupy, and a capture
-  reads fuel itself (spec/commands.md).
+  read. The slow sweep also checks `isExist` on each row it visits, which
+  finds a kill that sent no hit event (spec/records.md, "The object table"). A sidecar subscribes the units players occupy.
 - An event with no target, and an event naming an object the table
   lacks, marks nothing. Damage that sends no event, such as a scripted explosion's
   splash on a unit it does not kill (LIVE), shows at the row's next slow sweep of life.
 - **After a `HELLO`** the sidecar holds no samples. Every row returns to every position
   sweep until it has again read unmoved three times, and every row that is not read on
-  every vitals sweep is marked for one read of its life and fuel.
+  every vitals sweep is marked for one read of its life.
 
 Rows that an event or an attach marked are read at the start of their tier's next
 batch, before the cursor's rows, and do not count against the tier's credit.
@@ -385,13 +382,13 @@ while an enumeration runs it grows from the last ended one's `ENUM_BEGIN`, so it
 up to the period plus the enumeration's duration. The agent writes each in the status
 block (spec/transport.md) and in the `sampling` LOG.
 
-The slow sweep, of the life and fuel of the rows read once in twelve vitals sweeps,
+The slow sweep, of the life of the rows read once in twelve vitals sweeps,
 completes when the vitals tier has completed twelve sweeps. Its achieved period is
 reported in the `sampling` LOG in the same way: the longer of the last slow sweep's time
 and the time the running one has taken, and 0 before any such row was owed.
 
 A tier that reads a row only on its turn, in one of every `every` of its sweeps (an idle
-unit's position, a row's slow life and fuel), decides each place once per sweep. A batch
+unit's position, a row's slow life), decides each place once per sweep. A batch
 that passes the end of the list reads the places after the end in the next sweep: the
 batch's close completes the sweep, and those places are decided against the new count.
 So every row is read once in each `every` consecutive sweeps, and the slow sweep's period
@@ -495,7 +492,7 @@ message `sampling` and these `data` keys:
 | `due_vitals`, `swept_vitals` | Vitals rows due in the window at the target period, the rows of one vitals sweep × `window_s` / the target; and the rows the vitals cursor read, without the reads an event mark asked for, which `rows_vitals` includes. The vitals period as a rate is the target × `due_vitals` / `swept_vitals`, each summed over the windows of a span ("Starvation guard") |
 | `idle` | Units and movable statics read once in five position sweeps |
 | `marked_life` | Rows marked for a read of life that still wait |
-| `life_sweep_s` | The achieved period of the slow sweep of life and fuel ("Achieved period") |
+| `life_sweep_s` | The achieved period of the slow sweep of life ("Achieved period") |
 | `sweeps` | Sweeps of positions in `frame` in the window |
 | `sweep_row_us`, `sweep_batch_us` | The running cost of one row inside the sweep's loop, and of a sweep outside its loop. `cost_positions` is the sweep's whole time over its rows |
 | `sweep_cut` | Sweeps in the window that their deadline stopped |

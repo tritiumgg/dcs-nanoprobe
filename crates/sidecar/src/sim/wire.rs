@@ -227,8 +227,6 @@ pub struct Vitals {
     pub object: u64,
     /// `getLife()`.
     pub life: f32,
-    /// `getFuel()`.
-    pub fuel: f32,
 }
 
 /// Encode a `POSITIONS` batch.
@@ -260,7 +258,6 @@ pub fn encode_vitals(rows: &[Vitals]) -> Vec<u8> {
     TransportVitals {
         object: rows.iter().map(|v| v.object).collect(),
         life: rows.iter().map(|v| v.life).collect(),
-        fuel: rows.iter().map(|v| v.fuel).collect(),
     }
     .encode()
 }
@@ -272,7 +269,6 @@ pub fn decode_vitals(b: &[u8]) -> Result<Vec<Vitals>, DecodeError> {
         .map(|i| Vitals {
             object: v.object[i],
             life: v.life[i],
-            fuel: v.fuel[i],
         })
         .collect())
 }
@@ -1266,7 +1262,6 @@ mod tests {
             Input::Vitals(vec![Vitals {
                 object: 1,
                 life: 1.0,
-                fuel: 0.5,
             }]),
             Input::AuthorEvent(AuthorEvent {
                 objects: vec![7],

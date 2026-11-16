@@ -407,7 +407,7 @@ fn pump(s: &mut Sampler, rec: &mut Rec, w: &mut World, clock: &mut Clock) {
             Tier::Vitals => {
                 for &slot in &slots {
                     let t = clock.add(w.tier_us[plan.tier.index()].unwrap_or(cost(plan.tier)));
-                    if s.vitals(slot, Some(3.0), Some(1.0), || t) {
+                    if s.vitals(slot, Some(3.0), || t) {
                         stop = true;
                         break;
                     }
@@ -916,7 +916,7 @@ fn a_dear_row_and_a_large_allowance_do_not_stop_the_sweep() {
 
 /// A sidecar that attaches holds no samples. After its `HELLO` every row is
 /// read again within seconds, the halted ones too: a position (a static's
-/// with the enumeration the attach asks for), and life and fuel.
+/// with the enumeration the attach asks for), and life.
 #[test]
 fn an_attach_reads_every_row_again() {
     let mut s = Sampler::new(Rates::default(), 0.07);
@@ -945,7 +945,7 @@ fn an_attach_reads_every_row_again() {
         .flat_map(|p| p.object)
         .collect();
     assert_eq!(positions.len(), 2000, "positions after the attach");
-    assert_eq!(vitals.len(), 2000, "life and fuel after the attach");
+    assert_eq!(vitals.len(), 2000, "life after the attach");
     // The halted rows go back to their slow schedule.
     run_x(&mut s, &mut rec, &mut w, 10.0, 100.0, 185.0, 29.0, 2.2);
     assert!(
@@ -2689,7 +2689,6 @@ fn encode_into_matches_encode() {
     let v = Vitals {
         object: vec![4, 5],
         life: vec![1.5, 2.5],
-        fuel: vec![0.5, 0.25],
     };
     let a = Attitude {
         object: vec![6],
@@ -2815,7 +2814,7 @@ fn at_half_a_frame_a_second_the_sampling_frames_stay_under_250_us() {
 
 /// No aircraft exception: an unsubscribed aircraft's life is read when its
 /// row is added, after a hit, and on the slow sweep; a subscribed aircraft's
-/// life and fuel every 5 s.
+/// life every 5 s.
 #[test]
 fn only_a_subscribed_aircraft_has_its_life_read_every_vitals_period() {
     let mut s = Sampler::new(Rates::default(), 0.07);

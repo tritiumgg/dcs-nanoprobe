@@ -23,7 +23,7 @@ entities by `EntityId` within a campaign.
 | Kind | Identity | Created by the platform | Carries |
 |---|---|---|---|
 | Group | `EntityId` | yes | The spec: country, category and members; its controller options; and the order. The unit of spawn, order, materialize and destroy. |
-| Unit | `EntityId`, a member of one group | with its group | Observed state: position, attitude, life, fuel. Dies alone. |
+| Unit | `EntityId`, a member of one group | with its group | Observed state: position, attitude, life. Dies alone. |
 | Static | `EntityId` | yes | A spec and observed state. Spawned and destroyed alone. |
 | Airbase | theater and DCS name | no | Owner (coalition) |
 | Warehouse | theater and DCS name of its airbase | no | Stock |
@@ -412,8 +412,7 @@ holds, so a read at the life the spawn gave cannot overwrite it. A `DAMAGE` that
 does not apply is counted (`lives_lost`), and the next sample shows the unit's life.
 
 A unit spawns with the fuel, ammunition, flares and chaff its payload or type gives
-(owner's decision, after E39). A `PutGroup` that gives a unit `fuel` is
-refused.
+(owner's decision, after E39).
 
 ## Lua tables in the API
 
@@ -468,8 +467,7 @@ before the slot. A held slot attaches to every later birth with its mission ID, 
 respawn in the same slot is covered. A slot change or a disconnect ends the occupancy;
 so does the unit leaving the table. A slot that matches no birth leaves the player's
 unit unknown: the sidecar counts it and does not guess. The sidecar subscribes each
-occupied unit to the higher sampling rate (spec/sampling.md) and reports the fuel a
-player used over a campaign from those vitals samples.
+occupied unit to the higher sampling rate (spec/sampling.md).
 
 **Menu attribution.** A menu selection names the players who could have made it
 (spec/records.md, "Layout: MENU").

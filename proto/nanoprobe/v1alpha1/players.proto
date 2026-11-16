@@ -32,10 +32,8 @@ message Player {
   // The unit the player is in, 0 for none.
   uint64 unit_id = 5;
   uint32 seat = 6;
-  // Fuel the player used in the active campaign, in fractions of a full
-  // tank, summed over the units the player flew. A rise in a unit's fuel
-  // counts for nothing.
-  double fuel_used = 7;
+  reserved 7;
+  reserved "fuel_used";
 }
 
 message Occupancy {

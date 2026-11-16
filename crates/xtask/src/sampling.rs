@@ -22,7 +22,7 @@
 //! - no sample is older than twice `P`, the period its row is read at
 //!   (spec/sampling.md, "Tiers"). For a position: the position period for an
 //!   object that moves, five times it for one that does not, and 60 s, the
-//!   enumeration period, for a static that cannot move. For life and fuel:
+//!   enumeration period, for a static that cannot move. For life:
 //!   the vitals period for a row a subscription names, twelve times it for
 //!   any other row.
 //!   Each period is the tier's target, or the period the agent last reported
@@ -39,7 +39,7 @@
 //! - with `--recording`, the median over objects of the interval between an
 //!   object's last two samples in the recording is within 25 % of the period
 //!   the agent reported, for the positions of the objects that move. The
-//!   same figures for the life and fuel of the subscribed rows are reported,
+//!   same figures for the life of the subscribed rows are reported,
 //!   not judged, in every compare (the mock's `tenth` scenario, the live
 //!   `tenth` part's `k1`, the Windows part, and `--rejudge` of a bundle):
 //!   one reading of the vitals period can show a pass waiting for an
@@ -47,8 +47,7 @@
 //!   `swept_vitals` (`assert_vitals_band` in the agent-link host tests).
 //!   Fewer than 20 objects are reported and not judged,
 //!   and with `--no-ages` the figures are reported only;
-//! - every mirrored life equals the oracle's, and every unit's fuel is within
-//!   0.002 a second of the sample's age, plus 0.001;
+//! - every mirrored life equals the oracle's;
 //! - every row has a position and vitals, unless the mirror added it less
 //!   than 1.5 times the tier's achieved period (or target, when longer) plus
 //!   2 s before its last read: a tier that the budget has slowed reaches a
@@ -57,7 +56,7 @@
 //! The oracle's file is the eval reply's first value: `{model, chunks,
 //! rows_n, failed, early_model}`, or `{model, rows, failed}`. The mirror's
 //! file holds `periods` and `rows`, each with `object`, `pos`, `pos_model`,
-//! `life`, `fuel` and `vit_model`.
+//! `life` and `vit_model`.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -67,12 +66,9 @@ use serde_json::{Value, json};
 
 /// The slack on a position, metres.
 const POSITION_SLACK_M: f64 = 1.0;
-/// Fuel may change this fraction a second, and this much besides.
-const FUEL_RATE: f64 = 0.002;
-const FUEL_SLACK: f64 = 0.001;
 /// The sampler's schedule (spec/sampling.md, "Tiers"): a unit or cargo
 /// static that has not moved is read once in this many position sweeps, and
-/// a row no subscription names has its life and fuel read once in this many
+/// a row no subscription names has its life read once in this many
 /// vitals sweeps; a static that cannot move has its position read once an
 /// enumeration, every this many seconds.
 const IDLE_EVERY: f64 = 5.0;
@@ -109,10 +105,7 @@ pub struct Truth {
     pub top: f64,
     /// Life.
     pub life: f64,
-    /// Fuel, for a unit.
-    pub fuel: Option<f64>,
-    /// A subscription names it, so its life and fuel are read on every
-    /// vitals sweep. Any other row's are read on the slow sweep.
+    /// A subscription names it, so its life is read on every vitals sweep. Any other row's are read on the slow sweep.
     pub watched: bool,
     /// A static that can move.
     pub cargo: bool,
@@ -128,8 +121,8 @@ pub struct Mirrored {
     pub id: u64,
     /// Position and the model time of its sample.
     pub pos: Option<([f64; 3], f64)>,
-    /// Life, fuel and the model time of their sample.
-    pub vitals: Option<(f64, f64, f64)>,
+    /// Life and the model time of its sample.
+    pub vitals: Option<(f64, f64)>,
     /// The real time the mirror added the row.
     pub since_real: Option<f64>,
 }
@@ -195,7 +188,7 @@ pub struct Verdict {
     pub unpositioned: Vec<u64>,
     /// Positions past the distance allowed: object and metres off.
     pub far: Vec<(u64, f64)>,
-    /// Life or fuel that differs: object.
+    /// Life that differs: object.
     pub vitals: Vec<u64>,
     /// Objects with no vitals yet.
     pub unvital: Vec<u64>,
@@ -360,7 +353,7 @@ pub fn compare(
         match m.vitals {
             None if grace.young(m.since_real, grace.vitals_s) => v.young += 1,
             None => v.unvital.push(*id),
-            Some((life, fuel, at)) => {
+            Some((life, at)) => {
                 let age = (oracle_model - at).abs();
                 v.oldest.1 = v.oldest.1.max(age);
                 if grace
@@ -370,10 +363,7 @@ pub fn compare(
                     v.old_vitals.push((*id, age));
                 }
                 let life_ok = (life - t.life).abs() <= 1e-4 * t.life.abs().max(1.0);
-                let fuel_ok = t.fuel.is_none_or(|f| {
-                    (fuel - f).abs() <= FUEL_RATE * (oracle_model - at).abs() + FUEL_SLACK
-                });
-                if !(life_ok && fuel_ok) {
+                if !life_ok {
                     v.vitals.push(*id);
                 }
             }
@@ -430,7 +420,6 @@ pub fn read_oracle(v: &Value) -> Result<(f64, Vec<Truth>, u64), String> {
             speed: num("speed")?,
             top: r["top"].as_f64().unwrap_or(0.0),
             life: num("life")?,
-            fuel: r["fuel"].as_f64(),
             watched: false,
             cargo: r["cargo"].as_bool().unwrap_or(false),
             early: match (
@@ -463,7 +452,7 @@ pub fn read_mirror(v: &Value) -> Result<Vec<Mirrored>, String> {
             _ => None,
         };
         let vitals = match (r["life"].as_f64(), r["vit_model"].as_f64()) {
-            (Some(life), Some(at)) => Some((life, r["fuel"].as_f64().unwrap_or(f64::NAN), at)),
+            (Some(life), Some(at)) => Some((life, at)),
             _ => None,
         };
         out.push(Mirrored {
@@ -1186,7 +1175,6 @@ mod tests {
             speed,
             top: 0.0,
             life: 3.0,
-            fuel: Some(1.0),
             watched: false,
             cargo: false,
             early: None,
@@ -1197,7 +1185,7 @@ mod tests {
         Mirrored {
             id,
             pos: Some(([x, 0.0, 0.0], at)),
-            vitals: Some((3.0, 1.0, at)),
+            vitals: Some((3.0, at)),
             since_real: Some(0.0),
         }
     }
@@ -1250,7 +1238,7 @@ mod tests {
 
     /// An object that does not move is read once in five sweeps: its
     /// position fails past twice five periods, with its age, however close
-    /// the position. Its life and fuel, read once in twelve vitals sweeps,
+    /// the position. Its life, read once in twelve vitals sweeps,
     /// fail past twice that.
     #[test]
     fn an_unmoved_object_s_sample_fails_past_twice_its_slow_period() {
@@ -1272,13 +1260,13 @@ mod tests {
         assert_eq!(v.old, vec![(1, 11.0)]);
         assert!(v.old_vitals.is_empty() && !v.matches());
         let mut m = held(1, 100.0, 300.0);
-        m.vitals = Some((3.0, 1.0, 175.0));
+        m.vitals = Some((3.0, 175.0));
         let v = compare(&[truth(1, 100.0, 0.0)], 300.0, &[m.clone()], &[], aged());
         assert_eq!(v.old_vitals, vec![(1, 125.0)]);
-        // A subscribed row's life and fuel are read every sweep.
+        // A subscribed row's life is read every sweep.
         let mut t = truth(1, 100.0, 0.0);
         t.watched = true;
-        m.vitals = Some((3.0, 1.0, 289.0));
+        m.vitals = Some((3.0, 289.0));
         let v = compare(&[t], 300.0, &[m], &[], aged());
         assert_eq!(v.old_vitals, vec![(1, 11.0)]);
     }
@@ -1379,15 +1367,15 @@ mod tests {
     }
 
     #[test]
-    fn life_must_match_and_fuel_may_drift_with_age() {
+    fn life_must_match() {
         let mut m = held(1, 0.0, 10.0);
-        m.vitals = Some((2.0, 1.0, 10.0));
+        m.vitals = Some((2.0, 10.0));
         assert_eq!(
             compare(&[truth(1, 0.0, 0.0)], 10.0, &[m], &[], Grace::default()).vitals,
             vec![1]
         );
         let mut m = held(1, 0.0, 0.0);
-        m.vitals = Some((3.0, 0.985, 0.0));
+        m.vitals = Some((3.0, 0.0));
         assert!(compare(&[truth(1, 0.0, 0.0)], 10.0, &[m], &[], Grace::default()).matches());
     }
 

@@ -281,7 +281,6 @@ impl PlayersService for Players {
         require(&req, Access::Observer)?;
         let r = req.into_inner();
         let g = self.0.lock();
-        let campaign = g.active.unwrap_or(0);
         let players = g
             .roster
             .players()
@@ -299,7 +298,6 @@ impl PlayersService for Players {
                     coalition: coalition_of_dcs(p.side) as i32,
                     unit_id: seat.map_or(0, |o| o.unit),
                     seat: seat.map_or(0, |o| o.seat),
-                    fuel_used: g.roster.fuel_used(&p.key, campaign),
                 }
             })
             .collect();

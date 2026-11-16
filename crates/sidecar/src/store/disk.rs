@@ -1585,17 +1585,11 @@ fn dec_point(v: &Lv) -> Result<Point, DiskError> {
 }
 
 fn enc_unit_state(v: &UnitState) -> Lv {
-    let UnitState {
-        at,
-        heading,
-        life,
-        fuel,
-    } = v;
+    let UnitState { at, heading, life } = v;
     t(vec![
         ("at", enc_point(at)),
         ("heading", f(*heading)),
         ("life", f(f64::from(*life))),
-        ("fuel", f(f64::from(*fuel))),
     ])
 }
 
@@ -1605,7 +1599,6 @@ fn dec_unit_state(v: &Lv) -> Result<UnitState, DiskError> {
         at: dec_point(r.get("at"))?,
         heading: r.f("heading")?,
         life: r.f("life")? as f32,
-        fuel: r.f("fuel")? as f32,
     })
 }
 
@@ -2620,7 +2613,6 @@ mod tests {
                         },
                         heading: 0.5,
                         life: 1.0,
-                        fuel: 0.75,
                     },
                 )],
                 authority: Authority::Sim,

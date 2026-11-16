@@ -8,8 +8,7 @@
 -- per object that exists, in chunks of 1,000 rows because the eval channel
 -- encodes at most 2,000 entries of a table (spec/eval.md): its object ID,
 -- name, kind (1 unit, 2 static), position, speed, top speed (`getDesc().speedMax`),
--- life, and fuel for a unit; and `cargo` for a static of the cargo category,
--- which can move.
+-- life; and `cargo` for a static of the cargo category, which can move.
 -- A getter that raises leaves its object out and counts it in `failed`.
 -- After an early read (lua/sampling/oracle-early.lua) a unit's or cargo
 -- static's row also holds where it stood then and how fast it moved (`ex`,
@@ -45,7 +44,6 @@ local function unit_row(u)
     speed = math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z),
     top = type(desc) == 'table' and tonumber(desc.speedMax) or 0,
     life = u:getLife(),
-    fuel = u:getFuel(),
   })
 end
 

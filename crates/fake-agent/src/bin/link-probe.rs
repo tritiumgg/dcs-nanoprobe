@@ -77,7 +77,7 @@
 //! request: `generation`, `counters`, the status block's `slice_us` and
 //! `periods`, the `subscribed` object IDs, and `rows`, each with `object`,
 //! `name`, `kind`, `pos`, `pos_model`, `pos_real`, `samples`, `interval`,
-//! `life`, `fuel`, `vit_model` and `since_real`, the real time its row was
+//! `life`, `vit_model` and `since_real`, the real time its row was
 //! added; and `real`, the real time of the last `FRAME` read. The `xtask sampling compare` command sets
 //! it against the oracle. When the mirror wants an enumeration, the probe
 //! sends `ENUMERATE`. With `--subscribe N`, once it has used an enumeration
@@ -310,12 +310,12 @@ impl MirrorOut {
                     ),
                     None => ("null".into(), "null".into(), "null".into()),
                 };
-                let (life, fuel, vm) = match &r.vitals {
-                    Some(v) => (num(v.value.0.into()), num(v.value.1.into()), num(v.at.model_time)),
-                    None => ("null".into(), "null".into(), "null".into()),
+                let (life, vm) = match &r.vitals {
+                    Some(v) => (num(v.value.into()), num(v.at.model_time)),
+                    None => ("null".into(), "null".into()),
                 };
                 format!(
-                    "{{\"object\":{},\"name\":{},\"kind\":{},\"pos\":{pos},\"pos_model\":{pm},\"pos_real\":{pr},\"samples\":{},\"interval\":{},\"life\":{life},\"fuel\":{fuel},\"vit_model\":{vm},\"since_real\":{}}}",
+                    "{{\"object\":{},\"name\":{},\"kind\":{},\"pos\":{pos},\"pos_model\":{pm},\"pos_real\":{pr},\"samples\":{},\"interval\":{},\"life\":{life},\"vit_model\":{vm},\"since_real\":{}}}",
                     r.object.object,
                     json_string(&r.object.name),
                     r.object.kind,

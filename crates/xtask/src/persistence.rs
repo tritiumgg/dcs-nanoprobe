@@ -763,14 +763,14 @@ end
 return out
 "#;
 
-/// DCS's reads of each unit named: its callsign, fuel and life.
+/// DCS's reads of each unit named: its callsign and life.
 const UNIT_STATE_LUA: &str = r#"
 local out = {}
 for _, n in ipairs({ __UNITS__ }) do
   local u = Unit.getByName(n)
   if u then
     local okc, cs = pcall(u.getCallsign, u)
-    out[n] = { callsign = okc and cs or nil, fuel = u:getFuel(), life = u:getLife(), life0 = u:getLife0() }
+    out[n] = { callsign = okc and cs or nil, life = u:getLife(), life0 = u:getLife0() }
   end
 end
 return out

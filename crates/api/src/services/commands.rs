@@ -204,7 +204,7 @@ fn set_components(
 }
 
 /// Check a unit's spawn life (spec/world.md, "Spawn state"): a percentage
-/// from 0 to 100. Fuel is not restored.
+/// from 0 to 100.
 fn spawn_state_ok(u: &pb::UnitSpec, f: &str) -> Result<(), Status> {
     if let Some(p) = u.life_percent
         && !(p.is_finite() && (0.0..=100.0).contains(&p))
@@ -212,12 +212,6 @@ fn spawn_state_ok(u: &pb::UnitSpec, f: &str) -> Result<(), Status> {
         return Err(invalid(
             &format!("{f}.life_percent"),
             "a percentage from 0 to 100",
-        ));
-    }
-    if u.fuel.is_some() {
-        return Err(invalid(
-            f,
-            "a unit spawns with its payload's fuel; only its life can be given",
         ));
     }
     Ok(())
@@ -292,7 +286,6 @@ fn put_group(g: &mut Inner, c: u64, r: &PutGroupRequest) -> Result<PutGroupRespo
                     at,
                     heading: u.heading,
                     life: 0.0,
-                    fuel: 0.0,
                 },
             )
         });
@@ -465,7 +458,6 @@ fn put_static(g: &mut Inner, c: u64, r: &PutStaticRequest) -> Result<PutStaticRe
                         at,
                         heading,
                         life: 0.0,
-                        fuel: 0.0,
                     },
                 )
             }],

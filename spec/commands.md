@@ -554,7 +554,6 @@ raises leaves its key out.
 | `x`, `y`, `z` | Position, meters |
 | `heading`, `pitch`, `roll` | Attitude, radians, from `getPosition()` |
 | `life`, `life0` | `getLife()` and `getLife0()` |
-| `fuel` | `getFuel()`; a static has none |
 
 For a group that does not exist the value is nil. The sidecar never sends this command again
 after a `refused`, `unknown` or `TOO_LARGE` outcome: it takes the group's last

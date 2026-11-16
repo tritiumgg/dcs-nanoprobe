@@ -3,7 +3,7 @@
 //!
 //! A [`Roster`] is server-scoped. It reads every record the agent writes, as
 //! the API's driver does, and keeps who is connected, in which slot, in which
-//! unit, and how much fuel each player used in a campaign. It outputs
+//! unit. It outputs
 //! [`Note`]s, which the API turns into player events.
 //!
 //! A ucid enters the roster in a `PLAYER` record or a `PLAYERS` result and
@@ -177,9 +177,6 @@ pub struct PlayerRec {
     pub side: u32,
     /// The slot ID, empty for spectators.
     pub slot: String,
-    /// Fuel used by campaign, in fractions of a full tank, from the vitals
-    /// samples of the units the player occupied.
-    pub fuel_used: BTreeMap<u64, f64>,
 }
 
 impl PlayerRec {
@@ -339,8 +336,6 @@ pub struct Roster {
     /// The object of the latest birth, by mission ID.
     births: BTreeMap<String, u64>,
     open: Vec<Occupancy>,
-    /// The last fuel sample of each occupied object.
-    fuel_last: BTreeMap<u64, f32>,
     history: VecDeque<Occupancy>,
     boot: u64,
     gen_: u32,
@@ -365,7 +360,6 @@ impl Roster {
             holds: BTreeMap::new(),
             births: BTreeMap::new(),
             open: Vec::new(),
-            fuel_last: BTreeMap::new(),
             history: VecDeque::new(),
             boot: 0,
             gen_: 0,
@@ -560,11 +554,6 @@ impl Roster {
             }
             Input::Event(e) if self.current => self.event(&e),
             Input::ObjectGone(g) if self.current => self.object_gone(&g, ctx, &mut out),
-            Input::Vitals(rows) => {
-                for v in rows {
-                    self.fuel(v.object, v.fuel);
-                }
-            }
             Input::Result(res)
                 if u64::from(res.opcode) == u64::from(opcode::PLAYERS)
                     && u64::from(res.code) == rc::APPLIED =>
@@ -874,9 +863,6 @@ impl Roster {
             if self.open[i].key == key {
                 let mut o = self.open.remove(i);
                 o.to = Some(ctx.now);
-                if !self.open.iter().any(|x| x.object == o.object) {
-                    self.fuel_last.remove(&o.object);
-                }
                 out.push(Note::Leave {
                     key: o.key.clone(),
                     name: self.name_of(&o.key),
@@ -1068,30 +1054,6 @@ impl Roster {
         self.births.retain(|_, o| *o != object);
     }
 
-    /// A vitals row: the fuel an occupied unit lost since the last row is
-    /// the pilot's (the occupant of the lowest seat). A rise is a refuel and
-    /// counts for nothing.
-    fn fuel(&mut self, object: u64, fuel: f32) {
-        let Some(pilot) = self
-            .open
-            .iter()
-            .filter(|o| o.object == object)
-            .min_by_key(|o| o.seat)
-            .map(|o| o.key.clone())
-        else {
-            return;
-        };
-        if !fuel.is_finite() {
-            return;
-        }
-        if let Some(prev) = self.fuel_last.insert(object, fuel)
-            && fuel < prev
-            && let Some(p) = self.players.get_mut(&pilot)
-        {
-            *p.fuel_used.entry(self.campaign).or_default() += f64::from(prev - fuel);
-        }
-    }
-
     /// A `PLAYERS` answer: the truth of who is connected and where.
     fn apply_players(&mut self, value: &Lv, ctx: &Ctx<'_>, out: &mut Vec<Note>) {
         self.counts.resyncs += 1;
@@ -1138,15 +1100,6 @@ impl Roster {
         for c in gone {
             self.disconnect(c, ctx, out);
         }
-    }
-
-    /// The fuel a player used in a campaign, in fractions of a full tank.
-    pub fn fuel_used(&self, key: &str, campaign: u64) -> f64 {
-        self.players
-            .get(key)
-            .and_then(|p| p.fuel_used.get(&campaign))
-            .copied()
-            .unwrap_or(0.0)
     }
 }
 
@@ -1337,24 +1290,13 @@ mod tests {
     }
 
     #[test]
-    fn crew_seats_join_to_one_unit_and_the_pilot_gets_the_fuel() {
+    fn crew_seats_join_to_one_unit() {
         let mut r = Roster::new(ring());
         run(&mut r, &[player(pe::CONNECT, 2, "ucid-a", "Ann", "10")]);
         run(&mut r, &[player(pe::CONNECT, 3, "ucid-b", "Bo", "10_2")]);
         run(&mut r, &[birth(5, "10")]);
         let keys = r.players_of(5);
         assert_eq!(keys, vec![r.keys.key_of("ucid-a"), r.keys.key_of("ucid-b")]);
-        let rows = |fuel: f32| {
-            rec(Input::Vitals(vec![crate::sim::wire::Vitals {
-                object: 5,
-                life: 1.0,
-                fuel,
-            }]))
-        };
-        run(&mut r, &[rows(0.9), rows(0.8), rows(0.95), rows(0.85)]);
-        let pilot = r.fuel_used(&keys[0], 0);
-        assert!((pilot - 0.2).abs() < 1e-6, "{pilot}");
-        assert_eq!(r.fuel_used(&keys[1], 0), 0.0);
     }
 
     #[test]

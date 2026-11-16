@@ -775,28 +775,24 @@ impl Positions {
     }
 }
 
-/// `VITALS`: a columnar batch of life and fuel. Every column has one entry
-/// per object.
+/// `VITALS`: a columnar batch of life. Every column has one entry per object.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Vitals {
     /// DCS object IDs.
     pub object: Vec<u64>,
     /// `getLife()`.
     pub life: Vec<f32>,
-    /// `getFuel()`, NaN for a static.
-    pub fuel: Vec<f32>,
 }
 
 impl Vitals {
     /// The payload. The columns must have equal lengths; the row count is
     /// the shortest, and a longer column is cut to it.
     pub fn encode(&self) -> Vec<u8> {
-        let n = rows(&[self.object.len(), self.life.len(), self.fuel.len()]);
+        let n = rows(&[self.object.len(), self.life.len()]);
         let mut w = Writer::new();
         w.u32(n as u32).pad(4);
         self.object[..n].iter().for_each(|v| _ = w.u64(*v));
         self.life[..n].iter().for_each(|v| _ = w.f32(*v));
-        self.fuel[..n].iter().for_each(|v| _ = w.f32(*v));
         w.finish()
     }
 
@@ -805,13 +801,11 @@ impl Vitals {
         let mut r = Reader::new(b);
         let n = r.u32()?;
         r.skip(4)?;
-        let all = columns(&mut r, n, 16)?;
-        let (object, rest) = all.split_at(n as usize * 8);
-        let (life, fuel) = rest.split_at(n as usize * 4);
+        let all = columns(&mut r, n, 12)?;
+        let (object, life) = all.split_at(n as usize * 8);
         Ok(Vitals {
             object: u64_column(object),
             life: f32_column(life),
-            fuel: f32_column(fuel),
         })
     }
 }
@@ -1684,10 +1678,9 @@ mod tests {
         let v = Vitals {
             object: vec![1, 2, 3],
             life: vec![1.0, 2.0, 3.0],
-            fuel: vec![0.5, f32::MAX, 0.25],
         };
         let b = v.encode();
-        assert_eq!(b.len(), fixed("VITALS") + 3 * 16);
+        assert_eq!(b.len(), fixed("VITALS") + 3 * 12);
         assert_eq!(Vitals::decode(&b), Ok(v));
         truncations_fail(&b, Vitals::decode);
         assert_eq!(Vitals::default().encode().len(), fixed("VITALS"));
@@ -1703,16 +1696,6 @@ mod tests {
         assert_eq!(Attitude::decode(&b), Ok(a));
         truncations_fail(&b, Attitude::decode);
         assert_eq!(Attitude::default().encode().len(), fixed("ATTITUDE"));
-    }
-
-    #[test]
-    fn nan_fuel_survives_a_batch() {
-        let v = Vitals {
-            object: vec![1],
-            life: vec![1.0],
-            fuel: vec![f32::NAN],
-        };
-        assert!(Vitals::decode(&v.encode()).unwrap().fuel[0].is_nan());
     }
 
     #[test]

@@ -610,7 +610,7 @@ impl Reconciler {
                     for v in rows {
                         if let Some(b) = self.binding.get(&v.object) {
                             let life = self.life_held.get(&b.unit).map_or(v.life, |h| h.0);
-                            store.observe_vitals(b.unit, life, v.fuel);
+                            store.observe_vitals(b.unit, life);
                         }
                     }
                 }
@@ -1131,7 +1131,6 @@ impl Reconciler {
                         Some(h) => h.0,
                         None => num("life", f64::from(prev.life)) as f32,
                     },
-                    fuel: num("fuel", f64::from(prev.fuel)) as f32,
                 },
             );
             store.observe_capture_more(

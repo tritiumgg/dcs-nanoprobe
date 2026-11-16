@@ -76,7 +76,7 @@ impl Default for Budget {
 pub struct Sampling {
     /// Positions.
     pub position_s: f64,
-    /// Life and fuel.
+    /// Life.
     pub vitals_s: f64,
     /// Warehouses and airbase owners.
     pub warehouse_s: f64,

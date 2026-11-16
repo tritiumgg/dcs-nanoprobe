@@ -132,7 +132,7 @@ A commit writes:
 | Every group, unit or extension row whose spec, order, lifecycle, authority, policy, error, death, mark or object ID changed | Every commit |
 | `meta.world` and `meta.campaign` when they changed | Every commit |
 | The idempotency rows of calls answered | Every commit |
-| Positions, fuel, life, warehouse stock: the sampled state | Only at a checkpoint |
+| Positions, life, warehouse stock: the sampled state | Only at a checkpoint |
 
 A checkpoint is a commit that also writes every row whose sampled state changed, and
 replaces the checkpoint row. It is taken every `checkpoint_s` while the campaign is
@@ -150,7 +150,7 @@ What each failure loses:
 |---|---|---|---|
 | Specs, orders, components, extensions | in the step or call that changes them, before any command that carries them reaches DCS and before the call answers | nothing | nothing |
 | Results, deaths, removals, revivals | at the end of the step that reads them, before the agent learns they were read | what DCS did in its last frames before the crash and had not yet written | nothing: unacknowledged records are read again |
-| Positions, fuel, life, warehouse stock | every `checkpoint_s` | up to `checkpoint_s` | up to `checkpoint_s`; read again from the agent |
+| Positions, life, warehouse stock | every `checkpoint_s` | up to `checkpoint_s` | up to `checkpoint_s`; read again from the agent |
 | Events | at the end of the step that makes them, before they are published | nothing published | nothing published |
 | Effects | journalled as sent | may or may not have applied; never sent again | never sent again |
 | Owed mission load | in the activation's commit; cleared in the commit that journals its outcome | nothing | sent again at start if it never reached DCS |

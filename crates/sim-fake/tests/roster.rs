@@ -1,5 +1,5 @@
 //! Players and moderation of step S16 through the reconciler and the fake
-//! sim: keys, the roster and its occupancy join, menu candidates, fuel, and
+//! sim: keys, the roster and its occupancy join, menu candidates, and
 //! the `MODERATE`, `PLAYERS` and `BANS` commands.
 
 use nanoprobe_sidecar::ids::EntityId;
@@ -280,21 +280,6 @@ fn an_occupied_managed_unit_is_subscribed_and_the_menu_names_candidates() {
     p.w.rec.set_subscribed(p.roster.occupied_units());
     p.ticks(3);
     assert!(p.w.sim.subscribed().is_empty());
-}
-
-#[test]
-fn fuel_used_counts_the_drops_of_an_occupied_unit() {
-    let mut p = Probe::new(0);
-    p.w.sim.connect_client(2, "ucid-1", "Ann", 2);
-    p.w.sim.client_slot(2, 2, "40");
-    let u = p.w.sim.birth_client_unit("40");
-    p.ticks(3);
-    for fuel in [0.9, 0.7, 1.0, 0.9] {
-        p.w.sim.emit_vitals(u, 1.0, fuel);
-        p.ticks(1);
-    }
-    let used = p.roster.fuel_used(&p.key("ucid-1"), p.w.store.campaign().0);
-    assert!((used - 0.3).abs() < 1e-6, "{used}");
 }
 
 #[test]

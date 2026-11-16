@@ -133,7 +133,7 @@ pub enum Tier {
     Positions = 4,
     /// Attitude of rows that stopped.
     Stopped = 5,
-    /// Life and fuel.
+    /// Life.
     Vitals = 6,
     /// Warehouses and airbase owners.
     Warehouses = 7,
@@ -162,7 +162,7 @@ impl Tier {
 pub struct Rates {
     /// Positions.
     pub position_s: f64,
-    /// Life and fuel.
+    /// Life.
     pub vitals_s: f64,
     /// Warehouses and airbases.
     pub warehouse_s: f64,
@@ -296,7 +296,7 @@ impl Row {
         self.unmoved >= IDLE_AFTER
     }
 
-    /// Its life and fuel are read every vitals period: a subscription names
+    /// Its life is read every vitals period: a subscription names
     /// it. Any other row's are read when it is added, after a hit names it,
     /// and on the slow sweep.
     fn vital(&self) -> bool {
@@ -890,7 +890,7 @@ pub struct Sampler {
     /// With a row's slot they pick the sweep that reads a row read less
     /// often ([`Sampler::readable`]).
     passes: [u64; 2],
-    /// The slow sweep of life and fuel: when the one running began, and how
+    /// The slow sweep of life: when the one running began, and how
     /// long the last one took, seconds.
     slow_start: Option<Instant>,
     slow_period: f64,
@@ -899,7 +899,7 @@ pub struct Sampler {
     idle_units: usize,
     cargo: usize,
     idle_cargo: usize,
-    /// Rows whose life and fuel are read every vitals period, and unit rows
+    /// Rows whose life is read every vitals period, and unit rows
     /// a subscription names.
     vital_rows: usize,
     /// Rows left out of every tier because a read raised on them: all of
@@ -956,7 +956,7 @@ const STOP_M: f64 = 0.5;
 const IDLE_AFTER: u8 = 3;
 const IDLE_EVERY: u64 = 5;
 /// A row no subscription names has its
-/// life and fuel read once in this many vitals sweeps, besides the reads its
+/// life read once in this many vitals sweeps, besides the reads its
 /// events ask for: the slow sweep (spec/sampling.md, "Tiers"). `None`
 /// switches the slow sweep off; such a row is then read only when an event
 /// asks.
@@ -1445,7 +1445,7 @@ impl Sampler {
         if !row.unit() && row.found.movable {
             self.cargo += 1;
         }
-        // A new row's life and fuel are read on the next pump: a row no
+        // A new row's life is read on the next pump: a row no
         // subscription names has no other read until an event names it or
         // the slow sweep reaches it.
         self.life_marks.push(slot);
@@ -2157,7 +2157,7 @@ impl Sampler {
         self.request_enumeration();
         // A sidecar that attaches holds no samples. Every row is read as a
         // new one is: its position on the coming sweeps, whether or not it
-        // has moved, and its life and fuel on a coming pump.
+        // has moved, and its life on a coming pump.
         for (slot, row) in self.rows.iter_mut().enumerate() {
             let Some(row) = row.as_mut().filter(|r| r.found.object != 0) else {
                 continue;
@@ -2835,7 +2835,7 @@ impl Sampler {
         }
     }
 
-    /// The achieved period of the slow sweep of life and fuel at `now`,
+    /// The achieved period of the slow sweep of life at `now`,
     /// seconds: the longer of the last sweep's time and the time the running
     /// one has taken, and 0 for a sweep that is switched off or has no rows.
     fn slow_periods(&self, now: Instant) -> f64 {
@@ -3667,7 +3667,7 @@ impl Sampler {
 
     /// The slot at a cursor place, when the tier reads it on this sweep.
     /// Positions are the units' and the cargo statics'. A unit or a cargo
-    /// static that has not moved, the life and fuel of a row that no
+    /// static that has not moved, the life of a row that no
     /// subscription names are read once in several sweeps: the
     /// sweep's count and the slot pick the sweep, so each sweep reads an
     /// even share of them.
@@ -3985,7 +3985,6 @@ impl Sampler {
         b.positions.z.clear();
         b.vitals.object.clear();
         b.vitals.life.clear();
-        b.vitals.fuel.clear();
         b.attitude.object.clear();
         b.attitude.heading.clear();
         b.attitude.pitch.clear();
@@ -4036,7 +4035,7 @@ impl Sampler {
     /// positions without attitude, a unit's object ID, which the shim hands
     /// straight to `DCS.getUnitPositionByObjectId`, and minus the slot plus
     /// one for a static; for vitals, the slot plus one for a unit and minus
-    /// it for a static, which has no fuel; otherwise the slot plus one.
+    /// it for a static; otherwise the slot plus one.
     pub fn buffer_values(&self, tier: Tier, flag: bool, slots: &[u32], out: &mut Vec<i64>) {
         out.clear();
         let ids = matches!(tier, Tier::Subscribed | Tier::Positions) && !flag;
@@ -4147,22 +4146,11 @@ impl Sampler {
         b.z.push(p[2]);
     }
 
-    /// Life and fuel for a slot of the batch; `fuel` is `None` for a static.
-    /// Returns true to stop.
-    pub fn vitals(
-        &mut self,
-        slot: u32,
-        life: Option<f64>,
-        fuel: Option<f64>,
-        now: impl FnOnce() -> Instant,
-    ) -> bool {
+    /// Life for a slot of the batch. Returns true to stop.
+    pub fn vitals(&mut self, slot: u32, life: Option<f64>, now: impl FnOnce() -> Instant) -> bool {
         if let (Some(object), Some(life)) = (self.batch_row(slot), life) {
             self.batch.vitals.object.push(object);
             self.batch.vitals.life.push(life as f32);
-            self.batch
-                .vitals
-                .fuel
-                .push(fuel.map_or(f32::NAN, |f| f as f32));
         }
         self.tick(now)
     }
@@ -4726,7 +4714,7 @@ pub struct Report {
     pub marked: usize,
     /// The host's sweeps of positions in the window.
     pub sweeps: u64,
-    /// The achieved period of the slow sweep of life and fuel, seconds, for
+    /// The achieved period of the slow sweep of life, seconds, for
     /// the rows read once in several sweeps.
     pub slow_periods: f64,
     /// The running cost of one row inside the host's sweep, µs: the getter
@@ -4869,13 +4857,12 @@ impl Batched for Vitals {
         self.object.len()
     }
     fn row_bytes() -> usize {
-        16
+        12
     }
     fn slice(&self, a: usize, b: usize) -> Self {
         Vitals {
             object: self.object[a..b].to_vec(),
             life: self.life[a..b].to_vec(),
-            fuel: self.fuel[a..b].to_vec(),
         }
     }
     fn encode(&self) -> Vec<u8> {
@@ -4886,11 +4873,9 @@ impl Batched for Vitals {
         self.object
             .iter()
             .for_each(|v| out.extend_from_slice(&v.to_le_bytes()));
-        for column in [&self.life, &self.fuel] {
-            column
-                .iter()
-                .for_each(|v| out.extend_from_slice(&v.to_le_bytes()));
-        }
+        self.life
+            .iter()
+            .for_each(|v| out.extend_from_slice(&v.to_le_bytes()));
     }
 }
 

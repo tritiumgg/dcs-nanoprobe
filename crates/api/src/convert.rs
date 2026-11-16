@@ -109,17 +109,13 @@ pub fn components(c: &BTreeMap<String, Vec<u8>>) -> BTreeMap<String, prost_types
         .collect()
 }
 
-/// A sampled life or fuel value. The store keeps 0 for both until the
-/// first sample, so a unit with both at 0 has none.
-fn sampled(v: f32, u: &Unit) -> Option<f64> {
-    (u.state.life != 0.0 || u.state.fuel != 0.0).then_some(f64::from(v))
-}
-
+/// A unit's life. The store keeps 0 until the first sample, so a unit that
+/// has none shows none; a dead unit shows 0.
 fn life(u: &Unit) -> Option<f64> {
     if u.dead {
         Some(0.0)
     } else {
-        sampled(u.state.life, u)
+        u.vitals_read().then_some(f64::from(u.state.life))
     }
 }
 
@@ -138,7 +134,6 @@ fn unit(u: &Unit, theater: &str) -> pb::Unit {
         }),
         life_max: (u.captured.life0 > 0.0).then_some(u.captured.life0),
         life: life(u),
-        fuel: sampled(u.state.fuel, u),
         left: if u.dead {
             pb::UnitLeft::Unspecified
         } else if u.removed {
@@ -657,16 +652,14 @@ mod tests {
         assert_eq!(pg.units[0].label, "lead");
         assert_eq!(pg.components["supply"], comp);
         assert_eq!(pg.category, GroupCategory::Ground as i32);
-        // Never sampled: no life or fuel.
+        // Never sampled: no life.
         assert_eq!(pg.units[0].life, None);
-        assert_eq!(pg.units[0].fuel, None);
-        s.observe_vitals(u, 0.5, 0.0);
+        s.observe_vitals(u, 0.5);
         let e = entity(&s, s.group(g).expect("g"));
         let Some(entity::Kind::Group(pg)) = e.kind else {
             panic!("group")
         };
         assert_eq!(pg.units[0].life, Some(0.5));
-        assert_eq!(pg.units[0].fuel, Some(0.0));
         let e = entity(&s, s.group(st).expect("s"));
         assert!(matches!(e.kind, Some(entity::Kind::Static(ref x)) if x.r#type == "Tent"));
     }

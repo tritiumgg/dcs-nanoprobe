@@ -1900,9 +1900,9 @@ fn a_restore_gives_each_unit_its_life_back() {
     let firsts: Vec<_> = w.store.groups().map(|g| g.members[0]).collect();
     let (hurt, whole) = (firsts[0], firsts[1]);
     w.store.observe_life0(hurt, 4.0);
-    w.store.observe_vitals(hurt, 1.0, 0.5);
+    w.store.observe_vitals(hurt, 1.0);
     w.store.observe_life0(whole, 4.0);
-    w.store.observe_vitals(whole, 4.0, 0.5);
+    w.store.observe_vitals(whole, 4.0);
     let before = w.rec.counters().lives_restored;
     w.apply(&Op::RestartDcs).unwrap();
     w.settle().unwrap();
@@ -1928,7 +1928,7 @@ fn a_full_life_sample_before_the_damage_applies_keeps_the_captured_life() {
     w.settle().unwrap();
     let unit = w.store.groups().next().unwrap().members[0];
     w.store.observe_life0(unit, 5.0);
-    w.store.observe_vitals(unit, 2.0, 0.5);
+    w.store.observe_vitals(unit, 2.0);
     let sent = w.rec.counters().lives_restored;
     w.apply(&Op::RestartDcs).unwrap();
     // Until the reconciler has queued the spawn and its DAMAGE.
@@ -1959,7 +1959,7 @@ fn a_full_life_sample_before_the_damage_applies_keeps_the_captured_life() {
     );
     // Stall the ring so the sample is read while the DAMAGE waits.
     w.sim.set_commands_per_frame(0);
-    w.sim.emit_vitals(object, 5.0, 0.5);
+    w.sim.emit_vitals(object, 5.0);
     w.tick().unwrap();
     assert_eq!(
         w.sim.life_percent_of(unit.0),

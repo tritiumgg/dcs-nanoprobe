@@ -1579,13 +1579,12 @@ const TIER_POSITIONS: u8 = 4;
 const TIER_VITALS: u8 = 6;
 
 /// The shim's function list, by index: the position getter by object ID
-/// (false when DCS lacks it), a unit's `getLife` and `getFuel`, a static's
-/// `getLife`, and `getPoint`.
+/// (false when DCS lacks it), a unit's `getLife`, a static's `getLife`, and
+/// `getPoint`.
 const FN_BY_ID: c_int = 1;
 const FN_UNIT_LIFE: c_int = 2;
-const FN_UNIT_FUEL: c_int = 3;
-const FN_STATIC_LIFE: c_int = 4;
-const FN_POINT: c_int = 5;
+const FN_STATIC_LIFE: c_int = 3;
+const FN_POINT: c_int = 4;
 
 /// The number at field `key` of the table on top of the stack.
 ///
@@ -1643,7 +1642,7 @@ unsafe fn rows_here(state: *mut State, tier: u8, slots: &[u32], values: &[i64]) 
             let stop = if tier == TIER_VITALS {
                 lua::lua_rawgeti(state, 2, slot as c_int + 1);
                 if lua::lua_type(state, -1) != lua::TTABLE {
-                    driver::vitals(slot, None, None)
+                    driver::vitals(slot, None)
                 } else {
                     let unit = value > 0;
                     lua::lua_pushvalue(state, -1);
@@ -1655,16 +1654,7 @@ unsafe fn rows_here(state: *mut State, tier: u8, slots: &[u32], values: &[i64]) 
                     }
                     let life = arg_finite(state, -1);
                     lua::lua_settop(state, base + 1);
-                    let mut fuel = None;
-                    if unit {
-                        if !call_listed(state, FN_UNIT_FUEL, 1) {
-                            lua::lua_settop(state, base);
-                            driver::suspect(slot);
-                            return false;
-                        }
-                        fuel = arg_finite(state, -1);
-                    }
-                    driver::vitals(slot, life, fuel)
+                    driver::vitals(slot, life)
                 }
             } else if value > 0 && by_id {
                 lua::lua_pushnumber(state, value as f64);
@@ -1828,8 +1818,7 @@ unsafe fn work_stopped(state: *mut State) -> c_int {
     unsafe { push_bool(state, driver::stopped()) }
 }
 
-/// `vit(slot, life, fuel)`: life and fuel; fuel absent for a static.
-/// Returns true to stop.
+/// `vit(slot, life)`: a row's life. Returns true to stop.
 unsafe fn work_vit(state: *mut State) -> c_int {
     // SAFETY: a live state.
     let Some(slot) = (unsafe { arg_slot(state, 1) }) else {
@@ -1837,9 +1826,9 @@ unsafe fn work_vit(state: *mut State) -> c_int {
         return unsafe { push_bool(state, false) };
     };
     // SAFETY: as above.
-    let (life, fuel) = unsafe { (arg_finite(state, 2), arg_finite(state, 3)) };
+    let life = unsafe { arg_finite(state, 2) };
     // SAFETY: as above.
-    unsafe { push_bool(state, driver::vitals(slot, life, fuel)) }
+    unsafe { push_bool(state, driver::vitals(slot, life)) }
 }
 
 /// A table's pairs.

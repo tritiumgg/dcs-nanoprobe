@@ -90,7 +90,7 @@ pub trait Target {
     /// String keys that look like integers in the DCS tables the restore
     /// path carries, for the units named.
     fn integer_keys(&mut self, units: &[String]) -> Result<Value, String>;
-    /// DCS's own reads of the units named, by name: callsign, fuel and life.
+    /// DCS's own reads of the units named, by name: callsign and life.
     /// An empty object on the fake.
     fn unit_state(&mut self, units: &[String]) -> Result<Value, String>;
     /// DCS's controller option IDs and values the scenario sets.
@@ -890,19 +890,7 @@ pub fn tables(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Value, Str
                 .collect::<Vec<_>>()
         })
         .collect();
-    // DCS's reads, without fuel: it burns in flight.
-    let snap = |t: &mut dyn Target| -> Result<Value, String> {
-        let mut v = t.unit_state(&names_)?;
-        if let Some(o) = v.as_object_mut() {
-            for u in o.values_mut() {
-                if let Some(u) = u.as_object_mut() {
-                    u.remove("fuel");
-                }
-            }
-        }
-        Ok(v)
-    };
-    let s0 = snap(t)?;
+    let s0 = t.unit_state(&names_)?;
     let captured = api.capture(c, jet)?;
     let outcome = captured.result.as_ref().map(|r| r.outcome);
     api.materialize(c, &[jet, tank], false)?;
@@ -916,12 +904,12 @@ pub fn tables(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Value, Str
     api.materialize(c, &[jet, tank], true)?;
     all_live(t, api, c, &[jet, tank], 300.0, true)?;
     t.hold(5.0)?;
-    let s1 = snap(t)?;
+    let s1 = t.unit_state(&names_)?;
     reload(t, api)?;
     t.hold(5.0)?;
     all_live(t, api, c, &[jet, tank], 300.0, true)?;
     t.hold(5.0)?;
-    let s2 = snap(t)?;
+    let s2 = t.unit_state(&names_)?;
     let keys = t.integer_keys(&names_)?;
     let no_bad_keys = match &keys["string_integer_keys"] {
         Value::Array(a) => a.is_empty(),

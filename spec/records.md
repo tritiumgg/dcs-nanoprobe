@@ -126,7 +126,7 @@ a character boundary, so the replacement always fits. An `EVENT`'s values are `l
 | 24 | LOG | event | A log line from the hook, the shim or the agent |
 | 25 | SEEN | event | Rows an enumeration found whose `OBJECT` is unchanged |
 | 32 | POSITIONS | sample | Positions of a batch of objects |
-| 33 | VITALS | sample | Life and fuel of a batch of objects |
+| 33 | VITALS | sample | Life of a batch of objects |
 | 34 | ATTITUDE | sample | Heading, pitch and roll of a batch of objects |
 | 36 | WAREHOUSE | sample | One warehouse's stock |
 | 37 | AIRBASE | sample | One airbase's owner |
@@ -776,17 +776,17 @@ The shim's list includes the names the object table reads: `Object.isExist`,
 A sample batch is columnar: `n`, then one array per column. Row `i` of every array
 describes the same object.
 
-**What is sampled.** Positions follow the schedule in spec/sampling.md. Life and fuel
-are read for a row once when it is added, after an `S_EVENT_HIT` names it as target, in
-the slow sweep every 60 s at the default `vitals_s`, and at a capture. A `SUBSCRIBE`
-changes that for the rows it names: their life and fuel are read periodically
-(`vitals_s`, 5 s by default). The platform does not read unit ammunition.
+**What is sampled.** Positions follow the schedule in spec/sampling.md. Life is read
+for a row once when it is added, after an `S_EVENT_HIT` names it as target, in the slow
+sweep every 60 s at the default `vitals_s`, and at a capture. A `SUBSCRIBE` changes that
+for the rows it names: their life is read periodically (`vitals_s`, 5 s by default). The
+platform does not read unit fuel or ammunition.
 
-For a consumer, the life of an AI unit, and the fuel of a ground unit or a ship, is
-current within about 1 s of a hit event that names the unit. Damage that sends no
+For a consumer, the life of an AI unit is current within about 1 s of a hit event that
+names the unit. Damage that sends no
 event shows within the 60 s life sweep, which takes 98 s under load (LIVE, S10).
 Subscribed rows are current within 5 s. Read the sample's age, not its presence. A
-capture reads life and fuel itself.
+capture reads life itself.
 
 ### Layout: POSITIONS
 
@@ -807,7 +807,6 @@ capture reads life and fuel itself.
 | 0x0004 | pad[4] | reserved | |
 | + | u64[n] | object | DCS object IDs |
 | + | f32[n] | life | `getLife()`: DCS's absolute value, whose scale depends on the type |
-| + | f32[n] | fuel | `getFuel()`, a fraction of internal fuel; NaN for a static, which has no fuel |
 
 ### Layout: ATTITUDE
 

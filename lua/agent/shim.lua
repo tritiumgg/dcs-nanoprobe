@@ -104,7 +104,6 @@ local CAPABILITIES = {
   'DCS.getUnitPositionByObjectId',
   'Unit.getLife',
   'Unit.isDead',
-  'Unit.getFuel',
   'Unit.getObjectID',
   'land.getHeight',
   'trigger.action.explosion',
@@ -786,14 +785,11 @@ local function vitals(rows)
     end
     current = slot
     local o = T.objs[slot]
-    local life, fuel
+    local life
     if o then
       life = o:getLife()
-      if T.unit[slot] then
-        fuel = o:getFuel()
-      end
     end
-    if agent.vit(slot, life, fuel) then
+    if agent.vit(slot, life) then
       return true
     end
   end
@@ -873,12 +869,12 @@ end
 
 -- The getters the agent calls itself, in the order it knows them: the
 -- position getter by object ID, or false when this DCS lacks it; a unit's
--- life and fuel; a static's life; an object's point. False when this state
+-- life; a static's life; an object's point. False when this state
 -- lacks one of the classes.
 local FN
 local function functions()
   local fast = rawget(_G, 'DCS') and rawget(DCS, 'getUnitPositionByObjectId') or false
-  return { fast, Unit.getLife, Unit.getFuel, StaticObject.getLife, Object.getPoint }
+  return { fast, Unit.getLife, StaticObject.getLife, Object.getPoint }
 end
 
 -- Result codes (spec/commands.md, "Codes: result").
@@ -1286,7 +1282,6 @@ local function capture_one(o, is_unit)
   read('life', 'getLife')
   if is_unit then
     read('life0', 'getLife0')
-    read('fuel', 'getFuel')
   end
   return t
 end

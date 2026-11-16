@@ -2070,9 +2070,9 @@ pub fn spot(object: u64, p: [f64; 3]) {
     with(|d| d.sampler.spot(object, p));
 }
 
-/// Life and fuel for a slot of the batch; true to stop.
-pub fn vitals(slot: u32, life: Option<f64>, fuel: Option<f64>) -> bool {
-    with(|d| d.sampler.vitals(slot, life, fuel, Instant::now)).unwrap_or(true)
+/// Life for a slot of the batch; true to stop.
+pub fn vitals(slot: u32, life: Option<f64>) -> bool {
+    with(|d| d.sampler.vitals(slot, life, Instant::now)).unwrap_or(true)
 }
 
 /// One airbase of the batch, with its stock; true to stop.

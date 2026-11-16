@@ -768,13 +768,13 @@ scenario('world', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   expect(r[1], APPLIED, 'CAPTURE')
   expect(r[2], APPLIED, 'GROUP_CAPTURE_DESTROY')
   assert(#r[2].value == 2, 'the capture holds ' .. #r[2].value .. ' units, not 2:\n' .. dump(ctx))
-  for _, key in ipairs({ 'name', 'id', 'type', 'x', 'y', 'z', 'heading', 'pitch', 'roll', 'life', 'life0',
-    'fuel' }) do
+  for _, key in ipairs({ 'name', 'id', 'type', 'x', 'y', 'z', 'heading', 'pitch', 'roll', 'life', 'life0' }) do
     assert(r[2].value[1][key] ~= nil, 'the captured unit has no ' .. key .. ':\n' .. dump(ctx))
   end
   assert(r[2].value[1].type == 'BTR-80' and r[2].value[1].life0 == 2, 'wrong capture:\n' .. dump(ctx))
   assert(r[1].value[1].name == r[2].value[1].name, 'CAPTURE and the capture-destroy disagree')
   assert(r[2].value[1].ammo == nil, 'the capture holds an ammo key:\n' .. dump(ctx))
+  assert(r[2].value[1].fuel == nil, 'the capture holds a fuel key:\n' .. dump(ctx))
   host:set_pause(false)
   ctx.run(0.5)
   host:set_pause(true)
@@ -804,7 +804,7 @@ scenario('world', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   assert(r[1].object ~= 0 and r[1].value == S.null, 'a static spawn carries no object:\n' .. dump(ctx))
   expect(r[2], APPLIED, 'CAPTURE of a static')
   assert(#r[2].value == 1 and r[2].value[1].name == S1 and r[2].value[1].life == 1
-    and r[2].value[1].x == 500 and r[2].value[1].fuel == nil, 'the static capture is wrong:\n' .. dump(ctx))
+    and r[2].value[1].x == 500, 'the static capture is wrong:\n' .. dump(ctx))
   expect(r[3], DCS_REFUSED, 'STATIC_SPAWN without a name')
   expect(r[4], APPLIED, 'STATIC_DESTROY')
   expect(r[5], APPLIED, 'STATIC_DESTROY of nothing')

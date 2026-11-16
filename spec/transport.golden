@@ -281,7 +281,6 @@ layout VITALS fixed=8
   0x0004 pad[4] reserved
   + u64[n] object
   + f32[n] life
-  + f32[n] fuel
 layout ATTITUDE fixed=8
   0x0000 u32 n
   0x0004 pad[4] reserved
@@ -523,4 +522,4 @@ codes moderation
   2 BAN call=net.banlist_add(player,_seconds,_reason);_with_player_0,_net.banlist_add_by_ucid(ucid,_seconds,_reason)
   3 UNBAN call=net.banlist_remove(ucid)
   4 SLOT call=net.force_player_slot(player,_side,_slot)
-hash 6e3ea5da924ed9ce
+hash d386caeb0c478c15

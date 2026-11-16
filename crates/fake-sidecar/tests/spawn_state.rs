@@ -249,7 +249,7 @@ async fn a_unit_spawns_with_its_life_and_keeps_it_across_a_dematerialize() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_life_out_of_range_or_a_fuel_is_refused() {
+async fn a_life_out_of_range_is_refused() {
     let (_hub, ch) = in_process(cfg(), fake_config()).await.expect("server");
     let (l, c) = setup(&ch).await;
     let mut cmd = CommandsServiceClient::new(ch.clone());
@@ -265,13 +265,6 @@ async fn a_life_out_of_range_or_a_fuel_is_refused() {
             "life-nan",
             UnitSpec {
                 life_percent: Some(f64::NAN),
-                ..unit("F-15C", 0.0)
-            },
-        ),
-        (
-            "fuel",
-            UnitSpec {
-                fuel: Some(0.5),
                 ..unit("F-15C", 0.0)
             },
         ),

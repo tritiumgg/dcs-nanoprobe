@@ -395,7 +395,7 @@ fn a_commit_without_a_checkpoint_leaves_the_sampled_state_at_the_checkpoint() {
             let mut at = u.state.at;
             at.x += 111.0;
             w.store.observe_position(u.id, at);
-            w.store.observe_vitals(u.id, 0.25, 0.75);
+            w.store.observe_vitals(u.id, 0.25);
         }
         w.store.commit().expect("commit");
         let file = units(&read_back(&path).1);

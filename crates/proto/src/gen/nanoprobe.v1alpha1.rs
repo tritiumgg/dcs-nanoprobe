@@ -3931,9 +3931,6 @@ pub struct Unit {
     /// value the unit started with.
     #[prost(double, optional, tag = "9")]
     pub life: ::core::option::Option<f64>,
-    /// A fraction of internal fuel.
-    #[prost(double, optional, tag = "10")]
-    pub fuel: ::core::option::Option<f64>,
     /// Player keys of the occupants, by seat.
     #[prost(string, repeated, tag = "12")]
     pub occupants: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
@@ -4858,8 +4855,6 @@ pub struct UnitSpec {
     /// Life is a percentage of the type's initial life, 0 to 100.
     #[prost(double, optional, tag = "8")]
     pub life_percent: ::core::option::Option<f64>,
-    #[prost(double, optional, tag = "9")]
-    pub fuel: ::core::option::Option<f64>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GroupSpec {
@@ -8729,7 +8724,7 @@ pub mod moderation_service_server {
         const NAME: &'static str = SERVICE_NAME;
     }
 }
-#[derive(Clone, PartialEq, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Player {
     /// Constant across sessions, names and campaigns.
     #[prost(string, tag = "1")]
@@ -8745,11 +8740,6 @@ pub struct Player {
     pub unit_id: u64,
     #[prost(uint32, tag = "6")]
     pub seat: u32,
-    /// Fuel the player used in the active campaign, in fractions of a full
-    /// tank, summed over the units the player flew. A rise in a unit's fuel
-    /// counts for nothing.
-    #[prost(double, tag = "7")]
-    pub fuel_used: f64,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Occupancy {

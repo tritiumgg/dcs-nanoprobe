@@ -56,8 +56,8 @@ pub struct Row {
     pub found_in: u64,
     /// The last position: DCS `x`, `y`, `z`, meters.
     pub position: Option<Sample<[f64; 3]>>,
-    /// The last life and fuel. Fuel is NaN for a static.
-    pub vitals: Option<Sample<(f32, f32)>>,
+    /// The last life.
+    pub vitals: Option<Sample<f32>>,
     /// The last heading, pitch and roll, radians.
     pub attitude: Option<Sample<[f32; 3]>>,
     /// Positions taken for it.
@@ -498,12 +498,12 @@ impl Mirror {
     /// `VITALS`: one sample per row with a known object.
     fn vitals(&mut self, v: Vitals) {
         let at = self.stamp;
-        let n = v.object.len().min(v.life.len()).min(v.fuel.len());
+        let n = v.object.len().min(v.life.len());
         for i in 0..n {
             match self.rows.get_mut(&v.object[i]) {
                 Some(row) => {
                     row.vitals = Some(Sample {
-                        value: (v.life[i], v.fuel[i]),
+                        value: v.life[i],
                         at,
                     });
                 }
@@ -661,7 +661,6 @@ mod tests {
         let v = Vitals {
             object: ids.to_vec(),
             life: vec![10.0; ids.len()],
-            fuel: vec![f32::NAN; ids.len()],
         };
         (kind::VITALS, v.encode())
     }
@@ -711,8 +710,7 @@ mod tests {
         assert_eq!(p.at.mission_gen, 1);
         assert!(r.vitals.is_none());
         let v = m.get(2).unwrap().vitals.as_ref().unwrap();
-        assert_eq!(v.value.0, 10.0);
-        assert!(v.value.1.is_nan());
+        assert_eq!(v.value, 10.0);
         assert_eq!(m.counters().enumerations_used, 1);
         assert!(!m.wants_enumeration());
     }

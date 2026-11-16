@@ -61,7 +61,7 @@ fn longest_gap(
     (gap, gap_s, unread, pumps)
 }
 
-/// Every row's life and fuel are read once in `VITALS_EVERY` passes, with
+/// Every row's life is read once in `VITALS_EVERY` passes, with
 /// batches that end inside a lap at every size.
 #[test]
 fn the_slow_vitals_sweep_reads_every_row_in_every_cycle() {

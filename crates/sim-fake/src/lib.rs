@@ -939,12 +939,11 @@ impl FakeSim {
     }
 
     /// A vitals row for an object, in the next frame.
-    pub fn emit_vitals(&mut self, object: u64, life: f32, fuel: f32) {
+    pub fn emit_vitals(&mut self, object: u64, life: f32) {
         self.queued_out
             .push(Input::Vitals(vec![nanoprobe_sidecar::sim::wire::Vitals {
                 object,
                 life,
-                fuel,
             }]));
     }
 
@@ -3012,7 +3011,6 @@ impl FakeSim {
                     ("heading", lv::n(0.0)),
                     ("life", lv::n(self.life.get(m).map_or(1.0, |p| p / 100.0))),
                     ("life0", lv::n(1.0)),
-                    ("fuel", lv::n(0.5)),
                 ])
             })
             .collect();

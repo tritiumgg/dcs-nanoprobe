@@ -127,8 +127,6 @@ pub struct UnitState {
     pub heading: f64,
     /// `getLife()`, or 0 when never sampled.
     pub life: f32,
-    /// `getFuel()`, or 0 when never sampled.
-    pub fuel: f32,
 }
 
 /// The keys of a capture that `UnitState` does not hold
@@ -198,10 +196,10 @@ pub struct Unit {
 }
 
 impl Unit {
-    /// Whether DCS has read the unit's life or fuel: the store keeps 0 for
-    /// both until the first read.
+    /// Whether DCS has read the unit's life: the store keeps 0 until the
+    /// first read.
     pub fn vitals_read(&self) -> bool {
-        self.state.life != 0.0 || self.state.fuel != 0.0
+        self.state.life != 0.0
     }
 
     /// The life to spawn the unit with, as a percentage of its initial life
@@ -1745,14 +1743,13 @@ impl Store {
         }
     }
 
-    /// Sampled life and fuel. They replace the life a `PutGroup` asked for.
-    pub fn observe_vitals(&mut self, unit: EntityId, life: f32, fuel: f32) {
+    /// Sampled life. It replaces the life a `PutGroup` asked for.
+    pub fn observe_vitals(&mut self, unit: EntityId, life: f32) {
         if let Some(u) = self.units.get_mut(&unit)
             && !u.dead
-            && ((u.state.life, u.state.fuel) != (life, fuel) || u.captured.life_percent.is_some())
+            && (u.state.life != life || u.captured.life_percent.is_some())
         {
             u.state.life = life;
-            u.state.fuel = fuel;
             u.captured.life_percent = None;
             self.touch(unit);
         }
@@ -1782,7 +1779,6 @@ impl Store {
             .ok_or(StoreError::NoSuchEntity(unit))?;
         // What DCS read no longer stands for the unit.
         u.state.life = 0.0;
-        u.state.fuel = 0.0;
         u.captured.life_percent = Some(life_percent);
         let gid = u.group;
         self.spec_changed(gid)
