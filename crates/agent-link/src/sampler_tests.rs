@@ -522,8 +522,9 @@ struct Run {
     first_pump: Option<f64>,
     /// Existence checks waiting, once a second.
     checks: Vec<usize>,
-    /// Frames over 250 µs.
+    /// Frames over 250 µs, and those with no dear enumeration step in them.
     over_250: usize,
+    over_250_plain: usize,
     /// Every report the run wrote.
     reports: Vec<Report>,
 }
@@ -566,6 +567,7 @@ fn run_x(
     let (mut first_worth, mut first_pump) = (None, None);
     let mut checks = Vec::new();
     let mut over_250 = 0;
+    let mut over_250_plain = 0;
     let mut reports = Vec::new();
     let mut report = None;
     for f in 0..frames {
@@ -633,6 +635,7 @@ fn run_x(
             } else {
                 s.decide(rec, clock.0)
             };
+            let steps0 = w.enum_steps;
             if pumped {
                 pumps += 1;
                 first_pump.get_or_insert(elapsed);
@@ -646,6 +649,8 @@ fn run_x(
             }
             let frame_us = clock.0.saturating_duration_since(t0).as_secs_f64() * 1e6;
             over_250 += usize::from(frame_us > SLICE_CAP_US);
+            // A frame past the cap with no dear enumeration step in it.
+            over_250_plain += usize::from(frame_us > SLICE_CAP_US && w.enum_steps == steps0);
             longest_us = longest_us.max(frame_us);
         }
         if rec.syscall {
@@ -703,6 +708,7 @@ fn run_x(
         first_pump,
         checks,
         over_250,
+        over_250_plain,
         reports,
     }
 }
