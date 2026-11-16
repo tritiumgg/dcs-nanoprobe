@@ -39,8 +39,10 @@ sh "$HOOK" >/dev/null 2>&1 || {
 }
 printf 'ok  a clean change passes\n'
 
-# A GitHub token shape: ghp_ and 36 random letters and digits.
-TOKEN="ghp_$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 36)"
+# A GitHub token shape: ghp_ and 36 random letters and digits. The input is bounded:
+# 512 random bytes give about 124 letters and digits, and tr ends at its input's end.
+# An unbounded read of /dev/urandom spins forever where SIGPIPE is ignored.
+TOKEN="ghp_$(head -c 512 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' | head -c 36)"
 printf 'token = "%s"\n' "$TOKEN" > leak.txt
 git add leak.txt
 if OUTPUT=$(sh "$HOOK" 2>&1); then
