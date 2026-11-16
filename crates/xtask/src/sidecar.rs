@@ -1,4 +1,6 @@
-//! `sidecar <name> [--part all|conformance|hello]`: the S17 live test on a
+//! `sidecar <name> [--part all|conformance|hello|shell [--template FILE]]`:
+//! the S17 live test, and with `--part shell` the S19 one
+//! (`shell_live.rs`), on a
 //! docker-wine target. The product's sidecar runs in a container of its own
 //! that shares the game container's network namespace, as the example
 //! compose overlay in `deploy/` sets it up, but started by hand and removed
@@ -50,6 +52,9 @@ pub(crate) const MAP_DIR: &str = "nanoprobe/dev/sidecar";
 /// The mission folder of `[missions]`, under the profile: the run makes it
 /// and removes it.
 pub(crate) const MISSIONS_DIR: &str = "nanoprobe/missions";
+/// The shell part's campaign store, under the profile: the run makes it and
+/// removes it.
+const STORE_DIR: &str = "nanoprobe/dev/sidecar-store";
 /// The image's tag.
 pub(crate) const IMAGE: &str = "nanoprobe-sidecar:xtask";
 /// The containers' names.
@@ -57,22 +62,33 @@ const PROBE_C: &str = "nanoprobe-xtask-conformance";
 const SIDECAR_C: &str = "nanoprobe-xtask-sidecar";
 /// The API port inside the shared namespace.
 pub(crate) const API_PORT: u16 = 47311;
+/// The run's lease lifetime. The drivers renew between calls, but one eval
+/// over SSH or a hold during a map load can take longer than the default
+/// 30 s, and a lost lease ends the run on a refusal no test meant.
+const LEASE_TTL_S: u64 = 300;
 /// Model seconds each hold runs.
 const HOLD_S: f64 = 15.0;
 /// How long a probe or a hello may take, seconds.
 const LIMIT_S: u64 = 900;
 /// The hello's route, from examples/hello-rust (start, end); the suite
 /// spawns at the start.
-const HELLO_POINTS: [(f64, f64); 2] = [(-290_000.0, 680_000.0), (-289_000.0, 680_000.0)];
+pub(crate) const HELLO_POINTS: [(f64, f64); 2] = [(-290_000.0, 680_000.0), (-289_000.0, 680_000.0)];
 
-const USAGE: &str = "usage: cargo xtask sidecar <name> [--part all|conformance|hello]";
+const USAGE: &str =
+    "usage: cargo xtask sidecar <name> [--part all|conformance|hello|shell [--template FILE]]";
 
 pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
-    let (name, part) = match args {
-        [name] => (*name, "all"),
-        [name, "--part", p] if ["all", "conformance", "hello"].contains(p) => (*name, *p),
+    let (name, part, template) = match args {
+        [name] => (*name, "all", None),
+        [name, "--part", p] if ["all", "conformance", "hello", "shell"].contains(p) => {
+            (*name, *p, None)
+        }
+        [name, "--part", "shell", "--template", t] => (*name, "shell", Some(*t)),
         _ => return Err(USAGE.into()),
     };
+    let template = template
+        .map(|t| std::fs::read(t).map_err(|e| format!("{t}: {e}")))
+        .transpose()?;
     let Target::DockerWine { ssh, container, .. } = crate::target(name)? else {
         return Err("sidecar runs on a docker-wine target".into());
     };
@@ -80,12 +96,39 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
     let host = Host { ssh, container };
     let started = bundle::utc_now();
     let mut results = json!({});
-    let result = attempt(repository, &run, &host, name, part, &shell, &mut results);
+    let result = attempt(
+        repository,
+        &run,
+        &host,
+        name,
+        part,
+        &shell,
+        template.as_deref(),
+        &mut results,
+    );
+    let keys: &[&str] = if part == "shell" {
+        &[
+            "reload",
+            "theaters",
+            "own_template",
+            "finished",
+            "hung",
+            "killed",
+        ]
+    } else {
+        &[
+            "conformance",
+            "hello_rust",
+            "hello_python",
+            "hello_shells_written",
+        ]
+    };
     let ok = result.is_ok()
-        && ["conformance", "hello_rust", "hello_python"]
+        && keys
             .iter()
-            .filter(|k| part == "all" || k.starts_with(part))
-            .all(|k| results[k]["pass"] == json!(true))
+            .filter(|k| part == "all" || part == "shell" || k.starts_with(part))
+            // A skipped item is reported, not failed.
+            .all(|k| results[k]["pass"] == json!(true) || results[k]["skipped"].is_string())
         // A clean stop of the sidecar's container.
         && (part == "conformance" || results["sidecar"]["exit_code_after_stop"] == json!("0"));
     let out = json!({
@@ -173,6 +216,7 @@ impl Host {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn attempt(
     repository: &Path,
     run: &Run,
@@ -180,6 +224,7 @@ fn attempt(
     name: &str,
     part: &str,
     shell: &[u8],
+    template: Option<&[u8]>,
     results: &mut Value,
 ) -> Result<(), String> {
     let probe = link::build_linux_bins(&[("nanoprobe-fake-agent", "conformance-probe")])?
@@ -231,8 +276,8 @@ fn attempt(
         .lines()
         .any(|l| l == "Build Cache|0");
     let result = with_map(
-        repository, run, host, name, part, shell, &probe, &sidecar, profile, &map_dir, &dir,
-        results,
+        repository, run, host, name, part, shell, template, &probe, &sidecar, profile, &map_dir,
+        &dir, results,
     );
     // Put everything back, whatever the outcome; each step goes on after a
     // failed one.
@@ -274,6 +319,9 @@ fn attempt(
     }
     if let Err(e) = run.sh("rm -rf \"$1\"", &[&missions_dir]) {
         cleanup.push(format!("mission folder: {e}"));
+    }
+    if let Err(e) = run.sh("rm -rf \"$1\"", &[&format!("{profile}/{STORE_DIR}")]) {
+        cleanup.push(format!("store folder: {e}"));
     }
     println!("== containers, image and host folder removed; agent.toml put back as found");
     if !cache_was_empty {
@@ -335,6 +383,7 @@ fn with_map(
     name: &str,
     part: &str,
     shell: &[u8],
+    template: Option<&[u8]>,
     probe: &Path,
     sidecar: &Path,
     profile: &str,
@@ -346,16 +395,24 @@ fn with_map(
     crate::restart(name)?;
     println!("== load a fresh shell mission");
     crate::live::load(&run.remote, "np-shell.miz", shell)?;
-    // `[missions]`: the shell as the Caucasus mission, the folder named as
-    // DCS opens it (spec/config.md).
-    run.remote
-        .write(&format!("{MISSIONS_DIR}/Caucasus.miz"), shell)?;
+    // `[missions]`: the templates, the folder named as DCS opens it
+    // (spec/config.md). The shell part writes shells from the committed
+    // templates; the other parts use the S17 shell mission as the Caucasus
+    // template. Every activation writes its shell under `shells/`.
+    if part == "shell" {
+        for (file, bytes) in crate::shell_live::templates() {
+            run.remote.write(&format!("{MISSIONS_DIR}/{file}"), bytes)?;
+        }
+    } else {
+        run.remote
+            .write(&format!("{MISSIONS_DIR}/Caucasus.miz"), shell)?;
+    }
     let dcs_missions = format!(
         "Z:{}",
         format!("{profile}/{MISSIONS_DIR}").replace('/', "\\")
     );
     let shell_path = format!("{dcs_missions}\\Caucasus.miz");
-    results["mission_path"] = json!(shell_path);
+    results["mission_template_path"] = json!(shell_path);
     // The points must be on land, or a ground group does not drive.
     let surface = run.eval(
         "server",
@@ -391,6 +448,15 @@ fn with_map(
     let host_map = host.host_path(map_dir)?;
     let host_token = host.host_path(&run.remote.full_path(TOKEN))?;
     let host_missions = host.host_path(&format!("{profile}/{MISSIONS_DIR}"))?;
+    // The shell part restarts the sidecar with DCS: its store must outlive
+    // the container's tmpfs.
+    let host_store = if part == "shell" {
+        let store_dir = format!("{profile}/{STORE_DIR}");
+        run.sh("mkdir -p \"$1\" && chmod 700 \"$1\"", &[&store_dir])?;
+        host.host_path(&store_dir)?
+    } else {
+        String::new()
+    };
     let port = run_port(run)?;
     host.sh("rm -rf \"$1\" && mkdir -m 755 \"$1\"", &[dir], b"")?;
     upload(
@@ -496,7 +562,7 @@ fn with_map(
         }
     }
 
-    if part == "all" || part == "hello" {
+    if part == "all" || part == "hello" || part == "shell" {
         let token: String = (0..4)
             .map(|_| format!("{:016x}", nanoprobe_transport::random_nonzero()))
             .collect();
@@ -507,21 +573,34 @@ fn with_map(
         let toml = format!(
             "[agent]\nmap_path = \"/nanoprobe-shm/nanoprobe.map\"\nhandshake = \"127.0.0.1:{port}\"\n\
              token_path = \"/etc/nanoprobe/agent-token\"\n\n[api]\nlisten = \"0.0.0.0:{API_PORT}\"\n\
-             tokens_path = \"/etc/nanoprobe/tokens.toml\"\n\n[store]\ndir = \"/var/lib/nanoprobe/campaigns\"\n\n\
-             [missions]\ndir = \"/missions\"\ndcs_dir = '{dcs_missions}'\n"
+             tokens_path = \"/etc/nanoprobe/tokens.toml\"\nlease_ttl_s = {LEASE_TTL_S}\n\n[store]\ndir = \"/var/lib/nanoprobe/campaigns\"\n\n\
+             [missions]\ndir = \"/missions\"\ndcs_dir = '{dcs_missions}'\n\n\
+             [health]\nheartbeat_stale_s = {stale}\n",
+            stale = crate::shell_live::HEARTBEAT_STALE_S,
         );
         upload(host, dir, "sidecar.toml", toml.as_bytes(), "644")?;
         println!("== nanoprobe-sidecar in its container");
         host.sh(
             &format!(
                 "{} -v \"$5/sidecar.toml\":/etc/nanoprobe/sidecar.toml:ro -v \"$5/tokens.toml\":/etc/nanoprobe/tokens.toml:ro \
-                 -v \"$6\":/missions:ro \
-                 --tmpfs /var/lib/nanoprobe:rw,size=64m,uid={u},gid={g},mode=0700 {IMAGE} >/dev/null",
+                 -v \"$6\":/missions:{mode} {restart} {store} {IMAGE} >/dev/null",
                 common(SIDECAR_C),
-                u = uid.split(':').next().unwrap_or("0"),
-                g = uid.split(':').nth(1).unwrap_or("0"),
+                store = if part == "shell" {
+                    "-v \"$7\":/var/lib/nanoprobe".to_owned()
+                } else {
+                    format!(
+                        "--tmpfs /var/lib/nanoprobe:rw,size=64m,uid={u},gid={g},mode=0700",
+                        u = uid.split(':').next().unwrap_or("0"),
+                        g = uid.split(':').nth(1).unwrap_or("0"),
+                    )
+                },
+                // Every activation writes its shell under the folder. The
+                // shell part also keeps the sidecar across the DCS restarts
+                // it makes.
+                mode = "rw",
+                restart = if part == "shell" { "--restart on-failure" } else { "" },
             ),
-            &[args[0], args[1], args[2], args[3], args[4], &host_missions],
+            &[args[0], args[1], args[2], args[3], args[4], &host_missions, &host_store],
             b"",
         )?;
         let deadline = Instant::now() + Duration::from_secs(60);
@@ -548,6 +627,35 @@ fn with_map(
             .port();
         let mut forward = Forward::start(&host.ssh, local, &ip, API_PORT)?;
         let endpoint = format!("http://127.0.0.1:{local}");
+        if part == "shell" {
+            let container = host.container.clone();
+            let r = crate::shell_live::drive(
+                run,
+                &endpoint,
+                &token,
+                template,
+                || run.remote.players(),
+                || crate::restart(name).map(|_| ()),
+                || {
+                    host.text(
+                        // The bracket keeps the pattern from matching this
+                        // shell's own command line, which pkill would kill.
+                        "docker exec \"$1\" sh -c 'pkill -9 -f \"[D]CS_server.exe\"; echo killed'",
+                        &[&container],
+                    )
+                },
+                results,
+            );
+            results["sidecar_logs"] =
+                json!(host.text("docker logs --tail 200 \"$1\" 2>&1 || true", &[SIDECAR_C])?);
+            forward.stop();
+            host.sh("docker stop -t 20 \"$1\" >/dev/null", &[SIDECAR_C], b"")?;
+            results["sidecar"] = json!({
+                "exit_code_after_stop": host.text("docker inspect -f '{{.State.ExitCode}}' \"$1\"", &[SIDECAR_C])?,
+                "restarts": host.text("docker inspect -f '{{.RestartCount}}' \"$1\"", &[SIDECAR_C])?,
+            });
+            return r;
+        }
         let hellos: [(&str, Vec<String>); 2] = [
             (
                 "hello_rust",
@@ -623,6 +731,11 @@ fn with_map(
                 "done": text.lines().find(|l| l.contains("hello campaign done")),
             });
         }
+        // At least one activation wrote a shell under `shells/`. This does not
+        // show that every hello did, or that DCS loaded it.
+        let shells = host.text("ls \"$1/shells\" 2>&1 || true", &[&host_missions])?;
+        let shell_written = shells.lines().any(is_shell_file_name);
+        results["hello_shells_written"] = json!({ "pass": shell_written, "listing": shells });
         forward.stop();
         let health = host.text(
             "docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' \"$1\"",
@@ -638,6 +751,17 @@ fn with_map(
         results["sidecar"]["exit_code_after_stop"] = json!(exit);
     }
     Ok(())
+}
+
+/// Whether `name` is `<campaign ID>.<slot>.miz`, as a shell is named.
+fn is_shell_file_name(name: &str) -> bool {
+    let Some(stem) = name.trim().strip_suffix(".miz") else {
+        return false;
+    };
+    let Some((id, slot)) = stem.split_once('.') else {
+        return false;
+    };
+    !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) && (slot == "a" || slot == "b")
 }
 
 /// Whether a hello's group materialized once, and only after DCS began
@@ -783,6 +907,15 @@ mod tests {
         assert_eq!(pair(&python, "START ="), HELLO_POINTS[0]);
         assert_eq!(pair(&python, "END ="), HELLO_POINTS[1]);
         assert_eq!(pair(&probe, "None =>"), HELLO_POINTS[0]);
+    }
+
+    #[test]
+    fn shell_file_names_are_recognized() {
+        assert!(is_shell_file_name("12.a.miz\n"));
+        assert!(is_shell_file_name("3.b.miz"));
+        assert!(!is_shell_file_name("Caucasus.miz"));
+        assert!(!is_shell_file_name("3.c.miz"));
+        assert!(!is_shell_file_name(".a.miz"));
     }
 
     #[test]

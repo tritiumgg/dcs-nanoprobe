@@ -1,7 +1,10 @@
 # Mission templates
 
-One empty mission per map, saved from the DCS Mission Editor, for `cargo xtask miz` to
-write shell missions from.
+One empty mission per map, saved from the DCS Mission Editor. The sidecar writes each
+campaign's shell from the shared template of its theater, read from `[missions] dir` as
+`<Theater>.miz`, the theater's name exactly as DCS gives it (spec/config.md): install
+`caucasus.miz` there as `Caucasus.miz` and `afghanistan.miz` as `Afghanistan.miz`.
+`cargo xtask miz` writes test missions from them too.
 
 | File | Map |
 |---|---|

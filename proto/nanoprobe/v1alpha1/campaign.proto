@@ -27,14 +27,18 @@ service CampaignService {
   rpc ExportCampaign(ExportCampaignRequest) returns (stream ExportCampaignResponse);
   rpc DeleteCampaign(DeleteCampaignRequest) returns (DeleteCampaignResponse);
   // Take a backup of the campaign's store now (spec/persistence.md,
-  // "Backups"). There is no restore call. To restore backup <n>: suspend the
-  // campaign; stop the server; delete store.sqlite-wal and store.sqlite-shm
-  // in the campaign's folder if they are there; copy backups/<n>/store.sqlite
-  // over the folder's store.sqlite; start the server; activate the campaign.
-  // events.sqlite is not rolled back and keeps the events after the backup.
+  // "Backups"). Refused with SPACE_LOW when the store's file system has less
+  // free space than the store, its WAL and its events file. There is no
+  // restore call: `nanoprobe restore`, with the server stopped, restores a
+  // backup (spec/persistence.md, "Restore a backup").
   rpc BackupCampaign(BackupCampaignRequest) returns (BackupCampaignResponse);
   // The backups kept, oldest first. Needs no lease.
   rpc ListCampaignBackups(ListCampaignBackupsRequest) returns (ListCampaignBackupsResponse);
+  // Set or remove the campaign's own template for one of its theaters: a
+  // mission the author saved in the Mission Editor, used in place of the
+  // shared one in [missions] dir. Its units stay unmanaged. Kept in the
+  // campaign's store, so a backup or a copy of the campaign carries it.
+  rpc SetCampaignTemplate(SetCampaignTemplateRequest) returns (SetCampaignTemplateResponse);
 }
 
 enum CampaignState {
@@ -62,6 +66,8 @@ message Campaign {
   google.protobuf.Struct outcome = 10;
   // The last checkpoint written to the store, absent before the first.
   CheckpointInfo last_checkpoint = 11;
+  // The theaters the campaign has its own template for.
+  repeated string templates = 12;
 }
 
 // A checkpoint of the observed state (spec/persistence.md, "Writes").
@@ -193,4 +199,17 @@ message ListCampaignBackupsRequest {
 
 message ListCampaignBackupsResponse {
   repeated Backup backups = 1;
+}
+
+message SetCampaignTemplateRequest {
+  Write write = 1;
+  // One of the campaign's theaters; the template's `theatre` member must
+  // name it exactly.
+  string theater = 2;
+  // The .miz file, at most 16 MiB. Empty removes the campaign's template.
+  bytes miz = 3;
+}
+
+message SetCampaignTemplateResponse {
+  Campaign campaign = 1;
 }

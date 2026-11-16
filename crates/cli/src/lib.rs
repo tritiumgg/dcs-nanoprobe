@@ -6,7 +6,8 @@
 //! they read. `watch` prints a sidecar's world changes or events from its
 //! API, one message per line. `doctor` checks an install from outside DCS, and
 //! `install` and `uninstall` add the release to a Saved Games profile and take
-//! it out again.
+//! it out again. `restore` restores a campaign's backup with the sidecar
+//! stopped.
 
 pub mod args;
 pub mod dcslog;
@@ -14,6 +15,7 @@ pub mod decode;
 pub mod doctor;
 pub mod inspect;
 pub mod profiles;
+pub mod restore;
 pub mod setup;
 pub mod top;
 pub mod util;
@@ -42,6 +44,7 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
             0
         }
         Command::Watch(o) => watch::run(&o, out, err),
+        Command::Restore(o) => restore::run(&o, out, err),
         Command::Doctor(o) => doctor::run(&o.place, &profiles::Env::current(), out, err),
         Command::Install(o) => setup::run_install(&o, &profiles::Env::current(), out, err),
         Command::Uninstall(o) => setup::run_uninstall(&o, &profiles::Env::current(), out, err),

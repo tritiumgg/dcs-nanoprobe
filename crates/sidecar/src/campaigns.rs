@@ -9,7 +9,7 @@ use crate::eventfile::EventFile;
 use crate::ids::CampaignId;
 use crate::store::{
     CampaignRecord, CampaignState, DiskError, MIGRATIONS, Migration, SCHEMA, Store, TierPeriod,
-    backup_file, ident_of, record_of, revision_of, state_of,
+    backup_file, ident_of, next_entity_of, rebase_world, record_of, revision_of, state_of,
 };
 
 /// Why a backup was taken.
@@ -75,6 +75,7 @@ const STORE: &str = "store.sqlite";
 const EVENTS: &str = "events.sqlite";
 const BACKUPS: &str = "backups";
 const INFO: &str = "backup.txt";
+const READ: &str = ".read";
 
 impl Campaigns {
     /// The campaigns in `dir`, which is created if missing. `backup_keep` is
@@ -86,6 +87,11 @@ impl Campaigns {
             changes_keep,
             backup_keep: backup_keep.max(1),
         })
+    }
+
+    /// The store dir.
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
 
     /// The changes a store keeps for a watch to resume from.
@@ -332,10 +338,166 @@ impl Campaigns {
         self.backup_folder(id).list()
     }
 
+    /// Restore backup `number` over a campaign's store, offline: the caller
+    /// holds the store dir's lock, so no sidecar has the store open
+    /// (spec/persistence.md, "Restore a backup"). The current store is first
+    /// copied to `restore-<at_ms>/store.sqlite` in the campaign's folder;
+    /// its WAL files are removed; the backup is copied in; and the restored
+    /// store's next `EntityId` and revision are raised above both copies'.
+    pub fn restore(&self, id: CampaignId, number: u32, at_ms: u64) -> Result<Restored, DiskError> {
+        let backup = self
+            .backups(id)?
+            .into_iter()
+            .find(|b| b.number == number)
+            .ok_or_else(|| {
+                DiskError::Io(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("campaign {} has no complete backup {number}", id.0),
+                ))
+            })?;
+        let path = self.store_path(id);
+        let (found, _) = ident_of(&path)?;
+        if found != id {
+            return Err(DiskError::Corrupt(format!(
+                "folder {} holds campaign {}",
+                id.0, found.0
+            )));
+        }
+        let source = self
+            .folder(id)
+            .join(BACKUPS)
+            .join(number.to_string())
+            .join(STORE);
+        let (backup_id, _) = ident_of(&source)?;
+        if backup_id != id {
+            return Err(DiskError::Corrupt(format!(
+                "backup {number} holds campaign {}",
+                backup_id.0
+            )));
+        }
+        // What the current store handed out, read with its WAL applied.
+        let next_entity = next_entity_of(&path)?;
+        let revision = revision_of(&path)?;
+        let shell_slot = crate::store::shell_slot_of(&path)?;
+        let aside_dir = self.folder(id).join(format!("restore-{at_ms}"));
+        fs::create_dir(&aside_dir)?;
+        let aside = aside_dir.join(STORE);
+        backup_file(&path, &aside)?;
+        sync_file(&aside)?;
+        // The current store, with its WAL applied, is aside before anything
+        // is removed. The backup goes in under a temporary name, then over
+        // the store; a crash after the WAL files go and before the rename
+        // leaves the store without its last commits, which the aside copy
+        // holds.
+        let tmp = self.folder(id).join(".restore.sqlite");
+        let _ = fs::remove_file(&tmp);
+        fs::copy(&source, &tmp)?;
+        sync_file(&tmp)?;
+        for wal in ["-wal", "-shm"] {
+            let mut p = path.clone().into_os_string();
+            p.push(wal);
+            match fs::remove_file(PathBuf::from(p)) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
+                _ => {}
+            }
+        }
+        fs::rename(&tmp, &path)?;
+        let (next_entity, revision) = rebase_world(&path, next_entity, revision, shell_slot)?;
+        Ok(Restored {
+            backup,
+            aside,
+            next_entity,
+            revision,
+        })
+    }
+
+    /// A consistent copy of a campaign's store, migrated to this sidecar's
+    /// schema and opened, for reading a finished campaign without opening
+    /// its store (spec/persistence.md, "Reading a finished campaign"). The
+    /// copy is under `.read/` in the campaign's folder and is removed when
+    /// the value drops.
+    pub fn read_copy(&self, id: CampaignId, at_ms: u64) -> Result<ReadCopy, DiskError> {
+        let path = self.store_path(id);
+        let (found, schema) = ident_of(&path)?;
+        if found != id {
+            return Err(DiskError::Corrupt(format!(
+                "folder {} holds campaign {}",
+                id.0, found.0
+            )));
+        }
+        let known = MIGRATIONS.last().map_or(SCHEMA, |s| s.to);
+        if schema > known {
+            return Err(DiskError::Newer {
+                found: schema,
+                known,
+            });
+        }
+        let dir = self.folder(id).join(READ);
+        fs::create_dir_all(&dir)?;
+        let copy = dir.join(format!("{at_ms}-{}.sqlite", std::process::id()));
+        let _ = fs::remove_file(&copy);
+        backup_file(&path, &copy)?;
+        let mut guard = ReadCopy {
+            store: None,
+            path: copy,
+        };
+        guard.store = Some(Store::open(&guard.path, self.changes_keep)?);
+        Ok(guard)
+    }
+
+    /// Remove copies a stopped sidecar left under `.read/`.
+    pub fn clear_read_copies(&self, id: CampaignId) {
+        let _ = fs::remove_dir_all(self.folder(id).join(READ));
+    }
+
     /// Delete a campaign's folder. Never automatic.
     pub fn delete(&self, id: CampaignId) -> io::Result<()> {
         fs::remove_dir_all(self.folder(id))
     }
+}
+
+/// What [`Campaigns::restore`] did.
+#[derive(Debug)]
+pub struct Restored {
+    /// The backup restored.
+    pub backup: Backup,
+    /// Where the store it replaced was copied.
+    pub aside: PathBuf,
+    /// The restored store's next `EntityId`.
+    pub next_entity: u64,
+    /// The restored store's revision.
+    pub revision: u64,
+}
+
+/// A migrated copy of a campaign's store, open for reading; the files are
+/// removed when it drops.
+#[derive(Debug)]
+pub struct ReadCopy {
+    store: Option<Store>,
+    path: PathBuf,
+}
+
+impl ReadCopy {
+    /// The store.
+    pub fn store(&self) -> &Store {
+        self.store.as_ref().expect("open until dropped")
+    }
+}
+
+impl Drop for ReadCopy {
+    fn drop(&mut self) {
+        // The connection closes first, then its files go.
+        drop(self.store.take());
+        for suffix in ["", "-wal", "-shm"] {
+            let mut p = self.path.clone().into_os_string();
+            p.push(suffix);
+            let _ = fs::remove_file(PathBuf::from(p));
+        }
+    }
+}
+
+fn sync_file(path: &Path) -> io::Result<()> {
+    fs::OpenOptions::new().write(true).open(path)?.sync_all()
 }
 
 /// The backups of one store folder: a campaign's, or the server store's
@@ -539,6 +701,125 @@ mod tests {
         let d = tempfile::tempdir().expect("dir");
         let c = Campaigns::new(d.path(), 10, 2).expect("campaigns");
         (d, c)
+    }
+
+    #[test]
+    fn a_restore_keeps_ids_and_revisions_above_both_copies() {
+        let (_d, c) = campaigns();
+        let id = CampaignId(1);
+        let mut s = c.create(id, record(CampaignState::Active)).expect("create");
+        for _ in 0..3 {
+            s.adopt_id().expect("id");
+        }
+        let key = |k: &str| nanoprobe_transport::codec::Lv::String(k.as_bytes().to_vec());
+        s.set_owed_load(Some(crate::store::OwedLoad {
+            path: "Z:\\m\\shells\\1.a.miz".into(),
+            cmd: Some((1, 2)),
+            start_ms: Some(5),
+        }));
+        s.set_next_mission(Some(nanoprobe_transport::codec::Lv::Table(vec![
+            (key("theater"), key("Caucasus")),
+            (key("start_ms"), key("5")),
+        ])));
+        s.commit().expect("commit");
+        let b = c
+            .backup(id, 5, s.revision(), BackupReason::Manual)
+            .expect("backup");
+        for _ in 0..5 {
+            s.adopt_id().expect("id");
+        }
+        s.commit().expect("commit");
+        let (next, rev) = (
+            next_entity_of(&c.store_path(id)).expect("next"),
+            revision_of(&c.store_path(id)).expect("rev"),
+        );
+        assert_eq!(next, 9);
+        // The sidecar stopped without closing it: its WAL is still there.
+        std::mem::forget(s);
+        assert!(c.restore(id, 99, 7).is_err(), "no backup 99");
+        let r = c.restore(id, b.number, 7).expect("restore");
+        assert_eq!(r.next_entity, 9, "the larger next EntityId");
+        assert_eq!(r.revision, rev + REVISION_RESERVE);
+        assert_eq!(
+            next_entity_of(&r.aside).expect("aside"),
+            9,
+            "the old store is kept aside"
+        );
+        assert!(!c.folder(id).join("store.sqlite-wal").exists());
+        let opened = c.open(id, 8).expect("open the restored store");
+        assert_eq!(
+            opened.revision(),
+            rev + REVISION_RESERVE,
+            "closed: no second reserve"
+        );
+        assert_eq!(
+            opened.record().expect("record").state,
+            CampaignState::Suspended
+        );
+        assert_eq!(opened.owed_load(), None);
+        assert_eq!(
+            opened.next_mission(),
+            Some(&nanoprobe_transport::codec::Lv::Table(vec![(
+                key("theater"),
+                key("Caucasus")
+            )])),
+            "the start is cleared, the rest kept"
+        );
+        assert!(opened.unanswered().is_empty());
+        assert_eq!(
+            c.backups(id).expect("backups"),
+            vec![b],
+            "backups untouched"
+        );
+        assert!(c.restore(id, 1, 7).is_err(), "the aside folder exists");
+    }
+
+    #[test]
+    fn a_restored_finished_backup_stays_finished() {
+        let (_d, c) = campaigns();
+        let id = CampaignId(1);
+        let mut s = c.create(id, record(CampaignState::Active)).expect("create");
+        c.finish(&mut s, 3, Vec::new(), b"won".to_vec())
+            .expect("finish");
+        drop(s);
+        let b = c.backup(id, 4, 0, BackupReason::Manual).expect("backup");
+        let r = c.restore(id, b.number, 5).expect("restore");
+        assert_eq!(
+            record_of(&c.store_path(id)).expect("record").2.state,
+            CampaignState::Finished
+        );
+        assert!(r.aside.exists());
+    }
+
+    #[test]
+    fn a_finished_campaign_reads_through_a_copy_that_goes_away() {
+        let (_d, c) = campaigns();
+        let id = CampaignId(1);
+        let mut s = c.create(id, record(CampaignState::Active)).expect("create");
+        s.adopt_id().expect("id");
+        c.finish(&mut s, 3, Vec::new(), b"won".to_vec())
+            .expect("finish");
+        drop(s);
+        let before = fs::read(c.store_path(id)).expect("bytes");
+        let copy = c.read_copy(id, 4).expect("copy");
+        assert_eq!(
+            copy.store().record().expect("record").state,
+            CampaignState::Finished
+        );
+        let path = c.folder(id).join(READ);
+        assert!(fs::read_dir(&path).expect("dir").count() > 0);
+        drop(copy);
+        assert_eq!(
+            fs::read_dir(&path).expect("dir").count(),
+            0,
+            "the copy is removed"
+        );
+        assert_eq!(
+            fs::read(c.store_path(id)).expect("bytes"),
+            before,
+            "the store is untouched"
+        );
+        assert!(matches!(c.open(id, 5), Err(DiskError::Finished(_))));
     }
 
     #[test]

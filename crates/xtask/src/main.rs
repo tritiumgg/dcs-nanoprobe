@@ -24,6 +24,7 @@ mod proto;
 mod remote;
 mod routes;
 mod sampling;
+mod shell_live;
 mod sidecar;
 mod soak;
 mod spec;

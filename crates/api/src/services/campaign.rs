@@ -17,14 +17,19 @@ use nanoprobe_proto::v1alpha1::{
     ExportCampaignRequest, ExportCampaignResponse, FinishCampaignRequest, FinishCampaignResponse,
     GetCampaignRequest, GetCampaignResponse, ListCampaignBackupsRequest,
     ListCampaignBackupsResponse, ListCampaignsRequest, ListCampaignsResponse,
-    SuspendCampaignRequest, SuspendCampaignResponse,
+    SetCampaignTemplateRequest, SetCampaignTemplateResponse, SuspendCampaignRequest,
+    SuspendCampaignResponse,
 };
 use tonic::{Code, Request, Response, Status};
 
 use super::Out;
 use crate::auth::{Access, require};
-use crate::convert::{invalid, not_built};
+use crate::convert::invalid;
 use crate::hub::{Call, Hub, Inner, Need, disk_status, wall_ms};
+
+/// The most bytes of whole lines one export message carries, before the
+/// line that passes it.
+const EXPORT_CHUNK: usize = 64 * 1024;
 
 /// The service.
 pub struct Campaigns(pub Arc<Hub>);
@@ -60,6 +65,13 @@ fn backup_pb(b: &Backup) -> nanoprobe_proto::v1alpha1::Backup {
 
 fn shown(g: &Inner, id: u64) -> PbCampaign {
     let mut c = g.campaigns[&id].meta.clone();
+    // The clock as the campaign runs it, not as the last checkpoint wrote it.
+    if let Some(ms) = g.clock_ms(id) {
+        c.clock = Some(prost_types::Timestamp {
+            seconds: ms.div_euclid(1000),
+            nanos: i32::try_from(ms.rem_euclid(1000) * 1_000_000).unwrap_or(0),
+        });
+    }
     // The loaded theater once the agent's frames carry this campaign; until
     // then the mission loading for it has not reported.
     if g.active == Some(id) && g.link.frame_campaign == id {
@@ -137,6 +149,9 @@ impl CampaignService for Campaigns {
                             "name",
                         ));
                     }
+                    if let Some(c) = &r.clock {
+                        crate::convert::mission_date(c, "clock")?;
+                    }
                     let first = if r.first_theater.is_empty() {
                         r.theaters[0].clone()
                     } else {
@@ -144,7 +159,7 @@ impl CampaignService for Campaigns {
                     };
                     // An activation with no mission file creates nothing.
                     if r.activate {
-                        g.mission_check(&first)?;
+                        g.mission_check(0, &first)?;
                     }
                     let id = g.new_campaign_id();
                     g.add_campaign(
@@ -161,11 +176,17 @@ impl CampaignService for Campaigns {
                             created: Some(timestamp_now()),
                             outcome: None,
                             last_checkpoint: None,
+                            templates: Vec::new(),
                         },
                         first,
                     )?;
-                    if r.activate {
-                        g.activate(&cfg, id)?;
+                    // An activation refused after the folder was made (its
+                    // shell could not be written) leaves no campaign.
+                    if r.activate
+                        && let Err(e) = g.activate(&cfg, id)
+                    {
+                        let _ = g.delete_campaign(&cfg, id, &r.name);
+                        return Err(e);
                     }
                     Ok((
                         CreateCampaignResponse {
@@ -338,16 +359,119 @@ impl CampaignService for Campaigns {
 
     async fn export_campaign(
         &self,
-        _req: Request<ExportCampaignRequest>,
+        req: Request<ExportCampaignRequest>,
     ) -> Result<Response<Self::ExportCampaignStream>, Status> {
-        Err(not_built("ExportCampaign"))
+        require(&req, Access::Observer)?;
+        let id = req.into_inner().campaign_id;
+        let (campaign, store, events) = {
+            let mut g = self.0.lock();
+            let id = g.resolve_read(id)?;
+            let files = g.files().ok_or_else(|| {
+                status(
+                    Code::FailedPrecondition,
+                    ErrorReason::Unspecified,
+                    "the stores are in memory (`[store] enabled = false`): there is no file to export",
+                    0,
+                    "",
+                )
+            })?;
+            (
+                id,
+                files.store_path(CampaignId(id)),
+                files.events_path(CampaignId(id)),
+            )
+        };
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        tokio::task::spawn_blocking(move || {
+            let mut chunk = Vec::new();
+            let send = |chunk: &mut Vec<u8>| {
+                tx.blocking_send(Ok(ExportCampaignResponse {
+                    lines: std::mem::take(chunk),
+                }))
+                .is_ok()
+            };
+            let r = nanoprobe_sidecar::export::export(campaign, &store, &events, &mut |line| {
+                chunk.extend_from_slice(&line);
+                chunk.len() < EXPORT_CHUNK || send(&mut chunk)
+            });
+            match r {
+                Ok(()) if !chunk.is_empty() => {
+                    send(&mut chunk);
+                }
+                Ok(()) => {}
+                Err(e) => {
+                    let _ = tx.blocking_send(Err(disk_status(campaign, &e)));
+                }
+            }
+        });
+        Ok(Response::new(Box::pin(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        )))
     }
 
     async fn delete_campaign(
         &self,
-        _req: Request<DeleteCampaignRequest>,
+        req: Request<DeleteCampaignRequest>,
     ) -> Result<Response<DeleteCampaignResponse>, Status> {
-        Err(not_built("DeleteCampaign"))
+        require(&req, Access::Admin)?;
+        let r = req.into_inner();
+        let mut hashed = r.clone();
+        hashed.lease = None;
+        let cfg = self.0.cfg.clone();
+        let resp = self
+            .0
+            .write(
+                Call {
+                    method: "DeleteCampaign",
+                    key: r.idempotency.as_ref(),
+                    lease: r.lease.as_ref(),
+                    campaign: 0,
+                    need: Need::Nothing,
+                },
+                &hashed,
+                |g: &mut Inner, _| {
+                    g.delete_campaign(&cfg, r.campaign_id, &r.confirm_name)?;
+                    Ok((DeleteCampaignResponse {}, 0))
+                },
+            )
+            .await?;
+        Ok(Response::new(resp))
+    }
+
+    async fn set_campaign_template(
+        &self,
+        req: Request<SetCampaignTemplateRequest>,
+    ) -> Result<Response<SetCampaignTemplateResponse>, Status> {
+        require(&req, Access::Controller)?;
+        let r = req.into_inner();
+        let w = r.write.clone().unwrap_or_default();
+        let mut hashed = r.clone();
+        if let Some(h) = hashed.write.as_mut() {
+            h.lease = None;
+        }
+        let resp = self
+            .0
+            .write(
+                Call {
+                    method: "SetCampaignTemplate",
+                    key: w.idempotency.as_ref(),
+                    lease: w.lease.as_ref(),
+                    campaign: w.campaign_id,
+                    need: Need::Campaign,
+                },
+                &hashed,
+                |g: &mut Inner, id| {
+                    g.set_template(id, &r.theater, &r.miz)?;
+                    Ok((
+                        SetCampaignTemplateResponse {
+                            campaign: Some(shown(g, id)),
+                        },
+                        id,
+                    ))
+                },
+            )
+            .await?;
+        Ok(Response::new(resp))
     }
 
     async fn backup_campaign(

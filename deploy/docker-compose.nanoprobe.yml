@@ -40,8 +40,9 @@ services:
       - ./nanoprobe/sidecar.toml:/etc/nanoprobe/sidecar.toml:ro
       # The agent's token, from the DCS profile's nanoprobe folder on the host.
       - "<host path of the DCS profile>/nanoprobe/token:/etc/nanoprobe/agent-token:ro"
-      # The mission folder, `<theater>.miz` for each theater.
-      - "<host path of the DCS profile>/nanoprobe/missions:/missions:ro"
+      # The mission folder: `<theater>.miz` for each theater, and `shells/`,
+      # which the sidecar writes.
+      - "<host path of the DCS profile>/nanoprobe/missions:/missions"
       # The campaign stores: a folder on the host owned by the DCS user.
       - ./nanoprobe/data:/var/lib/nanoprobe
       # For a listener off loopback: the tokens file sidecar.toml names.

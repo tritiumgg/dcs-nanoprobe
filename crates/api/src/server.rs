@@ -18,6 +18,10 @@ use tonic::service::Routes;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Server;
 
+/// The largest message CampaignService decodes: a 16 MiB template and the
+/// rest of its request.
+pub const CAMPAIGN_MESSAGE_MAX: usize = 16 * 1024 * 1024 + 64 * 1024;
+
 use crate::auth::Tokens;
 use crate::config::Config;
 use crate::hub::Hub;
@@ -63,7 +67,16 @@ pub fn routes(hub: &Arc<Hub>, tokens: Tokens) -> Result<Routes, String> {
         .add_service(guarded!(WorldServiceServer, World(Arc::clone(hub))))
         .add_service(guarded!(EventsServiceServer, Events(Arc::clone(hub))))
         .add_service(guarded!(CommandsServiceServer, Commands(Arc::clone(hub))))
-        .add_service(guarded!(CampaignServiceServer, Campaigns(Arc::clone(hub))))
+        .add_service({
+            let t = Arc::clone(&t);
+            // A campaign's template is up to 16 MiB; only this service takes
+            // messages that large.
+            InterceptedService::new(
+                CampaignServiceServer::new(Campaigns(Arc::clone(hub)))
+                    .max_decoding_message_size(CAMPAIGN_MESSAGE_MAX),
+                move |r| t.check(r),
+            )
+        })
         .add_service(guarded!(MissionServiceServer, Mission(Arc::clone(hub))))
         .add_service(guarded!(PlayersServiceServer, Players(Arc::clone(hub))))
         .add_service(guarded!(ExtensionServiceServer, Extension(Arc::clone(hub))))

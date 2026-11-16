@@ -74,7 +74,15 @@ Every failed call returns a gRPC status whose details hold one `ErrorDetail`: a
 | `FAILED_PRECONDITION` | `LEASE_HELD` | Another controller holds the lease |
 | `FAILED_PRECONDITION` | `RAW_LUA_OFF` | The call needs raw Lua, which the agent has off |
 | `FAILED_PRECONDITION` | `THEATER_NOT_LOADED` | The entity's theater is not the loaded one |
-| `FAILED_PRECONDITION` | none (`UNSPECIFIED`), `field` `theater` | An activation, or a `CreateCampaign` that activates, whose theater has no mission file (spec/config.md, `[missions]`). Nothing is created, suspended, opened or sent |
+| `FAILED_PRECONDITION` | none (`UNSPECIFIED`), `field` `theater` | An activation, a `CreateCampaign` that activates, or a `Reload`, whose theater has no template (the message starts `no template for theater`), whose template does not parse (`the template for theater`), or whose shell does not render (`the shell`). Nothing is created, suspended, captured, opened or sent. A shell that renders but cannot be saved (`could not be written`) is the one refusal that comes after the capture: the groups are captured, and nothing is suspended, opened or sent. A `SetNextMission` or `SetCampaignTemplate` that lands during a `Reload`'s capture can refuse the reload the same way |
+| `FAILED_PRECONDITION` | none (`UNSPECIFIED`) | A `Reload` while a mission load is owed. Nothing is captured |
+| `INVALID_ARGUMENT` | `INVALID_FIELD`, `field` `next.dynamic_spawn` | An activation, a `CreateCampaign` that activates, or a `Reload`, whose stored next-mission settings name an airport that is not in the `warehouses` of the theater's template. Nothing is created, suspended, captured, opened or sent |
+| `INVALID_ARGUMENT` | `INVALID_FIELD`, `field` `next.theater` | A `SetNextMission` whose theater is not one of the campaign's |
+| `INVALID_ARGUMENT` | `INVALID_FIELD`, `field` `next.start` | A `SetNextMission` whose start is not a date from year 1 to year 9999 |
+| `INVALID_ARGUMENT` | `INVALID_FIELD`, `field` `clock` | A `CreateCampaign` whose `clock` is not a date from year 1 to year 9999. Nothing is created |
+| `FAILED_PRECONDITION` | none (`UNSPECIFIED`), `field` `campaign_id` | A `DeleteCampaign` of the active campaign or of one with a backup running |
+| `INVALID_ARGUMENT` | `INVALID_FIELD`, `field` `confirm_name` | A `DeleteCampaign` whose `confirm_name` is not the campaign's name |
+| `INTERNAL` | `INTERNAL` | A `DeleteCampaign` whose folder could not be removed; the campaign stays listed with what is left |
 | `FAILED_PRECONDITION` | `UNMANAGED_ENTITY` | The call changes a spec or order of an unmanaged entity |
 | `FAILED_PRECONDITION` | `CONFIRMATION_REQUIRED` | A delete without its confirmation field |
 | `ABORTED` | `LEASE_LOST` | The caller's lease epoch is not the current one |
@@ -88,6 +96,7 @@ Every failed call returns a gRPC status whose details hold one `ErrorDetail`: a
 | `UNAVAILABLE` | none (`UNSPECIFIED`) | The server is stopping. A stream ends with it, and a changing call that arrives is refused with it; the client connects again and resumes from its last revision or sequence number |
 | `UNIMPLEMENTED` | `UNVERIFIED` | A call path not yet verified on DCS; permanent until a release verifies it. The detail's `field` names the field |
 | `UNIMPLEMENTED` | none (`UNSPECIFIED`) | The call is in the schema and this server does not build it yet. The detail's `field` names the method |
+| `RESOURCE_EXHAUSTED` | `SPACE_LOW` | The store's file system has less free space than the campaign holds there (its store, the store's WAL and its events file), plus a template being set: a backup, a read copy and `SetCampaignTemplate` are refused. A store write that fails still stops the sidecar |
 | `INTERNAL` | `INTERNAL` | A fault in the sidecar |
 
 A set-state call succeeds when the desired state is journalled. It does not wait for
@@ -195,6 +204,16 @@ matches decides:
   handshake port still accepts a connect, which makes it `hung` and not `gone`, is
   UNVERIFIED until step S19 (E22).
 
+While the verdict is `hung`, the status reports the state `SIM_STATE_HUNG`, and while it
+is `gone`, `SIM_STATE_GONE`. When the verdict enters `hung`, the sidecar publishes a
+lifecycle event with `SIM_STATE_HUNG`; when it leaves, one with the state the status
+then reports. The event goes to the active campaign's history, or to the server log.
+
 The sidecar takes no action on a verdict. Starting, stopping and restarting DCS belong
 to the host. The health command's exit code is 0 for `healthy` and differs for each
 other verdict (spec/config.md).
+
+The status also reports the free bytes on the store's file system, and whether they
+are below what the active campaign holds there (spec/persistence.md, "Free space").
+Space is not part of the verdict or of the health command's exit code: a full disk must
+not make a watchdog restart DCS.

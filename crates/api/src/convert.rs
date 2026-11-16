@@ -49,6 +49,25 @@ pub fn not_built(what: &str) -> Status {
     )
 }
 
+/// Milliseconds since the Unix epoch of a timestamp.
+pub fn ms_of_timestamp(t: &prost_types::Timestamp) -> i64 {
+    t.seconds
+        .saturating_mul(1000)
+        .saturating_add(i64::from(t.nanos / 1_000_000))
+}
+
+/// A date a mission can carry, years 1 to 9999, or `INVALID_FIELD` on
+/// `field`.
+pub fn mission_date(t: &prost_types::Timestamp, field: &str) -> Result<(), Status> {
+    const FIRST_S: i64 = -62_135_596_800;
+    const LAST_S: i64 = 253_402_300_799;
+    if (FIRST_S..=LAST_S).contains(&t.seconds) && (0..1_000_000_000).contains(&t.nanos) {
+        Ok(())
+    } else {
+        Err(invalid(field, "must be a date from year 1 to year 9999"))
+    }
+}
+
 /// A finite number, or `INVALID_FIELD`.
 pub fn finite(v: f64, field: &str) -> Result<f64, Status> {
     if v.is_finite() {

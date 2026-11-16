@@ -44,8 +44,7 @@ const NORMAL_PERIOD: Duration = Duration::from_secs(1);
 const SLOW_PERIOD: Duration = Duration::from_secs(5);
 
 fn snapshot(g: &Inner, campaign: u64, filter: &Filter) -> (u64, Vec<pb::Entity>) {
-    let slot = &g.campaigns[&campaign];
-    let store = &slot.store;
+    let store = g.read_store(campaign);
     let entities = filter
         .candidates(store)
         .into_iter()
@@ -298,6 +297,7 @@ impl WorldService for World {
         let (campaign, revision, entities) = {
             let mut g = self.0.lock();
             let campaign = g.resolve_read(f.map_or(0, |f| f.campaign_id))?;
+            g.open_archive(campaign)?;
             let (revision, entities) = snapshot(&g, campaign, &filter);
             (campaign, revision, entities)
         };
@@ -429,6 +429,7 @@ impl WorldService for World {
         let filter = Filter::new(f, true)?;
         let mut g = self.0.lock();
         let campaign = g.resolve_read(f.map_or(0, |f| f.campaign_id))?;
+        g.open_archive(campaign)?;
         let (revision, entities) = snapshot(&g, campaign, &filter);
         Ok(Response::new(QueryAreaResponse {
             revision,
