@@ -76,6 +76,11 @@ pub trait Target {
     }
     /// Whether DCS is paused. `None` on the fake.
     fn paused(&mut self) -> Result<Option<bool>, String>;
+    /// Fails when a player is connected: before a step that loads a
+    /// mission. Always passes on the fake.
+    fn no_players(&mut self) -> Result<(), String> {
+        Ok(())
+    }
     /// Players connected now. `None` on the fake.
     fn players(&mut self) -> Result<Option<usize>, String>;
     /// Remove one unit by name with `Unit.destroy`, which emits no death.
@@ -367,6 +372,8 @@ fn land_grid(
 
 /// Create and activate a campaign, and wait for its mission to load.
 fn campaign(t: &mut dyn Target, api: &mut Api, name: &str) -> Result<u64, String> {
+    // Activation loads the campaign's mission.
+    t.no_players()?;
     let c = api.create(name, &t.theater())?;
     let theater = t.theater();
     wait(
@@ -653,6 +660,7 @@ pub fn switch(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Value, Str
     let b_once = one_per_entity(t, api, b)?;
     let a_in_dcs_under_b = t.dcs_groups()?.map(|g| dcs_of(&g, a).len());
     let theater_c = theater.clone();
+    t.no_players()?;
     api.activate(a)?;
     wait(t, api, "A's mission", 600.0, 5.0, true, |api, _| {
         Ok((api.campaign(a)?.loaded_theater == theater_c).then_some(()))
@@ -758,7 +766,9 @@ pub fn death_pending(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Val
             // A death fact: dead, no mark.
             "late" | "prompt" => unit.as_ref().is_some_and(|u| !u.alive && u.left == 0),
             // No death fact: a mark holds it.
-            _ => unit.as_ref().is_some_and(|u| u.left != 0),
+            _ => unit
+                .as_ref()
+                .is_some_and(|u| u.alive && u.left == pb::UnitLeft::Removed as i32),
         };
         cases.push(json!({
             "case": case,
@@ -935,6 +945,16 @@ pub fn tables(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Value, Str
         Value::Object(o) => o.is_empty(),
         _ => false,
     };
+    // Every unit's ammunition was read, and every read saw keys.
+    let reads = keys["read"].as_array().cloned().unwrap_or_default();
+    let all_read = !t.live()
+        || (names_.iter().all(|n| {
+            reads
+                .iter()
+                .any(|r| r["what"] == json!(format!("{n}:getAmmo")))
+        }) && reads
+            .iter()
+            .all(|r| r["keys"].as_u64().is_some_and(|k| k > 0)));
     let armed = s0.as_object().is_some_and(|o| {
         o.values().any(|u| {
             u["ammo"].as_array().is_some_and(|a| {
@@ -971,6 +991,7 @@ pub fn tables(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Value, Str
         && s0 == s1
         && s1 == s2
         && no_bad_keys
+        && all_read
         && outcome == Some(pb::Outcome::Applied as i32)
         && air.as_ref().is_none_or(|a| a.iter().any(|b| *b));
     Ok(json!({
@@ -1042,8 +1063,13 @@ pub fn owed_load(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Value, 
     };
     sample(t)?;
     t.start_sidecar()?;
-    let deadline = Instant::now() + Duration::from_secs(120);
-    while !sample(t)? && Instant::now() < deadline {
+    let deadline = Instant::now() + Duration::from_secs(600);
+    let mut saw_start = false;
+    while Instant::now() < deadline {
+        if sample(t)? {
+            saw_start = true;
+            break;
+        }
         std::thread::sleep(Duration::from_millis(500));
     }
     *api = reconnect(t, api)?;
@@ -1072,12 +1098,14 @@ pub fn owed_load(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Value, 
         "loading_events": loads,
         "dcs_mission_starts": starts,
         "samples_before_the_load": samples,
+        "saw_the_start": saw_start,
         "campaign_groups_in_the_old_mission": early,
         "one_per_entity": once,
         "old_groups_in_dcs": old_in_dcs,
         "pass": starts.is_none_or(|n| n == 1)
             && (loads == 1 || !t.live())
             && early.is_empty()
+            && ((samples > 0 && saw_start) || !t.live())
             && activated.state == pb::CampaignState::Active as i32
             && once["pass"] == json!(true)
             && old_in_dcs.is_none_or(|n| n == 0),
@@ -1116,6 +1144,9 @@ pub fn run(
     for name in which {
         println!("== {name}");
         let players_before = t.players()?;
+        if let Some(n @ 1..) = players_before {
+            return Err(format!("{name}: {n} player(s) connected; not starting it"));
+        }
         let mut api = Api::connect(
             rt,
             &t.endpoint(),

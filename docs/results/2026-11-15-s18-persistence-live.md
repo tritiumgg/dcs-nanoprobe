@@ -13,7 +13,8 @@
 
 All figures are LIVE and from run 5 unless tagged. Run 5 records the player count at the
 start and the end of each scenario: 0 every time. The test also checks for players before
-every mission load, kill, removal and pause.
+every reload, kill, removal and pause. `c0eaacc` did not check before an activation's
+mission load or before the load after a DCS restart; the tool checks there now.
 
 ## How the test runs
 
@@ -105,6 +106,9 @@ model time ran, the unit was gone from DCS, and the mission was loaded again.
 | prompt | Killed the same way, the sidecar running | dead, no mark | not spawned |
 | removed | `Unit.destroy`, which DCS reports with no death | alive, `left` `REMOVED` | not spawned |
 
+The removed case passes only on `alive` and `REMOVED`; `c0eaacc` accepted any mark, and
+run 5 gave `REMOVED`.
+
 In each case the group came back with its two other members, one group per entity.
 
 In the late case the sidecar was paused through the death and the start of the reload,
@@ -120,7 +124,7 @@ model time. The sidecar printed its write times every 10 s (`NANOPROBE_COMMIT_TI
 `crates/api/src/timings.rs`), 14 reports at 2,000 units, each of about 4,980 commits: one
 commit per driver step, about 500 a second.
 
-| | Worst report | Host (S18b, 2,001 units, macOS) |
+| | Worst report, live: 400 of 2,000 units moving | Host (S18b): all 2,001 units moving, macOS |
 |---|---|---|
 | A step's commit, median | 0.66 ms | 0.38 ms |
 | A step's commit, p99 | 0.97 ms | |
@@ -152,9 +156,11 @@ platform by `coalition.addGroup` with the same payload as a Lua table keyed by n
 loaded it with the same rows, `M61_20_HE` 940 and `AIM_120` 2. The conversion of the
 decimal-string keys is not the cause; why DCS loads two is UNVERIFIED.
 
-No string key looked like an integer in 218 keys of 55 tables: each unit's `getAmmo`,
-`getDesc` and `getPosition`, and the inventory of three airbases' warehouses
-(spec/world.md, "Lua tables in the API", now LIVE for these tables).
+No string key looked like an integer in 218 keys of 55 tables: the F-15C's and the
+M-113's `getAmmo`, `getDesc` and `getPosition`, and the inventories of three Caucasus
+airbases' warehouses (Anapa-Vityazevo, Krasnodar-Center, Novorossiysk). spec/world.md
+("Lua tables in the API") is LIVE for these tables only. Run 5 recorded only the totals;
+the tool now records each read's key count and fails a read with none.
 
 Ammunition: the restore path carries no ammunition count. A `PutGroup` with a unit's `ammo`
 set is refused (`spawning with a captured life, fuel or ammunition is not built yet`), and
@@ -168,8 +174,9 @@ is not observed live (UNVERIFIED); host tests check that the sidecar sends them.
 
 Campaign X active with one group; campaign Y created inactive with one group. The DCS
 container was paused, Y activated (the call answered `ACTIVE`), the sidecar killed, DCS
-unpaused, and the sidecar started again from its store. Until DCS started Y's mission, DCS
-was read twice: no group of Y was in X's mission. DCS loaded Y's mission once: one
+unpaused, and the sidecar started again from its store. DCS was read twice before it
+started Y's mission, and no group of Y was in X's mission. The test now fails when it
+reads DCS no time before that start, or never sees the start; run 5 meets both. DCS loaded Y's mission once: one
 simulation start in `hook.log` from before the pause to the end, after 30 s more of model
 time, and one `LOADING` lifecycle event in Y's log. Y's group was live once, one group per
 entity, and no group of X was in DCS.

@@ -429,4 +429,5 @@ pending"): the agent writes `OBJECT_GONE` `DESTROYED` at once and DCS lets the o
 go at the resume. A spawn under the same name in the same pause is a new group with new
 object IDs. After the resume DCS holds exactly one group per entity: LIVE on the Wine
 server, docs/results/2026-11-15-s15-world-commands.md ("Paused replace"). The
-sidecar's restore path over it is checked on the fake sim only.
+sidecar's restore path over it is LIVE on the same server,
+docs/results/2026-11-15-s18-persistence-live.md (item 2).

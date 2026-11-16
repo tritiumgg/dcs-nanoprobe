@@ -411,10 +411,11 @@ are strings and whose numbers are doubles. The sidecar converts both ways by one
 
 So a sparse table such as pylons 1, 3 and 5 is an object with the keys `"1"`, `"3"` and
 `"5"`. A string key that looks like an integer cannot be sent. None of these DCS tables
-has one: a unit's `getAmmo`, `getDesc` and `getPosition`, and an airbase warehouse's
-`getInventory` (LIVE, DCS 2.9.31.29434 dedicated server under Wine 10.0,
-docs/results/2026-11-15-s18-persistence-live.md). That no other DCS table the platform
-handles has one is UNVERIFIED.
+has one: `getAmmo`, `getDesc` and `getPosition` of an F-15C and an M-113, and
+`getInventory` of three Caucasus airbases' warehouses (LIVE, DCS 2.9.31.29434 dedicated
+server under Wine 10.0, docs/results/2026-11-15-s18-persistence-live.md). That no other
+DCS table the platform handles has one, of these or other unit types and warehouses, is
+UNVERIFIED.
 
 ## Players
 

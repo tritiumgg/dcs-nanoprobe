@@ -463,6 +463,10 @@ impl Target for LiveTarget<'_> {
         self.load_mission()
     }
 
+    fn no_players(&mut self) -> Result<(), String> {
+        LiveTarget::no_players(self)
+    }
+
     fn kill_dcs(&mut self) -> Result<(), String> {
         self.no_players()?;
         println!("   DCS kill");
@@ -477,7 +481,9 @@ impl Target for LiveTarget<'_> {
             .map(|_| ())
         })?;
         // DCS starts its own mission; the campaign's is loaded as an
-        // operator would, then the sidecar starts from its store.
+        // operator would, then the sidecar starts from its store. A visitor
+        // may have joined the restarted server.
+        LiveTarget::no_players(self)?;
         self.load_mission()?;
         self.start_sidecar()
     }
@@ -546,6 +552,9 @@ impl Target for LiveTarget<'_> {
     }
 
     fn freeze_sidecar(&mut self, frozen: bool) -> Result<(), String> {
+        if frozen {
+            LiveTarget::no_players(self)?;
+        }
         let verb = if frozen { "pause" } else { "unpause" };
         self.host.sh(
             &format!(
@@ -843,7 +852,11 @@ for _, n in ipairs({ __UNITS__ }) do
   if u then
     for _, m in ipairs({ 'getAmmo', 'getDesc', 'getPosition' }) do
       local ok, v = pcall(u[m], u)
-      if ok then walk(v, n .. ':' .. m, 0); read[#read + 1] = n .. ':' .. m end
+      if ok then
+        local before = seen
+        walk(v, n .. ':' .. m, 0)
+        read[#read + 1] = { what = n .. ':' .. m, keys = seen - before }
+      end
     end
   end
 end
@@ -852,8 +865,9 @@ for i = 1, math.min(#abs, 3) do
   local ok, inv = pcall(function() return abs[i]:getWarehouse():getInventory() end)
   if ok then
     local name = abs[i]:getName()
+    local before = seen
     walk(inv, name .. ':getInventory', 0)
-    read[#read + 1] = name .. ':getInventory'
+    read[#read + 1] = { what = name .. ':getInventory', keys = seen - before }
   end
 end
 return { string_integer_keys = bad, keys = seen, tables = tables, read = read }
