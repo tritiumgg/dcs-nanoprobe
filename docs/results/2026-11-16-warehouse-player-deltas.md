@@ -10,7 +10,7 @@
 | Mission | The server's own mission, with the warehouses of airbase 11 (Dwyer) and of the FARP with unit ID 8624 limited: `cargo xtask miz <mission> <out> --limited-airport 11 --limited-warehouse 8624`, loaded with `cargo xtask load`. The `start_inventory` read before the first step: each held 100 of every aircraft type, from the mission's own `aircrafts` table, which the tool keeps. Each held 100 Mk-82, which the tool writes into an empty `weapons` table, and no other weapon. Each held 100,000 of each liquid, from the mission's `InitFuel` of 100. The `stock` action was not run. |
 | Script | `lua/experiments/warehouse/run.sh <server> <action> [slot] [seconds] [stock]` runs `step.lua` in the server's hook state. `cargo xtask eval <server> server lua/experiments/warehouse/farp-spawn.lua` runs `farp-spawn.lua`. The client joined with `cargo xtask client join` and entered its aircraft with `lua/experiments/alone/e31-spawn.lua`. |
 | Rehearsal | `lua/tests/warehouse_experiments.lua`, run by `mise run check` |
-| Result | Slot, deslot on the ground and kill on the ground have verdicts at the airbase. The rearm, the flight and every FARP step with a player wait for a person. |
+| Result | Slot, deslot on the ground and kill on the ground have verdicts at the airbase. The ground-crew steps and the FARP steps with a person at the client are in docs/results/2026-11-16-person-tests-2.md. |
 
 All results are LIVE.
 
@@ -85,17 +85,15 @@ plus the start-up of `cargo xtask eval`, which was not timed.
 | `setItem` Mk-82 7 and `setLiquidAmount` 0 to 1,234 | read back 7 and 1,234: limited, by E6's rule that only a limited warehouse reads a set back |
 
 A spawned FARP starts with an empty limited warehouse. A player who lands there finds no
-fuel or stores until something adds them.
+fuel or stores until something adds them. A player could spawn at one when the static
+was added with `dynamicSpawn`, `allowHotStart` and `dynamicCargo` true and stocked, and not
+at one added without them (docs/results/2026-11-16-person-tests-2.md).
 
-## Waits for a person
+## With a person at the client
 
-These steps need a pilot at the client and were not run:
-
-- 2. Rearm and refuel on the ground through the ground crew radio menu, at Dwyer and at a
-  FARP.
-- 4. Take off, land at the same or another base, and deslot.
-- Every FARP step with a player. The mission's FARP has no client slot, and Dwyer's
-  helicopter spawns are dynamic slots, which the scripted client does not take.
+The ground-crew refuel, defuel and rearm, the deslot after them, and the FARP steps with a
+player are in docs/results/2026-11-16-person-tests-2.md. A flight from base to base and a
+deslot after it were not flown.
 
 ## Open items
 
