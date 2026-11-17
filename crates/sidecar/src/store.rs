@@ -6,7 +6,7 @@
 //! tables and the journal in a per-campaign SQLite file; here they are in
 //! memory, and a test keeps the [`Store`] across a simulated restart.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use nanoprobe_transport::codec::Lv;
 use nanoprobe_transport::records::Rates;
@@ -24,7 +24,8 @@ mod disk;
 pub use disk::{
     CampaignRecord, CampaignState, Checkpoint, DiskError, MIGRATIONS, Migration, REVISION_RESERVE,
     SCHEMA, TierPeriod, backup_file, checkpoint_of, idempotency_of, ident_of, journal_of,
-    record_of, revision_of, schema_of, state_of,
+    next_entity_of, next_mission_of, rebase_world, record_of, revision_of, schema_of,
+    shell_slot_of, state_of, template_of, template_theaters_of,
 };
 
 /// Without the `disk` feature a store lives in memory only: its slot is
@@ -335,6 +336,9 @@ pub struct OwedLoad {
     pub path: String,
     /// The `MISSION_LOAD`'s epoch and sequence number once sent.
     pub cmd: Option<(u64, u64)>,
+    /// The date and start time written into the shell, milliseconds since
+    /// the Unix epoch; `None` for a file the sidecar did not write.
+    pub start_ms: Option<i64>,
 }
 
 /// How a unit left DCS without a death fact.
@@ -457,6 +461,14 @@ pub enum Entry {
     Death {
         /// The unit.
         unit: EntityId,
+    },
+    /// The controller released a member held out of spawns: `dead` gave it
+    /// a death fact, otherwise the next spawn includes it.
+    Resolve {
+        /// The unit.
+        unit: EntityId,
+        /// Whether it was resolved dead.
+        dead: bool,
     },
     /// A unit left DCS as `MISSING` or `REMOVED`: it holds its group's
     /// respawn gate and stays out of spawns, across mission generations too,
@@ -614,6 +626,21 @@ pub struct Store {
     stocks: BTreeMap<(String, String), DesiredStock>,
     rates: Option<Rates>,
     owed_load: Option<OwedLoad>,
+    /// The start written into the shell of the mission that runs now, ms
+    /// since the Unix epoch: the campaign clock is it plus the model time.
+    mission_start_ms: Option<i64>,
+    /// The model time of the first sample of the mission that runs now,
+    /// with its agent boot and generation.
+    model0: Option<(u64, u32, f64)>,
+    /// The shell slot (`a` or `b`) of the last load DCS applied.
+    shell_slot: Option<u8>,
+    /// What the next shell is written with, in the API's encoding; opaque
+    /// to the store.
+    next_mission: Option<Lv>,
+    /// The campaign's own templates by theater (plan revision 35).
+    templates: BTreeMap<String, Vec<u8>>,
+    /// Theaters whose template changed since the last commit.
+    templates_dirty: BTreeSet<String>,
     countries: Option<BTreeMap<u32, u32>>,
     sample_time: f64,
     route_events: Vec<RouteEvent>,
@@ -733,6 +760,12 @@ impl Store {
             stocks: BTreeMap::new(),
             rates: None,
             owed_load: None,
+            mission_start_ms: None,
+            model0: None,
+            shell_slot: None,
+            next_mission: None,
+            templates: BTreeMap::new(),
+            templates_dirty: BTreeSet::new(),
             countries: None,
             sample_time: 0.0,
             route_events: Vec::new(),
@@ -979,6 +1012,53 @@ impl Store {
     /// commit, in `meta.world`.
     pub fn set_owed_load(&mut self, owed: Option<OwedLoad>) {
         self.owed_load = owed;
+    }
+
+    /// The start written into the running mission's shell, ms since the
+    /// Unix epoch.
+    pub fn mission_start_ms(&self) -> Option<i64> {
+        self.mission_start_ms
+    }
+
+    /// Set the running mission's start. It goes to disk with the next
+    /// commit, in `meta.world`.
+    pub fn set_mission_start_ms(&mut self, start: Option<i64>) {
+        self.mission_start_ms = start;
+    }
+
+    /// What the next shell is written with.
+    pub fn next_mission(&self) -> Option<&Lv> {
+        self.next_mission.as_ref()
+    }
+
+    /// Set what the next shell is written with. It goes to disk with the
+    /// next commit, in `meta.world`.
+    pub fn set_next_mission(&mut self, next: Option<Lv>) {
+        self.next_mission = next;
+    }
+
+    /// The campaign's own template for `theater`.
+    pub fn template(&self, theater: &str) -> Option<&[u8]> {
+        self.templates.get(theater).map(Vec::as_slice)
+    }
+
+    /// The theaters the campaign has its own template for.
+    pub fn template_theaters(&self) -> impl Iterator<Item = &str> {
+        self.templates.keys().map(String::as_str)
+    }
+
+    /// Set or remove the campaign's own template for `theater`. It goes to
+    /// disk with the next commit.
+    pub fn set_template(&mut self, theater: &str, bytes: Option<Vec<u8>>) {
+        match bytes {
+            Some(b) => {
+                self.templates.insert(theater.to_owned(), b);
+            }
+            None => {
+                self.templates.remove(theater);
+            }
+        }
+        self.templates_dirty.insert(theater.to_owned());
     }
 
     /// Set the sample rates the agent is told.
@@ -1550,6 +1630,26 @@ impl Store {
         Ok(true)
     }
 
+    /// Release a member held out of spawns (spec/world.md, "Respawn
+    /// gate"): `dead` journals a death fact, otherwise the mark is cleared
+    /// so the group's next spawn includes it. Journalled as `resolve`.
+    /// Returns whether the unit was held.
+    pub fn resolve_member(&mut self, unit: EntityId, dead: bool) -> Result<bool, StoreError> {
+        if self.unit(unit).is_none() {
+            return Err(StoreError::NoSuchEntity(unit));
+        }
+        if !self.held(unit) {
+            return Ok(false);
+        }
+        self.journal(Entry::Resolve { unit, dead });
+        if dead {
+            self.death(unit)?;
+        } else {
+            self.set_missing(unit, false);
+        }
+        Ok(true)
+    }
+
     /// Whether every member of the group has a death fact.
     pub fn all_dead(&self, id: EntityId) -> bool {
         self.group(id)
@@ -1684,10 +1784,56 @@ impl Store {
             .is_some_and(|u| !u.dead && (u.missing || u.removed))
     }
 
+    /// The model time of the last samples.
+    pub fn sample_time(&self) -> f64 {
+        self.sample_time
+    }
+
     /// Set the model time of the position samples that follow: the last
     /// `FRAME`'s.
     pub fn set_sample_time(&mut self, t: f64) {
         self.sample_time = t;
+        // The first sample of a generation sets its model time zero for the
+        // campaign clock.
+        if let Some(l) = &self.loaded
+            && self
+                .model0
+                .is_none_or(|(b, g, _)| (b, g) != (l.agent_boot, l.mission_gen))
+        {
+            self.model0 = Some((l.agent_boot, l.mission_gen, t));
+        }
+    }
+
+    /// Count the model time from the next generation's first sample: until
+    /// one arrives, [`Store::model_elapsed`] is 0. For a load just applied,
+    /// whose mission has not started yet.
+    pub fn await_generation(&mut self) {
+        let (b, g) = self
+            .loaded
+            .as_ref()
+            .map_or((0, 0), |l| (l.agent_boot, l.mission_gen));
+        // The running generation's zero is past any of its samples.
+        self.model0 = Some((b, g, f64::MAX));
+    }
+
+    /// The model time since the running generation's first sample, seconds.
+    pub fn model_elapsed(&self) -> f64 {
+        match (&self.loaded, self.model0) {
+            (Some(l), Some((b, g, t0))) if (b, g) == (l.agent_boot, l.mission_gen) => {
+                (self.sample_time - t0).max(0.0)
+            }
+            _ => 0.0,
+        }
+    }
+
+    /// The shell slot of the last load DCS applied.
+    pub fn shell_slot(&self) -> Option<u8> {
+        self.shell_slot
+    }
+
+    /// Set the shell slot of the last load DCS applied.
+    pub fn set_shell_slot(&mut self, slot: Option<u8>) {
+        self.shell_slot = slot;
     }
 
     /// Forget the last samples of every group's lead unit: no segment is made
@@ -2345,5 +2491,36 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn a_held_member_resolves_dead_or_restored_once() {
+        let mut s = Store::new(CampaignId(1), 10);
+        let a = s.create_group(spec(2)).unwrap();
+        let m = s.group(a).unwrap().members.clone();
+        assert!(!s.resolve_member(m[0], true).unwrap(), "not held");
+        assert!(matches!(
+            s.resolve_member(EntityId(999), true),
+            Err(StoreError::NoSuchEntity(_))
+        ));
+        assert!(s.left(m[0], 7, LeftAs::Removed));
+        assert!(s.left(m[1], 8, LeftAs::Missing));
+        assert!(s.held(m[0]) && s.held(m[1]));
+        let rev = s.revision();
+        assert!(s.resolve_member(m[0], true).unwrap());
+        assert!(s.unit(m[0]).unwrap().dead && !s.held(m[0]));
+        assert!(s.resolve_member(m[1], false).unwrap());
+        assert!(!s.unit(m[1]).unwrap().dead && !s.held(m[1]));
+        assert!(s.revision() > rev, "the change shows in a watch");
+        assert!(!s.resolve_member(m[1], false).unwrap(), "once");
+        let resolves: Vec<_> = s
+            .entries()
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Resolve { unit, dead } => Some((*unit, *dead)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(resolves, [(m[0], true), (m[1], false)]);
     }
 }

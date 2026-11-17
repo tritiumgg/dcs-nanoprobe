@@ -89,6 +89,48 @@ if os.getenv('JUNK_DUMP') then
 end
 S.ok(string.format('junk2.lua@server: %d observation(s)', #result2.reply.observations))
 
+-- The ruin person test (ruin-person.lua), each action in turn, with a
+-- stand-in player unit: the mock has no `coalition.getPlayers`.
+do
+  local server = host.states.server
+  server.coalition.addGroup(server.country.id.USA, server.Group.Category.GROUND, {
+    name = 'np-ruin-player', task = 'Ground Nothing', visible = false, start_time = 0, x = 0, y = 0,
+    units = { { name = 'np-ruin-player-1', type = 'M-113', x = 0, y = 0, heading = 0, skill = 'Client' } },
+    route = { points = {} },
+  })
+  rawset(server.coalition, 'getPlayers', function(side)
+    local unit = server.Unit.getByName('np-ruin-player-1')
+    return (unit and unit:getCoalition() == side) and { unit } or {}
+  end)
+  local ruin = S.read(root .. 'lua/experiments/junk/ruin-person.lua')
+  local expect = { spawn = { 'spawn', 'after_spawn' }, kill = { 'before_kill' }, read = { 'now', 'player_life' },
+    clear = { 'before_clear', 'removed', 'after_clear' }, destroy = { 'before_destroy', 'destroyed', 'after_destroy' } }
+  local steps = {}
+  for _, action in ipairs({ 'spawn', 'kill', 'read', 'clear', 'destroy' }) do
+    local r = eval('ruin-' .. action, 'server', (ruin:gsub('<action>', action)), 30)
+    assert(r.ok and r.reply.values[1] == 'done', 'ruin-person ' .. action .. ': ' .. tostring(r.error or r.reply.error))
+    local got = {}
+    for _, o in ipairs(r.reply.observations) do
+      got[o.name] = o.value
+    end
+    for _, name in ipairs(expect[action]) do
+      assert(got[name] ~= nil, 'ruin-person ' .. action .. ': no observation named ' .. name)
+    end
+    steps[action] = got
+  end
+  assert(steps.spawn.spawn.ok == true, 'ruin-person spawn failed: ' .. tostring(steps.spawn.spawn.error))
+  assert(steps.spawn.after_spawn.exists == true, 'ruin-person: the static does not exist after spawn')
+  assert(steps.kill.before_kill.exists == true, 'ruin-person: the static is gone before the kill')
+  assert(steps.read.now.exists == false, 'ruin-person: the static still exists after the kill')
+  assert(type(steps.clear.removed) == 'number', 'ruin-person: removeJunk gave no count')
+  -- The mock drops a dead static from getByName, so `destroy` finds nothing
+  -- here; live, the dead static was still found by name and destroyed
+  -- (docs/results/2026-11-16-person-tests-2.md, section 4).
+  assert(steps.destroy.before_destroy.found == false, 'ruin-person: the mock found the dead static by name')
+  assert(steps.destroy.destroyed.ok == false, 'ruin-person: destroy did not report the missing static')
+  S.ok('ruin-person.lua@server: spawn, kill, read, clear, destroy')
+end
+
 local report = eval('junkclean', 'uninstall', '', 10)
 assert(report.ok, tostring(report.error))
 for _, state in ipairs(report.reply) do

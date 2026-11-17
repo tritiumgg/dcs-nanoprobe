@@ -18,6 +18,10 @@ service CommandsService {
   rpc Materialize(MaterializeRequest) returns (MaterializeResponse);
   rpc Dematerialize(DematerializeRequest) returns (DematerializeResponse);
   rpc RemoveEntity(RemoveEntityRequest) returns (RemoveEntityResponse);
+  // Release a member held out of spawns (Unit.left MISSING or REMOVED, no
+  // death fact): DEAD records a death fact, RESTORE lets the next spawn of
+  // its group include it. Store-only, so it works on a suspended campaign.
+  rpc ResolveMember(ResolveMemberRequest) returns (ResolveMemberResponse);
   rpc SetLostPolicy(SetLostPolicyRequest) returns (SetLostPolicyResponse);
   rpc SetAirbaseOwner(SetAirbaseOwnerRequest) returns (SetAirbaseOwnerResponse);
   rpc SetWarehouseStock(SetWarehouseStockRequest) returns (SetWarehouseStockResponse);
@@ -198,6 +202,25 @@ message RemoveEntityRequest {
 }
 
 message RemoveEntityResponse {
+  uint64 revision = 1;
+}
+
+enum Resolution {
+  RESOLUTION_UNSPECIFIED = 0;
+  // A death fact with no killer, now.
+  RESOLUTION_DEAD = 1;
+  // The mark is cleared; the group's next spawn includes the member.
+  RESOLUTION_RESTORE = 2;
+}
+
+message ResolveMemberRequest {
+  Write write = 1;
+  // A unit whose left is MISSING or REMOVED.
+  uint64 unit = 2;
+  Resolution resolution = 3;
+}
+
+message ResolveMemberResponse {
   uint64 revision = 1;
 }
 

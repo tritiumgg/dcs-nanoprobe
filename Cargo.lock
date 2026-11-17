@@ -745,6 +745,7 @@ dependencies = [
  "prost",
  "prost-types",
  "serde",
+ "serde_json",
  "sha2",
  "tempfile",
  "tokio",
@@ -752,6 +753,7 @@ dependencies = [
  "toml",
  "tonic",
  "tonic-reflection",
+ "zip",
 ]
 
 [[package]]
@@ -762,8 +764,10 @@ dependencies = [
  "nanoprobe-agent-link",
  "nanoprobe-install",
  "nanoprobe-proto",
+ "nanoprobe-sidecar",
  "nanoprobe-transport",
  "serde_json",
+ "tempfile",
  "tokio",
  "tonic",
 ]
@@ -835,6 +839,7 @@ name = "nanoprobe-sidecar"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.3.4",
+ "libc",
  "nanoprobe-sim-fake",
  "nanoprobe-transport",
  "proptest",
@@ -842,6 +847,8 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "windows-sys",
+ "zip",
 ]
 
 [[package]]
@@ -1928,9 +1935,11 @@ dependencies = [
  "getrandom 0.3.4",
  "hmac",
  "nanoprobe-agent-link",
+ "nanoprobe-api",
  "nanoprobe-fake-agent",
  "nanoprobe-install",
  "nanoprobe-proto",
+ "nanoprobe-sidecar",
  "nanoprobe-transport",
  "prost",
  "prost-types",

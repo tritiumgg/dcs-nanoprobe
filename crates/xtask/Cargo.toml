@@ -17,8 +17,10 @@ publish = false
 [dependencies]
 nanoprobe-agent-link = { path = "../agent-link" }
 nanoprobe-fake-agent = { path = "../fake-agent" }
+nanoprobe-api = { path = "../api" }
 nanoprobe-install = { path = "../install" }
 nanoprobe-proto = { path = "../proto" }
+nanoprobe-sidecar = { path = "../sidecar", features = ["disk"] }
 nanoprobe-transport = { path = "../transport" }
 getrandom = "0.3"
 hmac = "0.12"

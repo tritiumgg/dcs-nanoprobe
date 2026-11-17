@@ -34,8 +34,11 @@ S.mkdir(version .. 'lua')
 S.mkdir(profile .. 'nanoprobe/logs')
 S.mkdir(profile .. 'sidecar')
 S.mkdir(profile .. 'nanoprobe/missions')
--- `[missions]`: activation loads `<theater>.miz` from this folder.
-S.write(profile .. 'nanoprobe/missions/Caucasus.miz', 'shell')
+-- `[missions]`: the shared template of each theater is `<theater>.miz` in
+-- this folder; activation writes the campaign's shell under `shells/` and
+-- loads it.
+S.write(profile .. 'nanoprobe/missions/Caucasus.miz',
+  assert(S.read(root .. 'templates/caucasus.miz'), 'templates/caucasus.miz'))
 S.copy(root .. 'lua/hook/nanoprobe-hook.lua', profile .. 'Scripts/Hooks/nanoprobe-hook.lua')
 S.copy(root .. 'lua/agent/hook.lua', version .. 'lua/hook.lua')
 S.copy(root .. 'lua/agent/log.lua', version .. 'lua/log.lua')
@@ -147,7 +150,7 @@ local ok, err = pcall(function()
   else
     print('skip  the Python hello: no uv, or no examples/hello-python/.venv (mise run hello-python-gen)')
   end
-  local mission = profile .. 'nanoprobe/missions/Caucasus.miz'
+  local shells = profile .. 'nanoprobe/missions/shells/'
   for _, h in ipairs(hellos) do
     local name = 'hello-' .. h[1]
     local loads = #host.loads
@@ -173,11 +176,13 @@ local ok, err = pcall(function()
     local out = S.read(profile .. name .. '.out') or ''
     assert(code == '0', name .. ' failed with ' .. tostring(code) .. ':\n' .. out:sub(-3000)
       .. '\nsidecar:\n' .. (S.read(profile .. 'sidecar.out') or ''):sub(-3000))
-    -- The activation loaded the campaign's mission from `[missions]`, once.
-    assert(#host.loads == loads + 1 and host.loads[#host.loads] == mission,
-      name .. ': the activation did not load ' .. mission .. ' once: '
+    -- The activation loaded the campaign's shell from `[missions]`, once.
+    local loaded = host.loads[#host.loads] or ''
+    assert(#host.loads == loads + 1 and loaded:sub(1, #shells) == shells
+        and loaded:sub(#shells + 1):match('^%d+%.[ab]%.miz$'),
+      name .. ': the activation did not load a shell under ' .. shells .. ' once: '
         .. table.concat(host.loads, ', ', loads + 1))
-    S.ok(name .. ' ran against nanoprobe-sidecar, its activation loading ' .. mission .. ': '
+    S.ok(name .. ' ran against nanoprobe-sidecar, its activation loading ' .. loaded .. ': '
       .. (out:match('hello campaign done:[^\n]*') or out:sub(-200)))
   end
   -- The health command, against the loopback listener with no tokens file.

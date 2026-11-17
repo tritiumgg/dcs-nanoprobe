@@ -15,6 +15,7 @@ pub mod idem;
 pub mod lease;
 pub mod loadouts;
 pub mod lua;
+pub mod next;
 pub mod real;
 pub mod server;
 pub mod services;

@@ -11,6 +11,7 @@ Usage:
   nanoprobe doctor [--profile DIR | --wine-prefix DIR]
   nanoprobe install [--profile DIR | --wine-prefix DIR] [--payload DIR]
   nanoprobe uninstall [--profile DIR | --wine-prefix DIR]
+  nanoprobe restore --store DIR --campaign ID --backup N
 
 inspect  Print the status block, the metrics and the unread records of both
          rings. --records N lists at most N records per ring (default 50).
@@ -41,9 +42,15 @@ install    Install the release into one DCS Saved Games profile: the loader,
            release's payload folder (default: payload/ beside this program).
 uninstall  Remove everything install added, the autoexec.cfg block included.
 
+restore  Restore backup N of a campaign in the sidecar's store dir, with the
+         sidecar stopped: the store it replaces is kept in the campaign's
+         folder as restore-<time>/store.sqlite, entity IDs and revisions
+         stay above both copies', and the campaign is suspended unless the
+         backup is finished. The events file is not rolled back.
+
 inspect and top open the file read-only.
 Exit codes: 0 success, 2 usage error, 1 the file cannot be opened, the
-stream fails, a doctor check fails, or install or uninstall fails.
+stream fails, a doctor check fails, or install, uninstall or restore fails.
 ";
 
 /// Records listed per ring when `--records` is absent.
@@ -80,6 +87,8 @@ pub enum Command {
     Install(crate::setup::Options),
     /// `nanoprobe uninstall`.
     Uninstall(crate::setup::Options),
+    /// `nanoprobe restore`.
+    Restore(crate::restore::Options),
 }
 
 /// Parse the arguments after the program name. The error is a one-line message.
@@ -93,6 +102,9 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     }
     if sub == "watch" {
         return crate::watch::parse(&args[1..]).map(Command::Watch);
+    }
+    if sub == "restore" {
+        return crate::restore::parse(&args[1..]).map(Command::Restore);
     }
     let setup =
         |f: fn(crate::setup::Options) -> Command| crate::setup::parse(sub, &args[1..]).map(f);

@@ -242,7 +242,13 @@ CREATE TABLE journal (seq INTEGER PRIMARY KEY, at_ms INTEGER NOT NULL, kind TEXT
 CREATE TABLE inflight (epoch INTEGER NOT NULL, seq INTEGER NOT NULL, body BLOB NOT NULL, PRIMARY KEY (epoch, seq));
 CREATE TABLE idempotency (key TEXT PRIMARY KEY, at_ms INTEGER NOT NULL, request_hash BLOB NOT NULL, response BLOB NOT NULL);
 CREATE TABLE checkpoint (seq INTEGER PRIMARY KEY, body BLOB NOT NULL);
+CREATE TABLE template (theater TEXT PRIMARY KEY, body BLOB NOT NULL);
 ";
+
+/// The template table, made at open in a schema 1 file written before it
+/// (schema 1 has not shipped; spec/persistence.md).
+const TEMPLATE_TABLE: &str =
+    "CREATE TABLE IF NOT EXISTS template (theater TEXT PRIMARY KEY, body BLOB NOT NULL);";
 
 /// The schema version of the store file at `path`.
 pub fn schema_of(path: &Path) -> Result<u32, DiskError> {
@@ -298,6 +304,162 @@ pub fn checkpoint_of(path: &Path) -> Result<Option<Checkpoint>, DiskError> {
 pub fn revision_of(path: &Path) -> Result<u64, DiskError> {
     let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     Rd(&get_meta(&conn, "world")?).u("revision")
+}
+
+/// The campaign's own template for `theater` in the store file at `path`,
+/// read without opening the store; `None` when it has none.
+pub fn template_of(path: &Path, theater: &str) -> Result<Option<Vec<u8>>, DiskError> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let has_table: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'template'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !has_table {
+        return Ok(None);
+    }
+    Ok(conn
+        .query_row(
+            "SELECT body FROM template WHERE theater = ?1",
+            params![theater],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// The theaters the store file at `path` holds a campaign template for,
+/// read without opening the store.
+pub fn template_theaters_of(path: &Path) -> Result<Vec<String>, DiskError> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let has_table = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'template'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !has_table {
+        return Ok(Vec::new());
+    }
+    let mut q = conn.prepare("SELECT theater FROM template ORDER BY theater")?;
+    let rows = q.query_map([], |r| r.get::<_, String>(0))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// The next mission's settings in the store file at `path`, read without
+/// opening the store.
+pub fn next_mission_of(path: &Path) -> Result<Option<Lv>, DiskError> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    Ok(match Rd(&get_meta(&conn, "world")?).get("next_mission") {
+        Lv::Nil => None,
+        v => Some(v.clone()),
+    })
+}
+
+/// The shell slot DCS may hold, in the store file at `path`, read without
+/// opening the store: the slot of an owed load already sent, else that of
+/// the last load applied.
+pub fn shell_slot_of(path: &Path) -> Result<Option<u8>, DiskError> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let world = get_meta(&conn, "world")?;
+    let w = Rd(&world);
+    if let v @ Lv::Table(_) = w.get("owed_load") {
+        let owed = dec_owed_load(v)?;
+        let named = owed
+            .path
+            .strip_suffix(".miz")
+            .and_then(|p| p.rsplit_once('.'))
+            .map(|(_, s)| s.as_bytes())
+            .filter(|s| *s == b"a" || *s == b"b");
+        if let (Some(_), Some(s)) = (owed.cmd, named) {
+            return Ok(Some(s[0]));
+        }
+    }
+    Ok(match w.get("shell_slot") {
+        Lv::String(b) if b.len() == 1 => Some(b[0]),
+        _ => None,
+    })
+}
+
+/// The next `EntityId` in the store file at `path`, read without opening
+/// the store.
+pub fn next_entity_of(path: &Path) -> Result<u64, DiskError> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    Rd(&get_meta(&conn, "world")?).u("next_entity")
+}
+
+/// Raise the store file at `path` above what another copy of the campaign
+/// handed out, for an offline restore (spec/persistence.md, "Restore a
+/// backup"): its next `EntityId` becomes at least `next_entity`, its
+/// revision the larger of its own and `revision` plus
+/// [`REVISION_RESERVE`], and it is marked closed; its record is
+/// `suspended` unless it is `finished`; its commands in flight, its owed
+/// mission load and a start set for the next shell are cleared; its shell
+/// slot is `shell_slot`, the replaced store's. Returns
+/// the new next `EntityId` and revision.
+pub fn rebase_world(
+    path: &Path,
+    next_entity: u64,
+    revision: u64,
+    shell_slot: Option<u8>,
+) -> Result<(u64, u64), DiskError> {
+    let mut conn = connect(path)?;
+    let world = get_meta(&conn, "world")?;
+    let (own_next, own_rev) = {
+        let r = Rd(&world);
+        (r.u("next_entity")?, r.u("revision")?)
+    };
+    let next = own_next.max(next_entity);
+    let rev = own_rev
+        .max(revision)
+        .checked_add(REVISION_RESERVE)
+        .ok_or_else(|| DiskError::Corrupt("revision overflow".into()))?;
+    let Lv::Table(pairs) = world else {
+        return Err(DiskError::Corrupt("meta world is not a table".into()));
+    };
+    // A zero or false value has no key (the encoders drop nil), so the
+    // three keys are replaced, not edited.
+    let ours = |k: &Lv| matches!(k, Lv::String(n) if [&b"next_entity"[..], b"revision", b"open"].contains(&n.as_slice()));
+    let mut pairs: Vec<(Lv, Lv)> = pairs.into_iter().filter(|(k, _)| !ours(k)).collect();
+    for (k, v) in [("next_entity", u(next)), ("revision", u(rev))] {
+        if !matches!(v, Lv::Nil) {
+            pairs.push((s(k), v));
+        }
+    }
+    // A restored store owes no mission load and waits for no command; a
+    // start set for the next shell is not carried over.
+    let mut pairs: Vec<(Lv, Lv)> = pairs
+        .into_iter()
+        .filter(|(k, _)| *k != s("owed_load"))
+        .map(|(k, v)| {
+            if k == s("next_mission")
+                && let Lv::Table(n) = v
+            {
+                let n = n.into_iter().filter(|(k, _)| *k != s("start_ms")).collect();
+                return (k, Lv::Table(n));
+            }
+            (k, v)
+        })
+        .collect();
+    pairs.retain(|(k, _)| *k != s("mission_start_ms") && *k != s("shell_slot"));
+    // The slot DCS may hold is the replaced store's, not the backup's.
+    if let Some(c) = shell_slot {
+        pairs.push((s("shell_slot"), s(&char::from(c).to_string())));
+    }
+    let mut record = dec_record(&get_meta(&conn, "campaign")?)?;
+    if record.state != CampaignState::Finished {
+        record.state = CampaignState::Suspended;
+    }
+    let tx = conn.transaction()?;
+    put_meta(&tx, "world", &Lv::Table(pairs))?;
+    put_meta(&tx, "campaign", &enc_record(&record))?;
+    tx.execute("DELETE FROM inflight", [])?;
+    tx.commit()?;
+    Ok((next, rev))
 }
 
 /// A key kept in the store file at `path`, read without opening the store:
@@ -510,6 +672,7 @@ impl Store {
     /// store keeps its journal ([`Store::keep_journal`]).
     fn drain_journal(&mut self) {
         self.idempotency.clear();
+        self.templates_dirty.clear();
         if self.keep_journal {
             return;
         }
@@ -713,6 +876,15 @@ impl Store {
         self.commit()
     }
 
+    /// Set the campaign record without writing it: it goes to disk with the
+    /// next commit, with the rest of that commit's changes.
+    pub fn stage_record(&mut self, record: CampaignRecord) {
+        if let Some(d) = self.disk.0.as_mut() {
+            d.record = record;
+            d.record_written = false;
+        }
+    }
+
     /// Write every change, then copy the file to `dest` consistently.
     pub fn backup_to(&mut self, dest: &Path) -> Result<(), DiskError> {
         self.commit()?;
@@ -761,6 +933,12 @@ impl Disk {
             stocks,
             rates,
             owed_load,
+            mission_start_ms,
+            model0,
+            shell_slot,
+            next_mission,
+            templates,
+            templates_dirty,
             countries,
             sample_time,
             route_events,
@@ -882,7 +1060,7 @@ impl Disk {
         }
         // Sampled state moves only at a checkpoint.
         let sample_time = if full { *sample_time } else { self.sample_time };
-        let world = encode(&t(vec![
+        let mut world_pairs = vec![
             ("next_entity", u(*next_entity)),
             ("open", b(self.open)),
             ("revision", u(*rev)),
@@ -905,6 +1083,14 @@ impl Disk {
                 "owed_load",
                 owed_load.as_ref().map_or(Lv::Nil, enc_owed_load),
             ),
+        ];
+        world_pairs.extend(enc_world_mission(
+            *mission_start_ms,
+            next_mission,
+            *model0,
+            *shell_slot,
+        ));
+        world_pairs.extend([
             (
                 "countries",
                 countries.as_ref().map_or(Lv::Nil, enc_countries),
@@ -914,9 +1100,24 @@ impl Disk {
                 "route_events",
                 list(route_events.iter().map(enc_route_event).collect()),
             ),
-        ]));
+        ]);
+        let world = encode(&t(world_pairs));
         if world != self.world {
             put_meta_raw(&tx, "world", &world)?;
+        }
+        let theaters: Vec<&String> = if init {
+            templates.keys().collect()
+        } else {
+            templates_dirty.iter().collect()
+        };
+        for theater in theaters {
+            match templates.get(theater) {
+                Some(body) => tx.execute(
+                    "INSERT OR REPLACE INTO template (theater, body) VALUES (?1, ?2)",
+                    params![theater, body],
+                )?,
+                None => tx.execute("DELETE FROM template WHERE theater = ?1", params![theater])?,
+            };
         }
         if !self.record_written {
             put_meta(&tx, "campaign", &enc_record(&self.record))?;
@@ -1020,6 +1221,7 @@ fn opt_record(v: Option<(u64, u64)>) -> Lv {
 }
 
 fn load(path: &Path, conn: Connection, changes_keep: usize) -> Result<Store, DiskError> {
+    conn.execute_batch(TEMPLATE_TABLE)?;
     let campaign = CampaignId(dec_u(&get_meta(&conn, "campaign_id")?, "campaign_id")?);
     let record = dec_record(&get_meta(&conn, "campaign")?)?;
     let world_bytes: Vec<u8> = conn
@@ -1029,6 +1231,16 @@ fn load(path: &Path, conn: Connection, changes_keep: usize) -> Result<Store, Dis
         .optional()?
         .ok_or_else(|| DiskError::Corrupt("no meta world".into()))?;
     let mut store = Store::new(campaign, changes_keep);
+    {
+        let mut q = conn.prepare("SELECT theater, body FROM template")?;
+        let rows = q.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })?;
+        for row in rows {
+            let (theater, body) = row?;
+            store.templates.insert(theater, body);
+        }
+    }
     {
         let w = decode(&world_bytes)?;
         let w = Rd(&w);
@@ -1061,6 +1273,26 @@ fn load(path: &Path, conn: Connection, changes_keep: usize) -> Result<Store, Dis
         store.rates = match w.get("rates") {
             Lv::Nil => None,
             v => Some(dec_rates(v)?),
+        };
+        store.mission_start_ms = opt_i64(w.get("mission_start_ms"), "mission_start_ms")?;
+        store.model0 = match w.list("model0")?.as_slice() {
+            [] => None,
+            [a, g, Lv::Number(t0)] => Some((
+                dec_u(a, "model0")?,
+                u32::try_from(dec_u(g, "model0")?)
+                    .map_err(|_| DiskError::Corrupt("model0".into()))?,
+                *t0,
+            )),
+            _ => return Err(DiskError::Corrupt("model0".into())),
+        };
+        store.shell_slot = match w.get("shell_slot") {
+            Lv::Nil => None,
+            Lv::String(b) if b.as_slice() == b"a" || b.as_slice() == b"b" => Some(b[0]),
+            _ => return Err(DiskError::Corrupt("shell_slot".into())),
+        };
+        store.next_mission = match w.get("next_mission") {
+            Lv::Nil => None,
+            v => Some(v.clone()),
         };
         // A store written before the key has no owed load.
         store.owed_load = match w.get("owed_load") {
@@ -1334,6 +1566,34 @@ fn nested(v: &Lv) -> Lv {
     } else {
         Lv::String(encode(v))
     }
+}
+
+/// The keys of `meta.world` that follow the loaded mission: its start, the
+/// next mission's settings, the model time of the generation's first sample
+/// and the shell slot DCS may hold.
+fn enc_world_mission(
+    mission_start_ms: Option<i64>,
+    next_mission: &Option<Lv>,
+    model0: Option<(u64, u32, f64)>,
+    shell_slot: Option<u8>,
+) -> Vec<(&'static str, Lv)> {
+    vec![
+        (
+            "mission_start_ms",
+            mission_start_ms.map_or(Lv::Nil, |v| s(&v.to_string())),
+        ),
+        ("next_mission", next_mission.clone().unwrap_or(Lv::Nil)),
+        (
+            "model0",
+            model0.map_or(Lv::Nil, |(a, g, t0)| {
+                list(vec![s(&a.to_string()), s(&g.to_string()), Lv::Number(t0)])
+            }),
+        ),
+        (
+            "shell_slot",
+            shell_slot.map_or(Lv::Nil, |c| s(&char::from(c).to_string())),
+        ),
+    ]
 }
 
 fn opt_pair(v: Option<(u64, u32)>) -> Lv {
@@ -2013,9 +2273,14 @@ fn dec_extension(v: &Lv) -> Result<Extension, DiskError> {
 }
 
 fn enc_owed_load(v: &OwedLoad) -> Lv {
-    let OwedLoad { path, cmd } = v;
+    let OwedLoad {
+        path,
+        cmd,
+        start_ms,
+    } = v;
     t(vec![
         ("path", s(path)),
+        ("start_ms", start_ms.map_or(Lv::Nil, |v| s(&v.to_string()))),
         (
             "cmd",
             cmd.map_or(Lv::Nil, |(e, q)| {
@@ -2035,7 +2300,21 @@ fn dec_owed_load(v: &Lv) -> Result<OwedLoad, DiskError> {
     Ok(OwedLoad {
         path: r.s("path")?,
         cmd,
+        start_ms: opt_i64(r.get("start_ms"), "owed_load start_ms")?,
     })
+}
+
+/// An `i64` kept as decimal text, or nil for none.
+fn opt_i64(v: &Lv, what: &str) -> Result<Option<i64>, DiskError> {
+    match v {
+        Lv::Nil => Ok(None),
+        Lv::String(b) => std::str::from_utf8(b)
+            .ok()
+            .and_then(|t| t.parse().ok())
+            .map(Some)
+            .ok_or_else(|| DiskError::Corrupt(what.into())),
+        _ => Err(DiskError::Corrupt(what.into())),
+    }
 }
 
 fn enc_loaded(v: &Loaded) -> Lv {
@@ -2145,6 +2424,9 @@ fn enc_entry(e: &Entry) -> Lv {
         ),
         Entry::Captured { entity } => k("captured", vec![("entity", u(entity.0))]),
         Entry::Death { unit } => k("death", vec![("unit", u(unit.0))]),
+        Entry::Resolve { unit, dead } => {
+            k("resolve", vec![("unit", u(unit.0)), ("dead", b(*dead))])
+        }
         Entry::Left { unit, object, how } => k(
             "left",
             vec![
@@ -2248,6 +2530,10 @@ fn dec_entry(v: &Lv) -> Result<Entry, DiskError> {
         },
         "captured" => Entry::Captured { entity: entity()? },
         "death" => Entry::Death { unit: unit()? },
+        "resolve" => Entry::Resolve {
+            unit: unit()?,
+            dead: r.b("dead")?,
+        },
         "left" => Entry::Left {
             unit: unit()?,
             object: r.u("object")?,
@@ -2668,9 +2954,42 @@ mod tests {
             (
                 "world.owed_load".to_owned(),
                 encode(&enc_owed_load(&OwedLoad {
-                    path: "Z:\\m\\Caucasus.miz".into(),
+                    path: "Z:\\m\\shells\\9.a.miz".into(),
                     cmd: Some((3, 7)),
+                    start_ms: Some(1_700_000_000_000),
                 })),
+            ),
+            (
+                "entry.resolve".to_owned(),
+                encode(&enc_entry(&Entry::Resolve {
+                    unit: EntityId(2),
+                    dead: true,
+                })),
+            ),
+            // The S19 keys of `meta.world`, as the store writes them.
+            (
+                "world.s19_keys".to_owned(),
+                encode(&t(enc_world_mission(
+                    Some(-5),
+                    &Some(t(vec![
+                        ("theater", super::s("Caucasus")),
+                        ("start_ms", super::s("1700000000000")),
+                        (
+                            "weather",
+                            Lv::String(encode(&t(vec![("k", Lv::Bool(true))]))),
+                        ),
+                        (
+                            "dynamic",
+                            list(vec![t(vec![
+                                ("airbase", super::s("12")),
+                                ("enabled", Lv::Bool(true)),
+                                ("hot_start", Lv::Bool(false)),
+                            ])]),
+                        ),
+                    ])),
+                    Some((11, 2, 1.5)),
+                    Some(b'b'),
+                ))),
             ),
         ];
         for (i, e) in s.entries().iter().enumerate() {
@@ -2889,5 +3208,54 @@ mod tests {
         let (id, schema, r) = record_of(&p).expect("record");
         assert_eq!((id, schema), (CampaignId(7), SCHEMA));
         assert_eq!(r, record());
+    }
+
+    #[test]
+    fn templates_next_mission_and_start_survive_a_reopen() {
+        let d = tempfile::tempdir().expect("dir");
+        let p = d.path().join("store.sqlite");
+        let mut s = Store::create_on_disk(&p, CampaignId(7), record(), 10).expect("create");
+        assert_eq!(template_of(&p, "Caucasus").expect("read"), None);
+        s.set_template("Caucasus", Some(b"miz".to_vec()));
+        s.set_template("Syria", Some(b"other".to_vec()));
+        let next = Lv::Table(vec![(
+            Lv::String(b"theater".to_vec()),
+            Lv::String(b"Syria".to_vec()),
+        )]);
+        s.set_next_mission(Some(next.clone()));
+        s.set_mission_start_ms(Some(-5));
+        s.commit().expect("commit");
+        s.set_template("Syria", None);
+        s.commit().expect("commit");
+        assert_eq!(
+            template_of(&p, "Caucasus").expect("read"),
+            Some(b"miz".to_vec())
+        );
+        assert_eq!(template_of(&p, "Syria").expect("read"), None);
+        drop(s);
+        let s = Store::open(&p, 10).expect("open");
+        assert_eq!(s.template("Caucasus"), Some(&b"miz"[..]));
+        assert_eq!(s.template_theaters().collect::<Vec<_>>(), ["Caucasus"]);
+        assert_eq!(s.next_mission(), Some(&next));
+        assert_eq!(s.mission_start_ms(), Some(-5));
+    }
+
+    #[test]
+    fn a_store_without_the_template_table_opens_and_gains_it() {
+        let d = tempfile::tempdir().expect("dir");
+        let p = d.path().join("store.sqlite");
+        drop(Store::create_on_disk(&p, CampaignId(7), record(), 10).expect("create"));
+        Connection::open(&p)
+            .expect("conn")
+            .execute_batch("DROP TABLE template")
+            .expect("drop");
+        assert_eq!(template_of(&p, "Caucasus").expect("no table"), None);
+        let mut s = Store::open(&p, 10).expect("open");
+        s.set_template("Caucasus", Some(b"miz".to_vec()));
+        s.commit().expect("commit");
+        assert_eq!(
+            template_of(&p, "Caucasus").expect("read"),
+            Some(b"miz".to_vec())
+        );
     }
 }

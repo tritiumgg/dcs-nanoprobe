@@ -21,7 +21,8 @@ listen = "127.0.0.1:47311"
 dir = "/var/lib/nanoprobe/campaigns"
 
 [missions]
-# The mission folder: `<theater>.miz` for each theater a campaign uses. The
-# sidecar reads it through a read-only mount; DCS loads from it by this path.
+# The mission folder: the template `<theater>.miz` of each theater a campaign
+# uses. The sidecar writes each campaign's shell under `shells/` there; DCS
+# loads the shells by this path.
 dir = "/missions"
 dcs_dir = '<Windows path of the DCS profile>\nanoprobe\missions'

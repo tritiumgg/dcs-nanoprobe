@@ -15,10 +15,11 @@ use nanoprobe_proto::v1alpha1::{
     CaptureResponse, DematerializeRequest, DematerializeResponse, DoEffectRequest,
     DoEffectResponse, ErrorReason, GetOutcomeRequest, GetOutcomeResponse, GroupCategory,
     MaterializeRequest, MaterializeResponse, PutGroupRequest, PutGroupResponse, PutStaticRequest,
-    PutStaticResponse, RemoveEntityRequest, RemoveEntityResponse, SetAirbaseOwnerRequest,
-    SetAirbaseOwnerResponse, SetLostPolicyRequest, SetLostPolicyResponse, SetOptionsRequest,
-    SetOptionsResponse, SetOrderRequest, SetOrderResponse, SetSampleRatesRequest,
-    SetSampleRatesResponse, SetWarehouseStockRequest, SetWarehouseStockResponse, Write,
+    PutStaticResponse, RemoveEntityRequest, RemoveEntityResponse, Resolution, ResolveMemberRequest,
+    ResolveMemberResponse, SetAirbaseOwnerRequest, SetAirbaseOwnerResponse, SetLostPolicyRequest,
+    SetLostPolicyResponse, SetOptionsRequest, SetOptionsResponse, SetOrderRequest,
+    SetOrderResponse, SetSampleRatesRequest, SetSampleRatesResponse, SetWarehouseStockRequest,
+    SetWarehouseStockResponse, Write,
 };
 use nanoprobe_sidecar::ids::EntityId;
 use nanoprobe_sidecar::reconciler::EffectResult;
@@ -552,6 +553,43 @@ fn remove_entity(
     }
     slot.store.remove_entity(id).map_err(store_error)?;
     Ok(RemoveEntityResponse {
+        revision: slot.store.revision(),
+    })
+}
+
+/// Release a member held out of spawns (spec/world.md, "Respawn gate").
+pub(crate) fn resolve_member(
+    g: &mut Inner,
+    c: u64,
+    r: &ResolveMemberRequest,
+) -> Result<ResolveMemberResponse, Status> {
+    let dead = match Resolution::try_from(r.resolution) {
+        Ok(Resolution::Dead) => true,
+        Ok(Resolution::Restore) => false,
+        _ => return Err(invalid("resolution", "DEAD or RESTORE")),
+    };
+    let slot = g.campaigns.get_mut(&c).expect("resolved campaign");
+    let unit = EntityId(r.unit);
+    if slot.store.unit(unit).is_none() {
+        return Err(if slot.store.group(unit).is_some() {
+            invalid("unit", "a member is a unit, not a group")
+        } else {
+            not_found(r.unit)
+        });
+    }
+    if !slot.store.resolve_member(unit, dead).map_err(store_error)? {
+        return Err(status(
+            Code::FailedPrecondition,
+            ErrorReason::Unspecified,
+            format!(
+                "unit {} is not held: its left is not MISSING or REMOVED, or it is dead",
+                r.unit
+            ),
+            r.unit,
+            "unit",
+        ));
+    }
+    Ok(ResolveMemberResponse {
         revision: slot.store.revision(),
     })
 }
@@ -1206,6 +1244,13 @@ impl CommandsService for Commands {
         req: Request<RemoveEntityRequest>,
     ) -> Result<Response<RemoveEntityResponse>, Status> {
         changing!(self, req, "RemoveEntity", Need::Campaign, remove_entity)
+    }
+
+    async fn resolve_member(
+        &self,
+        req: Request<ResolveMemberRequest>,
+    ) -> Result<Response<ResolveMemberResponse>, Status> {
+        changing!(self, req, "ResolveMember", Need::Campaign, resolve_member)
     }
 
     async fn set_lost_policy(
