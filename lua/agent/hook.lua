@@ -336,6 +336,11 @@ local PICTURE_CALL = {
   [1] = 'a_out_picture', [2] = 'a_out_picture_s', [5] = 'a_out_picture_c',
   [3] = 'a_out_picture_g', [4] = 'a_out_picture_u',
 }
+-- a_out_picture_s takes the coalition by the Mission Editor's name for it,
+-- and shows nothing for a number (LIVE, docs/results/2026-11-16-person-tests.md;
+-- ED-CODE, MissionEditor/modules/Mission/CoalitionData.lua). a_out_picture_c
+-- takes the DCS country number (ED-CODE, me_trigrules.lua countryLister).
+local COALITION_NAME = { [0] = 'neutrals', [1] = 'red', [2] = 'blue' }
 
 -- One call into another state. Returns its text, or nil and the reason.
 local function cross(state, chunk)
@@ -529,9 +534,16 @@ local HANDLERS = {
     if a.clear_view ~= 'true' and a.clear_view ~= 'false' then
       return DCS_REFUSED, nil, 'clear_view is not true or false'
     end
-    -- The target the call names: none, a number, or a mission ID.
+    -- The target the call names: none, a coalition name, a number, or a
+    -- mission ID.
     local first = ''
-    if scope == 2 or scope == 5 then
+    if scope == 2 then
+      local side = COALITION_NAME[tonumber(a.target)]
+      if not side then
+        return DCS_REFUSED, nil, 'the coalition is not 0 to 2'
+      end
+      first = '"' .. side .. '", '
+    elseif scope == 5 then
       first = a.target .. ', '
     elseif scope == 3 and a.group_id ~= nil then
       -- The agent's binding holds the group: its DCS group ID is the mission

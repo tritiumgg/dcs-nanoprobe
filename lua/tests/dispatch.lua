@@ -1461,7 +1461,7 @@ scenario('picture', nil, function(ctx)
   expect(r[7], NOT_BOUND, 'PICTURE to no unit')
   local want = {
     { 'a_out_picture', nil, 'Key_1' },
-    { 'a_out_picture_s', 2, 'Key_2' },
+    { 'a_out_picture_s', 'blue', 'Key_2' },
     { 'a_out_picture_c', 80, 'Key_3' },
     { 'a_out_picture_g', group_id, 'Key_4' },
     { 'a_out_picture_u', unit_id, 'Key_5.png' },
@@ -1477,6 +1477,17 @@ scenario('picture', nil, function(ctx)
   local last = shown(6)
   assert(last.seconds == 0 and last.clear_view == false and last.size == 1, 'the last picture differs')
   assert(sim.picture_stops == 1, 'PICTURE_STOP called a_out_picture_stop ' .. tostring(sim.picture_stops) .. ' times')
+
+  -- A coalition goes to DCS by its Mission Editor name; a number shows nothing
+  -- there (LIVE), and a coalition beyond 2 is refused before the call.
+  before = #sim.pictures
+  r = run({ full(2, 1, 'r'), full(2, 0, 'n'), full(2, 3, 'x') }, 'picture coalitions')
+  expect(r[1], APPLIED, 'PICTURE to red')
+  expect(r[2], APPLIED, 'PICTURE to neutrals')
+  expect(r[3], 22, 'PICTURE to coalition 3')
+  assert(#sim.pictures == before + 2, 'a picture to coalition 3 reached the mission state')
+  assert(shown(before + 1).target == 'red' and shown(before + 2).target == 'neutrals',
+    'the coalitions went as ' .. tostring(shown(before + 1).target) .. ' and ' .. tostring(shown(before + 2).target))
 
   -- Files and numbers the agent will not put in source, and a bad scope.
   before = #sim.pictures

@@ -105,12 +105,12 @@ end
 
 local PICTURE = {
   all = { call = 'a_out_picture', seconds = 10, clear_view = false },
-  coalition = { call = 'a_out_picture_s', target = 2, seconds = 10, clear_view = false },
+  ['coalition-name'] = { call = 'a_out_picture_s', target = 'blue', seconds = 10, clear_view = false },
   group = { call = 'a_out_picture_g', target = gid, seconds = 10, clear_view = false },
   hold = { call = 'a_out_picture', seconds = 0, clear_view = false },
   clearview = { call = 'a_out_picture', seconds = 10, clear_view = true },
 }
-for _, name in ipairs({ 'all', 'coalition', 'group', 'hold', 'clearview', 'stop' }) do
+for _, name in ipairs({ 'all', 'coalition-name', 'group', 'hold', 'clearview', 'stop' }) do
   local file = 'picture-' .. name .. '.lua'
   sim.pictures, sim.picture_stops = {}, 0
   local reply, seen = run(file, 'hook')
@@ -130,14 +130,14 @@ for _, name in ipairs({ 'all', 'coalition', 'group', 'hold', 'clearview', 'stop'
   S.ok(file .. ': ' .. tostring(seen.call and seen.call.value))
 end
 
--- The mock's a_out_picture_s takes the coalition as a number, as the agent's
--- PICTURE sends it. LIVE, a client shows the picture only for the name
--- (docs/results/2026-11-16-person-tests.md); the mock changes with the agent.
+-- The mock's a_out_picture_s takes the coalition's name, as the agent's
+-- PICTURE sends it, and refuses a number: LIVE, a client shows nothing for one
+-- (docs/results/2026-11-16-person-tests.md).
 do
-  local file = 'picture-coalition-name.lua'
+  local file = 'picture-coalition.lua'
   local reply = run(file, 'hook')
   assert(tostring(reply.values[1]):find('^false .*takes the arguments'), file .. ': ' .. tostring(reply.values[1]))
-  S.ok(file .. ': the mock refuses the coalition name (open item)')
+  S.ok(file .. ': the mock refuses the coalition as a number')
 end
 
 do

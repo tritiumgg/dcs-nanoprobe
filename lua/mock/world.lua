@@ -76,7 +76,8 @@
 --     mock records each call in `sim.sounds` as { call, target, file }, for any
 --     file, a missing one included (LIVE: DCS raises nothing). The mission
 --     state's a_out_picture, _s, _c, _g and _u take the target (not for the
---     plain one), a resource key, the seconds, clear view as a boolean, the
+--     plain one; _s takes the coalition's name, the others a number), a
+--     resource key, the seconds, clear view as a boolean, the
 --     start delay, horizontal, vertical, size and size units, and record each
 --     call in `sim.pictures`; a_out_picture_stop counts in
 --     `sim.picture_stops`; getValueResourceByKey returns a key it does not
@@ -1535,7 +1536,13 @@ function W.install(host, name)
         local args = { ... }
         local n = targeted and 9 or 8
         local at = targeted and 2 or 1
-        local ok = select('#', ...) == n and (not targeted or type(args[1]) == 'number')
+        -- a_out_picture_s takes 'red', 'blue' or 'neutrals'; a number shows
+        -- nothing (LIVE), so the mock raises on one to catch the old form.
+        local target_ok = not targeted or type(args[1]) == 'number'
+        if call == 'a_out_picture_s' then
+          target_ok = args[1] == 'red' or args[1] == 'blue' or args[1] == 'neutrals'
+        end
+        local ok = select('#', ...) == n and target_ok
           and type(args[at]) == 'string' and type(args[at + 2]) == 'boolean'
         for _, i in ipairs({ at + 1, at + 3, at + 4, at + 5, at + 6, at + 7 }) do
           ok = ok and type(args[i]) == 'number'

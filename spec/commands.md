@@ -811,8 +811,14 @@ scope, the target first for a scoped form, then `getValueResourceByKey(file)`, s
 clear view, a start delay of 0, horizontal, vertical, size and size units, the order of
 the Mission Editor's fields (ED-CODE, `me_trigrules.lua`). A key DCS does not know
 resolves to itself, and DCS raises nothing for a missing picture (LIVE), so `APPLIED`
-says only that DCS took the call. The alignment and unit values, the form of a
-coalition target, and what a client shows are UNVERIFIED.
+says only that DCS took the call. A `COALITION` target goes as the Mission Editor's
+coalition name, `"neutrals"`, `"red"` or `"blue"` for 0, 1 and 2 (ED-CODE,
+`MissionEditor/modules/Mission/CoalitionData.lua`): `a_out_picture_s` shows nothing for a
+number and shows the picture for `"blue"` (LIVE, a client). The handler answers
+`DCS_REFUSED` for a coalition above 2, with no call. A `COUNTRY` target goes as the DCS
+country number, the value the Mission Editor's country list writes (ED-CODE,
+`me_trigrules.lua`, `countryLister`); a client showing it is UNVERIFIED. The alignment
+and unit values are UNVERIFIED.
 
 `PICTURE_STOP` has no payload after the header and calls `a_out_picture_stop()`.
 
