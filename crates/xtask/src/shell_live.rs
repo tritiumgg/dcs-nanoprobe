@@ -599,8 +599,8 @@ fn owned_and_stocked(
 }
 
 /// A dead static's ruin through `DoEffect` `ClearDebris` (spec/commands.md,
-/// "Layout: CLEAR_DEBRIS"): a `FARP Fuel Depot` put 300 m east of the FARP
-/// with `PutStatic`, killed with a scripted explosion of power 1,000, then a
+/// "Layout: CLEAR_DEBRIS"): a `FARP Fuel Depot` added by script 300 m east of
+/// the FARP, so unmanaged, killed with a scripted explosion of power 1,000, then a
 /// 30 m sphere cleared on it 10 s later. Records the clear's count and what
 /// the server state reads of the static before and after, by name and by
 /// `world.searchObjects`, at once and 5 s later.
@@ -623,33 +623,20 @@ fn ruin_check(
         at["x"].as_f64().ok_or("no FARP point")?,
         at["z"].as_f64().ok_or("no FARP point")? + 300.0,
     );
-    let req = pb::PutStaticRequest {
-        write: api.write("ruin", campaign),
-        static_id: 0,
-        spec: Some(pb::StaticSpec {
-            label: "person-fixes ruin".into(),
-            country: 2,
-            r#type: "FARP Fuel Depot".into(),
-            position: Some(pb::Position {
-                theater: theater.to_string(),
-                north: x,
-                east: z,
-                ..pb::Position::default()
-            }),
-            heading: 0.0,
-            extra: None,
-        }),
-    };
-    api.rt
-        .block_on(api.commands.put_static(req))
-        .map_err(status_text("PutStatic"))?;
-    let find = format!(
-        "for _, s in ipairs(coalition.getStaticObjects(2) or {{}}) do local p = s:getPoint() if s:getTypeName() == 'FARP Fuel Depot' and math.abs(p.x - {x}) < 5 and math.abs(p.z - {z}) < 5 then return s:getName() end end\nreturn ''\n"
-    );
-    let name = wait(run, api, Duration::from_secs(60), "the ruin static", |_| {
-        let v = run.eval("server", "s19-person-ruin-find", &find, 60)?;
-        Ok(v.as_str().filter(|n| !n.is_empty()).map(str::to_string))
-    })?;
+    // A scripted static, unmanaged: the clear's handling of a dead static the
+    // platform did not spawn.
+    let name = "person-fixes ruin".to_string();
+    let added = run.eval(
+        "server",
+        "s19-person-ruin-add",
+        &format!(
+            "local s = coalition.addStaticObject(country.id.USA, {{ name = {name:?}, type = 'FARP Fuel Depot', x = {x}, y = {z}, heading = 0 }})\nreturn s ~= nil and s:getName() or ''\n"
+        ),
+        60,
+    )?;
+    if added.as_str() != Some(name.as_str()) {
+        return Err(format!("the ruin static was not added: {added}"));
+    }
     let read = format!(
         "local out = {{}}\nlocal s = StaticObject.getByName({name:?})\nout.found = s ~= nil\nif s then local ok, e = pcall(s.isExist, s) out.exists = ok and e or 'raised' local okl, l = pcall(s.getLife, s) out.life = okl and l or 'raised' end\nout.listed = 0\nworld.searchObjects(Object.Category.STATIC, {{ id = world.VolumeType.SPHERE, params = {{ point = {{ x = {x}, y = land.getHeight({{ x = {x}, y = {z} }}), z = {z} }}, radius = 30 }} }}, function(o) local ok, n = pcall(o.getName, o) if ok and n == {name:?} then out.listed = out.listed + 1 end return true end)\nreturn out\n"
     );
