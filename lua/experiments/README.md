@@ -115,6 +115,17 @@ client sees of a kick, a ban or a slot move; arms, then reports on the next run)
 asks to spawn in one step). A rejoin is `cargo xtask client join`, which runs
 `e30-join.lua`.
 
+## E39
+
+The snippets in `e39/` belong to experiment E39, on spawning with a captured unit
+state. The runner does not pick them up: each is run alone with
+`cargo xtask eval <target> <state> <file>`, in the state its header names, on a server
+with no players, and cleans up what it adds. `recon.lua` (`server`) reads the unit
+database and each type's default spawn; `spawn.lua` (`hook`) spawns aircraft, ground
+units and ships with a state and sets life in three ways, about 10 s of model time;
+`guns.lua` (`server`) reads the full gun counts. `lua/tests/e39.lua` rehearses them on
+the mock. The results are in `docs/results/2026-11-16-e39-spawn-state.md`.
+
 ## Warehouse
 
 How a player's actions change a warehouse's inventory. The server needs a mission with
@@ -142,3 +153,16 @@ model time and `junk2.lua` 312 s. Both kill what they spawn with scripted explos
 4 to 14 km from the mission's first airbase and clear their own wrecks at the end.
 `lua/tests/junk_experiment.lua` rehearses them on the mock. The results are in
 `docs/results/2026-11-16-clear-debris.md`.
+
+## Loadout
+
+The snippets in `loadout/` check the player loadout reads. Each runs alone in the
+`server` state with `cargo xtask eval <target> server <file>`. `player-name.lua` reads
+`Unit.getPlayerName` and `getAmmo` for every player unit, and `getPlayerName` for up to
+40 AI units. `ai-birth.lua` spawns one AI M-113 near the first player, lets 5 s of model
+time run, and destroys it, so a recording shows that an AI birth gives no `AMMO` record.
+`player-name.lua` runs with a client in an aircraft (`alone/e30-take-slot.lua`,
+`alone/e31-spawn.lua`). `ai-birth.lua` spawns near that client when there is one, and
+otherwise near the map origin.
+`lua/tests/loadout_experiments.lua` rehearses them on the mock. The results are in
+`docs/results/2026-11-17-s19-spawn-state.md`.

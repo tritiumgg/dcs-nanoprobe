@@ -1889,3 +1889,274 @@ fn a_rebuilt_reconciler_removes_the_markers_of_an_adoption_that_ended() {
         );
     }
 }
+
+/// spec/world.md, "Spawn state": a unit DCS read at part of its life spawns
+/// again after a DCS restart with that life, sent as a `DAMAGE` once the
+/// respawn is applied; a unit at full life gets none.
+#[test]
+fn a_restore_gives_each_unit_its_life_back() {
+    let mut w = World::new(2, 0, LostPolicy::Report);
+    w.settle().unwrap();
+    let firsts: Vec<_> = w.store.groups().map(|g| g.members[0]).collect();
+    let (hurt, whole) = (firsts[0], firsts[1]);
+    w.store.observe_life0(hurt, 4.0);
+    w.store.observe_vitals(hurt, 1.0);
+    w.store.observe_life0(whole, 4.0);
+    w.store.observe_vitals(whole, 4.0);
+    let before = w.rec.counters().lives_restored;
+    w.apply(&Op::RestartDcs).unwrap();
+    w.settle().unwrap();
+    assert_eq!(w.sim.life_percent_of(hurt.0), Some(25.0));
+    assert_eq!(w.sim.life_percent_of(whole.0), None);
+    assert_eq!(w.rec.counters().lives_restored, before + 1);
+}
+
+/// spec/world.md, "Spawn state": a restored unit's captured life is held
+/// until its `DAMAGE` is applied. A sample at full life that arrives between
+/// the spawn and the `DAMAGE` leaves the stored life at 40 %.
+#[test]
+fn a_full_life_sample_before_the_damage_applies_keeps_the_captured_life() {
+    let mut w = World::with_config(
+        1,
+        0,
+        LostPolicy::Report,
+        nanoprobe_sim_fake::Config {
+            commands_per_frame: 1,
+            ..nanoprobe_sim_fake::Config::default()
+        },
+    );
+    w.settle().unwrap();
+    let unit = w.store.groups().next().unwrap().members[0];
+    w.store.observe_life0(unit, 5.0);
+    w.sim.set_life0(unit.0, 5.0);
+    w.store.observe_vitals(unit, 2.0);
+    let sent = w.rec.counters().lives_restored;
+    w.apply(&Op::RestartDcs).unwrap();
+    // Until the reconciler has queued the spawn and its DAMAGE.
+    for _ in 0..200 {
+        if w.rec.counters().lives_restored > sent {
+            break;
+        }
+        w.tick().unwrap();
+    }
+    assert_eq!(w.rec.counters().lives_restored, sent + 1);
+    // The spawn runs alone in the next frame; the unit is in DCS at full life.
+    for _ in 0..200 {
+        if w.units_in_dcs().iter().any(|(_, e)| *e == unit.0) {
+            break;
+        }
+        w.tick().unwrap();
+    }
+    let object = w
+        .units_in_dcs()
+        .into_iter()
+        .find(|(_, e)| *e == unit.0)
+        .map(|(o, _)| o)
+        .expect("respawned");
+    assert_eq!(
+        w.sim.life_percent_of(unit.0),
+        None,
+        "the DAMAGE has not run yet"
+    );
+    // Stall the ring so the sample is read while the DAMAGE waits.
+    w.sim.set_commands_per_frame(0);
+    w.sim.emit_vitals(object, 5.0);
+    w.tick().unwrap();
+    assert_eq!(
+        w.sim.life_percent_of(unit.0),
+        None,
+        "the DAMAGE still waits"
+    );
+    assert_eq!(w.store.unit(unit).unwrap().state.life, 2.0);
+    assert_eq!(w.store.unit(unit).unwrap().spawn_life_percent(), Some(40.0));
+    w.sim.set_commands_per_frame(1);
+    for _ in 0..30 {
+        w.tick().unwrap();
+    }
+    assert_eq!(w.sim.life_percent_of(unit.0), Some(40.0));
+    assert_eq!(w.store.unit(unit).unwrap().state.life, 2.0);
+    assert_eq!(w.store.unit(unit).unwrap().spawn_life_percent(), Some(40.0));
+    assert_eq!(w.rec.counters().lives_lost, 0);
+}
+
+/// A world of one unit with a 5-point initial life, restarted so that the
+/// unit's respawn is in DCS and its `DAMAGE` waits in the ring (the fake
+/// takes one command a frame). Returns the unit and its DCS object.
+fn a_respawn_waiting_for_its_damage(w: &mut World) -> (nanoprobe_sidecar::ids::EntityId, u64) {
+    w.settle().unwrap();
+    let unit = w.store.groups().next().unwrap().members[0];
+    w.store.observe_life0(unit, 5.0);
+    w.store.observe_vitals(unit, 2.0);
+    let sent = w.rec.counters().lives_restored;
+    w.apply(&Op::RestartDcs).unwrap();
+    for _ in 0..200 {
+        if w.rec.counters().lives_restored > sent {
+            break;
+        }
+        w.tick().unwrap();
+    }
+    assert_eq!(w.rec.counters().lives_restored, sent + 1);
+    for _ in 0..200 {
+        if w.units_in_dcs().iter().any(|(_, e)| *e == unit.0) {
+            break;
+        }
+        w.tick().unwrap();
+    }
+    let object = w
+        .units_in_dcs()
+        .into_iter()
+        .find(|(_, e)| *e == unit.0)
+        .map(|(o, _)| o)
+        .expect("respawned");
+    assert_eq!(w.sim.life_percent_of(unit.0), None, "the DAMAGE waits");
+    (unit, object)
+}
+
+fn one_command_a_frame() -> nanoprobe_sim_fake::Config {
+    nanoprobe_sim_fake::Config {
+        commands_per_frame: 1,
+        ..nanoprobe_sim_fake::Config::default()
+    }
+}
+
+/// spec/world.md, "Spawn state": a life a `PutGroup` asked for is held like
+/// a captured one. A full-life sample between the spawn and the `DAMAGE`
+/// leaves it, and a DCS restart before the `DAMAGE` runs asks for it again.
+#[test]
+fn a_full_life_sample_before_the_damage_keeps_a_putgroup_life() {
+    let mut w = World::with_config(1, 0, LostPolicy::Report, one_command_a_frame());
+    w.settle().unwrap();
+    let unit = w.store.groups().next().unwrap().members[0];
+    w.store.set_spawn_life(unit, 40.0).unwrap();
+    w.settle().unwrap();
+    assert_eq!(w.sim.life_percent_of(unit.0), Some(40.0));
+    let sent = w.rec.counters().lives_restored;
+    w.apply(&Op::RestartDcs).unwrap();
+    for _ in 0..200 {
+        if w.rec.counters().lives_restored > sent
+            && w.units_in_dcs().iter().any(|(_, e)| *e == unit.0)
+        {
+            break;
+        }
+        w.tick().unwrap();
+    }
+    let object = w
+        .units_in_dcs()
+        .into_iter()
+        .find(|(_, e)| *e == unit.0)
+        .map(|(o, _)| o)
+        .expect("respawned");
+    assert_eq!(w.sim.life_percent_of(unit.0), None, "the DAMAGE waits");
+    w.sim.set_commands_per_frame(0);
+    w.sim.emit_vitals(object, 1.0);
+    w.tick().unwrap();
+    assert_eq!(w.store.unit(unit).unwrap().spawn_life_percent(), Some(40.0));
+    // The DCS restart comes before the DAMAGE runs.
+    w.apply(&Op::RestartDcs).unwrap();
+    w.sim.set_commands_per_frame(1);
+    w.settle().unwrap();
+    assert_eq!(w.sim.life_percent_of(unit.0), Some(40.0));
+    assert_eq!(w.rec.counters().lives_lost, 0);
+}
+
+/// A unit whose life comes from a sample and whose initial life comes only
+/// from its `OBJECT` record restores at the right percentage.
+#[test]
+fn a_restore_takes_the_initial_life_from_the_object_record() {
+    let mut w = World::new(1, 0, LostPolicy::Report);
+    let unit = w.store.groups().next().unwrap().members[0];
+    w.sim.set_life0(unit.0, 4.0);
+    w.settle().unwrap();
+    w.store.observe_vitals(unit, 1.0);
+    w.apply(&Op::RestartDcs).unwrap();
+    w.settle().unwrap();
+    assert_eq!(w.sim.life_percent_of(unit.0), Some(25.0));
+}
+
+/// A `DAMAGE` DCS refuses is counted, and the next life sample is taken.
+#[test]
+fn a_refused_damage_is_counted_and_the_next_sample_is_taken() {
+    let mut w = World::with_config(1, 0, LostPolicy::Report, one_command_a_frame());
+    let (unit, object) = a_respawn_waiting_for_its_damage(&mut w);
+    w.sim.refuse_damages(1);
+    for _ in 0..30 {
+        w.tick().unwrap();
+    }
+    assert_eq!(w.sim.life_percent_of(unit.0), None);
+    assert_eq!(w.rec.counters().lives_lost, 1);
+    w.sim.emit_vitals(object, 5.0);
+    w.tick().unwrap();
+    assert_eq!(w.store.unit(unit).unwrap().state.life, 5.0);
+}
+
+/// A `DAMAGE` answered by a `HELLO` instead of a `RESULT` releases the held
+/// life. DCS applied it and the result was lost, so the outcome is Unknown:
+/// a warning, no count.
+#[test]
+fn a_damage_resolved_by_a_hello_releases_the_held_life() {
+    let mut w = World::with_config(1, 0, LostPolicy::Report, one_command_a_frame());
+    let (unit, object) = a_respawn_waiting_for_its_damage(&mut w);
+    w.sim.lose_next_result();
+    for _ in 0..30 {
+        w.tick().unwrap();
+    }
+    assert_eq!(w.sim.life_percent_of(unit.0), Some(40.0));
+    w.apply(&Op::Detach).unwrap();
+    w.apply(&Op::Reattach).unwrap();
+    w.settle().unwrap();
+    assert_eq!(w.rec.counters().lives_lost, 0);
+    w.sim.emit_vitals(object, 5.0);
+    w.tick().unwrap();
+    assert_eq!(w.store.unit(unit).unwrap().state.life, 5.0);
+}
+
+/// spec/world.md, "Spawn state": the restore `DAMAGE`s are the sidecar's
+/// own. They stay out of the effect results, so a restore of more units than
+/// the table keeps does not push out an API effect's result.
+#[test]
+fn a_big_restore_leaves_an_api_effects_result_in_the_table() {
+    let mut w = World::new(1100, 0, LostPolicy::Report);
+    w.settle().unwrap();
+    let units: Vec<_> = w.store.groups().map(|g| g.members[0]).collect();
+    let key = w
+        .rec
+        .damage(&mut w.store, &mut w.sim, units[0], 50.0)
+        .expect("sent");
+    w.settle().unwrap();
+    assert!(w.rec.effect_result(key).is_some(), "answered");
+    for u in &units {
+        w.store.observe_life0(*u, 4.0);
+        w.store.observe_vitals(*u, 1.0);
+    }
+    let before = w.rec.counters().lives_restored;
+    w.apply(&Op::RestartDcs).unwrap();
+    w.settle().unwrap();
+    assert!(w.rec.counters().lives_restored >= before + 1100);
+    assert!(
+        w.rec.effect_result(key).is_some(),
+        "the API effect's result is still kept"
+    );
+}
+
+/// spec/world.md, "Spawn state": while a group's respawn is owed, a sample of
+/// the old spawn does not replace the life a `PutGroup` asked for.
+#[test]
+fn a_sample_of_the_old_spawn_keeps_a_putgroup_life() {
+    let mut w = World::with_config(1, 0, LostPolicy::Report, one_command_a_frame());
+    let unit = w.store.groups().next().unwrap().members[0];
+    w.sim.set_life0(unit.0, 5.0);
+    w.settle().unwrap();
+    let object = w
+        .units_in_dcs()
+        .into_iter()
+        .find(|(_, e)| *e == unit.0)
+        .map(|(o, _)| o)
+        .expect("live");
+    w.store.set_spawn_life(unit, 40.0).unwrap();
+    // The old object reads at full life before the respawn is sent.
+    w.sim.emit_vitals(object, 5.0);
+    w.tick().unwrap();
+    assert_eq!(w.store.unit(unit).unwrap().spawn_life_percent(), Some(40.0));
+    w.settle().unwrap();
+    assert_eq!(w.sim.life_percent_of(unit.0), Some(40.0));
+}

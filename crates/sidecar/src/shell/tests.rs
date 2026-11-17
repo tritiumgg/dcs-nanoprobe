@@ -1,8 +1,8 @@
 use super::lua::{self, Key};
 use super::*;
 
-const CAUCASUS: &[u8] = include_bytes!("../../../../templates/caucasus.miz");
-const AFGHANISTAN: &[u8] = include_bytes!("../../../../templates/afghanistan.miz");
+const CAUCASUS: &[u8] = include_bytes!("../../../../tests/fixtures/templates/caucasus.miz");
+const AFGHANISTAN: &[u8] = include_bytes!("../../../../tests/fixtures/templates/afghanistan.miz");
 
 fn get<'a>(m: &'a [(String, Vec<u8>)], name: &str) -> &'a [u8] {
     member(m, name).unwrap()

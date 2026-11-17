@@ -38,7 +38,7 @@ S.mkdir(profile .. 'nanoprobe/missions')
 -- this folder; activation writes the campaign's shell under `shells/` and
 -- loads it.
 S.write(profile .. 'nanoprobe/missions/Caucasus.miz',
-  assert(S.read(root .. 'templates/caucasus.miz'), 'templates/caucasus.miz'))
+  assert(S.read(root .. 'tests/fixtures/templates/caucasus.miz'), 'tests/fixtures/templates/caucasus.miz'))
 S.copy(root .. 'lua/hook/nanoprobe-hook.lua', profile .. 'Scripts/Hooks/nanoprobe-hook.lua')
 S.copy(root .. 'lua/agent/hook.lua', version .. 'lua/hook.lua')
 S.copy(root .. 'lua/agent/log.lua', version .. 'lua/log.lua')

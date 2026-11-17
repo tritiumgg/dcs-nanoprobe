@@ -56,7 +56,7 @@ fuzz_target!(|data: &[u8]| {
         assert!(Positions::decode(&p.encode()).is_ok());
     }
     if let Ok(v) = Vitals::decode(data) {
-        assert_eq!(v.object.len(), v.fuel.len());
+        assert_eq!(v.object.len(), v.life.len());
     }
     if let Ok(a) = Attitude::decode(data) {
         assert_eq!(a.object.len(), a.roll.len());

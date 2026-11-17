@@ -10,8 +10,6 @@ use nanoprobe_sidecar::sim::real::{RealSim, Verdict};
 
 use crate::hub::Backend;
 
-/// The longest theater name a template file may carry, bytes.
-pub const THEATER_MAX: usize = 64;
 /// The longest path the agent takes in a `MISSION_LOAD`, bytes.
 pub const PATH_MAX: usize = 1024;
 
@@ -56,12 +54,7 @@ impl Missions {
     /// The shared template of `theater`: the bytes of `<dir>/<theater>.miz`.
     pub fn template(&self, theater: &str) -> Result<Vec<u8>, String> {
         let none = |why: &str| format!("no template for theater {theater:?}: {why}");
-        let named = !theater.is_empty()
-            && theater.len() <= THEATER_MAX
-            && theater
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b));
-        if !named {
+        if !nanoprobe_sidecar::shell::is_theater_name(theater) {
             return Err(none("not a theater name"));
         }
         let dir = self.dir().map_err(|e| none(&e))?;
@@ -152,7 +145,7 @@ impl Backend for Real {
         Some(&mut self.0)
     }
 
-    fn achieved(&self) -> Option<[f64; 5]> {
+    fn achieved(&self) -> Option<[f64; 4]> {
         self.0.achieved()
     }
 }

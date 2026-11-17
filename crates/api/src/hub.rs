@@ -23,8 +23,8 @@ use nanoprobe_sidecar::server::{ServerStore, StoreLock};
 use nanoprobe_sidecar::sim::wire::{Body, Command, Input};
 use nanoprobe_sidecar::sim::{Detached, RawRecord, SimAdapter};
 use nanoprobe_sidecar::store::{
-    CampaignRecord, CampaignState, Checkpoint, DiskError, LostPolicy, Outcome, OwedLoad, Store,
-    TierPeriod, checkpoint_of,
+    CampaignRecord, CampaignState, Checkpoint, DiskError, Loadout, LostPolicy, Outcome, OwedLoad,
+    Store, TierPeriod, checkpoint_of,
 };
 use nanoprobe_transport::records::CommandHeader;
 use prost::Message;
@@ -32,10 +32,11 @@ use tokio::sync::{Notify, watch};
 use tonic::{Code, Status};
 
 use crate::config::Config;
-use crate::events::{EventLog, Link, Lookup, Read, player_body, route_body};
+use crate::events::{EventLog, Link, Lookup, Read, loadout_body, player_body, route_body};
 use crate::idem::{self, Begin, Done, Idem};
 use crate::idem::{EffectKind, Pending};
 use crate::lease::{LeaseError, Leases};
+use crate::loadouts::Loadouts;
 
 /// What the server drives: DCS with the agent in it, real or fake.
 pub trait Backend: Send + 'static {
@@ -76,16 +77,16 @@ pub trait Backend: Send + 'static {
         None
     }
     /// The periods the sampling tiers achieve now, in seconds: position,
-    /// vitals, ammunition, warehouse, enumeration (the agent's metrics,
+    /// vitals, warehouse, enumeration (the agent's metrics,
     /// spec/transport.md); `None` when unknown.
-    fn achieved(&self) -> Option<[f64; 5]> {
+    fn achieved(&self) -> Option<[f64; 4]> {
         None
     }
 }
 
 /// The sampling tiers by their `SampleRates` field names, in the order of
 /// [`Backend::achieved`].
-const TIERS: [&str; 5] = ["position", "vitals", "ammo", "warehouse", "enumeration"];
+const TIERS: [&str; 4] = ["position", "vitals", "warehouse", "enumeration"];
 
 /// One campaign: its description, its store and what the API keeps beside
 /// the store.
@@ -236,6 +237,9 @@ pub struct Inner {
     /// The players: keys, who is connected, who is in which unit. Server
     /// scoped: it lives through campaign changes.
     pub roster: Roster,
+    /// The loadouts of the units players occupy, by DCS object ID: what
+    /// `Player.ammo` shows.
+    pub loadouts: Loadouts,
     /// Moderation calls whose result has not come.
     pub moderation: Vec<PendingModeration>,
     /// The `PLAYERS` query in flight.
@@ -660,12 +664,67 @@ impl Inner {
             if let Some(read) = self.link.read_with(r, &look) {
                 group.push(read);
             }
+            // A unit a player left keeps no loadout.
+            for n in &notes {
+                if let nanoprobe_sidecar::players::Note::Leave { object, .. } = n
+                    && self.roster.players_of(*object).is_empty()
+                {
+                    self.loadouts.forget(*object);
+                    if let Some(e) = env.as_ref() {
+                        let mut g = e.borrow_mut();
+                        let (rec, store, _) = &mut *g;
+                        if let Some((unit, _)) = rec.entity_of(store, *object) {
+                            store.forget_loadout(EntityId(unit));
+                        }
+                    }
+                }
+            }
+            self.loadouts
+                .retain_generation(self.link.agent_boot, self.link.mission_gen);
             for n in notes {
                 group.push(Read {
                     campaign: self.link.frame_campaign,
                     stamp: self.link.stamp(),
                     body: player_body(n),
                 });
+            }
+            // The ammunition a birth or a takeoff read of a player-occupied
+            // unit gave (spec/world.md, "Ammunition"). A read of an object
+            // with no `EntityId` yet waits for its bind, which a record
+            // since the read may have made.
+            if let Some(e) = env.as_ref() {
+                let mut g = e.borrow_mut();
+                let (rec, store, _) = &mut *g;
+                let released = self
+                    .loadouts
+                    .take_bound(|o| rec.entity_of(store, o).is_some());
+                for (object, boot, loadout) in released {
+                    apply_loadout(
+                        &self.roster,
+                        &mut self.loadouts,
+                        &self.link,
+                        (&**rec, &mut **store),
+                        (object, boot, loadout),
+                        &mut group,
+                    );
+                }
+                if r.kind == nanoprobe_transport::layout::kind::AMMO as u16
+                    && let Ok(a) = nanoprobe_transport::records::Ammo::decode(&r.payload)
+                {
+                    let loadout = crate::convert::loadout(&a, &self.link.stamp());
+                    if rec.entity_of(store, a.object).is_some() {
+                        apply_loadout(
+                            &self.roster,
+                            &mut self.loadouts,
+                            &self.link,
+                            (&**rec, &mut **store),
+                            (a.object, r.agent_boot, loadout),
+                            &mut group,
+                        );
+                    } else {
+                        self.loadouts.hold(a.object, r.agent_boot, loadout);
+                    }
+                }
             }
             reads.push((group, (r.agent_boot, r.number)));
         }
@@ -1272,15 +1331,7 @@ impl Inner {
             .campaigns
             .get(&id)
             .and_then(|s| s.store.rates())
-            .map(|r| {
-                [
-                    r.position_s,
-                    r.vitals_s,
-                    r.ammo_s,
-                    r.warehouse_s,
-                    r.enumeration_s,
-                ]
-            })
+            .map(|r| [r.position_s, r.vitals_s, r.warehouse_s, r.enumeration_s])
             .unwrap_or_default();
         TIERS
             .iter()
@@ -2333,7 +2384,6 @@ pub fn checkpoint_info(c: &Checkpoint) -> pb::CheckpointInfo {
         match t.tier.as_str() {
             "position" => rates.position = d,
             "vitals" => rates.vitals = d,
-            "ammo" => rates.ammo = d,
             "warehouse" => rates.warehouse = d,
             "enumeration" => rates.enumeration = d,
             _ => {}
@@ -2439,6 +2489,7 @@ impl Hub {
                 // With persistence on, `load` replaces it with the server
                 // store's keyring.
                 roster: Roster::new(Keyring::generate()),
+                loadouts: Loadouts::default(),
                 moderation: Vec::new(),
                 players_cmd: None,
                 on_lost: cfg.on_lost,
@@ -3082,12 +3133,51 @@ impl Hub {
     }
 }
 
+/// Apply an `AMMO` read of a bound object: the store's unit shows it, the
+/// loadout table keeps it for `Player.ammo`, and a loadout event follows when
+/// the roster has players in the unit. A read from another agent boot or
+/// mission generation than the loaded store's is dropped.
+fn apply_loadout(
+    roster: &Roster,
+    loadouts: &mut Loadouts,
+    link: &Link,
+    (rec, store): (&Reconciler, &mut Store),
+    (object, boot, loadout): (u64, u64, Loadout),
+    out: &mut Vec<Read>,
+) {
+    let Some((unit, group)) = rec.entity_of(store, object) else {
+        return;
+    };
+    if !store
+        .loaded()
+        .is_some_and(|l| l.agent_boot == boot && l.mission_gen == loadout.read.mission_gen)
+    {
+        return;
+    }
+    store.observe_loadout(EntityId(unit), loadout.clone());
+    let keys = roster.players_of(object);
+    if !keys.is_empty() {
+        out.push(Read {
+            campaign: link.frame_campaign,
+            stamp: link.stamp(),
+            body: loadout_body(
+                unit,
+                group,
+                roster.type_of(object).unwrap_or_default(),
+                keys,
+                &loadout,
+            ),
+        });
+    }
+    loadouts.set(object, boot, loadout);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// The committed Caucasus template.
-    const TEMPLATE: &[u8] = include_bytes!("../../../templates/caucasus.miz");
+    const TEMPLATE: &[u8] = include_bytes!("../../../tests/fixtures/templates/caucasus.miz");
 
     /// A DCS that never answers.
     struct Silent;
@@ -3666,7 +3756,8 @@ mod tests {
     #[test]
     fn a_reload_switches_theater_and_back_with_the_other_map_s_entities_virtual() {
         use nanoprobe_sidecar::lifecycle::State;
-        const AFGHANISTAN: &[u8] = include_bytes!("../../../templates/afghanistan.miz");
+        const AFGHANISTAN: &[u8] =
+            include_bytes!("../../../tests/fixtures/templates/afghanistan.miz");
         let dir = tempfile::tempdir().expect("dir");
         std::fs::write(dir.path().join("Caucasus.miz"), TEMPLATE).expect("miz");
         std::fs::write(dir.path().join("Afghanistan.miz"), AFGHANISTAN).expect("miz");

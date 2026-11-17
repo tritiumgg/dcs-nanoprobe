@@ -10,6 +10,9 @@ import "nanoprobe/v1alpha1/common.proto";
 import "nanoprobe/v1alpha1/events.proto";
 import "nanoprobe/v1alpha1/session.proto";
 
+option java_multiple_files = true;
+option java_package = "nanoprobe.v1alpha1";
+
 service MissionService {
   rpc GetServerStatus(GetServerStatusRequest) returns (GetServerStatusResponse);
   // Weather and time written into the shell at the next load.
@@ -31,9 +34,10 @@ enum Health {
 message SampleRates {
   google.protobuf.Duration position = 1;
   google.protobuf.Duration vitals = 2;
-  google.protobuf.Duration ammo = 3;
   google.protobuf.Duration warehouse = 4;
   google.protobuf.Duration enumeration = 5;
+  reserved 3;
+  reserved "ammo";
 }
 
 message ServerStatus {

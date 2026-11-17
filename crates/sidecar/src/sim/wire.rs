@@ -8,7 +8,7 @@
 use nanoprobe_transport::codec::{DecodeError, Lv, Reader, Writer};
 use nanoprobe_transport::layout::{command, kind};
 use nanoprobe_transport::records::{
-    Airbase, AuthorEvent, Bind, CommandHeader, CommandResult, EnumBegin, EnumEnd, Event,
+    Airbase, Ammo, AuthorEvent, Bind, CommandHeader, CommandResult, EnumBegin, EnumEnd, Event,
     ExtensionStats, Frame, Gap, Hello, Lifecycle, Menu, Player, Positions, Rates, Subscribe,
     Vitals as TransportVitals, Warehouse,
 };
@@ -230,8 +230,6 @@ pub struct Vitals {
     pub object: u64,
     /// `getLife()`.
     pub life: f32,
-    /// `getFuel()`.
-    pub fuel: f32,
 }
 
 /// Encode a `POSITIONS` batch.
@@ -263,7 +261,6 @@ pub fn encode_vitals(rows: &[Vitals]) -> Vec<u8> {
     TransportVitals {
         object: rows.iter().map(|v| v.object).collect(),
         life: rows.iter().map(|v| v.life).collect(),
-        fuel: rows.iter().map(|v| v.fuel).collect(),
     }
     .encode()
 }
@@ -275,7 +272,6 @@ pub fn decode_vitals(b: &[u8]) -> Result<Vec<Vitals>, DecodeError> {
         .map(|i| Vitals {
             object: v.object[i],
             life: v.life[i],
-            fuel: v.fuel[i],
         })
         .collect())
 }
@@ -308,6 +304,8 @@ pub enum Input {
     Positions(Vec<Position>),
     /// `VITALS`
     Vitals(Vec<Vitals>),
+    /// `AMMO`
+    Ammo(Ammo),
     /// `AIRBASE`
     Airbase(Airbase),
     /// `WAREHOUSE`
@@ -343,6 +341,7 @@ impl Input {
             kind::POSITIONS => Input::Positions(decode_positions(payload)?),
             kind::VITALS => Input::Vitals(decode_vitals(payload)?),
             kind::EVENT => Input::Event(Event::decode(payload)?),
+            kind::AMMO => Input::Ammo(Ammo::decode(payload)?),
             kind::AIRBASE => Input::Airbase(Airbase::decode(payload)?),
             kind::WAREHOUSE => Input::Warehouse(Warehouse::decode(payload)?),
             kind::AUTHOR_EVENT => Input::AuthorEvent(AuthorEvent::decode(payload)?),
@@ -369,6 +368,7 @@ impl Input {
             Input::Positions(p) => (kind::POSITIONS, encode_positions(p)),
             Input::Vitals(v) => (kind::VITALS, encode_vitals(v)),
             Input::Event(e) => (kind::EVENT, e.encode()),
+            Input::Ammo(a) => (kind::AMMO, a.encode()),
             Input::Airbase(a) => (kind::AIRBASE, a.encode()),
             Input::Warehouse(w) => (kind::WAREHOUSE, w.encode()),
             Input::AuthorEvent(a) => (kind::AUTHOR_EVENT, a.encode()),
@@ -737,7 +737,7 @@ impl Command {
             Body::Rates(r) => {
                 w.f64(r.position_s)
                     .f64(r.vitals_s)
-                    .f64(r.ammo_s)
+                    .pad(8)
                     .f64(r.warehouse_s)
                     .f64(r.enumeration_s);
             }
@@ -947,13 +947,17 @@ impl Command {
                 r.skip(4)?;
                 Body::Burst(on)
             }
-            opcode::RATES => Body::Rates(Rates {
-                position_s: r.f64()?,
-                vitals_s: r.f64()?,
-                ammo_s: r.f64()?,
-                warehouse_s: r.f64()?,
-                enumeration_s: r.f64()?,
-            }),
+            opcode::RATES => {
+                let position_s = r.f64()?;
+                let vitals_s = r.f64()?;
+                r.skip(8)?;
+                Body::Rates(Rates {
+                    position_s,
+                    vitals_s,
+                    warehouse_s: r.f64()?,
+                    enumeration_s: r.f64()?,
+                })
+            }
             opcode::SUBSCRIBE => Body::Subscribe(Subscribe::decode(&payload[command::HEADER..])?),
             opcode::BIND => Body::Bind(Bind::decode(&payload[command::HEADER..])?),
             opcode::MODERATE => {
@@ -1325,7 +1329,6 @@ mod tests {
             Input::Vitals(vec![Vitals {
                 object: 1,
                 life: 1.0,
-                fuel: 0.5,
             }]),
             Input::AuthorEvent(AuthorEvent {
                 objects: vec![7],
@@ -1616,7 +1619,6 @@ mod tests {
             Body::Rates(Rates {
                 position_s: 1.0,
                 vitals_s: 2.0,
-                ammo_s: 3.0,
                 warehouse_s: 4.0,
                 enumeration_s: 5.0,
             }),

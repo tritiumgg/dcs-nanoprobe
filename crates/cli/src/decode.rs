@@ -331,11 +331,14 @@ mod tests {
         assert!(text.contains("z=[5, 6]"), "{text}");
 
         let mut w = Writer::new();
-        w.u64(5).lv(&Lv::Table(vec![(
+        w.u64(5).u32(2).pad(4).lv(&Lv::Table(vec![(
             Lv::String(b"k".to_vec()),
             Lv::Number(2.0),
         )]));
-        assert_eq!(record(Some("AMMO"), &w.finish()), "object=5 ammo={\"k\"=2}");
+        assert_eq!(
+            record(Some("AMMO"), &w.finish()),
+            "object=5 cause=2 ammo={\"k\"=2}"
+        );
     }
 
     #[test]

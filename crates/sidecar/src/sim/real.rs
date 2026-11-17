@@ -147,7 +147,7 @@ struct Watch {
     lifecycle: u32,
     flags: u32,
     in_capacity: u64,
-    periods: Option<[f64; 5]>,
+    periods: Option<[f64; 4]>,
     probe_at: Option<Instant>,
     /// Whether the last connect to the handshake port was refused.
     refused: bool,
@@ -349,7 +349,7 @@ impl RealSim {
 
     /// The periods the sampling tiers achieve now, seconds; `None` before
     /// the agent wrote them.
-    pub fn achieved(&self) -> Option<[f64; 5]> {
+    pub fn achieved(&self) -> Option<[f64; 4]> {
         self.watch.periods
     }
 

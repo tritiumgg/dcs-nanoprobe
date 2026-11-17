@@ -2,7 +2,7 @@
 //! link, on a made-up clock.
 
 use super::*;
-use nanoprobe_transport::records::{Ammo, EnumEnd, ObjectGone, Warehouse};
+use nanoprobe_transport::records::{EnumEnd, ObjectGone, Warehouse};
 use proptest::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -18,7 +18,7 @@ struct Rec {
     drops: u64,
     boot: u64,
     slice: f64,
-    periods: [f64; 5],
+    periods: [f64; 4],
 }
 
 impl Rec {
@@ -33,7 +33,7 @@ impl Rec {
             drops: 0,
             boot: 1,
             slice: 0.0,
-            periods: [0.0; 5],
+            periods: [0.0; 4],
         }
     }
 
@@ -78,7 +78,7 @@ impl Port for Rec {
     fn served_boot(&self) -> u64 {
         self.boot
     }
-    fn set_sampling(&mut self, slice_us: f64, periods: [f64; 5], _rows_per_clock: u64) {
+    fn set_sampling(&mut self, slice_us: f64, periods: [f64; 4], _rows_per_clock: u64) {
         self.slice = slice_us;
         self.periods = periods;
     }
@@ -156,7 +156,7 @@ struct World {
     waits: [u64; 5],
     /// What a row of each tier costs inside the pump, µs, where it is not
     /// [`cost`]'s default: a live cost.
-    tier_us: [Option<f64>; 8],
+    tier_us: [Option<f64>; 7],
 }
 
 /// When the host's sweep read each object, and every gap between two reads
@@ -235,7 +235,6 @@ fn cost(tier: Tier) -> f64 {
         Tier::Subscribed | Tier::Positions => 0.2,
         Tier::Stopped => 3.0,
         Tier::Vitals => 0.2,
-        Tier::Ammo => 1.7,
         Tier::Warehouses => 50.0,
     }
 }
@@ -410,16 +409,7 @@ fn pump(s: &mut Sampler, rec: &mut Rec, w: &mut World, clock: &mut Clock) {
             Tier::Vitals => {
                 for &slot in &slots {
                     let t = clock.add(w.tier_us[plan.tier.index()].unwrap_or(cost(plan.tier)));
-                    if s.vitals(slot, Some(3.0), Some(1.0), || t) {
-                        stop = true;
-                        break;
-                    }
-                }
-            }
-            Tier::Ammo => {
-                for &slot in &slots {
-                    let t = clock.add(cost(plan.tier));
-                    if s.ammo(rec, slot, &[(b"shell".to_vec(), 5.0)], || t) {
+                    if s.vitals(slot, Some(3.0), || t) {
                         stop = true;
                         break;
                     }
@@ -472,7 +462,7 @@ fn pump(s: &mut Sampler, rec: &mut Rec, w: &mut World, clock: &mut Clock) {
 /// the position periods seen once a second.
 struct Run {
     share: f64,
-    samples: Vec<[f64; 5]>,
+    samples: Vec<[f64; 4]>,
     /// Frames that pumped, frames that did not make system calls.
     pumps: usize,
     frames: usize,
@@ -503,7 +493,7 @@ struct Run {
         not(feature = "faults"),
         allow(dead_code, reason = "read by a faults test")
     )]
-    tier_rows: [u64; 8],
+    tier_rows: [u64; 7],
     /// From the reports: vitals rows due at the target, and those the
     /// vitals cursor read (`due_vitals`, `swept_vitals`).
     vitals_due: f64,
@@ -566,7 +556,7 @@ fn run_x(
     let (mut row_frames, mut overrun_frames, mut forgiven_us) = (0, 0, 0.0);
     let mut maintenance_forgiven_us = 0.0;
     let (mut sweeps, mut sweep_cut, mut sweep_overruns) = (0, 0, 0);
-    let mut tier_rows = [0u64; 8];
+    let mut tier_rows = [0u64; 7];
     let (mut vitals_due, mut vitals_swept) = (0.0, 0);
     let mut empty_pumps = 0;
     let mut windows = Vec::new();
@@ -743,7 +733,7 @@ fn halt_four_in_five(w: &mut World) {
     }
 }
 
-fn tail_mean(samples: &[[f64; 5]], tier: usize, n: usize) -> f64 {
+fn tail_mean(samples: &[[f64; 4]], tier: usize, n: usize) -> f64 {
     let tail = &samples[samples.len().saturating_sub(n)..];
     tail.iter().map(|p| p[tier]).sum::<f64>() / tail.len() as f64
 }
@@ -755,25 +745,8 @@ fn rates_meet_their_targets_and_the_mean_holds_at_2000_units() {
     let mut w = world(1960, 40, 20);
     run(&mut s, &mut rec, &mut w, 60.0, 110.0, 200.0);
     assert_eq!(s.len(), 2000);
-    // No unit has fired and none is subscribed: no ammunition is read.
-    assert_eq!(
-        rec.of(kind::AMMO).count(),
-        0,
-        "ammunition read with no shot"
-    );
-    // Ten units fire: each one's ammunition is read once.
-    for i in 1..=10u64 {
-        s.mark(Some((1000 + i) as f64), false);
-    }
     let r = run(&mut s, &mut rec, &mut w, 60.0, 110.0, 200.0);
     assert!(r.share <= 0.003 * 1.02, "share {}", r.share);
-    let fired: Vec<u64> = rec
-        .of(kind::AMMO)
-        .filter_map(|p| Ammo::decode(p).ok())
-        .map(|a| a.object)
-        .collect();
-    assert_eq!(fired.len(), 10, "ammunition records {fired:?}");
-    assert!(fired.iter().all(|o| (1001..=1010).contains(o)), "{fired:?}");
     for k in [
         kind::POSITIONS,
         kind::VITALS,
@@ -784,11 +757,9 @@ fn rates_meet_their_targets_and_the_mean_holds_at_2000_units() {
     }
     let pos = tail_mean(&r.samples, 0, 30);
     let vit = tail_mean(&r.samples, 1, 30);
-    let ammo = tail_mean(&r.samples, 2, 30);
-    let wh = tail_mean(&r.samples, 3, 30);
+    let wh = tail_mean(&r.samples, 2, 30);
     assert!((0.9..1.3).contains(&pos), "position period {pos}");
     assert!((4.5..6.0).contains(&vit), "vitals period {vit}");
-    assert!((27.0..36.0).contains(&ammo), "ammo period {ammo}");
     assert!((54.0..72.0).contains(&wh), "warehouse period {wh}");
 }
 
@@ -898,7 +869,7 @@ fn the_hosts_sweep_reads_each_unit_once_a_second_and_leaves_the_pump_its_turn() 
         s.stopped.len(),
         s.births,
         s.xcall_seen,
-        [Tier::Vitals, Tier::Ammo, Tier::Warehouses]
+        [Tier::Vitals, Tier::Warehouses]
             .map(|t| (s.tiers[t.index()].credit, s.tiers[t.index()].cost)),
     );
     assert!(r2.longest_us <= 250.0, "a frame of {} µs", r2.longest_us);
@@ -1005,7 +976,7 @@ fn a_dear_row_and_a_large_allowance_do_not_stop_the_sweep() {
 
 /// A sidecar that attaches holds no samples. After its `HELLO` every row is
 /// read again within seconds, the halted ones too: a position (a static's
-/// with the enumeration the attach asks for), and life and fuel.
+/// with the enumeration the attach asks for), and life.
 #[test]
 fn an_attach_reads_every_row_again() {
     let mut s = Sampler::new(Rates::default(), 0.07);
@@ -1034,7 +1005,7 @@ fn an_attach_reads_every_row_again() {
         .flat_map(|p| p.object)
         .collect();
     assert_eq!(positions.len(), 2000, "positions after the attach");
-    assert_eq!(vitals.len(), 2000, "life and fuel after the attach");
+    assert_eq!(vitals.len(), 2000, "life after the attach");
     // The halted rows go back to their slow schedule.
     run_x(&mut s, &mut rec, &mut w, 10.0, 100.0, 185.0, 29.0, 2.2);
     assert!(
@@ -1075,12 +1046,12 @@ fn the_enumeration_keeps_its_period_at_2000_with_live_costs() {
     // The period is begin to begin, 60 s. An enumeration of this size takes
     // about 35 s, and while one runs the reported period grows from the
     // last ended one's begin: at most the target plus the duration.
-    let ended = s.periods()[4];
+    let ended = s.periods()[3];
     assert!((59.0..61.0).contains(&ended), "enumeration period {ended}");
     assert!(
-        worst(4) <= 60.0 + 40.0,
+        worst(3) <= 60.0 + 40.0,
         "enumeration period grew to {}",
-        worst(4)
+        worst(3)
     );
     assert!(
         worst(0) <= 1.3,
@@ -1154,7 +1125,7 @@ fn a_birth_burst_leaves_the_positions_and_the_enumeration_their_turn() {
     assert!(r.share <= 0.003 * 1.02, "share {}", r.share);
     let worst = r.samples.iter().map(|p| p[0]).fold(0.0f64, f64::max);
     assert!(worst <= 3.0, "positions took {worst:.1} s during the burst");
-    let en = r.samples.iter().map(|p| p[4]).fold(0.0f64, f64::max);
+    let en = r.samples.iter().map(|p| p[3]).fold(0.0f64, f64::max);
     // The enumeration keeps its 60 s target, within half again.
     assert!(en <= 90.0, "the enumeration took {en:.1} s");
     assert_eq!(s.len(), 2000, "every birth resolved");
@@ -1234,7 +1205,7 @@ fn at_a_tenth_with_live_costs_subscribed_positions_keep_a_rate() {
     let pos = end[0];
     assert!(pos > 0.0 && pos < 60.0, "positions period {pos}");
     assert!(pos >= sub, "positions {pos} against subscribed {sub}");
-    for (i, name) in [(1, "vitals"), (2, "ammunition"), (3, "warehouses")] {
+    for (i, name) in [(1, "vitals"), (2, "warehouses")] {
         assert!(end[i] > 0.0, "{name} reads 0");
         assert!(
             end[i] >= pos,
@@ -1292,7 +1263,7 @@ fn a_saturating_subscription_starves_the_lower_tiers_and_they_recover() {
     assert!((4.5..6.5).contains(&vit), "vitals recovered to {vit} s");
 }
 
-/// With the sampling budget at a tenth, ammunition and warehouses fall first, then
+/// With the sampling budget at a tenth, warehouses fall first, then
 /// vitals, then positions; subscribed positions last; the mean still holds.
 #[cfg(feature = "faults")]
 #[test]
@@ -1313,34 +1284,21 @@ fn with_a_tenth_of_the_slice_the_rates_fall_in_order() {
     s.subscribe(1.0, false, &(1..=50).collect::<Vec<_>>());
     let r = run(&mut s, &mut rec, &mut w, 240.0, 110.0, 200.0);
     assert!(r.share <= 0.003, "share {}", r.share);
-    assert_eq!(s.watched_units, 50, "subscribed units");
     let ratio = |tier: usize, target: f64| tail_mean(&r.samples, tier, 60) / target;
-    let (pos, vit, ammo) = (ratio(0, 1.0), ratio(1, 5.0), ratio(2, 30.0));
+    let pos = ratio(0, 1.0);
     let sub = s.subscribed_period();
     assert!(sub > 0.0 && sub < 1.3, "subscribed period {sub}");
     // Positions fell, and the lower tiers fell further: in achieved period,
-    // ammunition ≥ vitals ≥ positions (S10 ruling on the tenth). A tier that
-    // got no rows shows a period that grows from when it first owed them,
-    // never 0.
+    // vitals ≥ positions (S10 ruling on the tenth). A tier that got no rows
+    // shows a period that grows from when it first owed them, never 0.
     assert!(pos > 1.2, "positions did not fall: {pos}");
     let period = |tier: usize| tail_mean(&r.samples, tier, 60);
-    let (pos_p, vit_p, ammo_p) = (period(0), period(1), period(2));
-    assert!(
-        vit_p > 0.0 && ammo_p > 0.0,
-        "vitals {vit_p} s, ammunition {ammo_p} s"
-    );
+    let (pos_p, vit_p) = (period(0), period(1));
+    assert!(vit_p > 0.0, "vitals {vit_p} s");
     assert!(
         vit_p > pos_p,
         "vitals {vit_p} s against positions {pos_p} s"
     );
-    // A tier that gets no rows meets the order with its growing period. Two
-    // such tiers grow from their own starts, so either may read a little
-    // higher: one past twice its target has stalled, and meets it.
-    assert!(
-        ammo_p >= vit_p || ammo_p >= 2.0 * 30.0,
-        "ammunition {ammo_p} s against vitals {vit_p} s"
-    );
-    let _ = (vit, ammo);
 }
 
 /// At scale 1 the faults build plans exactly what a sampler never scaled
@@ -1961,7 +1919,7 @@ fn at_a_tenth_the_pump_comes_under_5_times_a_second() {
     eprintln!(
         "k = 0.1: {} pumps a second, enumeration period {}, enumerations {}",
         r.pumps as f64 / 200.0,
-        s.periods()[4],
+        s.periods()[3],
         s.enum_count
     );
     assert!(
@@ -2020,21 +1978,21 @@ fn every_tier_holds(cases: &[(Sweep, f64, f64, Option<f64>, bool)]) {
         );
         assert!((4.5..6.5).contains(&p[1]), "{case}: vitals period {}", p[1]);
         assert!(
-            (58.0..64.0).contains(&p[4]),
+            (58.0..64.0).contains(&p[3]),
             "{case}: enumeration period {}",
-            p[4]
+            p[3]
         );
         // The reported period grows while one runs: at most the target and
         // the duration.
-        let worst = r.samples.iter().map(|p| p[4]).fold(0.0f64, f64::max);
+        let worst = r.samples.iter().map(|p| p[3]).fold(0.0f64, f64::max);
         assert!(worst <= 60.0 + 40.0, "{case}: enumeration period {worst}");
         if attitude {
             // The warehouses are still read: within about twice their
             // period, whatever the pump leaves them.
             assert!(
-                p[3] > 0.0 && p[3] <= 2.0 * 60.0,
+                p[2] > 0.0 && p[2] <= 2.0 * 60.0,
                 "{case}: warehouse period {}",
-                p[3]
+                p[2]
             );
             // A row's period is the span over the rows read.
             let sub = 20.0 * 180.0 / r.tier_rows[Tier::Subscribed.index()] as f64;
@@ -2242,7 +2200,7 @@ fn the_live_cost_storm_case_holds_every_tier_at_k_1() {
     let p = rec.periods;
     assert!((0.9..1.2).contains(&p[0]), "positions {}", p[0]);
     assert!((4.5..6.5).contains(&p[1]), "vitals {}", p[1]);
-    let worst = r.samples.iter().map(|p| p[4]).fold(0.0f64, f64::max);
+    let worst = r.samples.iter().map(|p| p[3]).fold(0.0f64, f64::max);
     assert!(worst <= 60.0 + 40.0, "enumeration period {worst}");
     assert!(r.share <= 0.003, "share {}", r.share);
     assert!(r.pumps as f64 / 180.0 < 5.0, "{} pumps", r.pumps);
@@ -2596,9 +2554,8 @@ fn the_pump_reads_no_lower_tier_while_the_sweep_is_behind() {
     }
 }
 
-/// A HIT names a row's life and a shot its ammunition: each is read on the
-/// next pump, and a row read again within `LIFE_AGAIN_S`, or
-/// `AMMO_AGAIN_S`, waits.
+/// A HIT names a row's life: it is read on the next pump, and a row read
+/// again within `LIFE_AGAIN_S` waits.
 #[test]
 fn marks_read_the_named_row_and_not_again_within_their_wait() {
     let (mut s, mut rec, mut w) = table(100);
@@ -2610,38 +2567,20 @@ fn marks_read_the_named_row_and_not_again_within_their_wait() {
     });
     let t0 = rec.began + Duration::from_secs(10);
     s.budget.debt = -CREDIT_CAP_US;
-    s.mark(Some(1005.0), true);
+    s.mark(Some(1005.0));
     one_pump(&mut s, &mut rec, &mut w, t0);
     assert_eq!(vitals_read(&rec), vec![1005]);
     rec.records.clear();
     // Hit again 0.5 s later: too soon.
-    s.mark(Some(1005.0), true);
+    s.mark(Some(1005.0));
     one_pump(&mut s, &mut rec, &mut w, t0 + Duration::from_millis(500));
     assert!(!vitals_read(&rec).contains(&1005), "read again at 0.5 s");
     one_pump(&mut s, &mut rec, &mut w, t0 + Duration::from_millis(1200));
     assert!(vitals_read(&rec).contains(&1005), "not read at 1.2 s");
-    // A shot.
-    rec.records.clear();
-    let ammo = |rec: &Rec| {
-        rec.of(kind::AMMO)
-            .filter_map(|p| Ammo::decode(p).ok())
-            .map(|a| a.object)
-            .collect::<Vec<_>>()
-    };
-    let t1 = t0 + Duration::from_secs(2);
-    s.mark(Some(1007.0), false);
-    one_pump(&mut s, &mut rec, &mut w, t1);
-    assert_eq!(ammo(&rec), vec![1007]);
-    rec.records.clear();
-    s.mark(Some(1007.0), false);
-    one_pump(&mut s, &mut rec, &mut w, t1 + Duration::from_secs(2));
-    assert!(ammo(&rec).is_empty(), "read again at 2 s");
-    one_pump(&mut s, &mut rec, &mut w, t1 + Duration::from_millis(5200));
-    assert_eq!(ammo(&rec), vec![1007]);
     // An object the table lacks is ignored.
-    s.mark(Some(5.0), true);
-    s.mark(Some(f64::NAN), false);
-    assert!(s.life_marks.is_empty() && s.ammo_marks.is_empty());
+    s.mark(Some(5.0));
+    s.mark(Some(f64::NAN));
+    assert!(s.life_marks.is_empty());
 }
 
 /// A row a getter raised on is left out of every tier until an enumeration
@@ -2651,7 +2590,7 @@ fn a_suspect_row_is_read_by_no_tier_until_an_enumeration_finds_it() {
     let (mut s, mut rec, _w) = table(20);
     let slot = s.slot_of(1005).unwrap();
     s.suspect(slot);
-    for tier in [Tier::Positions, Tier::Vitals, Tier::Ammo] {
+    for tier in [Tier::Positions, Tier::Vitals] {
         assert!(s.readable(tier, slot as usize).is_none(), "{tier:?}");
     }
     assert!(s.readable(Tier::Positions, slot as usize + 1).is_some());
@@ -2810,7 +2749,6 @@ fn encode_into_matches_encode() {
     let v = Vitals {
         object: vec![4, 5],
         life: vec![1.5, 2.5],
-        fuel: vec![0.5, 0.25],
     };
     let a = Attitude {
         object: vec![6],
@@ -2936,7 +2874,7 @@ fn at_half_a_frame_a_second_the_sampling_frames_stay_under_250_us() {
 
 /// No aircraft exception: an unsubscribed aircraft's life is read when its
 /// row is added, after a hit, and on the slow sweep; a subscribed aircraft's
-/// life and fuel every 5 s.
+/// life every 5 s.
 #[test]
 fn only_a_subscribed_aircraft_has_its_life_read_every_vitals_period() {
     let mut s = Sampler::new(Rates::default(), 0.07);
@@ -2971,7 +2909,7 @@ fn only_a_subscribed_aircraft_has_its_life_read_every_vitals_period() {
     }
     // A hit names one: read within two seconds, once.
     rec.records.clear();
-    s.mark(Some(1050.0), true);
+    s.mark(Some(1050.0));
     rec.began += Duration::from_millis(10);
     run_x(&mut s, &mut rec, &mut w, 2.0, 100.0, 185.0, 29.0, 2.2);
     assert!(
@@ -3135,7 +3073,7 @@ fn at_a_tenth_the_enumeration_runs_at_a_fraction_of_its_rate() {
     eprintln!(
         "enumeration items a second: {full:.1} at k = 1 with rows owed, {tenth:.1} at k = 0.1 \
          (ratio {ratio:.3}); period {}; {} pumps a second",
-        s.periods()[4],
+        s.periods()[3],
         pumps as f64 / 900.0
     );
     assert!(
@@ -3146,7 +3084,7 @@ fn at_a_tenth_the_enumeration_runs_at_a_fraction_of_its_rate() {
         s.enum_count > before + 1,
         "the enumeration did not complete"
     );
-    assert!(s.periods()[4] > 0.0, "no period reported");
+    assert!(s.periods()[3] > 0.0, "no period reported");
     assert!(pumps as f64 / 900.0 < 5.0, "{} pumps", pumps);
 }
 
@@ -3210,9 +3148,10 @@ fn guard_rows_at(offset: f64) {
     // The warehouses' mark lasts the pump's wait from when it was first set
     // (2026-11-15 ruling on live row costs), so the subscribed pumps cannot
     // keep them out and they are read without the guard too (61 rows of 60
-    // due). The guard must take none away.
+    // due). The guard must take none away; a run's last row falls on either
+    // side of the window's end, so the two runs may differ by one.
     assert!(
-        rows >= without,
+        rows + 1 >= without,
         "offset {offset} s: {rows} rows with the guard, {without} without"
     );
     assert!(
@@ -3296,7 +3235,7 @@ fn the_vitals_rate_keys_add_up_and_leave_out_marked_reads() {
     let mut rows = rows_before;
     for i in 0..30u64 {
         for k in 0..40u64 {
-            s.mark(Some((1001 + (i * 40 + k) % 500) as f64), true);
+            s.mark(Some((1001 + (i * 40 + k) % 500) as f64));
         }
         rec.began += Duration::from_nanos(9_090_909);
         r = run_x(&mut s, &mut rec, &mut w, 1.0, 110.0, 165.0, 23.0, 3.0);
@@ -3503,7 +3442,7 @@ fn cycle_capped(stall_s: f64, enumeration: bool, one_sweep: bool) -> Cycle {
             c.vitals_tail += tail_mean(&r.samples, 1, 10) / 3.0;
         }
     }
-    c.slow_end = s.slow_period[0];
+    c.slow_end = s.slow_period;
     c
 }
 
@@ -4425,7 +4364,7 @@ struct NoRowRun {
 /// 2,000 statics and no unit or airbase, with the LIVE costs of
 /// [`enum_rank_run`]: `coalition.getGroups` steps of 687 and 1,140 µs in
 /// turn, or of `step_us` each when set, a birth 37 µs, the call 23 µs, a
-/// batch's fixed part 20 µs. The vitals, ammunition and warehouse periods
+/// batch's fixed part 20 µs. The vitals and warehouse periods
 /// are out of reach, so no row tier owes rows: at the default 5 s, 2,000
 /// statics owe vitals on nearly every frame (145 of 150 steps ended owing
 /// them), which hides the case. The fill resolves the 2,000 births; then
@@ -4445,7 +4384,6 @@ fn no_row_run_with(
     let mut pump_windows = Vec::new();
     let rates = Rates {
         vitals_s: 1e9,
-        ammo_s: 1e9,
         warehouse_s: 1e9,
         ..Rates::default()
     };
@@ -4768,7 +4706,7 @@ fn attitude_live(offset: f64) {
         sub_rows += r.tier_rows[Tier::Subscribed.index()];
         pos += rec.periods[0] / 24.0;
         readings.push(rec.periods[1]);
-        warehouse = r.samples.iter().map(|p| p[3]).fold(warehouse, f64::max);
+        warehouse = r.samples.iter().map(|p| p[2]).fold(warehouse, f64::max);
         // A frame passes 250 µs only with a dear enumeration step in it:
         // one `coalition.getGroups`, a single DCS call ("Tiers").
         let dear = w.enum_steps - steps;
@@ -5004,7 +4942,7 @@ fn an_unaffordable_mark_lasts_the_pumps_wait_from_when_it_was_first_set() {
     assert!(s.marked_out(Tier::Vitals, at(900)));
     assert!(!s.marked_out(Tier::Vitals, at(1000)));
     assert!(
-        !s.marked_out(Tier::Ammo, at(900)),
+        !s.marked_out(Tier::Warehouses, at(900)),
         "another tier is not marked"
     );
     // In the pump's worth: vitals owes 100 rows at 1.3 µs, past three 35 µs

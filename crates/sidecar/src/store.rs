@@ -128,8 +128,6 @@ pub struct UnitState {
     pub heading: f64,
     /// `getLife()`, or 0 when never sampled.
     pub life: f32,
-    /// `getFuel()`, or 0 when never sampled.
-    pub fuel: f32,
 }
 
 /// The keys of a capture that `UnitState` does not hold
@@ -143,8 +141,9 @@ pub struct CapturedMore {
     pub pitch: f64,
     /// Roll, radians.
     pub roll: f64,
-    /// `getAmmo()` as DCS returns it, or nil.
-    pub ammo: Lv,
+    /// The life a `PutGroup` asked the unit to spawn with, as a percentage
+    /// of its initial life, until DCS reads the unit's life.
+    pub life_percent: Option<f64>,
 }
 
 impl Default for CapturedMore {
@@ -153,7 +152,7 @@ impl Default for CapturedMore {
             life0: 0.0,
             pitch: 0.0,
             roll: 0.0,
-            ammo: Lv::Nil,
+            life_percent: None,
         }
     }
 }
@@ -189,12 +188,64 @@ pub struct Unit {
     pub label: String,
     /// DCS skill, empty for the default. Spec.
     pub skill: String,
-    /// What the last capture read besides the state: initial life, attitude
-    /// and ammunition. Absent keys stay 0 and nil.
+    /// What the last capture read besides the state: initial life and attitude.
+    /// Absent keys stay 0 and nil.
     pub captured: CapturedMore,
+    /// The last ammunition read of a player-occupied unit. Volatile: never
+    /// written to disk, never part of a capture, and forgotten at a new
+    /// mission generation.
+    pub loadout: Option<Loadout>,
     /// Further keys of the DCS unit or static table: payload, livery,
     /// callsign and so on (spec/world.md, "Lua tables in the API"). Spec.
     pub extra: Lv,
+}
+
+/// The stamps of a record, as the API shows them.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ReadStamp {
+    /// Wall-clock time, seconds since the epoch.
+    pub wall_s: f64,
+    /// Model time, seconds.
+    pub model_time: f64,
+    /// The mission generation.
+    pub mission_gen: u32,
+    /// The agent's frame sequence number.
+    pub frame: u64,
+}
+
+/// A player-occupied unit's ammunition and the read it came from
+/// (spec/records.md, "Layout: AMMO").
+#[derive(Clone, Debug, PartialEq)]
+pub struct Loadout {
+    /// The event that asked for the read: 1 birth, 2 takeoff.
+    pub cause: u32,
+    /// Counts by `getAmmo` type name.
+    pub ammo: BTreeMap<String, u32>,
+    /// When the read was made.
+    pub read: ReadStamp,
+}
+
+impl Unit {
+    /// Whether DCS has read the unit's life: the store keeps 0 until the
+    /// first read.
+    pub fn vitals_read(&self) -> bool {
+        self.state.life != 0.0
+    }
+
+    /// The life to spawn the unit with, as a percentage of its initial life
+    /// (spec/world.md, "Spawn state"): what DCS last read, else what a
+    /// `PutGroup` asked for. None when neither is known.
+    pub fn spawn_life_percent(&self) -> Option<f64> {
+        if self.dead {
+            return None;
+        }
+        if self.vitals_read() && self.captured.life0 > 0.0 && self.state.life > 0.0 {
+            return Some(
+                (100.0 * f64::from(self.state.life) / self.captured.life0).clamp(0.0, 100.0),
+            );
+        }
+        self.captured.life_percent
+    }
 }
 
 /// A managed group or static.
@@ -1209,6 +1260,7 @@ impl Store {
                     label: u.label,
                     skill: u.skill,
                     captured: CapturedMore::default(),
+                    loadout: None,
                     extra: u.extra,
                 },
             );
@@ -1712,6 +1764,7 @@ impl Store {
         let mut cleared = Vec::new();
         for u in self.units.values_mut() {
             u.object = 0;
+            u.loadout = None;
             if !u.left_logged && (u.missing || u.removed) {
                 u.missing = false;
                 u.removed = false;
@@ -1867,42 +1920,88 @@ impl Store {
         }
     }
 
-    /// Sampled life and fuel.
-    pub fn observe_vitals(&mut self, unit: EntityId, life: f32, fuel: f32) {
+    /// Sampled life. It replaces the life a `PutGroup` asked for.
+    pub fn observe_vitals(&mut self, unit: EntityId, life: f32) {
         if let Some(u) = self.units.get_mut(&unit)
             && !u.dead
-            && (u.state.life, u.state.fuel) != (life, fuel)
+            && (u.state.life != life || u.captured.life_percent.is_some())
         {
             u.state.life = life;
-            u.state.fuel = fuel;
+            u.captured.life_percent = None;
             self.touch(unit);
         }
     }
 
-    /// A captured state replaces the unit's.
+    /// A player-occupied unit's ammunition read. It is volatile: nothing of
+    /// it is written to disk.
+    pub fn observe_loadout(&mut self, unit: EntityId, loadout: Loadout) {
+        if let Some(u) = self.units.get_mut(&unit)
+            && !u.dead
+            && u.loadout.as_ref() != Some(&loadout)
+        {
+            u.loadout = Some(loadout);
+            self.touch(unit);
+        }
+    }
+
+    /// The last player left the unit: it shows no ammunition read.
+    pub fn forget_loadout(&mut self, unit: EntityId) {
+        if let Some(u) = self.units.get_mut(&unit)
+            && u.loadout.is_some()
+        {
+            u.loadout = None;
+            self.touch(unit);
+        }
+    }
+
+    /// The life the unit started with, from its `OBJECT` record, when DCS
+    /// gave one. A capture's reading replaces it.
+    pub fn observe_life0(&mut self, unit: EntityId, life0: f64) {
+        if let Some(u) = self.units.get_mut(&unit)
+            && life0.is_finite()
+            && life0 > 0.0
+            && u.captured.life0 != life0
+        {
+            u.captured.life0 = life0;
+            self.touch(unit);
+        }
+    }
+
+    /// The life a `PutGroup` asks a unit to spawn with, as a percentage of
+    /// its initial life (spec/world.md, "Spawn state"). It replaces what DCS
+    /// read until DCS reads the unit's life again, and is a spec change, so
+    /// the group spawns again with it.
+    pub fn set_spawn_life(&mut self, unit: EntityId, life_percent: f64) -> Result<u64, StoreError> {
+        let u = self
+            .units
+            .get_mut(&unit)
+            .ok_or(StoreError::NoSuchEntity(unit))?;
+        // What DCS read no longer stands for the unit.
+        u.state.life = 0.0;
+        u.captured.life_percent = Some(life_percent);
+        let gid = u.group;
+        self.spec_changed(gid)
+    }
+
+    /// A captured state replaces the unit's, and what a `PutGroup` asked for.
     pub fn observe_capture(&mut self, unit: EntityId, state: UnitState) {
         if let Some(u) = self.units.get_mut(&unit)
             && !u.dead
         {
             u.state = state;
+            u.captured.life_percent = None;
             let theater = self.groups[&u.group].theater.clone();
             self.grid.set(unit, &theater, state.at.x, state.at.z);
             self.touch(unit);
         }
     }
 
-    /// The rest of a capture: initial life, attitude, ammunition, and the DCS
+    /// The rest of a capture: initial life, attitude, and the DCS
     /// object ID the unit has now (0 leaves it as it was).
     pub fn observe_capture_more(&mut self, unit: EntityId, more: CapturedMore, object: u64) {
         if let Some(u) = self.units.get_mut(&unit)
             && !u.dead
         {
-            let mut more = more;
-            if check_lv(&more.ammo).is_err() {
-                // The agent caps what it sends; a value past the store's
-                // limits is dropped rather than stop the sidecar.
-                more.ammo = Lv::Nil;
-            }
             u.captured = more;
             if object != 0 {
                 u.object = object;

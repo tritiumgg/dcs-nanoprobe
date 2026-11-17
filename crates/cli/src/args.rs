@@ -8,7 +8,8 @@ Usage:
   nanoprobe inspect <map-file> [--records N]
   nanoprobe top <map-file> [--interval-ms MS] [--once]
   nanoprobe watch world|events [--addr URL] [--campaign ID] [--since N]
-  nanoprobe doctor [--profile DIR | --wine-prefix DIR]
+  nanoprobe doctor [--profile DIR | --wine-prefix DIR] [--missions DIR]
+                   [--theater NAME]...
   nanoprobe install [--profile DIR | --wine-prefix DIR] [--payload DIR]
   nanoprobe uninstall [--profile DIR | --wine-prefix DIR]
   nanoprobe restore --store DIR --campaign ID --backup N
@@ -33,8 +34,11 @@ doctor     Check an install from outside DCS: the files, the token and
            Config/autoexec.cfg. Writes nothing. Without --profile it checks
            every DCS Saved Games profile that holds nanoprobe: under
            USERPROFILE on Windows, and in the Wine prefix (--wine-prefix,
-           WINEPREFIX, or ~/.wine). Exit 1 when a check fails, 2 when no
-           installed profile is found.
+           WINEPREFIX, or ~/.wine). It also checks the per-map templates
+           in the mission folder: --missions DIR names the sidecar's
+           [missions] dir (default: nanoprobe/missions in the profile), and
+           each --theater NAME must have a NAME.miz there. Exit 1 when a
+           check fails, 2 when no installed profile is found.
 install    Install the release into one DCS Saved Games profile: the loader,
            the agent and its Lua, a handshake token, and a block in
            Config/autoexec.cfg that lets the hook reach the server state.

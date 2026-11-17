@@ -23,7 +23,7 @@ entities by `EntityId` within a campaign.
 | Kind | Identity | Created by the platform | Carries |
 |---|---|---|---|
 | Group | `EntityId` | yes | The spec: country, category and members; its controller options; and the order. The unit of spawn, order, materialize and destroy. |
-| Unit | `EntityId`, a member of one group | with its group | Observed state: position, attitude, life, fuel, ammunition. Dies alone. |
+| Unit | `EntityId`, a member of one group | with its group | Observed state: position, attitude, life, and a player unit's ammunition at its last birth or takeoff. Dies alone. |
 | Static | `EntityId` | yes | A spec and observed state. Spawned and destroyed alone. |
 | Airbase | theater and DCS name | no | Owner (coalition) |
 | Warehouse | theater and DCS name of its airbase | no | Stock |
@@ -407,6 +407,90 @@ With persistence off (spec/config.md) the stores are in memory. They last as lon
 the sidecar process. The author reads state with the capture call and writes it back
 as specs after a restart.
 
+## Spawn state
+
+Every spawn of a unit, a first materialization, a restore after a mission load or a DCS
+restart, and a materialize after a dematerialize, gives it the state the store knows:
+its position and heading in the unit table, and its life.
+
+The life is `getLife` over `getLife0` as a percentage: `getLife` from the last sample or
+capture, `getLife0` from the capture or the unit's `OBJECT` record. A `PutGroup` may give
+a unit's `life_percent` instead, above 0 and up to 100 (at 0 a unit leaves DCS with no
+death fact); it stands until DCS reads the unit's life. While the group's respawn is owed,
+a sample or capture of the old spawn does not replace it. When the life
+is below 99.95 %, the sidecar queues a `DAMAGE` right after the `GROUP_SPAWN`: ring order
+runs it after the spawn, which names the unit. It sets the life in the spawn's frame
+while the simulation is paused, and later with the simulation running (LIVE, E39,
+docs/results/2026-11-16-e39-spawn-state.md); that it sets it in the spawn's frame with
+the simulation running is UNVERIFIED. Until that `DAMAGE` is answered, a sample or
+capture of the unit does not replace the life the store holds, so a read at the life the
+spawn gave cannot overwrite it. The store holds the last life it read, or the
+percentage a `PutGroup` asked for. A `DAMAGE` that DCS refuses or rejects, or that the
+agent never took, is counted (`lives_lost`), and the sidecar writes a warning to its
+standard error naming the unit's entity ID. A `DAMAGE` rejected only for its moment is not
+counted: its spawn is sent again with a new `DAMAGE`. A `DAMAGE` that no `RESULT` answers
+before a `HELLO` of the same agent boot and mission generation resolves it may have been
+applied: the sidecar warns and does not count it, and the next sample shows the unit's
+life. A new mission generation drops the hold without a count, because the restore runs
+again with the next spawn. The count is in `Reconciler::counters()`; no other operator
+surface carries the reconciler's counters. The next sample shows the unit's life.
+
+The setter removes some units at some percentages: a speedboat left DCS at 50 % (LIVE,
+E16), while a PERRY kept 50 % and a speedboat kept 80 % (LIVE, E39). A restore `DAMAGE`
+that removes a unit leaves the member REMOVED or MISSING like any removal; no death fact
+follows and the sidecar does not spawn the group again. Which other ship types and
+thresholds remove a unit is UNVERIFIED, an open item.
+
+A unit spawns with the fuel, ammunition, flares and chaff its payload or type gives
+(owner's decision, after E39).
+
+### Ammunition
+
+`Unit.ammo` is the ammunition of a unit a player occupies, by `getAmmo` type name, as
+the agent read it at the unit's birth or at its takeoff. `Unit.ammo_read` names the
+event that asked for the read, `AMMO_READ_CAUSE_BIRTH` or `AMMO_READ_CAUSE_TAKEOFF`, and
+carries the stamps of the read. Rows with the same type name add up. The newest read
+replaces the one before. A controller reads it for a loadout check.
+
+An AI unit has no ammunition read: its `ammo` is empty and it has no `ammo_read`. So has
+a player unit before its first read. A player unit read with no ammunition rows has an
+empty `ammo` and an `ammo_read`. Nothing sees a
+rearm. No event named an AI M-1 rearmed by a truck (LIVE, E38,
+docs/results/2026-11-14-e38-life-and-ammunition.md); whether DCS sends one for a player
+aircraft rearmed by ground crew is UNVERIFIED, an open item for a live check. The
+loadout is the one at the last birth or takeoff. A read whose record the ring drops is
+made again on a later pump (spec/sampling.md, "Loadout reads"). The sidecar keeps it in memory with the unit. It is not stored on
+disk, not part of a capture and not carried by a restore, and a new mission generation
+clears it. A unit the store holds shows it on its `Unit`. The units the sidecar adopts
+have no entity in the store (above, "Managed and unmanaged"), so the API shows no `Unit`
+for them, and the World service lists store units only.
+
+**Players.** A player's aircraft is usually an adopted unit, so the loadout also reaches
+the API through the player. `Player.ammo` and `Player.ammo_read` (fields 8 and 9) carry
+the loadout of the unit in `Player.unit_id`: the same type-name counts and the same read
+as `Unit.ammo` and `Unit.ammo_read`, summed by type name when a record repeats a type.
+They are empty and absent when no read was made and when `unit_id` is 0. They clear when
+the player leaves the unit and at a new mission generation or agent boot. A managed unit
+a player occupies shows the same loadout on its `Unit` and on the `Player`. The sidecar
+keeps the table by DCS object ID in memory. Nothing of it is stored on disk.
+
+**Loadout event.** Each `AMMO` record of a unit that players occupy, managed or adopted,
+makes one `LoadoutEvent` (field 12 of `Event.body`). It carries the unit's `EntityId`,
+its group's, the unit's type name, the keys of its occupants by seat, the counts and the
+read. It is journalled after the `S_EVENT_BIRTH` or `S_EVENT_TAKEOFF` world event that
+caused the read, and it is not made when the roster names no player in the unit. An
+`EventFilter` passes it on `player_key`, when one of its `player_keys` matches, and on
+`dcs_ids`, by the cause: `S_EVENT_BIRTH` (15) for a birth read, `S_EVENT_TAKEOFF` (3) for
+a takeoff read.
+
+**Reads before the bind.** An `AMMO` record can reach the sidecar before the sidecar
+holds an `EntityId` for its object, such as one read before the player's slot joins the
+birth that adopts the unit. The sidecar holds the read by DCS object ID until the
+object is bound in the same agent boot and mission generation, then applies it: the
+`Player` fields, the store's unit when it has one, and the `LoadoutEvent`. It holds at
+most 64 reads. A newer read of an object replaces its held one, a full table drops its
+oldest read, and a new mission generation or agent boot drops them all.
+
 ## Lua tables in the API
 
 The API carries DCS tables as JSON-like values (`google.protobuf.Struct`), whose keys
@@ -423,7 +507,7 @@ are strings and whose numbers are doubles. The sidecar converts both ways by one
 
 So a sparse table such as pylons 1, 3 and 5 is an object with the keys `"1"`, `"3"` and
 `"5"`. A string key that looks like an integer cannot be sent. None of these DCS tables
-has one: `getAmmo`, `getDesc` and `getPosition` of an F-15C and an M-113, and
+has one: `getDesc` and `getPosition` of an F-15C and an M-113, and
 `getInventory` of three Caucasus airbases' warehouses (LIVE, DCS 2.9.31.29434 dedicated
 server under Wine 10.0, docs/results/2026-11-15-s18-persistence-live.md). That no other
 DCS table the platform handles has one, of these or other unit types and warehouses, is
@@ -460,8 +544,7 @@ before the slot. A held slot attaches to every later birth with its mission ID, 
 respawn in the same slot is covered. A slot change or a disconnect ends the occupancy;
 so does the unit leaving the table. A slot that matches no birth leaves the player's
 unit unknown: the sidecar counts it and does not guess. The sidecar subscribes each
-occupied unit to the higher sampling rate (spec/sampling.md) and reports the fuel a
-player used over a campaign from those vitals samples.
+occupied unit to the higher sampling rate (spec/sampling.md).
 
 **Menu attribution.** A menu selection names the players who could have made it
 (spec/records.md, "Layout: MENU").

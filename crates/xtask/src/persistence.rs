@@ -508,13 +508,15 @@ impl Target for LiveTarget<'_> {
     fn start_sidecar(&mut self) -> Result<(), String> {
         self.boots += 1;
         let a: Vec<&str> = self.args.iter().map(String::as_str).collect();
+        // `/missions` is writable: the sidecar writes each campaign's shell
+        // under `[missions] dir` (spec/config.md, "[missions]").
         self.host.sh(
             &format!(
                 "docker run -d --name {SIDECAR_C} --network container:\"$1\" --user \"$2\" \
                  -e {var}={TIMINGS_S} \
                  -v \"$3\":/nanoprobe-shm -v \"$4\":/etc/nanoprobe/agent-token:ro \
                  -v \"$5/sidecar.toml\":/etc/nanoprobe/sidecar.toml:ro -v \"$5/tokens.toml\":/etc/nanoprobe/tokens.toml:ro \
-                 -v \"$6\":/missions:ro -v \"$7\":/store \
+                 -v \"$6\":/missions:rw -v \"$7\":/store \
                  --tmpfs /var/lib/nanoprobe:rw,size=16m,uid={u},gid={g},mode=0700 {IMAGE} >/dev/null",
                 var = nanoprobe_api_timings_var(),
                 u = self.uid.0,
@@ -646,28 +648,6 @@ impl Target for LiveTarget<'_> {
         Ok(())
     }
 
-    fn payload_control(
-        &mut self,
-        at: (f64, f64),
-        alt: f64,
-        pylons: &[(u32, &str)],
-    ) -> Result<Value, String> {
-        let pylons = pylons
-            .iter()
-            .map(|(n, c)| format!("[{n}] = {{ CLSID = {} }}", lua_string(c)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        self.eval(
-            "server",
-            "s18-payload",
-            &PAYLOAD_CONTROL_LUA
-                .replace("__X__", &at.0.to_string())
-                .replace("__Z__", &at.1.to_string())
-                .replace("__ALT__", &alt.to_string())
-                .replace("__PYLONS__", &pylons),
-        )
-    }
-
     fn kill_unit(&mut self, unit: &str) -> Result<(), String> {
         self.no_players()?;
         let v = self.eval(
@@ -785,53 +765,21 @@ end
 return out
 "#;
 
-/// An F-15C spawned by `coalition.addGroup` with a Lua payload table keyed
-/// by pylon number, outside the platform: its `getAmmo` rows, then removed.
-/// The control for what the platform's payload conversion loads.
-const PAYLOAD_CONTROL_LUA: &str = r#"
-local g = coalition.addGroup(country.id.USA, Group.Category.AIRPLANE, {
-  name = 's18-payload-control', task = 'CAP',
-  units = { {
-    name = 's18-payload-control-1', type = 'F-15C', skill = 'High',
-    x = __X__, y = __Z__, alt = __ALT__, alt_type = 'BARO', speed = 180, heading = 0,
-    payload = { pylons = { __PYLONS__ }, fuel = 6103, flare = 60, chaff = 120, gun = 100 },
-  } },
-})
-local rows = {}
-local u = Unit.getByName('s18-payload-control-1')
-if u then
-  local ammo = u:getAmmo() or {}
-  for i = 1, #ammo do
-    rows[#rows + 1] = { type = ammo[i].desc.typeName, count = ammo[i].count }
-  end
-end
-if g then g:destroy() end
-return { spawned = u ~= nil, ammo = rows }
-"#;
-
-/// DCS's reads of each unit named: its ammunition by type and count, its
-/// callsign, and its fuel.
+/// DCS's reads of each unit named: its callsign and life.
 const UNIT_STATE_LUA: &str = r#"
 local out = {}
 for _, n in ipairs({ __UNITS__ }) do
   local u = Unit.getByName(n)
   if u then
-    local rows = {}
-    local ok, ammo = pcall(u.getAmmo, u)
-    if ok and type(ammo) == 'table' then
-      for i = 1, #ammo do
-        rows[#rows + 1] = { type = ammo[i].desc.typeName, count = ammo[i].count }
-      end
-    end
     local okc, cs = pcall(u.getCallsign, u)
-    out[n] = { ammo = rows, callsign = okc and cs or nil, fuel = u:getFuel() }
+    out[n] = { callsign = okc and cs or nil, life = u:getLife(), life0 = u:getLife0() }
   end
 end
 return out
 "#;
 
 /// String keys that look like integers in the tables DCS hands the restore
-/// path: each unit's `getAmmo`, `getDesc` and `getPosition`, and the
+/// path: each unit's `getDesc` and `getPosition`, and the
 /// inventory of the first three airbases' warehouses.
 const INTEGER_KEYS_LUA: &str = r#"
 local bad, seen, tables = {}, 0, 0
@@ -850,7 +798,7 @@ local read = {}
 for _, n in ipairs({ __UNITS__ }) do
   local u = Unit.getByName(n)
   if u then
-    for _, m in ipairs({ 'getAmmo', 'getDesc', 'getPosition' }) do
+    for _, m in ipairs({ 'getDesc', 'getPosition' }) do
       local ok, v = pcall(u[m], u)
       if ok then
         local before = seen
@@ -1043,15 +991,6 @@ impl Target for FakeTarget {
         Err("a scripted removal needs DCS".into())
     }
 
-    fn payload_control(
-        &mut self,
-        _at: (f64, f64),
-        _alt: f64,
-        _pylons: &[(u32, &str)],
-    ) -> Result<Value, String> {
-        Ok(Value::Null)
-    }
-
     fn kill_unit(&mut self, _unit: &str) -> Result<(), String> {
         Err("a kill needs DCS".into())
     }
@@ -1060,8 +999,25 @@ impl Target for FakeTarget {
         Ok(json!({ "string_integer_keys": [], "keys": 0, "on": "the fake" }))
     }
 
-    fn unit_state(&mut self, _units: &[String]) -> Result<Value, String> {
-        Ok(json!({}))
+    /// The life of each unit as the fake DCS holds it (the fake sidecar
+    /// logs it), 1 for a unit no `DAMAGE` set; `life0` is 1.
+    fn unit_state(&mut self, units: &[String]) -> Result<Value, String> {
+        let log = std::fs::read_to_string(&self.log).unwrap_or_default();
+        let lives = log
+            .lines()
+            .rev()
+            .filter(|l| l.contains("\"ev\":\"fake_lives\""))
+            .find_map(|l| serde_json::from_str::<Value>(l.trim()).ok())
+            .map_or(json!({}), |v| v["lives"].clone());
+        let mut out = serde_json::Map::new();
+        for u in units {
+            let entity = nanoprobe_transport::names::parse(u).map(|p| p.entity.to_string());
+            let percent = entity
+                .and_then(|e| lives[e.as_str()].as_f64())
+                .unwrap_or(100.0);
+            out.insert(u.clone(), json!({ "life": percent / 100.0, "life0": 1.0 }));
+        }
+        Ok(Value::Object(out))
     }
 
     fn option_ids(&mut self) -> Result<Value, String> {

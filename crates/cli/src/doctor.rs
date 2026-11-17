@@ -2,12 +2,12 @@
 //!
 //! Each check adds one line, marked `ok`, `fail` or `note`, and every check
 //! runs whatever an earlier one found, since a broken install often has more
-//! than one cause. `doctor` reads the profile and writes nothing. Of
-//! `autoexec.cfg` it reports only the two `net.*` keys, and of `dcs.log` only
-//! the platform's own lines.
+//! than one cause. `doctor` reads the profile and the mission folder, and
+//! writes nothing. Of `autoexec.cfg` it reports only the two `net.*` keys, and
+//! of `dcs.log` only the platform's own lines.
 
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use nanoprobe_agent_link::config::AgentToml;
 use nanoprobe_install::autoexec::{self, AUTOEXEC};
@@ -15,6 +15,7 @@ use nanoprobe_install::{
     AGENT_TOML, DISABLE, LOADER, LOGS, Local, Profile, RUNNING, TOKEN, VERSION_LUA, VERSIONS,
     manifest, sha256,
 };
+use nanoprobe_sidecar::shell;
 
 use crate::dcslog::{self, Line};
 use crate::profiles::{self, Env, Found, Where};
@@ -555,10 +556,115 @@ fn owner(root: &Path, report: &mut Report) {
 #[cfg(not(unix))]
 fn owner(_root: &Path, _report: &mut Report) {}
 
+/// The mission folder in the profile, the one spec/config.md suggests for
+/// `[missions] dir`.
+pub const MISSIONS: &str = "nanoprobe/missions";
+
+/// What doctor checks of the mission folder, which holds the per-map
+/// templates the administrator saves (`<theater>.miz`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Missions {
+    /// `--missions`: the folder the sidecar's `[missions] dir` names, as
+    /// this machine sees it. Without it, [`MISSIONS`] in the profile.
+    pub dir: Option<PathBuf>,
+    /// `--theater`, once per theater: a template that must be there.
+    pub theaters: Vec<String>,
+}
+
+/// The per-map templates: each `<theater>.miz` in the mission folder must
+/// be one the sidecar can write a shell from, the folder must hold at least
+/// one, and each theater named with `--theater` must have one. Without
+/// `--missions` and with no [`MISSIONS`] folder in the profile, the sidecar
+/// keeps its missions elsewhere, and only a note says so.
+pub fn templates(root: &Path, missions: &Missions, report: &mut Report) {
+    let dir = missions.dir.clone().unwrap_or_else(|| root.join(MISSIONS));
+    let shown = dir.display();
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound
+                && missions.dir.is_none()
+                && missions.theaters.is_empty() =>
+        {
+            report.note(format!(
+                "no {MISSIONS} folder: name the sidecar's [missions] dir with --missions to check its per-map templates"
+            ));
+            return;
+        }
+        Err(e) => {
+            report.fail(format!("cannot read the mission folder {shown}: {e}"));
+            return;
+        }
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.path().is_file())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    names.sort();
+    let mut good = Vec::new();
+    let mut present = Vec::new();
+    for name in &names {
+        let Some(theater) = name.strip_suffix(".miz") else {
+            continue;
+        };
+        if !is_theater_name(theater) {
+            report.note(format!(
+                "{name} in {shown}: not a theater name, so the sidecar never reads it"
+            ));
+            continue;
+        }
+        present.push(theater);
+        let bytes = match std::fs::read(dir.join(name)) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                report.fail(format!("cannot read the template {name} in {shown}: {e}"));
+                continue;
+            }
+        };
+        // A mission of another map: renaming fixes it, saving again does not.
+        if let Ok(other) = shell::theatre(&bytes)
+            && other != theater
+        {
+            report.fail(format!(
+                "the template {name} in {shown} is a mission of {other:?}: name it {other}.miz, or save a {theater} mission as {name}"
+            ));
+            continue;
+        }
+        match shell::check(&bytes, theater) {
+            Ok(()) => good.push(theater),
+            Err(e) => report.fail(format!(
+                "the template {name} in {shown}: {e}; save it again in the Mission Editor"
+            )),
+        }
+    }
+    if !good.is_empty() {
+        report.ok(format!("per-map templates in {shown}: {}", good.join(", ")));
+    }
+    for theater in &missions.theaters {
+        if !present.contains(&theater.as_str()) {
+            report.fail(format!(
+                "no per-map template for {theater}: a campaign without its own template for {theater} cannot be activated or reloaded on it; save one in the Mission Editor as {theater}.miz in {shown}"
+            ));
+        }
+    }
+    if present.is_empty() && missions.theaters.is_empty() {
+        report.fail(format!(
+            "no per-map template in {shown}: a campaign without its own template for its map cannot be activated or reloaded; save one per map in the Mission Editor as <theater>.miz"
+        ));
+    }
+}
+
+/// Whether `theater` can name a per-map template (spec/config.md).
+pub fn is_theater_name(theater: &str) -> bool {
+    shell::is_theater_name(theater)
+}
+
 /// Run doctor on every target. Returns the exit code: 0 when nothing
 /// failed, 1 when a check failed, 2 when there was nothing to check.
 pub fn run(
     place: &Where,
+    missions: &Missions,
     env: &Env,
     out: &mut dyn std::io::Write,
     err: &mut dyn std::io::Write,
@@ -575,7 +681,8 @@ pub fn run(
         if i > 0 {
             let _ = writeln!(out);
         }
-        let report = check(found);
+        let mut report = check(found);
+        templates(&found.path, missions, &mut report);
         failed |= report.failed();
         let _ = write!(out, "{report}");
     }

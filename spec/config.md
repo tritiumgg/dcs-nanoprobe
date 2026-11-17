@@ -26,7 +26,6 @@ commanded_ms = 2.0     # commanded work per frame, milliseconds
 [sampling]
 position_s = 1.0       # target period of each tier, seconds
 vitals_s = 5.0
-ammo_s = 30.0
 warehouse_s = 60.0
 enumeration_s = 60.0
 
@@ -39,7 +38,7 @@ raw = false            # allow extensions, EVAL and emit
 | `map_path` | A path as DCS opens it. Default: `nanoprobe-<port>.map` in the folder `GetTempPathW` returns. Under Wine, set it to a path on a memory-backed volume the sidecar also mounts, such as `Z:\dev\shm\nanoprobe.map`. On Windows, when the sidecar runs as another account than DCS, set it to a path both accounts can open, such as `<profile>\nanoprobe\nanoprobe.map`: the default temp folder is per user (LIVE, docs/results/2026-11-12-s7-agent-in-the-game.md). A file in `<profile>/nanoprobe/` goes with the folder on undeploy. |
 | `port` | The agent listens on `127.0.0.1` only, so the sidecar runs in the same network namespace as DCS. A sidecar container that joins the game container's network is restarted whenever the game container is (spec/transport.md). |
 | `overhead_share`, `commanded_ms` | The two budget settings. The slice of a frame is `overhead_share` times the running average frame interval, and never more than 250 µs, which is fixed. `overhead_share` is above 0 and at most 1; `commanded_ms` is above 0 and at most 1,000. The agent's fixed work on every frame and the cross-state call set a floor under `overhead_share`: below it nothing is left for sampling and the mean exceeds the share. The floor is about (`F` + `x`) × frames per second / 10⁶, with `F` the fixed work and `x` the cross-state call of spec/sampling.md, "Slice": about 0.0028 at 113 frames a second with `F` about 3 µs and `x` 22–24 µs (PRIOR, S10, docs/results/2026-11-13-s10-sampling.md). S11 measures both. The agent logs `fixed work reached the overhead allowance` at `warn` in any 10 s window with a frame whose fixed work reached the allowance. |
-| `[sampling]` | Defaults for the tiers. The sidecar may ask for other targets with `RATES` (spec/commands.md); the budget still holds. `vitals_s` and `ammo_s` are the periods of the rows a `SUBSCRIBE` names; any other row's life and fuel are read every 12 × `vitals_s`, and any other unit's ammunition only on demand (spec/sampling.md, "Tiers"). |
+| `[sampling]` | Defaults for the tiers. The sidecar may ask for other targets with `RATES` (spec/commands.md); the budget still holds. `vitals_s` is the period of the rows a `SUBSCRIBE` names; any other row's life is read every 12 × `vitals_s` (spec/sampling.md, "Tiers"). |
 | `raw` | Off by default. Only this file turns it on. |
 
 ### Token
@@ -81,7 +80,7 @@ result_wait_s = 10          # how long an effect or a query call waits for its r
 [store]
 dir = "campaigns"           # one folder per campaign and the server store (spec/persistence.md)
 enabled = true              # false: the author stores state through capture and restore
-checkpoint_s = 5            # positions, fuel and life
+checkpoint_s = 5            # positions and life
 backup_interval_h = 24      # consistent copies of the active store
 backup_keep = 7
 event_retention_days = 0    # event history; 0 keeps it for the life of the campaign
@@ -119,7 +118,7 @@ dcs_dir = ""                # the same folder as DCS opens it
 | `[health]` | Limits, not expectations (spec/errors.md, "Health"). A mission load has no fixed duration; `loading_limit_s` is only when to call a silent DCS hung. |
 | `on_lost` | An author may override it per group through the API. |
 | `destroy_retries` | At least 1. A dematerializing entity whose destroy is refused or unknown this many times goes `lost` with the error (spec/world.md). A destroy of an entity DCS should not hold is tried again after the next full enumeration. |
-| `[missions] dir`, `dcs_dir` | One folder, named once per side, as `map_path` is: inside the Saved Games profile, such as `<profile>/nanoprobe/missions`. It holds the shared template of each theater as `<theater>.miz`, the theater's name exactly as `LIFECYCLE` carries it, and the sidecar writes each campaign's shell under `shells/` (spec/persistence.md, "Mission shells"). A theater name of more than 64 bytes, or with a byte other than `A`-`Z`, `a`-`z`, `0`-`9`, `_` and `-`, has no template. The file name must match in case, also on a file system that ignores case. Activating or reloading a campaign writes its shell and loads it with a `MISSION_LOAD` of `dcs_dir` joined to `shells/<campaign ID>.<slot>.miz`. A key left empty, or no template for the theater, refuses the call (spec/persistence.md, "Campaign operations"). The sidecar refuses to start when `dcs_dir` joined to `shells/`, 20 digits and `.a.miz` is over 1,024 bytes, the agent's path limit. The sidecar writes nothing else in the folder. |
+| `[missions] dir`, `dcs_dir` | One folder, named once per side, as `map_path` is: inside the Saved Games profile, such as `<profile>/nanoprobe/missions`. It holds the shared template of each theater as `<theater>.miz`, the theater's name exactly as `LIFECYCLE` carries it; the administrator saves each one in the Mission Editor (docs/mission-templates.md), the project ships none, and `nanoprobe doctor` reports a missing one (spec/install.md, "Doctor"); and the sidecar writes each campaign's shell under `shells/` (spec/persistence.md, "Mission shells"). A theater name of more than 64 bytes, or with a byte other than `A`-`Z`, `a`-`z`, `0`-`9`, `_` and `-`, has no template. The file name must match in case, also on a file system that ignores case. Activating or reloading a campaign writes its shell and loads it with a `MISSION_LOAD` of `dcs_dir` joined to `shells/<campaign ID>.<slot>.miz`. A key left empty, or no template for the theater, refuses the call (spec/persistence.md, "Campaign operations"). The sidecar refuses to start when `dcs_dir` joined to `shells/`, 20 digits and `.a.miz` is over 1,024 bytes, the agent's path limit. The sidecar writes nothing else in the folder. |
 
 Relative paths are relative to the folder that holds `sidecar.toml`.
 

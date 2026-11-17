@@ -571,7 +571,9 @@ mod tests {
 
     #[test]
     fn limits_the_committed_caucasus_template() {
-        let bytes = std::fs::read(crate::repository().join("templates/caucasus.miz")).unwrap();
+        let bytes =
+            std::fs::read(crate::repository().join("tests/fixtures/templates/caucasus.miz"))
+                .unwrap();
         let shell = generate(
             &bytes,
             &Changes {
@@ -616,10 +618,10 @@ mod tests {
     }
 
     /// Every committed template yields a shell, and carries only the options
-    /// templates/README.md allows, so no player name or machine setting.
+    /// tests/fixtures/templates/README.md allows, so no player name or machine setting.
     #[test]
     fn the_committed_templates_generate_and_hold_nothing_personal() {
-        let folder = crate::repository().join("templates");
+        let folder = crate::repository().join("tests/fixtures/templates");
         let mut seen = 0;
         for entry in std::fs::read_dir(&folder).unwrap() {
             let path = entry.unwrap().path();

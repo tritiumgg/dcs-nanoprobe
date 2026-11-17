@@ -104,8 +104,8 @@ local CAPABILITIES = {
   'DCS.getUnitPositionByObjectId',
   'Unit.getLife',
   'Unit.isDead',
-  'Unit.getFuel',
   'Unit.getAmmo',
+  'Unit.getPlayerName',
   'Unit.getObjectID',
   'land.getHeight',
   'trigger.action.explosion',
@@ -396,8 +396,7 @@ local function register()
       agent.deaths(unpack(deaths))
     end
     -- The events that ask for a read (spec/sampling.md, "Tiers"): a hit for
-    -- the target's life, a shot for the shooter's ammunition, and a birth,
-    -- which the next pump resolves.
+    -- the target's life, and a birth, which the next pump resolves.
     local function ids(names)
       local out = {}
       for _, name in ipairs(names) do
@@ -410,11 +409,15 @@ local function register()
     end
     if type(agent.reads) == 'function' then
       agent.reads(1, unpack(ids({ 'S_EVENT_HIT' })))
-      agent.reads(2, unpack(ids({ 'S_EVENT_SHOT', 'S_EVENT_SHOOTING_END' })))
-      agent.reads(3, unpack(ids({ 'S_EVENT_BIRTH' })))
+      agent.reads(2, unpack(ids({ 'S_EVENT_BIRTH' })))
       -- A hit, a damage assessment or a kill asks for one check of whether
       -- its target still exists (spec/records.md, "The object table").
-      agent.reads(4, unpack(ids({ 'S_EVENT_HIT', 'S_EVENT_BDA', 'S_EVENT_KILL' })))
+      agent.reads(3, unpack(ids({ 'S_EVENT_HIT', 'S_EVENT_BDA', 'S_EVENT_KILL' })))
+      -- A birth and a takeoff ask for a read of the initiator's ammunition,
+      -- made only if a player occupies the unit (spec/sampling.md, "Loadout
+      -- reads").
+      agent.reads(4, unpack(ids({ 'S_EVENT_BIRTH' })))
+      agent.reads(5, unpack(ids({ 'S_EVENT_TAKEOFF' })))
     end
   end
   if previous and previous.handler and not M.replaced then
@@ -447,7 +450,7 @@ end
 -- leaves that row out until an event or an enumeration settles it.
 
 local TIER_BIRTHS, TIER_ENUM, TIER_SUB, TIER_POS = 1, 2, 3, 4
-local TIER_STOPPED, TIER_VITALS, TIER_AMMO, TIER_WAREHOUSE = 5, 6, 7, 8
+local TIER_STOPPED, TIER_VITALS, TIER_WAREHOUSE = 5, 6, 7
 local OBJECT_UNIT, OBJECT_STATIC = 1, 2
 -- DCS Object.Category.CARGO: a static that can move (LIVE, S10).
 local CATEGORY_CARGO = 6
@@ -789,39 +792,11 @@ local function vitals(rows)
     end
     current = slot
     local o = T.objs[slot]
-    local life, fuel
+    local life
     if o then
       life = o:getLife()
-      if T.unit[slot] then
-        fuel = o:getFuel()
-      end
     end
-    if agent.vit(slot, life, fuel) then
-      return true
-    end
-  end
-end
-
-local function ammo(rows)
-  for i = 1, rows do
-    local slot = buf[i]
-    current = slot
-    list[1] = slot
-    local n = 1
-    local o = T.objs[slot]
-    local a = o and o:getAmmo()
-    if type(a) == 'table' then
-      for _, entry in ipairs(a) do
-        local desc = type(entry) == 'table' and rawget(entry, 'desc')
-        local name = type(desc) == 'table' and rawget(desc, 'typeName')
-        local count = type(entry) == 'table' and rawget(entry, 'count')
-        if type(name) == 'string' and type(count) == 'number' and n < 128 then
-          list[n + 1], list[n + 2] = name, count
-          n = n + 2
-        end
-      end
-    end
-    if agent.ammo(unpack(list, 1, n)) then
+    if agent.vit(slot, life) then
       return true
     end
   end
@@ -898,7 +873,6 @@ local RUN = {
   [TIER_POS] = positions,
   [TIER_STOPPED] = stopped,
   [TIER_VITALS] = vitals,
-  [TIER_AMMO] = ammo,
   [TIER_WAREHOUSE] = warehouses,
 }
 
@@ -924,12 +898,12 @@ end
 
 -- The getters the agent calls itself, in the order it knows them: the
 -- position getter by object ID, or false when this DCS lacks it; a unit's
--- life and fuel; a static's life; an object's point. False when this state
+-- life; a static's life; an object's point. False when this state
 -- lacks one of the classes.
 local FN
 local function functions()
   local fast = rawget(_G, 'DCS') and rawget(DCS, 'getUnitPositionByObjectId') or false
-  return { fast, Unit.getLife, Unit.getFuel, StaticObject.getLife, Object.getPoint }
+  return { fast, Unit.getLife, StaticObject.getLife, Object.getPoint }
 end
 
 -- Result codes (spec/commands.md, "Codes: result").
@@ -1337,23 +1311,6 @@ local function capture_one(o, is_unit)
   read('life', 'getLife')
   if is_unit then
     read('life0', 'getLife0')
-    read('fuel', 'getFuel')
-    -- Each row is reduced to its type and count: the full desc of every row
-    -- would pass the read limit for a large armored group.
-    local ok_a, ammo = pcall(o.getAmmo, o)
-    if ok_a and type(ammo) == 'table' then
-      local rows = {}
-      for i = 1, #ammo do
-        local ok_r, row = pcall(function()
-          local r = ammo[i]
-          return { type = r.desc.typeName, count = r.count }
-        end)
-        if ok_r then
-          rows[#rows + 1] = row
-        end
-      end
-      t.ammo = rows
-    end
   end
   return t
 end
@@ -2331,6 +2288,54 @@ local function run_extensions()
   end
 end
 
+-- The ammunition of a unit a birth or a takeoff event named, when a player
+-- occupies it (spec/sampling.md, "Loadout reads"). A unit with no player
+-- name gets no `getAmmo` and no record. Each row is reduced to its type and
+-- count. Raises on a failed read; the caller catches it.
+local function loadout(slot, cause)
+  local o = T.objs[slot]
+  if not o or not T.unit[slot] then
+    return
+  end
+  local name = Unit.getPlayerName(o)
+  if type(name) ~= 'string' or name == '' then
+    return
+  end
+  local a = o:getAmmo()
+  list[1], list[2] = slot, cause
+  local n = 2
+  if type(a) == 'table' then
+    for _, entry in ipairs(a) do
+      local desc = type(entry) == 'table' and rawget(entry, 'desc')
+      local type_name = type(desc) == 'table' and rawget(desc, 'typeName')
+      local count = type(entry) == 'table' and rawget(entry, 'count')
+      if type(type_name) == 'string' and type(count) == 'number' and n < 130 then
+        list[n + 1], list[n + 2] = type_name, count
+        n = n + 2
+      end
+    end
+  end
+  agent.ammo(unpack(list, 1, n))
+end
+
+-- The loadout reads of this pump: pairs of a slot and a cause that the agent
+-- hands out, bounded per pump. Never periodic.
+local function loadouts()
+  local pairs_n = agent.loadouts(buf)
+  for i = 1, pairs_n or 0 do
+    local slot, cause = buf[2 * i - 1], buf[2 * i]
+    local ok, err = pcall(loadout, slot, cause)
+    if not ok then
+      M.read_errors = M.read_errors + 1
+      if M.read_errors <= LOGGED_ERRORS then
+        pcall(function()
+          M.file.write('error', 'a loadout read raised', { error = tostring(err) })
+        end)
+      end
+    end
+  end
+end
+
 local function pump()
   local gen, sample = agent.pump_begin(#T.births, #T.airbases, collectgarbage('count'))
   if gen == nil then
@@ -2373,7 +2378,7 @@ local function pump()
     -- batches of positions without attitude and of vitals itself.
     local tier, rows, flag = agent.plan(buf, T.objs, FN or nil)
     if not tier then
-      return
+      break
     end
     local run = RUN[tier]
     current = nil
@@ -2385,9 +2390,11 @@ local function pump()
         agent.suspect(current)
       end
     elseif stop then
-      return
+      break
     end
   end
+  -- The units a birth or a takeoff named, after the births resolved.
+  loadouts()
 end
 
 -- Errors the pump caught in this process, and how many it logs.

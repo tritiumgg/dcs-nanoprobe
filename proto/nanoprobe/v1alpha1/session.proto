@@ -6,6 +6,9 @@ package nanoprobe.v1alpha1;
 import "google/protobuf/duration.proto";
 import "nanoprobe/v1alpha1/common.proto";
 
+option java_multiple_files = true;
+option java_package = "nanoprobe.v1alpha1";
+
 // One controller holds the lease; any number of observers connect without one.
 service SessionService {
   // Versions and what this server offers.

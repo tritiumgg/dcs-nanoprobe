@@ -1178,6 +1178,8 @@ fn durable_eq(a: &Unit, b: &Unit) -> bool {
         label,
         skill,
         captured,
+        // Volatile: never written.
+        loadout: _,
         extra,
     } = a;
     *id == b.id
@@ -1636,6 +1638,14 @@ impl<'a> Rd<'a> {
         u32::try_from(self.u(key)?).map_err(|_| DiskError::Corrupt(format!("{key} too large")))
     }
 
+    fn opt_f(&self, key: &str) -> Result<Option<f64>, DiskError> {
+        match self.get(key) {
+            Lv::Nil => Ok(None),
+            Lv::Number(n) => Ok(Some(*n)),
+            _ => Err(DiskError::Corrupt(format!("{key} is not a number"))),
+        }
+    }
+
     fn f(&self, key: &str) -> Result<f64, DiskError> {
         match self.get(key) {
             Lv::Nil => Ok(0.0),
@@ -1837,17 +1847,11 @@ fn dec_point(v: &Lv) -> Result<Point, DiskError> {
 }
 
 fn enc_unit_state(v: &UnitState) -> Lv {
-    let UnitState {
-        at,
-        heading,
-        life,
-        fuel,
-    } = v;
+    let UnitState { at, heading, life } = v;
     t(vec![
         ("at", enc_point(at)),
         ("heading", f(*heading)),
         ("life", f(f64::from(*life))),
-        ("fuel", f(f64::from(*fuel))),
     ])
 }
 
@@ -1857,7 +1861,6 @@ fn dec_unit_state(v: &Lv) -> Result<UnitState, DiskError> {
         at: dec_point(r.get("at"))?,
         heading: r.f("heading")?,
         life: r.f("life")? as f32,
-        fuel: r.f("fuel")? as f32,
     })
 }
 
@@ -1876,24 +1879,27 @@ fn enc_unit(v: &Unit) -> Lv {
         skill,
         extra,
         captured,
+        // Volatile: never written.
+        loadout: _,
     } = v;
     let CapturedMore {
         life0,
         pitch,
         roll,
-        ammo,
+        life_percent,
     } = captured;
+    let mut c = vec![
+        ("life0", f(*life0)),
+        ("pitch", f(*pitch)),
+        ("roll", f(*roll)),
+    ];
+    // Absent when not asked, so a row without them reads back as before.
+    if let Some(p) = life_percent {
+        c.push(("life_percent", f(*p)));
+    }
     t(vec![
         ("kind", s("unit")),
-        (
-            "captured",
-            t(vec![
-                ("life0", f(*life0)),
-                ("pitch", f(*pitch)),
-                ("roll", f(*roll)),
-                ("ammo", nested(ammo)),
-            ]),
-        ),
+        ("captured", t(c)),
         ("id", u(id.0)),
         ("group", u(group.0)),
         ("type", s(type_name)),
@@ -1930,9 +1936,10 @@ fn dec_unit(v: &Lv) -> Result<Unit, DiskError> {
                 life0: c.f("life0")?,
                 pitch: c.f("pitch")?,
                 roll: c.f("roll")?,
-                ammo: c.nested("ammo")?,
+                life_percent: c.opt_f("life_percent")?,
             }
         },
+        loadout: None,
     })
 }
 
@@ -2724,14 +2731,12 @@ fn enc_rates(v: &Rates) -> Lv {
     let Rates {
         position_s,
         vitals_s,
-        ammo_s,
         warehouse_s,
         enumeration_s,
     } = v;
     t(vec![
         ("position_s", Lv::Number(*position_s)),
         ("vitals_s", Lv::Number(*vitals_s)),
-        ("ammo_s", Lv::Number(*ammo_s)),
         ("warehouse_s", Lv::Number(*warehouse_s)),
         ("enumeration_s", Lv::Number(*enumeration_s)),
     ])
@@ -2742,7 +2747,6 @@ fn dec_rates(v: &Lv) -> Result<Rates, DiskError> {
     Ok(Rates {
         position_s: r.f("position_s")?,
         vitals_s: r.f("vitals_s")?,
-        ammo_s: r.f("ammo_s")?,
         warehouse_s: r.f("warehouse_s")?,
         enumeration_s: r.f("enumeration_s")?,
     })
@@ -2900,7 +2904,6 @@ mod tests {
                         },
                         heading: 0.5,
                         life: 1.0,
-                        fuel: 0.75,
                     },
                 )],
                 authority: Authority::Sim,
@@ -2993,6 +2996,33 @@ mod tests {
             rows.push((format!("entry.created.{i}"), encode(&enc_entry(e))));
         }
         rows
+    }
+
+    /// A unit's asked spawn life reads back; a row without it reads None.
+    #[test]
+    fn a_units_asked_life_round_trips_and_is_absent_by_default() {
+        let mut s = Store::new(CampaignId(7), 10);
+        let g = s
+            .create_group(super::super::NewGroup {
+                theater: "Caucasus".into(),
+                country: 2,
+                category: 2,
+                coalition: 2,
+                units: vec![super::super::NewUnit::new("M-113", UnitState::default())],
+                authority: Authority::Sim,
+                label: "g".into(),
+                extra: Lv::Nil,
+            })
+            .expect("group");
+        let u = s.group(g).expect("g").members[0];
+        let plain = s.unit(u).expect("u").clone();
+        let back = dec_unit(&decode(&encode(&enc_unit(&plain))).expect("decode")).expect("unit");
+        assert_eq!(back.captured.life_percent, None);
+        s.set_spawn_life(u, 42.5).expect("set");
+        let asked = s.unit(u).expect("u").clone();
+        let back = dec_unit(&decode(&encode(&enc_unit(&asked))).expect("decode")).expect("unit");
+        assert_eq!(back, asked);
+        assert_eq!(back.captured.life_percent, Some(42.5));
     }
 
     #[test]

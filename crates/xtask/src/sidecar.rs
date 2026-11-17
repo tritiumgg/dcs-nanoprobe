@@ -14,7 +14,7 @@
 //!    `nanoprobe-sidecar` as static Linux programs (the sidecar needs zig as
 //!    its C compiler: `mise install`), and deploys the agent;
 //! 2. points `agent.toml`'s `map_path` at the folder, restarts DCS, and loads
-//!    a fresh shell mission from `templates/caucasus.miz`;
+//!    a fresh shell mission from `tests/fixtures/templates/caucasus.miz`;
 //! 3. checks with `land.getSurfaceType` that the hello's route and the
 //!    suite's spawn point are on land;
 //! 4. builds the image from `deploy/Dockerfile` in a temporary folder on the
@@ -912,11 +912,14 @@ mod tests {
         let read = |p: &str| std::fs::read_to_string(root.join(p)).expect(p);
         let rust = read("examples/hello-rust/src/lib.rs");
         let python = read("examples/hello-python/hello.py");
+        let kotlin = read("examples/hello-kotlin/src/main/kotlin/Hello.kt");
         let probe = read("crates/fake-agent/src/bin/conformance-probe.rs");
         assert_eq!(pair(&rust, "const START"), HELLO_POINTS[0]);
         assert_eq!(pair(&rust, "const END"), HELLO_POINTS[1]);
         assert_eq!(pair(&python, "START ="), HELLO_POINTS[0]);
         assert_eq!(pair(&python, "END ="), HELLO_POINTS[1]);
+        assert_eq!(pair(&kotlin, "val START ="), HELLO_POINTS[0]);
+        assert_eq!(pair(&kotlin, "val END ="), HELLO_POINTS[1]);
         assert_eq!(pair(&probe, "None =>"), HELLO_POINTS[0]);
     }
 

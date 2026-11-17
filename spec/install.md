@@ -97,8 +97,13 @@ needs or that it cannot read, by line number and key, and nothing else from the 
 ## Release
 
 A release is two archives, the agent's PDB (`nanoprobe-<version>-agent.pdb`, which
-symbolizes its crash records and is not installed), and `SHA256SUMS` over the three,
-built by `mise run package` (`tools/stage-release.sh`). Each archive holds one folder,
+symbolizes its crash records and is not installed), the API schema, and `SHA256SUMS`
+over the five files, built by `mise run package` (`tools/stage-release.sh`). The schema
+is `nanoprobe-<version>-schema.tar.gz`, one folder `nanoprobe-<version>-schema/` with
+`buf.yaml`, `LICENSE` and `proto/`, and `nanoprobe-<version>-schema.binpb`, the file
+descriptor set `buf build` makes of it, with its imports and comments. Users generate
+client code from them (docs/api-clients.md). The GitHub release is the only place
+they are published. Each archive holds one folder,
 `nanoprobe-<version>-<platform>/`:
 
 ```
@@ -126,7 +131,11 @@ folder's access list decides.
 line per check, marked `ok`, `fail` or `note`, and exits 0 when nothing failed, 1 when a
 check failed, and 2 when it has no profile to check: none found, or, without
 `--profile`, none that holds the loader. Without `--profile`
-it checks every profile found, as install finds them, that holds the loader.
+it checks every profile found, as install finds them, that holds the loader. It also checks
+the per-map templates in the mission folder: `--missions DIR` names the folder the
+sidecar's `[missions] dir` names, as the machine doctor runs on sees it, and defaults to
+`nanoprobe/missions` in the profile. Each `--theater NAME` names a theater whose
+template must be there.
 
 | Check | Fails when | A note when |
 |---|---|---|
@@ -137,6 +146,7 @@ it checks every profile found, as install finds them, that holds the loader.
 | `Logs/dcs.log`, newest start | the newest start has no platform line and began after the loader was written; a platform `ERROR` line | no log; a newest start from before the install; the hook runs another build than `active` |
 | `logs/hook.log` and `logs/shim.log`, newest start | an `error` record; a `capabilities` record with a name absent; no `hook loaded` record of the newest session and no `hook.log.1` | no shim record yet in that start; the start record rotated out; the newest start ran no hook, and the logs are not checked |
 | `autoexec.cfg` | the block is edited or cut short; an assignment after the block, or anywhere without one, sets a list that lacks the needed name | no block; a value doctor cannot read |
+| Per-map templates | the folder holds no `<theater>.miz`, or none for a `--theater`; a template the sidecar cannot write a shell from (spec/persistence.md, "Mission shells"); the mission folder does not read, except when `nanoprobe/missions` is absent and neither `--missions` nor `--theater` is given | a `.miz` whose name is no theater's; no `nanoprobe/missions` in the profile and no `--missions` or `--theater` |
 
 The newest start is the part of `dcs.log` after its last `=== Log opened UTC <time>`
 line, which also says when it began (the log's modification time when there is no such

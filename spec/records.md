@@ -126,9 +126,9 @@ a character boundary, so the replacement always fits. An `EVENT`'s values are `l
 | 24 | LOG | event | A log line from the hook, the shim or the agent |
 | 25 | SEEN | event | Rows an enumeration found whose `OBJECT` is unchanged |
 | 32 | POSITIONS | sample | Positions of a batch of objects |
-| 33 | VITALS | sample | Life and fuel of a batch of objects |
+| 33 | VITALS | sample | Life of a batch of objects |
 | 34 | ATTITUDE | sample | Heading, pitch and roll of a batch of objects |
-| 35 | AMMO | sample | One unit's ammunition |
+| 35 | AMMO | sample | A player-occupied unit's ammunition, read at its birth or its takeoff |
 | 36 | WAREHOUSE | sample | One warehouse's stock |
 | 37 | AIRBASE | sample | One airbase's owner |
 | 38 | EXTENSION | sample | One registered extension's run time |
@@ -581,15 +581,15 @@ run 304 of 309 `S_EVENT_DEAD` events were of category 5 (LIVE, same report).
 it was within 0.004 s of model time when the event arrived (LIVE,
 `docs/results/2026-11-13-event-catalogue.md`). On `S_EVENT_MARK_ADDED` it was 28,799.1 s
 ahead of model time, which matches the time of day for a mission that starts at
-28,800 s after midnight, as the shell does (`start_time` in `templates/caucasus.miz`).
+28,800 s after midnight, as the shell does (`start_time` in `tests/fixtures/templates/caucasus.miz`).
 On `S_EVENT_MARK_REMOVED` it was at most 28,796.1 s ahead, 3 s less, and the scenario
 removed the line 3 s after adding it: the removal seems to carry the removed mark's add
 time, not the time of the removal (an inference from the report's per-cause maxima;
 UNVERIFIED).
 
 Whether a shooting-end event carries a count of rounds, and under what name, is
-UNVERIFIED (E32); where it does not, the sidecar fills the value from the
-ammunition difference. No allow-list holds `ROUNDS` until then. Codes are added and
+UNVERIFIED (E32); where it does not, the field is absent. No allow-list holds
+`ROUNDS` until then. Codes are added and
 never renumbered.
 
 ### Allow-lists
@@ -717,6 +717,9 @@ The sidecar builds the API's player events from these records:
 | enter unit, leave unit | `SLOT` joined to a `S_EVENT_BIRTH`, and the end of that occupancy (spec/world.md, "Players") |
 | rename | a `CONNECT` or `SLOT` whose name differs from the last one seen for the client |
 
+An `AMMO` record of a unit that players occupy makes a loadout event, which is not a
+player event (spec/world.md, "Ammunition").
+
 ### Codes: player_event
 
 | Code | Name |
@@ -777,23 +780,18 @@ The shim's list includes the names the object table reads: `Object.isExist`,
 A sample batch is columnar: `n`, then one array per column. Row `i` of every array
 describes the same object.
 
-**What is sampled.** Positions follow the schedule in spec/sampling.md. Life and fuel
-are read for a row once when it is added, after an `S_EVENT_HIT` names it as target, in
-the slow sweep every 60 s at the default `vitals_s`, and at a capture. A `SUBSCRIBE`
-changes that for the rows it names: their life and fuel are read periodically
-(`vitals_s`, 5 s by default), and their ammunition every `ammo_s` (30 s by default).
-Ammunition of any other unit is read only after an `S_EVENT_SHOT` or
-`S_EVENT_SHOOTING_END` names it, and at a capture.
+**What is sampled.** Positions follow the schedule in spec/sampling.md. Life is read
+for a row once when it is added, after an `S_EVENT_HIT` names it as target, in the slow
+sweep every 60 s at the default `vitals_s`, and at a capture. A `SUBSCRIBE` changes that
+for the rows it names: their life is read periodically (`vitals_s`, 5 s by default). The
+platform does not read unit fuel. It reads the ammunition of a player-occupied unit only,
+on two events (below, "Layout: AMMO").
 
-A unit that has not fired and is not subscribed has no `AMMO` record: its load is
-unknown, not full. A rearm sends no event, so it shows at the unit's next shot or at a
-capture.
-
-For a consumer, the life of an AI unit, and the fuel of a ground unit or a ship, is
-current within about 1 s of a hit event that names the unit. Damage that sends no
+For a consumer, the life of an AI unit is current within about 1 s of a hit event that
+names the unit. Damage that sends no
 event shows within the 60 s life sweep, which takes 98 s under load (LIVE, S10).
 Subscribed rows are current within 5 s. Read the sample's age, not its presence. A
-capture reads life, fuel and ammunition itself.
+capture reads life itself.
 
 ### Layout: POSITIONS
 
@@ -814,7 +812,6 @@ capture reads life, fuel and ammunition itself.
 | 0x0004 | pad[4] | reserved | |
 | + | u64[n] | object | DCS object IDs |
 | + | f32[n] | life | `getLife()`: DCS's absolute value, whose scale depends on the type |
-| + | f32[n] | fuel | `getFuel()`, a fraction of internal fuel; NaN for a static, which has no fuel |
 
 ### Layout: ATTITUDE
 
@@ -835,9 +832,28 @@ subscribed object, and once when an object stops.
 | Offset | Type | Field | Meaning |
 |---|---|---|---|
 | 0x0000 | u64 | object | DCS object ID |
-| + | lv | ammo | An array of tables, each with `type` (string) and `count` (number) |
+| 0x0008 | u32 | cause | The event that asked for the read: 1 birth, 2 takeoff |
+| 0x000C | pad[4] | reserved | |
+| + | lv | ammo | An array of tables, each with `type` (string, from the row's `desc.typeName`) and `count` (number) |
 
-No `AMMO` record for a unit means its ammunition is unknown, not full.
+The agent writes `AMMO` only for a unit a player occupies, and only after one of two
+events names the unit as initiator: `S_EVENT_BIRTH`, which a player taking a slot
+causes, and `S_EVENT_TAKEOFF`. The next pump checks `Unit.getPlayerName` for the unit;
+a unit with no player name gets no read and no record, so an AI unit never has an
+`AMMO` record. If both events name a unit before a pump reads it, one record is written
+with the later cause. A pump reads at most a few marked units (spec/sampling.md,
+"Loadout reads"), and nothing reads ammunition on a period.
+
+Every fall in ammunition has a shot event. No event named an AI M-1 rearmed by a truck
+(LIVE, E38, docs/results/2026-11-14-e38-life-and-ammunition.md). Whether DCS sends one
+when ground crew rearm a player aircraft is UNVERIFIED, an open item for a live check.
+A rearm is not read; the record shows the load at the birth or the takeoff it names.
+The ring can drop an `AMMO` record, as it drops any sample ("Delivery classes"). The
+agent then keeps the unit's loadout mark and reads the unit again on a later pump, within
+the 600 pumps a mark waits (spec/sampling.md, "Loadout reads"). Flares and
+chaff are not among the rows (LIVE, E8). A unit with no ammunition rows gets a record
+with an empty array. A unit that has no `AMMO` record has an unknown load, not a full
+one.
 
 ### Layout: WAREHOUSE
 

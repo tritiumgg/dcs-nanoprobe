@@ -281,7 +281,6 @@ impl PlayersService for Players {
         require(&req, Access::Observer)?;
         let r = req.into_inner();
         let g = self.0.lock();
-        let campaign = g.active.unwrap_or(0);
         let players = g
             .roster
             .players()
@@ -292,14 +291,20 @@ impl PlayersService for Players {
                     .occupancies()
                     .filter(|o| o.key == p.key && o.to.is_none())
                     .min_by_key(|o| o.seat);
+                // The loadout of the seat's unit, when the unit has an ID.
+                let loadout = seat
+                    .filter(|o| o.unit != 0)
+                    .and_then(|o| g.loadouts.get(o.object));
                 pb::Player {
+                    ammo: loadout
+                        .map_or_else(Default::default, |l| l.ammo.clone().into_iter().collect()),
+                    ammo_read: loadout.map(crate::convert::ammo_read),
                     key: p.key.clone(),
                     name: p.name().to_owned(),
                     connected: p.connected,
                     coalition: coalition_of_dcs(p.side) as i32,
                     unit_id: seat.map_or(0, |o| o.unit),
                     seat: seat.map_or(0, |o| o.seat),
-                    fuel_used: g.roster.fuel_used(&p.key, campaign),
                 }
             })
             .collect();

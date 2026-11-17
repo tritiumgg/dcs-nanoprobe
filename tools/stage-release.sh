@@ -10,7 +10,9 @@
 #   dist/nanoprobe-<v>-windows-x86_64.zip
 #   dist/nanoprobe-<v>-linux-x86_64.tar.gz
 #   dist/nanoprobe-<v>-agent.pdb     symbols for crash records; not in an archive
-#   dist/SHA256SUMS                  over the three files above
+#   dist/nanoprobe-<v>-schema.tar.gz the API schema, and its descriptor set
+#   dist/nanoprobe-<v>-schema.binpb  (tools/stage-schema.sh)
+#   dist/SHA256SUMS                  over the five files above
 #
 # Each archive holds one folder, nanoprobe-<v>-<platform>/, with:
 #
@@ -25,12 +27,13 @@
 # with tools/checkdll.sh. This script builds the program for both platforms.
 #
 # Usage: sh tools/stage-release.sh [out-dir]
-# POSIX sh. Needs cargo, cargo-xwin (on macOS and Linux), zip, tar, and
-# sha256sum or shasum.
+# POSIX sh. Needs cargo, cargo-xwin (on macOS and Linux), buf, git, zip, tar,
+# and sha256sum or shasum.
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-OUT=${1:-$ROOT/dist}
+mkdir -p "${1:-$ROOT/dist}"
+OUT=$(CDPATH= cd -- "${1:-$ROOT/dist}" && pwd)
 cd "$ROOT"
 
 VERSION=$(awk '
@@ -74,7 +77,8 @@ sha() {
 mkdir -p "$OUT"
 rm -rf "$OUT/stage"
 rm -f "$OUT"/nanoprobe-*-windows-x86_64.zip "$OUT"/nanoprobe-*-linux-x86_64.tar.gz \
-    "$OUT"/nanoprobe-*-agent.pdb "$OUT/SHA256SUMS"
+    "$OUT"/nanoprobe-*-agent.pdb "$OUT"/nanoprobe-*-schema.tar.gz \
+    "$OUT"/nanoprobe-*-schema.binpb "$OUT/SHA256SUMS"
 
 # stage <platform> <program>
 stage() {
@@ -113,6 +117,7 @@ chmod 0755 "$OUT/stage/nanoprobe-$VERSION-linux-x86_64/nanoprobe"
 rm -rf "$OUT/stage"
 
 cp "$PDB" "$OUT/nanoprobe-$VERSION-agent.pdb"
+sh tools/stage-schema.sh "$OUT" "$VERSION" >/dev/null
 
 (
     cd "$OUT"

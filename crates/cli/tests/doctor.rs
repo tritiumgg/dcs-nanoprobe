@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use nanoprobe_cli::doctor::{self, Mark, RELEASE_LOADER, Report};
+use nanoprobe_cli::doctor::{self, Mark, Missions, RELEASE_LOADER, Report};
 use nanoprobe_cli::profiles::{Env, Found, Where};
 use nanoprobe_install::autoexec::AUTOEXEC;
 use nanoprobe_install::{Local, Payload, install, manifest};
@@ -384,7 +384,16 @@ fn finds_and_checks_a_profile_in_a_wine_prefix() {
 
     let mut out = Vec::new();
     let mut err = Vec::new();
-    assert_eq!(doctor::run(&place, &Env::default(), &mut out, &mut err), 0);
+    assert_eq!(
+        doctor::run(
+            &place,
+            &Missions::default(),
+            &Env::default(),
+            &mut out,
+            &mut err
+        ),
+        0
+    );
     let text = String::from_utf8(out).unwrap();
     assert!(text.starts_with("note profile "), "{text}");
 }
@@ -400,7 +409,16 @@ fn no_installed_profile_is_exit_2() {
     };
     let mut out = Vec::new();
     let mut err = Vec::new();
-    assert_eq!(doctor::run(&place, &Env::default(), &mut out, &mut err), 2);
+    assert_eq!(
+        doctor::run(
+            &place,
+            &Missions::default(),
+            &Env::default(),
+            &mut out,
+            &mut err
+        ),
+        2
+    );
     let err = String::from_utf8(err).unwrap();
     assert!(err.contains("not installed"), "{err}");
 }
@@ -522,4 +540,104 @@ fn a_newest_start_without_the_hook_leaves_the_old_logs_alone() {
     assert!(!report.has(Mark::Fail, "agent not loaded"), "{report}");
     assert!(!report.has(Mark::Ok, "DCS names"), "{report}");
     assert!(report.has(Mark::Note, "ran no hook"), "{report}");
+}
+
+/// The administrator's per-map template, here the repository's test fixture.
+const CAUCASUS: &[u8] = include_bytes!("../../../tests/fixtures/templates/caucasus.miz");
+
+fn templates(root: &Path, missions: &Missions) -> Report {
+    let mut report = Report::default();
+    doctor::templates(root, missions, &mut report);
+    report
+}
+
+#[test]
+fn the_per_map_templates_are_checked() {
+    let scratch = Scratch::new("templates");
+    let root = scratch.0.join("DCS");
+    let profile = Missions::default();
+
+    // No mission folder in the profile: the sidecar keeps it elsewhere.
+    let report = templates(&root, &profile);
+    assert_clean(&report);
+    assert!(report.has(Mark::Note, "--missions"), "{report}");
+    // Unless a theater is named: then the folder must be there.
+    let named = Missions {
+        dir: None,
+        theaters: vec!["Caucasus".into()],
+    };
+    let report = templates(&root, &named);
+    assert!(
+        report.has(Mark::Fail, "cannot read the mission folder"),
+        "{report}"
+    );
+    assert!(!report.has(Mark::Note, "--missions"), "{report}");
+
+    // A file where the mission folder should be fails without any flag.
+    std::fs::create_dir_all(root.join("nanoprobe")).unwrap();
+    std::fs::write(root.join("nanoprobe/missions"), b"").unwrap();
+    let report = templates(&root, &profile);
+    assert!(
+        report.has(Mark::Fail, "cannot read the mission folder"),
+        "{report}"
+    );
+    std::fs::remove_file(root.join("nanoprobe/missions")).unwrap();
+
+    // A mission folder without a template.
+    let dir = root.join("nanoprobe/missions");
+    std::fs::create_dir_all(dir.join("shells")).unwrap();
+    std::fs::write(dir.join("shells/1.a.miz"), CAUCASUS).unwrap();
+    let report = templates(&root, &profile);
+    assert!(report.has(Mark::Fail, "no per-map template in"), "{report}");
+
+    // One template; a theater named on the command line that has none.
+    std::fs::write(dir.join("Caucasus.miz"), CAUCASUS).unwrap();
+    let report = templates(&root, &profile);
+    assert_clean(&report);
+    assert!(report.has(Mark::Ok, "per-map templates in"), "{report}");
+    assert!(report.has(Mark::Ok, ": Caucasus"), "{report}");
+    let syria = Missions {
+        dir: None,
+        theaters: vec!["Caucasus".into(), "Syria".into()],
+    };
+    let report = templates(&root, &syria);
+    assert!(
+        report.has(Mark::Fail, "no per-map template for Syria"),
+        "{report}"
+    );
+    assert!(!report.has(Mark::Fail, "for Caucasus"), "{report}");
+
+    // A file named for another theater than its `theatre` member, one
+    // that is not a mission, and one whose name is no theater's.
+    std::fs::write(dir.join("Syria.miz"), CAUCASUS).unwrap();
+    std::fs::write(dir.join("Nevada.miz"), b"not a zip").unwrap();
+    std::fs::write(dir.join("my mission.miz"), CAUCASUS).unwrap();
+    let report = templates(&root, &syria);
+    assert!(
+        report.has(
+            Mark::Fail,
+            "is a mission of \"Caucasus\": name it Caucasus.miz"
+        ),
+        "{report}"
+    );
+    assert!(report.has(Mark::Fail, "Nevada.miz"), "{report}");
+    assert!(report.has(Mark::Note, "my mission.miz"), "{report}");
+    assert!(
+        !report.has(Mark::Fail, "no per-map template for Syria"),
+        "{report}"
+    );
+
+    // --missions names the folder; one that does not exist fails.
+    let elsewhere = Missions {
+        dir: Some(scratch.0.join("elsewhere")),
+        theaters: Vec::new(),
+    };
+    let report = templates(&root, &elsewhere);
+    assert!(
+        report.has(Mark::Fail, "cannot read the mission folder"),
+        "{report}"
+    );
+    std::fs::create_dir_all(scratch.0.join("elsewhere")).unwrap();
+    std::fs::write(scratch.0.join("elsewhere/Caucasus.miz"), CAUCASUS).unwrap();
+    assert_clean(&templates(&root, &elsewhere));
 }

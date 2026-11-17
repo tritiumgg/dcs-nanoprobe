@@ -1,0 +1,5142 @@
+{
+  "recon": {
+    "script": "lua/experiments/e39/recon.lua",
+    "state": "server",
+    "apis": {
+      "db": "table",
+      "db_units": "table",
+      "db_units_keys": [
+        "ADEquipments:table",
+        "Animals:table",
+        "Cargos:table",
+        "Cars:table",
+        "Effects:table",
+        "Fortifications:table",
+        "GT_t:table",
+        "GrassAirfields:table",
+        "GroundObjects:table",
+        "Helicopters:table",
+        "Heliports:table",
+        "LTAvehicles:table",
+        "Personnel:table",
+        "Planes:table",
+        "Ships:table",
+        "Skills:table",
+        "WWIIstructures:table",
+        "Warehouses:table"
+      ],
+      "db_weapons": "table",
+      "db_weapons_keys": [
+        "ByCLSID:table",
+        "Categories:table"
+      ],
+      "display_by_clsid": "function",
+      "display_by_wstype": "function",
+      "getDescByName": "function",
+      "launcher_fn": "function"
+    },
+    "defs": [
+      {
+        "name": "def_1_M-113",
+        "where": "Cars.Car[20]",
+        "ws": [
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 1,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 2,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 3,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 4,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 5,
+            "ammo_capacity": null,
+            "shell_name": {}
+          }
+        ],
+        "pylons": []
+      },
+      {
+        "name": "def_2_T-72B",
+        "where": "Cars.Car[109]",
+        "ws": [
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 1,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 2,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 2,
+            "pl": 1,
+            "ammo_capacity": 7,
+            "shell_name": [
+              "2A46M_125_HE"
+            ]
+          },
+          {
+            "ws": 1,
+            "ln": 2,
+            "pl": 2,
+            "ammo_capacity": 10,
+            "shell_name": [
+              "2A46M_125_HE"
+            ]
+          },
+          {
+            "ws": 1,
+            "ln": 3,
+            "pl": 1,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 3,
+            "pl": 2,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 4,
+            "pl": 1,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 4,
+            "pl": 2,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 4,
+            "pl": 3,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 4,
+            "pl": 4,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 4,
+            "pl": 5,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 4,
+            "pl": 6,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 4,
+            "pl": 7,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 4,
+            "pl": 8,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 2,
+            "ln": 1,
+            "pl": 1,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 2,
+            "ln": 1,
+            "pl": 2,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 2,
+            "ln": 1,
+            "pl": 3,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 2,
+            "ln": 1,
+            "pl": 4,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 2,
+            "ln": 1,
+            "pl": 5,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 2,
+            "ln": 1,
+            "pl": 6,
+            "ammo_capacity": null,
+            "shell_name": {}
+          }
+        ],
+        "pylons": []
+      },
+      {
+        "name": "def_3_M-1 Abrams",
+        "where": "Cars.Car[200]",
+        "ws": [
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 1,
+            "ammo_capacity": 11,
+            "shell_name": [
+              "M256_120_AP"
+            ]
+          },
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 2,
+            "ammo_capacity": 14,
+            "shell_name": [
+              "M256_120_AP"
+            ]
+          },
+          {
+            "ws": 1,
+            "ln": 2,
+            "pl": 1,
+            "ammo_capacity": 7,
+            "shell_name": [
+              "M256_120_HE"
+            ]
+          },
+          {
+            "ws": 1,
+            "ln": 2,
+            "pl": 2,
+            "ammo_capacity": 10,
+            "shell_name": [
+              "M256_120_HE"
+            ]
+          },
+          {
+            "ws": 1,
+            "ln": 3,
+            "pl": 1,
+            "ammo_capacity": 2800,
+            "shell_name": {}
+          },
+          {
+            "ws": 2,
+            "ln": 1,
+            "pl": 1,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 2,
+            "ln": 1,
+            "pl": 2,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 2,
+            "ln": 1,
+            "pl": 3,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 2,
+            "ln": 1,
+            "pl": 4,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 2,
+            "ln": 1,
+            "pl": 5,
+            "ammo_capacity": null,
+            "shell_name": {}
+          }
+        ],
+        "pylons": []
+      },
+      {
+        "name": "def_4_BMP-2",
+        "where": "Cars.Car[11]",
+        "ws": [
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 1,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 2,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 2,
+            "pl": 1,
+            "ammo_capacity": 2000,
+            "shell_name": {}
+          },
+          {
+            "ws": 2,
+            "ln": 1,
+            "pl": 1,
+            "ammo_capacity": null,
+            "shell_name": {}
+          }
+        ],
+        "pylons": []
+      },
+      {
+        "name": "def_5_M-2 Bradley",
+        "where": "Cars.Car[22]",
+        "ws": [
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 1,
+            "ammo_capacity": 150,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 2,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 3,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 4,
+            "ammo_capacity": null,
+            "shell_name": [
+              "M242_25_AP_M791"
+            ]
+          },
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 5,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 6,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 2,
+            "pl": 1,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 3,
+            "pl": 1,
+            "ammo_capacity": 7,
+            "shell_name": {}
+          }
+        ],
+        "pylons": []
+      },
+      {
+        "name": "def_6_ZSU-23-4 Shilka",
+        "where": "Cars.Car[72]",
+        "ws": [
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 1,
+            "ammo_capacity": 2000,
+            "shell_name": {}
+          }
+        ],
+        "pylons": []
+      },
+      {
+        "name": "def_7_Leopard-2",
+        "where": "Cars.Car[291]",
+        "ws": [
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 1,
+            "ammo_capacity": 9,
+            "shell_name": [
+              "DM53_120_AP"
+            ]
+          },
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 2,
+            "ammo_capacity": 16,
+            "shell_name": [
+              "DM53_120_AP"
+            ]
+          },
+          {
+            "ws": 1,
+            "ln": 2,
+            "pl": 1,
+            "ammo_capacity": 6,
+            "shell_name": [
+              "DM12_L55_120mm_HEAT_MP_T"
+            ]
+          },
+          {
+            "ws": 1,
+            "ln": 2,
+            "pl": 2,
+            "ammo_capacity": 11,
+            "shell_name": [
+              "DM12_L55_120mm_HEAT_MP_T"
+            ]
+          },
+          {
+            "ws": 1,
+            "ln": 3,
+            "pl": 1,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 3,
+            "pl": 2,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 3,
+            "pl": 3,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 3,
+            "pl": 4,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 3,
+            "pl": 5,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 3,
+            "pl": 6,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 3,
+            "pl": 7,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 3,
+            "pl": 8,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 3,
+            "pl": 9,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 3,
+            "pl": 10,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 2,
+            "ln": 1,
+            "pl": 1,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 2,
+            "ln": 1,
+            "pl": 2,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 2,
+            "ln": 1,
+            "pl": 3,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 2,
+            "ln": 1,
+            "pl": 4,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 2,
+            "ln": 1,
+            "pl": 5,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 2,
+            "ln": 1,
+            "pl": 6,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 2,
+            "ln": 1,
+            "pl": 7,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 2,
+            "ln": 1,
+            "pl": 8,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 2,
+            "ln": 1,
+            "pl": 9,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 2,
+            "ln": 1,
+            "pl": 10,
+            "ammo_capacity": null,
+            "shell_name": {}
+          }
+        ],
+        "pylons": []
+      },
+      {
+        "name": "def_8_PERRY",
+        "where": "Ships.Ship[3]",
+        "ws": [
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 1,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 2,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 3,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 4,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 5,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 2,
+            "ln": 1,
+            "pl": 1,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 2,
+            "ln": 1,
+            "pl": 2,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 2,
+            "ln": 1,
+            "pl": 3,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 2,
+            "ln": 1,
+            "pl": 4,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 2,
+            "ln": 1,
+            "pl": 5,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 3,
+            "ln": 1,
+            "pl": 1,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 3,
+            "ln": 1,
+            "pl": 2,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 3,
+            "ln": 1,
+            "pl": 3,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 3,
+            "ln": 1,
+            "pl": 4,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 3,
+            "ln": 1,
+            "pl": 5,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 4,
+            "ln": 1,
+            "pl": 1,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 4,
+            "ln": 1,
+            "pl": 2,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 4,
+            "ln": 1,
+            "pl": 3,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 4,
+            "ln": 1,
+            "pl": 4,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 4,
+            "ln": 1,
+            "pl": 5,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 5,
+            "ln": 1,
+            "pl": 1,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 5,
+            "ln": 1,
+            "pl": 2,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 6,
+            "ln": 1,
+            "pl": 1,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 6,
+            "ln": 1,
+            "pl": 2,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 7,
+            "ln": 1,
+            "pl": 1,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 7,
+            "ln": 1,
+            "pl": 2,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 7,
+            "ln": 1,
+            "pl": 3,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 7,
+            "ln": 1,
+            "pl": 4,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 7,
+            "ln": 1,
+            "pl": 5,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 7,
+            "ln": 1,
+            "pl": 6,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 7,
+            "ln": 1,
+            "pl": 7,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 7,
+            "ln": 1,
+            "pl": 8,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 7,
+            "ln": 1,
+            "pl": 9,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 7,
+            "ln": 1,
+            "pl": 10,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 8,
+            "ln": 1,
+            "pl": null,
+            "ammo_capacity": null,
+            "shell_name": null
+          },
+          {
+            "ws": 9,
+            "ln": 1,
+            "pl": null,
+            "ammo_capacity": null,
+            "shell_name": null
+          },
+          {
+            "ws": 10,
+            "ln": 1,
+            "pl": 1,
+            "ammo_capacity": 24,
+            "shell_name": {}
+          },
+          {
+            "ws": 10,
+            "ln": 2,
+            "pl": 1,
+            "ammo_capacity": 16,
+            "shell_name": {}
+          },
+          {
+            "ws": 11,
+            "ln": 1,
+            "pl": 1,
+            "ammo_capacity": null,
+            "shell_name": {}
+          }
+        ],
+        "pylons": []
+      },
+      {
+        "name": "def_9_speedboat",
+        "where": "Ships.Ship[1]",
+        "ws": [
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 1,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 2,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 3,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 4,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 5,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 6,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 7,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 8,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 9,
+            "ammo_capacity": null,
+            "shell_name": {}
+          },
+          {
+            "ws": 1,
+            "ln": 1,
+            "pl": 10,
+            "ammo_capacity": null,
+            "shell_name": {}
+          }
+        ],
+        "pylons": []
+      },
+      {
+        "name": "def_10_F-15C",
+        "where": "Planes.Plane[24]",
+        "ws": [],
+        "pylons": [
+          {
+            "number": 1,
+            "launchers": [
+              {
+                "clsid": "{C8E06185-7CD6-4C90-959F-044679E90751}",
+                "weapon": [
+                  4,
+                  4,
+                  7,
+                  24
+                ],
+                "count": 1,
+                "display": "AIM-120B"
+              },
+              {
+                "clsid": "{40EF17B7-F508-45de-8566-6FFECC0C1AB8}",
+                "weapon": [
+                  4,
+                  4,
+                  7,
+                  106
+                ],
+                "count": 1,
+                "display": "AIM-120C"
+              },
+              {
+                "clsid": "{A4BCC903-06C8-47bb-9937-A30FEDB4E741}",
+                "weapon": [
+                  4,
+                  15,
+                  50,
+                  67
+                ],
+                "count": 1,
+                "display": "Smoke Generator - red"
+              },
+              {
+                "clsid": "{A4BCC903-06C8-47bb-9937-A30FEDB4E742}",
+                "weapon": [
+                  4,
+                  15,
+                  50,
+                  87
+                ],
+                "count": 1,
+                "display": "Smoke Generator - green"
+              }
+            ]
+          },
+          {
+            "number": 2,
+            "launchers": [
+              {
+                "clsid": "{E1F29B21-F291-4589-9FD8-3272EEC69506}",
+                "weapon": [
+                  1,
+                  3,
+                  43,
+                  10
+                ],
+                "count": 1,
+                "display": "Fuel tank 610 gal"
+              }
+            ]
+          },
+          {
+            "number": 3,
+            "launchers": [
+              {
+                "clsid": "{C8E06185-7CD6-4C90-959F-044679E90751}",
+                "weapon": [
+                  4,
+                  4,
+                  7,
+                  24
+                ],
+                "count": 1,
+                "display": "AIM-120B"
+              },
+              {
+                "clsid": "{40EF17B7-F508-45de-8566-6FFECC0C1AB8}",
+                "weapon": [
+                  4,
+                  4,
+                  7,
+                  106
+                ],
+                "count": 1,
+                "display": "AIM-120C"
+              },
+              {
+                "clsid": "{6CEB49FC-DED8-4DED-B053-E1F033FF72D3}",
+                "weapon": [
+                  4,
+                  4,
+                  7,
+                  22
+                ],
+                "count": 1,
+                "display": "AIM-9M"
+              },
+              {
+                "clsid": "{9BFD8C90-F7AE-4e90-833B-BFD0CED0E536}",
+                "weapon": [
+                  4,
+                  4,
+                  7,
+                  135
+                ],
+                "count": 1,
+                "display": "AIM-9P"
+              }
+            ]
+          },
+          {
+            "number": 4,
+            "launchers": [
+              {
+                "clsid": "{C8E06185-7CD6-4C90-959F-044679E90751}",
+                "weapon": [
+                  4,
+                  4,
+                  7,
+                  24
+                ],
+                "count": 1,
+                "display": "AIM-120B"
+              },
+              {
+                "clsid": "{40EF17B7-F508-45de-8566-6FFECC0C1AB8}",
+                "weapon": [
+                  4,
+                  4,
+                  7,
+                  106
+                ],
+                "count": 1,
+                "display": "AIM-120C"
+              },
+              {
+                "clsid": "{8D399DDA-FF81-4F14-904D-099B34FE7918}",
+                "weapon": [
+                  4,
+                  4,
+                  7,
+                  21
+                ],
+                "count": 1,
+                "display": "AIM-7M"
+              },
+              {
+                "clsid": "{AIM-7F}",
+                "weapon": [
+                  4,
+                  4,
+                  7,
+                  269
+                ],
+                "count": 1,
+                "display": "AIM-7F"
+              }
+            ]
+          },
+          {
+            "number": 5,
+            "launchers": [
+              {
+                "clsid": "{C8E06185-7CD6-4C90-959F-044679E90751}",
+                "weapon": [
+                  4,
+                  4,
+                  7,
+                  24
+                ],
+                "count": 1,
+                "display": "AIM-120B"
+              },
+              {
+                "clsid": "{40EF17B7-F508-45de-8566-6FFECC0C1AB8}",
+                "weapon": [
+                  4,
+                  4,
+                  7,
+                  106
+                ],
+                "count": 1,
+                "display": "AIM-120C"
+              },
+              {
+                "clsid": "{8D399DDA-FF81-4F14-904D-099B34FE7918}",
+                "weapon": [
+                  4,
+                  4,
+                  7,
+                  21
+                ],
+                "count": 1,
+                "display": "AIM-7M"
+              },
+              {
+                "clsid": "{AIM-7F}",
+                "weapon": [
+                  4,
+                  4,
+                  7,
+                  269
+                ],
+                "count": 1,
+                "display": "AIM-7F"
+              }
+            ]
+          },
+          {
+            "number": 6,
+            "launchers": [
+              {
+                "clsid": "{E1F29B21-F291-4589-9FD8-3272EEC69506}",
+                "weapon": [
+                  1,
+                  3,
+                  43,
+                  10
+                ],
+                "count": 1,
+                "display": "Fuel tank 610 gal"
+              }
+            ]
+          },
+          {
+            "number": 7,
+            "launchers": [
+              {
+                "clsid": "{C8E06185-7CD6-4C90-959F-044679E90751}",
+                "weapon": [
+                  4,
+                  4,
+                  7,
+                  24
+                ],
+                "count": 1,
+                "display": "AIM-120B"
+              },
+              {
+                "clsid": "{40EF17B7-F508-45de-8566-6FFECC0C1AB8}",
+                "weapon": [
+                  4,
+                  4,
+                  7,
+                  106
+                ],
+                "count": 1,
+                "display": "AIM-120C"
+              },
+              {
+                "clsid": "{8D399DDA-FF81-4F14-904D-099B34FE7918}",
+                "weapon": [
+                  4,
+                  4,
+                  7,
+                  21
+                ],
+                "count": 1,
+                "display": "AIM-7M"
+              },
+              {
+                "clsid": "{AIM-7F}",
+                "weapon": [
+                  4,
+                  4,
+                  7,
+                  269
+                ],
+                "count": 1,
+                "display": "AIM-7F"
+              }
+            ]
+          },
+          {
+            "number": 8,
+            "launchers": [
+              {
+                "clsid": "{C8E06185-7CD6-4C90-959F-044679E90751}",
+                "weapon": [
+                  4,
+                  4,
+                  7,
+                  24
+                ],
+                "count": 1,
+                "display": "AIM-120B"
+              },
+              {
+                "clsid": "{40EF17B7-F508-45de-8566-6FFECC0C1AB8}",
+                "weapon": [
+                  4,
+                  4,
+                  7,
+                  106
+                ],
+                "count": 1,
+                "display": "AIM-120C"
+              },
+              {
+                "clsid": "{8D399DDA-FF81-4F14-904D-099B34FE7918}",
+                "weapon": [
+                  4,
+                  4,
+                  7,
+                  21
+                ],
+                "count": 1,
+                "display": "AIM-7M"
+              },
+              {
+                "clsid": "{AIM-7F}",
+                "weapon": [
+                  4,
+                  4,
+                  7,
+                  269
+                ],
+                "count": 1,
+                "display": "AIM-7F"
+              }
+            ]
+          },
+          {
+            "number": 9,
+            "launchers": [
+              {
+                "clsid": "{C8E06185-7CD6-4C90-959F-044679E90751}",
+                "weapon": [
+                  4,
+                  4,
+                  7,
+                  24
+                ],
+                "count": 1,
+                "display": "AIM-120B"
+              },
+              {
+                "clsid": "{40EF17B7-F508-45de-8566-6FFECC0C1AB8}",
+                "weapon": [
+                  4,
+                  4,
+                  7,
+                  106
+                ],
+                "count": 1,
+                "display": "AIM-120C"
+              },
+              {
+                "clsid": "{6CEB49FC-DED8-4DED-B053-E1F033FF72D3}",
+                "weapon": [
+                  4,
+                  4,
+                  7,
+                  22
+                ],
+                "count": 1,
+                "display": "AIM-9M"
+              },
+              {
+                "clsid": "{9BFD8C90-F7AE-4e90-833B-BFD0CED0E536}",
+                "weapon": [
+                  4,
+                  4,
+                  7,
+                  135
+                ],
+                "count": 1,
+                "display": "AIM-9P"
+              }
+            ]
+          },
+          {
+            "number": 10,
+            "launchers": [
+              {
+                "clsid": "{E1F29B21-F291-4589-9FD8-3272EEC69506}",
+                "weapon": [
+                  1,
+                  3,
+                  43,
+                  10
+                ],
+                "count": 1,
+                "display": "Fuel tank 610 gal"
+              }
+            ]
+          },
+          {
+            "number": 11,
+            "launchers": [
+              {
+                "clsid": "{C8E06185-7CD6-4C90-959F-044679E90751}",
+                "weapon": [
+                  4,
+                  4,
+                  7,
+                  24
+                ],
+                "count": 1,
+                "display": "AIM-120B"
+              },
+              {
+                "clsid": "{40EF17B7-F508-45de-8566-6FFECC0C1AB8}",
+                "weapon": [
+                  4,
+                  4,
+                  7,
+                  106
+                ],
+                "count": 1,
+                "display": "AIM-120C"
+              },
+              {
+                "clsid": "{A4BCC903-06C8-47bb-9937-A30FEDB4E741}",
+                "weapon": [
+                  4,
+                  15,
+                  50,
+                  67
+                ],
+                "count": 1,
+                "display": "Smoke Generator - red"
+              },
+              {
+                "clsid": "{A4BCC903-06C8-47bb-9937-A30FEDB4E742}",
+                "weapon": [
+                  4,
+                  15,
+                  50,
+                  87
+                ],
+                "count": 1,
+                "display": "Smoke Generator - green"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "def_11_UH-1H",
+        "where": "Helicopters.Helicopter[13]",
+        "ws": [],
+        "pylons": [
+          {
+            "number": 1,
+            "launchers": [
+              {
+                "clsid": "M134_L",
+                "weapon": [
+                  4,
+                  6,
+                  10
+                ],
+                "count": 1,
+                "display": ""
+              }
+            ]
+          },
+          {
+            "number": 2,
+            "launchers": [
+              {
+                "clsid": "XM158_MK1",
+                "weapon": [
+                  4,
+                  7,
+                  33,
+                  144
+                ],
+                "count": 7,
+                "display": "Hydra 70 Mk 1 HE"
+              },
+              {
+                "clsid": "XM158_MK5",
+                "weapon": [
+                  4,
+                  7,
+                  33,
+                  145
+                ],
+                "count": 7,
+                "display": "Hydra 70 Mk 5 HEAT"
+              },
+              {
+                "clsid": "XM158_M151",
+                "weapon": [
+                  4,
+                  7,
+                  33,
+                  147
+                ],
+                "count": 7,
+                "display": "Hydra 70 M151 HE"
+              },
+              {
+                "clsid": "XM158_M156",
+                "weapon": [
+                  4,
+                  7,
+                  33,
+                  148
+                ],
+                "count": 7,
+                "display": "Hydra 70 M156 SM"
+              }
+            ]
+          },
+          {
+            "number": 3,
+            "launchers": [
+              {
+                "clsid": "M134_SIDE_L",
+                "weapon": [
+                  4,
+                  6,
+                  10
+                ],
+                "count": 1,
+                "display": ""
+              },
+              {
+                "clsid": "M60_SIDE_L",
+                "weapon": [
+                  4,
+                  6,
+                  10
+                ],
+                "count": 1,
+                "display": ""
+              }
+            ]
+          },
+          {
+            "number": 4,
+            "launchers": [
+              {
+                "clsid": "M134_SIDE_R",
+                "weapon": [
+                  4,
+                  6,
+                  10
+                ],
+                "count": 1,
+                "display": ""
+              },
+              {
+                "clsid": "M60_SIDE_R",
+                "weapon": [
+                  4,
+                  6,
+                  10
+                ],
+                "count": 1,
+                "display": ""
+              }
+            ]
+          },
+          {
+            "number": 5,
+            "launchers": [
+              {
+                "clsid": "XM158_MK1",
+                "weapon": [
+                  4,
+                  7,
+                  33,
+                  144
+                ],
+                "count": 7,
+                "display": "Hydra 70 Mk 1 HE"
+              },
+              {
+                "clsid": "XM158_MK5",
+                "weapon": [
+                  4,
+                  7,
+                  33,
+                  145
+                ],
+                "count": 7,
+                "display": "Hydra 70 Mk 5 HEAT"
+              },
+              {
+                "clsid": "XM158_M151",
+                "weapon": [
+                  4,
+                  7,
+                  33,
+                  147
+                ],
+                "count": 7,
+                "display": "Hydra 70 M151 HE"
+              },
+              {
+                "clsid": "XM158_M156",
+                "weapon": [
+                  4,
+                  7,
+                  33,
+                  148
+                ],
+                "count": 7,
+                "display": "Hydra 70 M156 SM"
+              }
+            ]
+          },
+          {
+            "number": 6,
+            "launchers": [
+              {
+                "clsid": "M134_R",
+                "weapon": [
+                  4,
+                  6,
+                  10
+                ],
+                "count": 1,
+                "display": ""
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "reads": [
+      {
+        "name": "read_1_M-113",
+        "life": 3,
+        "life0": 3,
+        "fuel": 1,
+        "fuelMassMax": null,
+        "ammo": [
+          {
+            "type": "weapons.shells.M2_12_7_T",
+            "display": "12.7mm",
+            "count": 104
+          },
+          {
+            "type": "weapons.shells.M2_12_7",
+            "display": "12.7mm",
+            "count": 404
+          }
+        ]
+      },
+      {
+        "name": "read_2_T-72B",
+        "life": 25,
+        "life0": 25,
+        "fuel": 1,
+        "fuelMassMax": null,
+        "ammo": [
+          {
+            "type": "weapons.shells.2A46M_125_AP",
+            "display": "3BM42 (125mm APFSDS-T)",
+            "count": 23
+          },
+          {
+            "type": "weapons.shells.2A46M_125_HE",
+            "display": "3OF26 (125mm HE)",
+            "count": 18
+          },
+          {
+            "type": "weapons.missiles.SVIR",
+            "display": "AT-11 Sniper",
+            "count": 7
+          },
+          {
+            "type": "weapons.shells.7_62x54",
+            "display": "7.62mm",
+            "count": 407
+          },
+          {
+            "type": "weapons.shells.7_62x54_NOTRACER",
+            "display": "7.62mm",
+            "count": 1607
+          },
+          {
+            "type": "weapons.shells.Utes_12_7x108_T",
+            "display": "12.7mm",
+            "count": 65
+          },
+          {
+            "type": "weapons.shells.Utes_12_7x108",
+            "display": "12.7mm",
+            "count": 245
+          }
+        ]
+      },
+      {
+        "name": "read_3_M-1 Abrams",
+        "life": 32,
+        "life0": 32,
+        "fuel": 1,
+        "fuelMassMax": null,
+        "ammo": [
+          {
+            "type": "weapons.shells.M256_120_AP",
+            "display": "M829A2 (120mm APFSDS-T)",
+            "count": 26
+          },
+          {
+            "type": "weapons.shells.M256_120_HE",
+            "display": "M830 (120mm HEAT-MP-T)",
+            "count": 18
+          },
+          {
+            "type": "weapons.shells.7_62x51tr",
+            "display": "7.62mm",
+            "count": 560
+          },
+          {
+            "type": "weapons.shells.7_62x51",
+            "display": "7.62mm",
+            "count": 2240
+          },
+          {
+            "type": "weapons.shells.M2_12_7_T",
+            "display": "12.7mm",
+            "count": 104
+          },
+          {
+            "type": "weapons.shells.M2_12_7",
+            "display": "12.7mm",
+            "count": 404
+          }
+        ]
+      },
+      {
+        "name": "read_4_BMP-2",
+        "life": 5,
+        "life0": 5,
+        "fuel": 1,
+        "fuelMassMax": null,
+        "ammo": [
+          {
+            "type": "weapons.shells.2A42_30_HE",
+            "display": "3UOF8 (30mm HE-T)",
+            "count": 340
+          },
+          {
+            "type": "weapons.shells.2A42_30_AP",
+            "display": "3UBR6 (30mm APBC-T)",
+            "count": 161
+          },
+          {
+            "type": "weapons.shells.7_62x54",
+            "display": "7.62mm",
+            "count": 400
+          },
+          {
+            "type": "weapons.shells.7_62x54_NOTRACER",
+            "display": "7.62mm",
+            "count": 1600
+          },
+          {
+            "type": "weapons.missiles.KONKURS",
+            "display": "AT-5 Spandrel",
+            "count": 4
+          }
+        ]
+      },
+      {
+        "name": "read_5_M-2 Bradley",
+        "life": 6,
+        "life0": 6,
+        "fuel": 1,
+        "fuelMassMax": null,
+        "ammo": [
+          {
+            "type": "weapons.shells.M242_25_HE_M792",
+            "display": "M792 (25mm HEI-T)",
+            "count": 452
+          },
+          {
+            "type": "weapons.shells.M242_25_AP_M791",
+            "display": "M791 (25mm APDS-T)",
+            "count": 453
+          },
+          {
+            "type": "weapons.shells.7_62x51tr",
+            "display": "7.62mm",
+            "count": 160
+          },
+          {
+            "type": "weapons.shells.7_62x51",
+            "display": "7.62mm",
+            "count": 640
+          },
+          {
+            "type": "weapons.missiles.TOW2",
+            "display": "BGM-71 TOW",
+            "count": 7
+          }
+        ]
+      },
+      {
+        "name": "read_6_ZSU-23-4 Shilka",
+        "life": 4,
+        "life0": 4,
+        "fuel": 1,
+        "fuelMassMax": null,
+        "ammo": [
+          {
+            "type": "weapons.shells.2A7_23_AP",
+            "display": "23mm AP",
+            "count": 503
+          },
+          {
+            "type": "weapons.shells.2A7_23_HE",
+            "display": "23mm HE",
+            "count": 1501
+          }
+        ]
+      },
+      {
+        "name": "read_7_Leopard-2",
+        "life": 32,
+        "life0": 32,
+        "fuel": 1,
+        "fuelMassMax": null,
+        "ammo": [
+          {
+            "type": "weapons.shells.DM53_120_AP",
+            "display": "DM53 (120mm APFSDS-T)",
+            "count": 26
+          },
+          {
+            "type": "weapons.shells.DM12_L55_120mm_HEAT_MP_T",
+            "display": "DM12 (120mm HEAT-MP-T)",
+            "count": 18
+          },
+          {
+            "type": "weapons.shells.7_62x51tr",
+            "display": "7.62mm",
+            "count": 818
+          },
+          {
+            "type": "weapons.shells.7_62x51",
+            "display": "7.62mm",
+            "count": 3218
+          }
+        ]
+      },
+      {
+        "name": "read_8_PERRY",
+        "life": 2100,
+        "life0": 2100,
+        "fuel": 1,
+        "fuelMassMax": null,
+        "ammo": [
+          {
+            "type": "weapons.shells.M2_12_7_T",
+            "display": "12.7mm",
+            "count": 416
+          },
+          {
+            "type": "weapons.shells.M2_12_7",
+            "display": "12.7mm",
+            "count": 1616
+          },
+          {
+            "type": "weapons.shells.M242_25_HE_M792",
+            "display": "M792 (25mm HEI-T)",
+            "count": 460
+          },
+          {
+            "type": "weapons.shells.M242_25_AP_M791",
+            "display": "M791 (25mm APDS-T)",
+            "count": 142
+          },
+          {
+            "type": "weapons.shells.M61_20_HE_gr",
+            "display": "20mm HE",
+            "count": 11629
+          },
+          {
+            "type": "weapons.shells.M61_20_AP_gr",
+            "display": "20mm AP",
+            "count": 3880
+          },
+          {
+            "type": "SM_1",
+            "display": "SM-1",
+            "count": 24
+          },
+          {
+            "type": "weapons.missiles.AGM_84S",
+            "display": "RGM-84D Harpoon",
+            "count": 16
+          },
+          {
+            "type": "weapons.shells.MK75_76",
+            "display": "76mm HE",
+            "count": 180
+          }
+        ]
+      },
+      {
+        "name": "read_9_speedboat",
+        "life": 1.600000023841858,
+        "life0": 1.600000023841858,
+        "fuel": 1,
+        "fuelMassMax": null,
+        "ammo": [
+          {
+            "type": "weapons.shells.Utes_12_7x108_T",
+            "display": "12.7mm",
+            "count": 109
+          },
+          {
+            "type": "weapons.shells.Utes_12_7x108",
+            "display": "12.7mm",
+            "count": 409
+          }
+        ]
+      },
+      {
+        "name": "read_10_F-15C",
+        "life": 20,
+        "life0": 20,
+        "fuel": 0.1637490838766098,
+        "fuelMassMax": 6103,
+        "ammo": [
+          {
+            "type": "weapons.shells.M61_20_HE",
+            "display": "20mm HE",
+            "count": 940
+          }
+        ]
+      },
+      {
+        "name": "read_11_UH-1H",
+        "life": 12,
+        "life0": 12,
+        "fuel": 0.9997204542160034,
+        "fuelMassMax": 631,
+        "ammo": []
+      }
+    ]
+  },
+  "spawn": {
+    "script": "lua/experiments/e39/spawn.lua",
+    "state": "hook",
+    "observations": [
+      {
+        "name": "start",
+        "value": {
+          "model": 46.031,
+          "paused": true
+        }
+      },
+      {
+        "name": "spawned",
+        "value": [
+          {
+            "added": true,
+            "label": "np-e39-full"
+          },
+          {
+            "added": true,
+            "label": "np-e39-reduced"
+          },
+          {
+            "added": true,
+            "label": "np-e39-gun25"
+          },
+          {
+            "added": true,
+            "label": "np-e39-gun0"
+          },
+          {
+            "added": true,
+            "label": "np-e39-heli"
+          },
+          {
+            "added": true,
+            "label": "np-e39-t72"
+          },
+          {
+            "added": true,
+            "label": "np-e39-t72ammo"
+          },
+          {
+            "added": true,
+            "label": "np-e39-t72zero"
+          },
+          {
+            "added": true,
+            "label": "np-e39-m113"
+          },
+          {
+            "added": true,
+            "label": "np-e39-abrams"
+          },
+          {
+            "added": true,
+            "label": "np-e39-perry"
+          },
+          {
+            "added": true,
+            "label": "np-e39-perry50"
+          },
+          {
+            "added": true,
+            "label": "np-e39-boat"
+          }
+        ]
+      },
+      {
+        "name": "ids",
+        "value": {
+          "np-e39-abrams": "1000041",
+          "np-e39-boat": "1000047",
+          "np-e39-full": "1000023",
+          "np-e39-gun0": "1000029",
+          "np-e39-gun25": "1000027",
+          "np-e39-heli": "1000031",
+          "np-e39-m113": "1000039",
+          "np-e39-perry": "1000043",
+          "np-e39-perry50": "1000045",
+          "np-e39-reduced": "1000025",
+          "np-e39-t72": "1000033",
+          "np-e39-t72ammo": "1000035",
+          "np-e39-t72zero": "1000037"
+        }
+      },
+      {
+        "name": "layouts",
+        "value": {
+          "np-e39-full": {
+            "1": {
+              "clsid": "{C8E06185-7CD6-4C90-959F-044679E90751}",
+              "count": 1,
+              "display": "AIM-120B",
+              "ok": true
+            },
+            "11": {
+              "clsid": "{C8E06185-7CD6-4C90-959F-044679E90751}",
+              "count": 1,
+              "display": "AIM-120B",
+              "ok": true
+            },
+            "3": {
+              "clsid": "{6CEB49FC-DED8-4DED-B053-E1F033FF72D3}",
+              "count": 1,
+              "display": "AIM-9M",
+              "ok": true
+            },
+            "4": {
+              "clsid": "{8D399DDA-FF81-4F14-904D-099B34FE7918}",
+              "count": 1,
+              "display": "AIM-7M",
+              "ok": true
+            },
+            "5": {
+              "clsid": "{8D399DDA-FF81-4F14-904D-099B34FE7918}",
+              "count": 1,
+              "display": "AIM-7M",
+              "ok": true
+            },
+            "6": {
+              "clsid": "{E1F29B21-F291-4589-9FD8-3272EEC69506}",
+              "count": 1,
+              "display": "Fuel tank 610 gal",
+              "ok": true
+            },
+            "7": {
+              "clsid": "{8D399DDA-FF81-4F14-904D-099B34FE7918}",
+              "count": 1,
+              "display": "AIM-7M",
+              "ok": true
+            },
+            "8": {
+              "clsid": "{8D399DDA-FF81-4F14-904D-099B34FE7918}",
+              "count": 1,
+              "display": "AIM-7M",
+              "ok": true
+            },
+            "9": {
+              "clsid": "{6CEB49FC-DED8-4DED-B053-E1F033FF72D3}",
+              "count": 1,
+              "display": "AIM-9M",
+              "ok": true
+            }
+          },
+          "np-e39-reduced": {
+            "1": {
+              "clsid": "{C8E06185-7CD6-4C90-959F-044679E90751}",
+              "count": 1,
+              "display": "AIM-120B",
+              "ok": true
+            },
+            "3": {
+              "clsid": "{6CEB49FC-DED8-4DED-B053-E1F033FF72D3}",
+              "count": 1,
+              "display": "AIM-9M",
+              "ok": true
+            },
+            "7": {
+              "clsid": "{8D399DDA-FF81-4F14-904D-099B34FE7918}",
+              "count": 1,
+              "display": "AIM-7M",
+              "ok": true
+            },
+            "8": {
+              "clsid": "{8D399DDA-FF81-4F14-904D-099B34FE7918}",
+              "count": 1,
+              "display": "AIM-7M",
+              "ok": true
+            }
+          }
+        }
+      },
+      {
+        "name": "same_frame_life",
+        "value": {
+          "np-e39-full": "ok",
+          "np-e39-heli": "ok",
+          "np-e39-perry": "ok",
+          "np-e39-t72": "ok"
+        }
+      },
+      {
+        "name": "read_same_frame",
+        "value": {
+          "np-e39-abrams": {
+            "ammo": [
+              {
+                "count": 26,
+                "display": "M829A2 (120mm APFSDS-T)",
+                "type": "weapons.shells.M256_120_AP"
+              },
+              {
+                "count": 18,
+                "display": "M830 (120mm HEAT-MP-T)",
+                "type": "weapons.shells.M256_120_HE"
+              },
+              {
+                "count": 560,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x51tr"
+              },
+              {
+                "count": 2240,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x51"
+              },
+              {
+                "count": 104,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7_T"
+              },
+              {
+                "count": 404,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 32,
+            "life0": 32,
+            "life_ok": false,
+            "life_percent": 100
+          },
+          "np-e39-boat": {
+            "ammo": [
+              {
+                "count": 109,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108_T"
+              },
+              {
+                "count": 409,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 1.6,
+            "life0": 1.6,
+            "life_ok": false,
+            "life_percent": 100
+          },
+          "np-e39-full": {
+            "ammo": [
+              {
+                "count": 940,
+                "display": "20mm HE",
+                "type": "weapons.shells.M61_20_HE"
+              },
+              {
+                "count": 2,
+                "display": "AIM-120B",
+                "type": "weapons.missiles.AIM_120"
+              },
+              {
+                "count": 2,
+                "display": "AIM-9M",
+                "type": "AIM_9"
+              },
+              {
+                "count": 4,
+                "display": "AIM-7M",
+                "type": "weapons.missiles.AIM_7"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 0.805731,
+            "fuel_ok": false,
+            "gun_ok": true,
+            "gun_rounds": 940,
+            "life": 12,
+            "life0": 20,
+            "life_ok": true,
+            "life_percent": 60,
+            "pylons": {
+              "AIM-120B": {
+                "ok": true,
+                "read": 2,
+                "want": 2
+              },
+              "AIM-7M": {
+                "ok": true,
+                "read": 4,
+                "want": 4
+              },
+              "AIM-9M": {
+                "ok": true,
+                "read": 2,
+                "want": 2
+              },
+              "Fuel tank 610 gal": {
+                "read": "no row",
+                "want": 1
+              }
+            }
+          },
+          "np-e39-gun0": {
+            "ammo": [],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 0.2,
+            "fuel_ok": true,
+            "life": 20,
+            "life0": 20
+          },
+          "np-e39-gun25": {
+            "ammo": [
+              {
+                "count": 235,
+                "display": "20mm HE",
+                "type": "weapons.shells.M61_20_HE"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 0.8,
+            "fuel_ok": true,
+            "gun_ok": true,
+            "gun_rounds": 235,
+            "life": 20,
+            "life0": 20,
+            "life_ok": false,
+            "life_percent": 100
+          },
+          "np-e39-heli": {
+            "ammo": [],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 0.5,
+            "fuel_ok": true,
+            "life": 6,
+            "life0": 12,
+            "life_ok": true,
+            "life_percent": 50
+          },
+          "np-e39-m113": {
+            "ammo": [
+              {
+                "count": 104,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7_T"
+              },
+              {
+                "count": 404,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 3,
+            "life0": 3,
+            "life_ok": false,
+            "life_percent": 100
+          },
+          "np-e39-perry": {
+            "ammo": [
+              {
+                "count": 416,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7_T"
+              },
+              {
+                "count": 1616,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7"
+              },
+              {
+                "count": 460,
+                "display": "M792 (25mm HEI-T)",
+                "type": "weapons.shells.M242_25_HE_M792"
+              },
+              {
+                "count": 142,
+                "display": "M791 (25mm APDS-T)",
+                "type": "weapons.shells.M242_25_AP_M791"
+              },
+              {
+                "count": 11629,
+                "display": "20mm HE",
+                "type": "weapons.shells.M61_20_HE_gr"
+              },
+              {
+                "count": 3880,
+                "display": "20mm AP",
+                "type": "weapons.shells.M61_20_AP_gr"
+              },
+              {
+                "count": 24,
+                "display": "SM-1",
+                "type": "SM_1"
+              },
+              {
+                "count": 16,
+                "display": "RGM-84D Harpoon",
+                "type": "weapons.missiles.AGM_84S"
+              },
+              {
+                "count": 180,
+                "display": "76mm HE",
+                "type": "weapons.shells.MK75_76"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 1680,
+            "life0": 2100,
+            "life_ok": true,
+            "life_percent": 80
+          },
+          "np-e39-perry50": {
+            "ammo": [
+              {
+                "count": 416,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7_T"
+              },
+              {
+                "count": 1616,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7"
+              },
+              {
+                "count": 460,
+                "display": "M792 (25mm HEI-T)",
+                "type": "weapons.shells.M242_25_HE_M792"
+              },
+              {
+                "count": 142,
+                "display": "M791 (25mm APDS-T)",
+                "type": "weapons.shells.M242_25_AP_M791"
+              },
+              {
+                "count": 11629,
+                "display": "20mm HE",
+                "type": "weapons.shells.M61_20_HE_gr"
+              },
+              {
+                "count": 3880,
+                "display": "20mm AP",
+                "type": "weapons.shells.M61_20_AP_gr"
+              },
+              {
+                "count": 24,
+                "display": "SM-1",
+                "type": "SM_1"
+              },
+              {
+                "count": 16,
+                "display": "RGM-84D Harpoon",
+                "type": "weapons.missiles.AGM_84S"
+              },
+              {
+                "count": 180,
+                "display": "76mm HE",
+                "type": "weapons.shells.MK75_76"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 2100,
+            "life0": 2100,
+            "life_ok": false,
+            "life_percent": 100
+          },
+          "np-e39-reduced": {
+            "ammo": [
+              {
+                "count": 470,
+                "display": "20mm HE",
+                "type": "weapons.shells.M61_20_HE"
+              },
+              {
+                "count": 1,
+                "display": "AIM-120B",
+                "type": "weapons.missiles.AIM_120"
+              },
+              {
+                "count": 1,
+                "display": "AIM-9M",
+                "type": "AIM_9"
+              },
+              {
+                "count": 2,
+                "display": "AIM-7M",
+                "type": "weapons.missiles.AIM_7"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 0.37,
+            "fuel_ok": true,
+            "gun_ok": true,
+            "gun_rounds": 470,
+            "life": 20,
+            "life0": 20,
+            "life_ok": false,
+            "life_percent": 100,
+            "pylons": {
+              "AIM-120B": {
+                "ok": true,
+                "read": 1,
+                "want": 1
+              },
+              "AIM-7M": {
+                "ok": true,
+                "read": 2,
+                "want": 2
+              },
+              "AIM-9M": {
+                "ok": true,
+                "read": 1,
+                "want": 1
+              }
+            }
+          },
+          "np-e39-t72": {
+            "ammo": [
+              {
+                "count": 23,
+                "display": "3BM42 (125mm APFSDS-T)",
+                "type": "weapons.shells.2A46M_125_AP"
+              },
+              {
+                "count": 18,
+                "display": "3OF26 (125mm HE)",
+                "type": "weapons.shells.2A46M_125_HE"
+              },
+              {
+                "count": 7,
+                "display": "AT-11 Sniper",
+                "type": "weapons.missiles.SVIR"
+              },
+              {
+                "count": 407,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54"
+              },
+              {
+                "count": 1607,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54_NOTRACER"
+              },
+              {
+                "count": 65,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108_T"
+              },
+              {
+                "count": 245,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 10,
+            "life0": 25,
+            "life_ok": true,
+            "life_percent": 40
+          },
+          "np-e39-t72ammo": {
+            "ammo": [
+              {
+                "count": 23,
+                "display": "3BM42 (125mm APFSDS-T)",
+                "type": "weapons.shells.2A46M_125_AP"
+              },
+              {
+                "count": 8,
+                "display": "3OF26 (125mm HE)",
+                "type": "weapons.shells.2A46M_125_HE"
+              },
+              {
+                "count": 7,
+                "display": "AT-11 Sniper",
+                "type": "weapons.missiles.SVIR"
+              },
+              {
+                "count": 407,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54"
+              },
+              {
+                "count": 1607,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54_NOTRACER"
+              },
+              {
+                "count": 65,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108_T"
+              },
+              {
+                "count": 245,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108"
+              }
+            ],
+            "ammo_asked": {
+              "2A46M_125_HE": 7
+            },
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 25,
+            "life0": 25
+          },
+          "np-e39-t72zero": {
+            "ammo": [
+              {
+                "count": 23,
+                "display": "3BM42 (125mm APFSDS-T)",
+                "type": "weapons.shells.2A46M_125_AP"
+              },
+              {
+                "count": 7,
+                "display": "AT-11 Sniper",
+                "type": "weapons.missiles.SVIR"
+              },
+              {
+                "count": 407,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54"
+              },
+              {
+                "count": 1607,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54_NOTRACER"
+              },
+              {
+                "count": 65,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108_T"
+              },
+              {
+                "count": 245,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108"
+              }
+            ],
+            "ammo_asked": {
+              "2A46M_125_HE": 0
+            },
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 25,
+            "life0": 25
+          }
+        }
+      },
+      {
+        "name": "read_paused_1_s",
+        "value": {
+          "np-e39-abrams": {
+            "ammo": [
+              {
+                "count": 26,
+                "display": "M829A2 (120mm APFSDS-T)",
+                "type": "weapons.shells.M256_120_AP"
+              },
+              {
+                "count": 18,
+                "display": "M830 (120mm HEAT-MP-T)",
+                "type": "weapons.shells.M256_120_HE"
+              },
+              {
+                "count": 560,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x51tr"
+              },
+              {
+                "count": 2240,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x51"
+              },
+              {
+                "count": 104,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7_T"
+              },
+              {
+                "count": 404,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 32,
+            "life0": 32,
+            "life_ok": false,
+            "life_percent": 100
+          },
+          "np-e39-boat": {
+            "ammo": [
+              {
+                "count": 109,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108_T"
+              },
+              {
+                "count": 409,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 1.6,
+            "life0": 1.6,
+            "life_ok": false,
+            "life_percent": 100
+          },
+          "np-e39-full": {
+            "ammo": [
+              {
+                "count": 940,
+                "display": "20mm HE",
+                "type": "weapons.shells.M61_20_HE"
+              },
+              {
+                "count": 2,
+                "display": "AIM-120B",
+                "type": "weapons.missiles.AIM_120"
+              },
+              {
+                "count": 2,
+                "display": "AIM-9M",
+                "type": "AIM_9"
+              },
+              {
+                "count": 4,
+                "display": "AIM-7M",
+                "type": "weapons.missiles.AIM_7"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 0.805731,
+            "fuel_ok": false,
+            "gun_ok": true,
+            "gun_rounds": 940,
+            "life": 12,
+            "life0": 20,
+            "life_ok": true,
+            "life_percent": 60,
+            "pylons": {
+              "AIM-120B": {
+                "ok": true,
+                "read": 2,
+                "want": 2
+              },
+              "AIM-7M": {
+                "ok": true,
+                "read": 4,
+                "want": 4
+              },
+              "AIM-9M": {
+                "ok": true,
+                "read": 2,
+                "want": 2
+              },
+              "Fuel tank 610 gal": {
+                "read": "no row",
+                "want": 1
+              }
+            }
+          },
+          "np-e39-gun0": {
+            "ammo": [],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 0.2,
+            "fuel_ok": true,
+            "life": 20,
+            "life0": 20
+          },
+          "np-e39-gun25": {
+            "ammo": [
+              {
+                "count": 235,
+                "display": "20mm HE",
+                "type": "weapons.shells.M61_20_HE"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 0.8,
+            "fuel_ok": true,
+            "gun_ok": true,
+            "gun_rounds": 235,
+            "life": 20,
+            "life0": 20,
+            "life_ok": false,
+            "life_percent": 100
+          },
+          "np-e39-heli": {
+            "ammo": [],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 0.5,
+            "fuel_ok": true,
+            "life": 6,
+            "life0": 12,
+            "life_ok": true,
+            "life_percent": 50
+          },
+          "np-e39-m113": {
+            "ammo": [
+              {
+                "count": 104,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7_T"
+              },
+              {
+                "count": 404,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 3,
+            "life0": 3,
+            "life_ok": false,
+            "life_percent": 100
+          },
+          "np-e39-perry": {
+            "ammo": [
+              {
+                "count": 416,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7_T"
+              },
+              {
+                "count": 1616,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7"
+              },
+              {
+                "count": 460,
+                "display": "M792 (25mm HEI-T)",
+                "type": "weapons.shells.M242_25_HE_M792"
+              },
+              {
+                "count": 142,
+                "display": "M791 (25mm APDS-T)",
+                "type": "weapons.shells.M242_25_AP_M791"
+              },
+              {
+                "count": 11629,
+                "display": "20mm HE",
+                "type": "weapons.shells.M61_20_HE_gr"
+              },
+              {
+                "count": 3880,
+                "display": "20mm AP",
+                "type": "weapons.shells.M61_20_AP_gr"
+              },
+              {
+                "count": 24,
+                "display": "SM-1",
+                "type": "SM_1"
+              },
+              {
+                "count": 16,
+                "display": "RGM-84D Harpoon",
+                "type": "weapons.missiles.AGM_84S"
+              },
+              {
+                "count": 180,
+                "display": "76mm HE",
+                "type": "weapons.shells.MK75_76"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 1680,
+            "life0": 2100,
+            "life_ok": true,
+            "life_percent": 80
+          },
+          "np-e39-perry50": {
+            "ammo": [
+              {
+                "count": 416,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7_T"
+              },
+              {
+                "count": 1616,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7"
+              },
+              {
+                "count": 460,
+                "display": "M792 (25mm HEI-T)",
+                "type": "weapons.shells.M242_25_HE_M792"
+              },
+              {
+                "count": 142,
+                "display": "M791 (25mm APDS-T)",
+                "type": "weapons.shells.M242_25_AP_M791"
+              },
+              {
+                "count": 11629,
+                "display": "20mm HE",
+                "type": "weapons.shells.M61_20_HE_gr"
+              },
+              {
+                "count": 3880,
+                "display": "20mm AP",
+                "type": "weapons.shells.M61_20_AP_gr"
+              },
+              {
+                "count": 24,
+                "display": "SM-1",
+                "type": "SM_1"
+              },
+              {
+                "count": 16,
+                "display": "RGM-84D Harpoon",
+                "type": "weapons.missiles.AGM_84S"
+              },
+              {
+                "count": 180,
+                "display": "76mm HE",
+                "type": "weapons.shells.MK75_76"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 2100,
+            "life0": 2100,
+            "life_ok": false,
+            "life_percent": 100
+          },
+          "np-e39-reduced": {
+            "ammo": [
+              {
+                "count": 470,
+                "display": "20mm HE",
+                "type": "weapons.shells.M61_20_HE"
+              },
+              {
+                "count": 1,
+                "display": "AIM-120B",
+                "type": "weapons.missiles.AIM_120"
+              },
+              {
+                "count": 1,
+                "display": "AIM-9M",
+                "type": "AIM_9"
+              },
+              {
+                "count": 2,
+                "display": "AIM-7M",
+                "type": "weapons.missiles.AIM_7"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 0.37,
+            "fuel_ok": true,
+            "gun_ok": true,
+            "gun_rounds": 470,
+            "life": 20,
+            "life0": 20,
+            "life_ok": false,
+            "life_percent": 100,
+            "pylons": {
+              "AIM-120B": {
+                "ok": true,
+                "read": 1,
+                "want": 1
+              },
+              "AIM-7M": {
+                "ok": true,
+                "read": 2,
+                "want": 2
+              },
+              "AIM-9M": {
+                "ok": true,
+                "read": 1,
+                "want": 1
+              }
+            }
+          },
+          "np-e39-t72": {
+            "ammo": [
+              {
+                "count": 23,
+                "display": "3BM42 (125mm APFSDS-T)",
+                "type": "weapons.shells.2A46M_125_AP"
+              },
+              {
+                "count": 18,
+                "display": "3OF26 (125mm HE)",
+                "type": "weapons.shells.2A46M_125_HE"
+              },
+              {
+                "count": 7,
+                "display": "AT-11 Sniper",
+                "type": "weapons.missiles.SVIR"
+              },
+              {
+                "count": 407,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54"
+              },
+              {
+                "count": 1607,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54_NOTRACER"
+              },
+              {
+                "count": 65,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108_T"
+              },
+              {
+                "count": 245,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 10,
+            "life0": 25,
+            "life_ok": true,
+            "life_percent": 40
+          },
+          "np-e39-t72ammo": {
+            "ammo": [
+              {
+                "count": 23,
+                "display": "3BM42 (125mm APFSDS-T)",
+                "type": "weapons.shells.2A46M_125_AP"
+              },
+              {
+                "count": 8,
+                "display": "3OF26 (125mm HE)",
+                "type": "weapons.shells.2A46M_125_HE"
+              },
+              {
+                "count": 7,
+                "display": "AT-11 Sniper",
+                "type": "weapons.missiles.SVIR"
+              },
+              {
+                "count": 407,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54"
+              },
+              {
+                "count": 1607,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54_NOTRACER"
+              },
+              {
+                "count": 65,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108_T"
+              },
+              {
+                "count": 245,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108"
+              }
+            ],
+            "ammo_asked": {
+              "2A46M_125_HE": 7
+            },
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 25,
+            "life0": 25
+          },
+          "np-e39-t72zero": {
+            "ammo": [
+              {
+                "count": 23,
+                "display": "3BM42 (125mm APFSDS-T)",
+                "type": "weapons.shells.2A46M_125_AP"
+              },
+              {
+                "count": 7,
+                "display": "AT-11 Sniper",
+                "type": "weapons.missiles.SVIR"
+              },
+              {
+                "count": 407,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54"
+              },
+              {
+                "count": 1607,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54_NOTRACER"
+              },
+              {
+                "count": 65,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108_T"
+              },
+              {
+                "count": 245,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108"
+              }
+            ],
+            "ammo_asked": {
+              "2A46M_125_HE": 0
+            },
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 25,
+            "life0": 25
+          }
+        }
+      },
+      {
+        "name": "paused_life",
+        "value": {
+          "np-e39-boat": "ok",
+          "np-e39-m113": "ok",
+          "np-e39-reduced": "ok"
+        }
+      },
+      {
+        "name": "read_paused_2_s",
+        "value": {
+          "np-e39-abrams": {
+            "ammo": [
+              {
+                "count": 26,
+                "display": "M829A2 (120mm APFSDS-T)",
+                "type": "weapons.shells.M256_120_AP"
+              },
+              {
+                "count": 18,
+                "display": "M830 (120mm HEAT-MP-T)",
+                "type": "weapons.shells.M256_120_HE"
+              },
+              {
+                "count": 560,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x51tr"
+              },
+              {
+                "count": 2240,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x51"
+              },
+              {
+                "count": 104,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7_T"
+              },
+              {
+                "count": 404,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 32,
+            "life0": 32,
+            "life_ok": false,
+            "life_percent": 100
+          },
+          "np-e39-boat": {
+            "ammo": [
+              {
+                "count": 109,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108_T"
+              },
+              {
+                "count": 409,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 1.28,
+            "life0": 1.6,
+            "life_ok": true,
+            "life_percent": 80
+          },
+          "np-e39-full": {
+            "ammo": [
+              {
+                "count": 940,
+                "display": "20mm HE",
+                "type": "weapons.shells.M61_20_HE"
+              },
+              {
+                "count": 2,
+                "display": "AIM-120B",
+                "type": "weapons.missiles.AIM_120"
+              },
+              {
+                "count": 2,
+                "display": "AIM-9M",
+                "type": "AIM_9"
+              },
+              {
+                "count": 4,
+                "display": "AIM-7M",
+                "type": "weapons.missiles.AIM_7"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 0.805731,
+            "fuel_ok": false,
+            "gun_ok": true,
+            "gun_rounds": 940,
+            "life": 12,
+            "life0": 20,
+            "life_ok": true,
+            "life_percent": 60,
+            "pylons": {
+              "AIM-120B": {
+                "ok": true,
+                "read": 2,
+                "want": 2
+              },
+              "AIM-7M": {
+                "ok": true,
+                "read": 4,
+                "want": 4
+              },
+              "AIM-9M": {
+                "ok": true,
+                "read": 2,
+                "want": 2
+              },
+              "Fuel tank 610 gal": {
+                "read": "no row",
+                "want": 1
+              }
+            }
+          },
+          "np-e39-gun0": {
+            "ammo": [],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 0.2,
+            "fuel_ok": true,
+            "life": 20,
+            "life0": 20
+          },
+          "np-e39-gun25": {
+            "ammo": [
+              {
+                "count": 235,
+                "display": "20mm HE",
+                "type": "weapons.shells.M61_20_HE"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 0.8,
+            "fuel_ok": true,
+            "gun_ok": true,
+            "gun_rounds": 235,
+            "life": 20,
+            "life0": 20,
+            "life_ok": false,
+            "life_percent": 100
+          },
+          "np-e39-heli": {
+            "ammo": [],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 0.5,
+            "fuel_ok": true,
+            "life": 6,
+            "life0": 12,
+            "life_ok": true,
+            "life_percent": 50
+          },
+          "np-e39-m113": {
+            "ammo": [
+              {
+                "count": 104,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7_T"
+              },
+              {
+                "count": 404,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 1.2,
+            "life0": 3,
+            "life_ok": true,
+            "life_percent": 40
+          },
+          "np-e39-perry": {
+            "ammo": [
+              {
+                "count": 416,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7_T"
+              },
+              {
+                "count": 1616,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7"
+              },
+              {
+                "count": 460,
+                "display": "M792 (25mm HEI-T)",
+                "type": "weapons.shells.M242_25_HE_M792"
+              },
+              {
+                "count": 142,
+                "display": "M791 (25mm APDS-T)",
+                "type": "weapons.shells.M242_25_AP_M791"
+              },
+              {
+                "count": 11629,
+                "display": "20mm HE",
+                "type": "weapons.shells.M61_20_HE_gr"
+              },
+              {
+                "count": 3880,
+                "display": "20mm AP",
+                "type": "weapons.shells.M61_20_AP_gr"
+              },
+              {
+                "count": 24,
+                "display": "SM-1",
+                "type": "SM_1"
+              },
+              {
+                "count": 16,
+                "display": "RGM-84D Harpoon",
+                "type": "weapons.missiles.AGM_84S"
+              },
+              {
+                "count": 180,
+                "display": "76mm HE",
+                "type": "weapons.shells.MK75_76"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 1680,
+            "life0": 2100,
+            "life_ok": true,
+            "life_percent": 80
+          },
+          "np-e39-perry50": {
+            "ammo": [
+              {
+                "count": 416,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7_T"
+              },
+              {
+                "count": 1616,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7"
+              },
+              {
+                "count": 460,
+                "display": "M792 (25mm HEI-T)",
+                "type": "weapons.shells.M242_25_HE_M792"
+              },
+              {
+                "count": 142,
+                "display": "M791 (25mm APDS-T)",
+                "type": "weapons.shells.M242_25_AP_M791"
+              },
+              {
+                "count": 11629,
+                "display": "20mm HE",
+                "type": "weapons.shells.M61_20_HE_gr"
+              },
+              {
+                "count": 3880,
+                "display": "20mm AP",
+                "type": "weapons.shells.M61_20_AP_gr"
+              },
+              {
+                "count": 24,
+                "display": "SM-1",
+                "type": "SM_1"
+              },
+              {
+                "count": 16,
+                "display": "RGM-84D Harpoon",
+                "type": "weapons.missiles.AGM_84S"
+              },
+              {
+                "count": 180,
+                "display": "76mm HE",
+                "type": "weapons.shells.MK75_76"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 2100,
+            "life0": 2100,
+            "life_ok": false,
+            "life_percent": 100
+          },
+          "np-e39-reduced": {
+            "ammo": [
+              {
+                "count": 470,
+                "display": "20mm HE",
+                "type": "weapons.shells.M61_20_HE"
+              },
+              {
+                "count": 1,
+                "display": "AIM-120B",
+                "type": "weapons.missiles.AIM_120"
+              },
+              {
+                "count": 1,
+                "display": "AIM-9M",
+                "type": "AIM_9"
+              },
+              {
+                "count": 2,
+                "display": "AIM-7M",
+                "type": "weapons.missiles.AIM_7"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 0.37,
+            "fuel_ok": true,
+            "gun_ok": true,
+            "gun_rounds": 470,
+            "life": 12,
+            "life0": 20,
+            "life_ok": true,
+            "life_percent": 60,
+            "pylons": {
+              "AIM-120B": {
+                "ok": true,
+                "read": 1,
+                "want": 1
+              },
+              "AIM-7M": {
+                "ok": true,
+                "read": 2,
+                "want": 2
+              },
+              "AIM-9M": {
+                "ok": true,
+                "read": 1,
+                "want": 1
+              }
+            }
+          },
+          "np-e39-t72": {
+            "ammo": [
+              {
+                "count": 23,
+                "display": "3BM42 (125mm APFSDS-T)",
+                "type": "weapons.shells.2A46M_125_AP"
+              },
+              {
+                "count": 18,
+                "display": "3OF26 (125mm HE)",
+                "type": "weapons.shells.2A46M_125_HE"
+              },
+              {
+                "count": 7,
+                "display": "AT-11 Sniper",
+                "type": "weapons.missiles.SVIR"
+              },
+              {
+                "count": 407,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54"
+              },
+              {
+                "count": 1607,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54_NOTRACER"
+              },
+              {
+                "count": 65,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108_T"
+              },
+              {
+                "count": 245,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 10,
+            "life0": 25,
+            "life_ok": true,
+            "life_percent": 40
+          },
+          "np-e39-t72ammo": {
+            "ammo": [
+              {
+                "count": 23,
+                "display": "3BM42 (125mm APFSDS-T)",
+                "type": "weapons.shells.2A46M_125_AP"
+              },
+              {
+                "count": 8,
+                "display": "3OF26 (125mm HE)",
+                "type": "weapons.shells.2A46M_125_HE"
+              },
+              {
+                "count": 7,
+                "display": "AT-11 Sniper",
+                "type": "weapons.missiles.SVIR"
+              },
+              {
+                "count": 407,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54"
+              },
+              {
+                "count": 1607,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54_NOTRACER"
+              },
+              {
+                "count": 65,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108_T"
+              },
+              {
+                "count": 245,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108"
+              }
+            ],
+            "ammo_asked": {
+              "2A46M_125_HE": 7
+            },
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 25,
+            "life0": 25
+          },
+          "np-e39-t72zero": {
+            "ammo": [
+              {
+                "count": 23,
+                "display": "3BM42 (125mm APFSDS-T)",
+                "type": "weapons.shells.2A46M_125_AP"
+              },
+              {
+                "count": 7,
+                "display": "AT-11 Sniper",
+                "type": "weapons.missiles.SVIR"
+              },
+              {
+                "count": 407,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54"
+              },
+              {
+                "count": 1607,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54_NOTRACER"
+              },
+              {
+                "count": 65,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108_T"
+              },
+              {
+                "count": 245,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108"
+              }
+            ],
+            "ammo_asked": {
+              "2A46M_125_HE": 0
+            },
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 25,
+            "life0": 25
+          }
+        }
+      },
+      {
+        "name": "read_running_1_s",
+        "value": {
+          "np-e39-abrams": {
+            "ammo": [
+              {
+                "count": 26,
+                "display": "M829A2 (120mm APFSDS-T)",
+                "type": "weapons.shells.M256_120_AP"
+              },
+              {
+                "count": 18,
+                "display": "M830 (120mm HEAT-MP-T)",
+                "type": "weapons.shells.M256_120_HE"
+              },
+              {
+                "count": 560,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x51tr"
+              },
+              {
+                "count": 2240,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x51"
+              },
+              {
+                "count": 104,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7_T"
+              },
+              {
+                "count": 404,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 32,
+            "life0": 32,
+            "life_ok": false,
+            "life_percent": 100
+          },
+          "np-e39-boat": {
+            "ammo": [
+              {
+                "count": 109,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108_T"
+              },
+              {
+                "count": 409,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 1.28,
+            "life0": 1.6,
+            "life_ok": true,
+            "life_percent": 80
+          },
+          "np-e39-full": {
+            "ammo": [
+              {
+                "count": 940,
+                "display": "20mm HE",
+                "type": "weapons.shells.M61_20_HE"
+              },
+              {
+                "count": 2,
+                "display": "AIM-120B",
+                "type": "weapons.missiles.AIM_120"
+              },
+              {
+                "count": 2,
+                "display": "AIM-9M",
+                "type": "AIM_9"
+              },
+              {
+                "count": 4,
+                "display": "AIM-7M",
+                "type": "weapons.missiles.AIM_7"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 0.805699,
+            "fuel_ok": false,
+            "gun_ok": true,
+            "gun_rounds": 940,
+            "life": 12,
+            "life0": 20,
+            "life_ok": true,
+            "life_percent": 60,
+            "pylons": {
+              "AIM-120B": {
+                "ok": true,
+                "read": 2,
+                "want": 2
+              },
+              "AIM-7M": {
+                "ok": true,
+                "read": 4,
+                "want": 4
+              },
+              "AIM-9M": {
+                "ok": true,
+                "read": 2,
+                "want": 2
+              },
+              "Fuel tank 610 gal": {
+                "read": "no row",
+                "want": 1
+              }
+            }
+          },
+          "np-e39-gun0": {
+            "ammo": [],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 0.199974,
+            "fuel_ok": true,
+            "life": 20,
+            "life0": 20
+          },
+          "np-e39-gun25": {
+            "ammo": [
+              {
+                "count": 235,
+                "display": "20mm HE",
+                "type": "weapons.shells.M61_20_HE"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 0.799975,
+            "fuel_ok": true,
+            "gun_ok": true,
+            "gun_rounds": 235,
+            "life": 20,
+            "life0": 20,
+            "life_ok": false,
+            "life_percent": 100
+          },
+          "np-e39-heli": {
+            "ammo": [],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 0.499862,
+            "fuel_ok": true,
+            "life": 6,
+            "life0": 12,
+            "life_ok": true,
+            "life_percent": 50
+          },
+          "np-e39-m113": {
+            "ammo": [
+              {
+                "count": 104,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7_T"
+              },
+              {
+                "count": 404,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 1.2,
+            "life0": 3,
+            "life_ok": true,
+            "life_percent": 40
+          },
+          "np-e39-perry": {
+            "ammo": [
+              {
+                "count": 416,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7_T"
+              },
+              {
+                "count": 1616,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7"
+              },
+              {
+                "count": 460,
+                "display": "M792 (25mm HEI-T)",
+                "type": "weapons.shells.M242_25_HE_M792"
+              },
+              {
+                "count": 142,
+                "display": "M791 (25mm APDS-T)",
+                "type": "weapons.shells.M242_25_AP_M791"
+              },
+              {
+                "count": 11629,
+                "display": "20mm HE",
+                "type": "weapons.shells.M61_20_HE_gr"
+              },
+              {
+                "count": 3880,
+                "display": "20mm AP",
+                "type": "weapons.shells.M61_20_AP_gr"
+              },
+              {
+                "count": 24,
+                "display": "SM-1",
+                "type": "SM_1"
+              },
+              {
+                "count": 16,
+                "display": "RGM-84D Harpoon",
+                "type": "weapons.missiles.AGM_84S"
+              },
+              {
+                "count": 180,
+                "display": "76mm HE",
+                "type": "weapons.shells.MK75_76"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 1680,
+            "life0": 2100,
+            "life_ok": true,
+            "life_percent": 80
+          },
+          "np-e39-perry50": {
+            "ammo": [
+              {
+                "count": 416,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7_T"
+              },
+              {
+                "count": 1616,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7"
+              },
+              {
+                "count": 460,
+                "display": "M792 (25mm HEI-T)",
+                "type": "weapons.shells.M242_25_HE_M792"
+              },
+              {
+                "count": 142,
+                "display": "M791 (25mm APDS-T)",
+                "type": "weapons.shells.M242_25_AP_M791"
+              },
+              {
+                "count": 11629,
+                "display": "20mm HE",
+                "type": "weapons.shells.M61_20_HE_gr"
+              },
+              {
+                "count": 3880,
+                "display": "20mm AP",
+                "type": "weapons.shells.M61_20_AP_gr"
+              },
+              {
+                "count": 24,
+                "display": "SM-1",
+                "type": "SM_1"
+              },
+              {
+                "count": 16,
+                "display": "RGM-84D Harpoon",
+                "type": "weapons.missiles.AGM_84S"
+              },
+              {
+                "count": 180,
+                "display": "76mm HE",
+                "type": "weapons.shells.MK75_76"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 2100,
+            "life0": 2100,
+            "life_ok": false,
+            "life_percent": 100
+          },
+          "np-e39-reduced": {
+            "ammo": [
+              {
+                "count": 470,
+                "display": "20mm HE",
+                "type": "weapons.shells.M61_20_HE"
+              },
+              {
+                "count": 1,
+                "display": "AIM-120B",
+                "type": "weapons.missiles.AIM_120"
+              },
+              {
+                "count": 1,
+                "display": "AIM-9M",
+                "type": "AIM_9"
+              },
+              {
+                "count": 2,
+                "display": "AIM-7M",
+                "type": "weapons.missiles.AIM_7"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 0.369972,
+            "fuel_ok": true,
+            "gun_ok": true,
+            "gun_rounds": 470,
+            "life": 12,
+            "life0": 20,
+            "life_ok": true,
+            "life_percent": 60,
+            "pylons": {
+              "AIM-120B": {
+                "ok": true,
+                "read": 1,
+                "want": 1
+              },
+              "AIM-7M": {
+                "ok": true,
+                "read": 2,
+                "want": 2
+              },
+              "AIM-9M": {
+                "ok": true,
+                "read": 1,
+                "want": 1
+              }
+            }
+          },
+          "np-e39-t72": {
+            "ammo": [
+              {
+                "count": 23,
+                "display": "3BM42 (125mm APFSDS-T)",
+                "type": "weapons.shells.2A46M_125_AP"
+              },
+              {
+                "count": 18,
+                "display": "3OF26 (125mm HE)",
+                "type": "weapons.shells.2A46M_125_HE"
+              },
+              {
+                "count": 7,
+                "display": "AT-11 Sniper",
+                "type": "weapons.missiles.SVIR"
+              },
+              {
+                "count": 407,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54"
+              },
+              {
+                "count": 1607,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54_NOTRACER"
+              },
+              {
+                "count": 65,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108_T"
+              },
+              {
+                "count": 245,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 10,
+            "life0": 25,
+            "life_ok": true,
+            "life_percent": 40
+          },
+          "np-e39-t72ammo": {
+            "ammo": [
+              {
+                "count": 23,
+                "display": "3BM42 (125mm APFSDS-T)",
+                "type": "weapons.shells.2A46M_125_AP"
+              },
+              {
+                "count": 8,
+                "display": "3OF26 (125mm HE)",
+                "type": "weapons.shells.2A46M_125_HE"
+              },
+              {
+                "count": 7,
+                "display": "AT-11 Sniper",
+                "type": "weapons.missiles.SVIR"
+              },
+              {
+                "count": 407,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54"
+              },
+              {
+                "count": 1607,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54_NOTRACER"
+              },
+              {
+                "count": 65,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108_T"
+              },
+              {
+                "count": 245,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108"
+              }
+            ],
+            "ammo_asked": {
+              "2A46M_125_HE": 7
+            },
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 25,
+            "life0": 25
+          },
+          "np-e39-t72zero": {
+            "ammo": [
+              {
+                "count": 23,
+                "display": "3BM42 (125mm APFSDS-T)",
+                "type": "weapons.shells.2A46M_125_AP"
+              },
+              {
+                "count": 7,
+                "display": "AT-11 Sniper",
+                "type": "weapons.missiles.SVIR"
+              },
+              {
+                "count": 407,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54"
+              },
+              {
+                "count": 1607,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54_NOTRACER"
+              },
+              {
+                "count": 65,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108_T"
+              },
+              {
+                "count": 245,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108"
+              }
+            ],
+            "ammo_asked": {
+              "2A46M_125_HE": 0
+            },
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 25,
+            "life0": 25
+          }
+        }
+      },
+      {
+        "name": "running_life",
+        "value": {
+          "np-e39-abrams": "ok",
+          "np-e39-gun25": "ok",
+          "np-e39-perry50": "ok"
+        }
+      },
+      {
+        "name": "read_life_1_s",
+        "value": {
+          "np-e39-abrams": {
+            "ammo": [
+              {
+                "count": 26,
+                "display": "M829A2 (120mm APFSDS-T)",
+                "type": "weapons.shells.M256_120_AP"
+              },
+              {
+                "count": 18,
+                "display": "M830 (120mm HEAT-MP-T)",
+                "type": "weapons.shells.M256_120_HE"
+              },
+              {
+                "count": 560,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x51tr"
+              },
+              {
+                "count": 2240,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x51"
+              },
+              {
+                "count": 104,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7_T"
+              },
+              {
+                "count": 404,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 22.4,
+            "life0": 32,
+            "life_ok": true,
+            "life_percent": 70
+          },
+          "np-e39-boat": {
+            "ammo": [
+              {
+                "count": 109,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108_T"
+              },
+              {
+                "count": 409,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 1.28,
+            "life0": 1.6,
+            "life_ok": true,
+            "life_percent": 80
+          },
+          "np-e39-full": {
+            "ammo": [
+              {
+                "count": 940,
+                "display": "20mm HE",
+                "type": "weapons.shells.M61_20_HE"
+              },
+              {
+                "count": 2,
+                "display": "AIM-120B",
+                "type": "weapons.missiles.AIM_120"
+              },
+              {
+                "count": 2,
+                "display": "AIM-9M",
+                "type": "AIM_9"
+              },
+              {
+                "count": 4,
+                "display": "AIM-7M",
+                "type": "weapons.missiles.AIM_7"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 0.805608,
+            "fuel_ok": false,
+            "gun_ok": true,
+            "gun_rounds": 940,
+            "life": 12,
+            "life0": 20,
+            "life_ok": true,
+            "life_percent": 60,
+            "pylons": {
+              "AIM-120B": {
+                "ok": true,
+                "read": 2,
+                "want": 2
+              },
+              "AIM-7M": {
+                "ok": true,
+                "read": 4,
+                "want": 4
+              },
+              "AIM-9M": {
+                "ok": true,
+                "read": 2,
+                "want": 2
+              },
+              "Fuel tank 610 gal": {
+                "read": "no row",
+                "want": 1
+              }
+            }
+          },
+          "np-e39-gun0": {
+            "ammo": [],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 0.199897,
+            "fuel_ok": true,
+            "life": 20,
+            "life0": 20
+          },
+          "np-e39-gun25": {
+            "ammo": [
+              {
+                "count": 235,
+                "display": "20mm HE",
+                "type": "weapons.shells.M61_20_HE"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 0.799903,
+            "fuel_ok": true,
+            "gun_ok": true,
+            "gun_rounds": 235,
+            "life": 6,
+            "life0": 20,
+            "life_ok": true,
+            "life_percent": 30
+          },
+          "np-e39-heli": {
+            "ammo": [],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 0.49972,
+            "fuel_ok": true,
+            "life": 6,
+            "life0": 12,
+            "life_ok": true,
+            "life_percent": 50
+          },
+          "np-e39-m113": {
+            "ammo": [
+              {
+                "count": 104,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7_T"
+              },
+              {
+                "count": 404,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 1.2,
+            "life0": 3,
+            "life_ok": true,
+            "life_percent": 40
+          },
+          "np-e39-perry": {
+            "ammo": [
+              {
+                "count": 416,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7_T"
+              },
+              {
+                "count": 1616,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7"
+              },
+              {
+                "count": 460,
+                "display": "M792 (25mm HEI-T)",
+                "type": "weapons.shells.M242_25_HE_M792"
+              },
+              {
+                "count": 142,
+                "display": "M791 (25mm APDS-T)",
+                "type": "weapons.shells.M242_25_AP_M791"
+              },
+              {
+                "count": 11629,
+                "display": "20mm HE",
+                "type": "weapons.shells.M61_20_HE_gr"
+              },
+              {
+                "count": 3880,
+                "display": "20mm AP",
+                "type": "weapons.shells.M61_20_AP_gr"
+              },
+              {
+                "count": 24,
+                "display": "SM-1",
+                "type": "SM_1"
+              },
+              {
+                "count": 16,
+                "display": "RGM-84D Harpoon",
+                "type": "weapons.missiles.AGM_84S"
+              },
+              {
+                "count": 180,
+                "display": "76mm HE",
+                "type": "weapons.shells.MK75_76"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 1680,
+            "life0": 2100,
+            "life_ok": true,
+            "life_percent": 80
+          },
+          "np-e39-perry50": {
+            "ammo": [
+              {
+                "count": 416,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7_T"
+              },
+              {
+                "count": 1616,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7"
+              },
+              {
+                "count": 460,
+                "display": "M792 (25mm HEI-T)",
+                "type": "weapons.shells.M242_25_HE_M792"
+              },
+              {
+                "count": 142,
+                "display": "M791 (25mm APDS-T)",
+                "type": "weapons.shells.M242_25_AP_M791"
+              },
+              {
+                "count": 11629,
+                "display": "20mm HE",
+                "type": "weapons.shells.M61_20_HE_gr"
+              },
+              {
+                "count": 3880,
+                "display": "20mm AP",
+                "type": "weapons.shells.M61_20_AP_gr"
+              },
+              {
+                "count": 24,
+                "display": "SM-1",
+                "type": "SM_1"
+              },
+              {
+                "count": 16,
+                "display": "RGM-84D Harpoon",
+                "type": "weapons.missiles.AGM_84S"
+              },
+              {
+                "count": 180,
+                "display": "76mm HE",
+                "type": "weapons.shells.MK75_76"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 1050,
+            "life0": 2100,
+            "life_ok": true,
+            "life_percent": 50
+          },
+          "np-e39-reduced": {
+            "ammo": [
+              {
+                "count": 470,
+                "display": "20mm HE",
+                "type": "weapons.shells.M61_20_HE"
+              },
+              {
+                "count": 1,
+                "display": "AIM-120B",
+                "type": "weapons.missiles.AIM_120"
+              },
+              {
+                "count": 1,
+                "display": "AIM-9M",
+                "type": "AIM_9"
+              },
+              {
+                "count": 2,
+                "display": "AIM-7M",
+                "type": "weapons.missiles.AIM_7"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 0.369892,
+            "fuel_ok": true,
+            "gun_ok": true,
+            "gun_rounds": 470,
+            "life": 12,
+            "life0": 20,
+            "life_ok": true,
+            "life_percent": 60,
+            "pylons": {
+              "AIM-120B": {
+                "ok": true,
+                "read": 1,
+                "want": 1
+              },
+              "AIM-7M": {
+                "ok": true,
+                "read": 2,
+                "want": 2
+              },
+              "AIM-9M": {
+                "ok": true,
+                "read": 1,
+                "want": 1
+              }
+            }
+          },
+          "np-e39-t72": {
+            "ammo": [
+              {
+                "count": 23,
+                "display": "3BM42 (125mm APFSDS-T)",
+                "type": "weapons.shells.2A46M_125_AP"
+              },
+              {
+                "count": 18,
+                "display": "3OF26 (125mm HE)",
+                "type": "weapons.shells.2A46M_125_HE"
+              },
+              {
+                "count": 7,
+                "display": "AT-11 Sniper",
+                "type": "weapons.missiles.SVIR"
+              },
+              {
+                "count": 407,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54"
+              },
+              {
+                "count": 1607,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54_NOTRACER"
+              },
+              {
+                "count": 65,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108_T"
+              },
+              {
+                "count": 245,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 10,
+            "life0": 25,
+            "life_ok": true,
+            "life_percent": 40
+          },
+          "np-e39-t72ammo": {
+            "ammo": [
+              {
+                "count": 23,
+                "display": "3BM42 (125mm APFSDS-T)",
+                "type": "weapons.shells.2A46M_125_AP"
+              },
+              {
+                "count": 8,
+                "display": "3OF26 (125mm HE)",
+                "type": "weapons.shells.2A46M_125_HE"
+              },
+              {
+                "count": 7,
+                "display": "AT-11 Sniper",
+                "type": "weapons.missiles.SVIR"
+              },
+              {
+                "count": 407,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54"
+              },
+              {
+                "count": 1607,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54_NOTRACER"
+              },
+              {
+                "count": 65,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108_T"
+              },
+              {
+                "count": 245,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108"
+              }
+            ],
+            "ammo_asked": {
+              "2A46M_125_HE": 7
+            },
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 25,
+            "life0": 25
+          },
+          "np-e39-t72zero": {
+            "ammo": [
+              {
+                "count": 23,
+                "display": "3BM42 (125mm APFSDS-T)",
+                "type": "weapons.shells.2A46M_125_AP"
+              },
+              {
+                "count": 7,
+                "display": "AT-11 Sniper",
+                "type": "weapons.missiles.SVIR"
+              },
+              {
+                "count": 407,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54"
+              },
+              {
+                "count": 1607,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54_NOTRACER"
+              },
+              {
+                "count": 65,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108_T"
+              },
+              {
+                "count": 245,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108"
+              }
+            ],
+            "ammo_asked": {
+              "2A46M_125_HE": 0
+            },
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 25,
+            "life0": 25
+          }
+        }
+      },
+      {
+        "name": "read_life_5_s",
+        "value": {
+          "np-e39-abrams": {
+            "ammo": [
+              {
+                "count": 26,
+                "display": "M829A2 (120mm APFSDS-T)",
+                "type": "weapons.shells.M256_120_AP"
+              },
+              {
+                "count": 18,
+                "display": "M830 (120mm HEAT-MP-T)",
+                "type": "weapons.shells.M256_120_HE"
+              },
+              {
+                "count": 560,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x51tr"
+              },
+              {
+                "count": 2240,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x51"
+              },
+              {
+                "count": 104,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7_T"
+              },
+              {
+                "count": 404,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 22.4,
+            "life0": 32,
+            "life_ok": true,
+            "life_percent": 70
+          },
+          "np-e39-boat": {
+            "ammo": [
+              {
+                "count": 109,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108_T"
+              },
+              {
+                "count": 409,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 1.28,
+            "life0": 1.6,
+            "life_ok": true,
+            "life_percent": 80
+          },
+          "np-e39-full": {
+            "ammo": [
+              {
+                "count": 940,
+                "display": "20mm HE",
+                "type": "weapons.shells.M61_20_HE"
+              },
+              {
+                "count": 2,
+                "display": "AIM-120B",
+                "type": "weapons.missiles.AIM_120"
+              },
+              {
+                "count": 2,
+                "display": "AIM-9M",
+                "type": "AIM_9"
+              },
+              {
+                "count": 4,
+                "display": "AIM-7M",
+                "type": "weapons.missiles.AIM_7"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 0.805009,
+            "fuel_ok": false,
+            "gun_ok": true,
+            "gun_rounds": 940,
+            "life": 12,
+            "life0": 20,
+            "life_ok": true,
+            "life_percent": 60,
+            "pylons": {
+              "AIM-120B": {
+                "ok": true,
+                "read": 2,
+                "want": 2
+              },
+              "AIM-7M": {
+                "ok": true,
+                "read": 4,
+                "want": 4
+              },
+              "AIM-9M": {
+                "ok": true,
+                "read": 2,
+                "want": 2
+              },
+              "Fuel tank 610 gal": {
+                "read": "no row",
+                "want": 1
+              }
+            }
+          },
+          "np-e39-gun0": {
+            "ammo": [],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 0.199459,
+            "fuel_ok": true,
+            "life": 20,
+            "life0": 20
+          },
+          "np-e39-gun25": {
+            "ammo": [
+              {
+                "count": 235,
+                "display": "20mm HE",
+                "type": "weapons.shells.M61_20_HE"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 0.79945,
+            "fuel_ok": true,
+            "gun_ok": true,
+            "gun_rounds": 235,
+            "life": 6,
+            "life0": 20,
+            "life_ok": true,
+            "life_percent": 30
+          },
+          "np-e39-heli": {
+            "ammo": [],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 0.499217,
+            "fuel_ok": true,
+            "life": 6,
+            "life0": 12,
+            "life_ok": true,
+            "life_percent": 50
+          },
+          "np-e39-m113": {
+            "ammo": [
+              {
+                "count": 104,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7_T"
+              },
+              {
+                "count": 404,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 1.2,
+            "life0": 3,
+            "life_ok": true,
+            "life_percent": 40
+          },
+          "np-e39-perry": {
+            "ammo": [
+              {
+                "count": 416,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7_T"
+              },
+              {
+                "count": 1616,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7"
+              },
+              {
+                "count": 460,
+                "display": "M792 (25mm HEI-T)",
+                "type": "weapons.shells.M242_25_HE_M792"
+              },
+              {
+                "count": 142,
+                "display": "M791 (25mm APDS-T)",
+                "type": "weapons.shells.M242_25_AP_M791"
+              },
+              {
+                "count": 11629,
+                "display": "20mm HE",
+                "type": "weapons.shells.M61_20_HE_gr"
+              },
+              {
+                "count": 3880,
+                "display": "20mm AP",
+                "type": "weapons.shells.M61_20_AP_gr"
+              },
+              {
+                "count": 24,
+                "display": "SM-1",
+                "type": "SM_1"
+              },
+              {
+                "count": 16,
+                "display": "RGM-84D Harpoon",
+                "type": "weapons.missiles.AGM_84S"
+              },
+              {
+                "count": 180,
+                "display": "76mm HE",
+                "type": "weapons.shells.MK75_76"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 1680,
+            "life0": 2100,
+            "life_ok": true,
+            "life_percent": 80
+          },
+          "np-e39-perry50": {
+            "ammo": [
+              {
+                "count": 416,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7_T"
+              },
+              {
+                "count": 1616,
+                "display": "12.7mm",
+                "type": "weapons.shells.M2_12_7"
+              },
+              {
+                "count": 460,
+                "display": "M792 (25mm HEI-T)",
+                "type": "weapons.shells.M242_25_HE_M792"
+              },
+              {
+                "count": 142,
+                "display": "M791 (25mm APDS-T)",
+                "type": "weapons.shells.M242_25_AP_M791"
+              },
+              {
+                "count": 11629,
+                "display": "20mm HE",
+                "type": "weapons.shells.M61_20_HE_gr"
+              },
+              {
+                "count": 3880,
+                "display": "20mm AP",
+                "type": "weapons.shells.M61_20_AP_gr"
+              },
+              {
+                "count": 24,
+                "display": "SM-1",
+                "type": "SM_1"
+              },
+              {
+                "count": 16,
+                "display": "RGM-84D Harpoon",
+                "type": "weapons.missiles.AGM_84S"
+              },
+              {
+                "count": 180,
+                "display": "76mm HE",
+                "type": "weapons.shells.MK75_76"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 1050,
+            "life0": 2100,
+            "life_ok": true,
+            "life_percent": 50
+          },
+          "np-e39-reduced": {
+            "ammo": [
+              {
+                "count": 470,
+                "display": "20mm HE",
+                "type": "weapons.shells.M61_20_HE"
+              },
+              {
+                "count": 1,
+                "display": "AIM-120B",
+                "type": "weapons.missiles.AIM_120"
+              },
+              {
+                "count": 1,
+                "display": "AIM-9M",
+                "type": "AIM_9"
+              },
+              {
+                "count": 2,
+                "display": "AIM-7M",
+                "type": "weapons.missiles.AIM_7"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 0.369408,
+            "fuel_ok": true,
+            "gun_ok": true,
+            "gun_rounds": 470,
+            "life": 12,
+            "life0": 20,
+            "life_ok": true,
+            "life_percent": 60,
+            "pylons": {
+              "AIM-120B": {
+                "ok": true,
+                "read": 1,
+                "want": 1
+              },
+              "AIM-7M": {
+                "ok": true,
+                "read": 2,
+                "want": 2
+              },
+              "AIM-9M": {
+                "ok": true,
+                "read": 1,
+                "want": 1
+              }
+            }
+          },
+          "np-e39-t72": {
+            "ammo": [
+              {
+                "count": 23,
+                "display": "3BM42 (125mm APFSDS-T)",
+                "type": "weapons.shells.2A46M_125_AP"
+              },
+              {
+                "count": 18,
+                "display": "3OF26 (125mm HE)",
+                "type": "weapons.shells.2A46M_125_HE"
+              },
+              {
+                "count": 7,
+                "display": "AT-11 Sniper",
+                "type": "weapons.missiles.SVIR"
+              },
+              {
+                "count": 407,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54"
+              },
+              {
+                "count": 1607,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54_NOTRACER"
+              },
+              {
+                "count": 65,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108_T"
+              },
+              {
+                "count": 245,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108"
+              }
+            ],
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 10,
+            "life0": 25,
+            "life_ok": true,
+            "life_percent": 40
+          },
+          "np-e39-t72ammo": {
+            "ammo": [
+              {
+                "count": 23,
+                "display": "3BM42 (125mm APFSDS-T)",
+                "type": "weapons.shells.2A46M_125_AP"
+              },
+              {
+                "count": 8,
+                "display": "3OF26 (125mm HE)",
+                "type": "weapons.shells.2A46M_125_HE"
+              },
+              {
+                "count": 7,
+                "display": "AT-11 Sniper",
+                "type": "weapons.missiles.SVIR"
+              },
+              {
+                "count": 407,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54"
+              },
+              {
+                "count": 1607,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54_NOTRACER"
+              },
+              {
+                "count": 65,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108_T"
+              },
+              {
+                "count": 245,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108"
+              }
+            ],
+            "ammo_asked": {
+              "2A46M_125_HE": 7
+            },
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 25,
+            "life0": 25
+          },
+          "np-e39-t72zero": {
+            "ammo": [
+              {
+                "count": 23,
+                "display": "3BM42 (125mm APFSDS-T)",
+                "type": "weapons.shells.2A46M_125_AP"
+              },
+              {
+                "count": 7,
+                "display": "AT-11 Sniper",
+                "type": "weapons.missiles.SVIR"
+              },
+              {
+                "count": 407,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54"
+              },
+              {
+                "count": 1607,
+                "display": "7.62mm",
+                "type": "weapons.shells.7_62x54_NOTRACER"
+              },
+              {
+                "count": 65,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108_T"
+              },
+              {
+                "count": 245,
+                "display": "12.7mm",
+                "type": "weapons.shells.Utes_12_7x108"
+              }
+            ],
+            "ammo_asked": {
+              "2A46M_125_HE": 0
+            },
+            "dead": false,
+            "exists": true,
+            "found": true,
+            "fuel": 1,
+            "life": 25,
+            "life0": 25
+          }
+        }
+      },
+      {
+        "name": "cleared",
+        "value": 13
+      }
+    ]
+  },
+  "guns": {
+    "script": "lua/experiments/e39/guns.lua",
+    "state": "server",
+    "observations": [
+      {
+        "name": "guns_F-15C",
+        "supply": [
+          {
+            "count": 940,
+            "count1": null,
+            "count2": null
+          }
+        ]
+      },
+      {
+        "name": "guns_UH-1H",
+        "supply": "nil"
+      },
+      {
+        "name": "guns_A-10C",
+        "supply": [
+          {
+            "count": 1150,
+            "count1": null,
+            "count2": null
+          }
+        ]
+      },
+      {
+        "name": "guns_Su-25T",
+        "supply": [
+          {
+            "count": 250,
+            "count1": null,
+            "count2": null
+          }
+        ]
+      },
+      {
+        "name": "guns_Ka-50",
+        "supply": [
+          {
+            "count": null,
+            "count1": 240,
+            "count2": 220
+          }
+        ]
+      },
+      {
+        "name": "guns_MiG-29A",
+        "supply": [
+          {
+            "count": 150,
+            "count1": null,
+            "count2": null
+          }
+        ]
+      }
+    ]
+  }
+}
