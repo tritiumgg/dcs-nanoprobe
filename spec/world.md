@@ -30,8 +30,14 @@ entities by `EntityId` within a campaign.
 | Mark, drawing, menu item | `EntityId` | yes | Player-facing objects. Set again after every mission load. |
 | Extension | name | yes | A registered Lua chunk (spec/commands.md, "Extensions") |
 
-The platform never creates or destroys an airbase or a warehouse. Their owner and stock
-are settable. The store keeps a desired owner only for an airbase the controller set,
+The platform creates an airbase and its warehouse only as part of a static DCS makes
+one of: a FARP. `coalition.addStaticObject` of a FARP makes an airbase under the static's
+name, with the static's ID, and its own empty limited warehouse (LIVE,
+docs/results/2026-11-16-person-tests-2.md). Such an airbase is listed and sampled like
+the mission's from its `STATIC_SPAWN` until the static is destroyed or dies, when the
+sidecar drops it; a new mission generation drops it until the static is spawned again,
+and its warehouse starts empty each time. The platform destroys an airbase only by
+destroying its FARP. Owner and stock are settable. The store keeps a desired owner only for an airbase the controller set,
 and a desired count only for a warehouse item the controller set. The reconciler sends
 `AIRBASE_OWNER` or `WAREHOUSE_SET` when the agent's latest sample differs from it, once
 per desired revision and mission generation. A capture by DCS or stock DCS uses is a

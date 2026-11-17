@@ -2,9 +2,9 @@
 //! link, on a made-up clock.
 
 use super::*;
-use nanoprobe_transport::records::{Ammo, EnumEnd, ObjectGone};
+use nanoprobe_transport::records::{Ammo, EnumEnd, ObjectGone, Warehouse};
 use proptest::prelude::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A recorder in place of the link.
 struct Rec {
@@ -104,6 +104,8 @@ struct World {
     objects: BTreeMap<u64, Obj>,
     births: Vec<u64>,
     airbases: usize,
+    /// Airbase indexes the shim reports as tombstones: an empty name.
+    gone_bases: Vec<u32>,
     /// The enumeration's list and how far it got.
     enum_list: Vec<u64>,
     enum_at: usize,
@@ -425,10 +427,14 @@ fn pump(s: &mut Sampler, rec: &mut Rec, w: &mut World, clock: &mut Clock) {
             }
             Tier::Warehouses => {
                 for &i in &slots {
-                    let a = Airbase {
-                        object: u64::from(i) + 1,
-                        coalition: 2,
-                        airbase: format!("base{i}"),
+                    let a = if w.gone_bases.contains(&i) {
+                        Airbase::default()
+                    } else {
+                        Airbase {
+                            object: u64::from(i) + 1,
+                            coalition: 2,
+                            airbase: format!("base{i}"),
+                        }
                     };
                     let t = clock.add(cost(plan.tier));
                     if s.airbase(rec, i, a, Some(Lv::Nil), || t) {
@@ -784,6 +790,31 @@ fn rates_meet_their_targets_and_the_mean_holds_at_2000_units() {
     assert!((4.5..6.0).contains(&vit), "vitals period {vit}");
     assert!((27.0..36.0).contains(&ammo), "ammo period {ammo}");
     assert!((54.0..72.0).contains(&wh), "warehouse period {wh}");
+}
+
+/// A spawned FARP that is gone stays in the shim's list as a tombstone, an
+/// empty name: the airbases after it keep their index, and nothing is
+/// written for it.
+#[test]
+fn a_tombstone_airbase_writes_nothing() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 110.0);
+    let mut w = world(10, 0, 3);
+    // Slots count from 0; the shim's list from 1.
+    w.gone_bases = vec![1];
+    run(&mut s, &mut rec, &mut w, 200.0, 110.0, 200.0);
+    let names: BTreeSet<String> = rec
+        .of(kind::AIRBASE)
+        .filter_map(|p| Airbase::decode(p).ok())
+        .map(|a| a.airbase)
+        .collect();
+    let want: BTreeSet<String> = ["base0", "base2"].iter().map(|n| n.to_string()).collect();
+    assert_eq!(names, want);
+    assert!(
+        rec.of(kind::WAREHOUSE)
+            .filter_map(|p| Warehouse::decode(p).ok())
+            .all(|x| x.airbase != "base1" && !x.airbase.is_empty())
+    );
 }
 
 /// The host sweeps the units' positions in `frame` with LIVE costs (S10: a

@@ -416,6 +416,9 @@ impl Mirror {
     /// added again later is not one the enumeration could remove.
     fn gone(&mut self, g: ObjectGone) {
         self.rows.remove(&g.object);
+        // A FARP static's airbase has the static's ID (LIVE,
+        // docs/results/2026-11-16-person-tests-2.md), and goes with it.
+        self.bases.retain(|_, b| b.object != g.object);
         if let Some(open) = &mut self.open {
             open.snapshot.remove(&g.object);
         }
@@ -1019,6 +1022,35 @@ mod tests {
         assert_eq!(b.coalition, 2);
         assert_eq!(b.stock, Some(Lv::Number(4.0)));
         assert_eq!(m.counters().samples_unknown_object, 1);
+    }
+
+    #[test]
+    fn a_farp_airbase_goes_with_its_static() {
+        let mut m = Mirror::new();
+        let ab = |object, name: &str| {
+            (
+                kind::AIRBASE,
+                Airbase {
+                    object,
+                    coalition: 2,
+                    airbase: name.into(),
+                }
+                .encode(),
+            )
+        };
+        feed(
+            &mut m,
+            &[
+                frame(1, 1.0),
+                ab(12, "Batumi"),
+                object(1_000_006, 0),
+                ab(1_000_006, "np#abc1"),
+            ],
+        );
+        assert_eq!(m.airbases().count(), 2);
+        feed(&mut m, &[gone(1_000_006)]);
+        let names: Vec<_> = m.airbases().map(|b| b.name.clone()).collect();
+        assert_eq!(names, vec!["Batumi".to_string()]);
     }
 
     /// A mirror at generation 1 holding units 1 to 3 from a whole enumeration.

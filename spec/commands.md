@@ -590,6 +590,21 @@ does not exist is `NOT_BOUND`. The sidecar keeps each group's options with the g
 
 The exists-guard applies as for a group.
 
+A FARP static (`category` `Heliports`) also makes an airbase of its name with its own
+warehouse, which the shim samples (spec/sampling.md; spec/world.md, "Kinds"). The table
+takes these keys from `StaticSpec.extra`; the sidecar adds none of them:
+
+| Key | Effect |
+|---|---|
+| `dynamicSpawn` | `true`: players may spawn aircraft at the FARP from its warehouse. Read only at spawn time; setting it later changes nothing (LIVE) |
+| `allowHotStart` | `true`: those spawns may start hot. Whether dynamic spawn needs it is UNVERIFIED; the LIVE run set it |
+| `dynamicCargo` | `true`: dynamic cargo at the FARP. Set in the LIVE run that offered a spawn; whether dynamic spawn needs it is UNVERIFIED |
+| `hidden` | `false`: the static shows on the clients' F10 map. A static added by script without it is hidden there (LIVE) |
+
+A dynamic spawn there takes an aircraft and fuel from the FARP's warehouse, which starts
+empty: the controller stocks it with `SetWarehouseStock` under the static's name (LIVE,
+a stocked FARP was offered and a spawn worked).
+
 ### Layout: AIRBASE_OWNER
 
 | Offset | Type | Field | Meaning |

@@ -810,6 +810,37 @@ scenario('world', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   expect(r[4], APPLIED, 'STATIC_DESTROY')
   expect(r[5], APPLIED, 'STATIC_DESTROY of nothing')
 
+  -- A FARP static makes an airbase: the shim samples it this generation. A
+  -- FARP spawned again under the name takes its entry; one that is gone, or
+  -- a static of the name that is no FARP, leaves a tombstone in its place.
+  local shim = server.__nanoprobe_shim
+  local before_bases = #shim.T.airbases
+  local FARP = 'np#hGxF'
+  local function farp(entity, rev)
+    return { op = 'STATIC_SPAWN', entity = entity, rev = rev, country = USA, name = FARP,
+      static = { name = FARP, type = 'FARP', category = 'Heliports', x = 900, y = 900, heading = 0,
+        dynamicSpawn = true, allowHotStart = true, dynamicCargo = true, hidden = false } }
+  end
+  r = run({ farp(15, 1) }, 'a FARP')
+  expect(r[1], APPLIED, 'STATIC_SPAWN of a FARP')
+  local entry = shim.T.airbases[before_bases + 1]
+  assert(#shim.T.airbases == before_bases + 1 and entry.spawned and entry.name == FARP and entry.id == r[1].object,
+    'the FARP is not in the airbase list')
+  assert(not shim.farp_gone(entry), 'a live FARP reads as gone')
+  r = run({ farp(15, 2) }, 'the FARP again')
+  expect(r[1], APPLIED, 'STATIC_SPAWN of the FARP again')
+  assert(#shim.T.airbases == before_bases + 1 and shim.T.airbases[before_bases + 1].id == r[1].object,
+    'the FARP spawned again did not take its entry')
+  r = run({ { op = 'STATIC_DESTROY', entity = 15 } }, 'the FARP destroyed')
+  expect(r[1], APPLIED, 'STATIC_DESTROY of the FARP')
+  ctx.run(0.2)
+  assert(shim.farp_gone(shim.T.airbases[before_bases + 1]), 'a destroyed FARP does not read as gone')
+  r = run({ farp(15, 3), { op = 'STATIC_SPAWN', entity = 15, rev = 4, country = USA, name = FARP,
+    static = { name = FARP, type = 'Barrier', x = 900, y = 900, heading = 0 } } }, 'a FARP then a barrier')
+  expect(r[2], APPLIED, 'STATIC_SPAWN of a barrier under the FARP name')
+  assert(#shim.T.airbases == before_bases + 1 and shim.T.airbases[before_bases + 1].gone,
+    'a static of the name that is no FARP left no tombstone')
+
   -- A 30-unit group with a dozen ammo rows each is captured, not TOO_LARGE.
   local BIG, names = 'np!hGx9', {}
   for i = 1, 30 do

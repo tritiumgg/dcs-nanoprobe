@@ -4300,7 +4300,9 @@ impl Sampler {
         now: impl FnOnce() -> Instant,
     ) -> bool {
         let i = self.batch.done;
-        if self.batch.slots.get(i) == Some(&index) {
+        // An empty name is the shim's tombstone for a spawned FARP that is
+        // gone: its index stays, and nothing is written for it.
+        if self.batch.slots.get(i) == Some(&index) && !airbase.airbase.is_empty() {
             let max = link.max_payload();
             let name = airbase.airbase.clone();
             let a = airbase.encode();

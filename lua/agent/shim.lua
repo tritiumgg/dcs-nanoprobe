@@ -846,14 +846,36 @@ local function stock(base)
   return n
 end
 
+-- Whether an airbase a spawned static made is gone: its static no longer
+-- exists, so it was destroyed or died. Its entry then stays as a tombstone,
+-- so the rows after it keep their index.
+local function farp_gone(base)
+  if base.gone then
+    return true
+  end
+  local ok, alive = pcall(function()
+    local s = StaticObject.getByName(base.name)
+    return s ~= nil and s:isExist() == true
+  end)
+  base.gone = not (ok and alive)
+  return base.gone
+end
+M.farp_gone = farp_gone
+
 local function warehouses(rows)
   for i = 1, rows do
     local index = buf[i]
     local base = T.airbases[index]
     local stop
-    if base then
+    if base and base.spawned and farp_gone(base) then
+      -- A tombstone: the agent writes no record for an empty name.
+      stop = agent.airbase(index, 0, 0, '', false)
+    elseif base then
       current = nil
-      local coalition_of = base.object:getCoalition()
+      local got, coalition_of = pcall(base.object.getCoalition, base.object)
+      if not got or type(coalition_of) ~= 'number' then
+        coalition_of = 0
+      end
       local ok, n = pcall(stock, base.object)
       if ok then
         stop = agent.airbase(index, base.id, coalition_of, base.name, true, unpack(list, 1, n))
@@ -1718,6 +1740,27 @@ local HANDLERS = {
     local id = rawget(s, 'id_')
     if type(id) ~= 'number' then
       return DCS_REFUSED, nil, 'the new static has no ID'
+    end
+    -- A FARP static makes an airbase of its name, with its own warehouse
+    -- (LIVE, docs/results/2026-11-16-person-tests-2.md). It joins the
+    -- airbases this generation samples; a static spawned again under the
+    -- name takes over its entry.
+    -- The airbase has the static's ID (LIVE); an airbase of the name with
+    -- another ID is not this static's. A static of the name that is no FARP
+    -- leaves a tombstone.
+    local found, ab = pcall(Airbase.getByName, a.name)
+    local ab_id = found and ab and rawget(ab, 'id_') or nil
+    local at
+    for i, base in ipairs(T.airbases) do
+      if base.spawned and base.name == a.name then
+        at = i
+        break
+      end
+    end
+    if ab_id == id then
+      T.airbases[at or #T.airbases + 1] = { object = ab, id = ab_id, name = a.name, spawned = true }
+    elseif at then
+      T.airbases[at].gone = true
     end
     local ids = {}
     if type(old_id) == 'number' and old_id ~= id then

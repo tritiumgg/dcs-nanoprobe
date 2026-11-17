@@ -998,7 +998,25 @@ local function scripting(host, name)
       return handle(GROUP, sim:add_group(country, category, data).id)
     end,
     addStaticObject = function(country, data)
-      return handle(STATIC, sim:add_static(country, data).id)
+      local static = sim:add_static(country, data)
+      -- A FARP (category `Heliports`) is also an airbase of its name, with
+      -- the static's ID and its own empty limited warehouse (LIVE,
+      -- docs/results/2026-11-16-person-tests-2.md). A FARP spawned again
+      -- under the name replaces the airbase.
+      if data.category == 'Heliports' then
+        local base = {
+          id = static.id, name = static.name, coalition = side_of(state, country), x = static.x, z = static.z,
+          stock = { aircraft = {}, weapon = {}, liquids = { [0] = 0, [1] = 0, [2] = 0, [3] = 0 } },
+        }
+        local at = #sim.airbases + 1
+        for i, b in ipairs(sim.airbases) do
+          if b.name == static.name then
+            at = i
+          end
+        end
+        sim.airbases[at] = base
+      end
+      return handle(STATIC, static.id)
     end,
     getCountryCoalition = function(country)
       return side_of(state, country)

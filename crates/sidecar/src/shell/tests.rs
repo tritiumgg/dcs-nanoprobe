@@ -140,7 +140,11 @@ fn only_the_runtime_fields_change() {
             }
             // Only the enabled airport's aircraft become limited; the
             // disabled one keeps the template's flag.
-            let unlimited = [Key::s("airports"), Key::Num(id), Key::s("unlimitedAircrafts")];
+            let unlimited = [
+                Key::s("airports"),
+                Key::Num(id),
+                Key::s("unlimitedAircrafts"),
+            ];
             if id == 12.0 {
                 assert_eq!(at(wb, &unlimited), Lv::Bool(false));
             } else {
