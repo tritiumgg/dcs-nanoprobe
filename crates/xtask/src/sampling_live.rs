@@ -1173,7 +1173,7 @@ fn tenth_order(
         kept("rows_subscribed"),
         kept("rows_vitals"),
     );
-    let (ammo, wh) = (kept("rows_ammo"), kept("rows_warehouses"));
+    let wh = kept("rows_warehouses");
     let tol = 0.02;
     let le = |a: Option<f64>, b: Option<f64>| match (a, b) {
         (Some(a), Some(b)) => a <= b + tol,
@@ -1186,13 +1186,12 @@ fn tenth_order(
     // keep, and the order below the positions is reported. A k = 1 base
     // with no subscribed rows measures nothing, and fails.
     let rank_ok = sub.is_some_and(|s| s > 0.0) && le(pos, sub);
-    let order_ok = le(vit, pos) && le(ammo, vit) && le(wh, vit);
+    let order_ok = le(vit, pos) && le(wh, vit);
     // The periods are reported beside the rates and judged by nothing: a
     // reported period holds any stall in progress when the report is made.
     let periods = format!(
-        "mean periods: ammunition {:.2}, warehouses {:.2}, vitals {:.2}, positions {:.2}, \
+        "mean periods: warehouses {:.2}, vitals {:.2}, positions {:.2}, \
          subscribed up to {subscribed_interval:.2}",
-        mean_of(k01, "ammo_s"),
         mean_of(k01, "warehouse_s"),
         mean_of(k01, "vitals_s"),
         mean_of(k01, "position_s"),
@@ -1208,12 +1207,11 @@ fn tenth_order(
             true,
             format!("{}; ", if order_ok { "in order" } else { "out of order" })
                 + &format!(
-                    "kept: subscribed {}, positions {}, vitals {}, ammunition {}, warehouses {}; \
+                    "kept: subscribed {}, positions {}, vitals {}, warehouses {}; \
                  {} reports at k = 1, {} at k = 0.1; {periods}",
                     show(sub),
                     show(pos),
                     show(vit),
-                    show(ammo),
                     show(wh),
                     k1.len(),
                     k01.len()
@@ -1820,13 +1818,13 @@ mod tests {
         assert_eq!(quantile(&[json!(0)], 0.5), None);
     }
 
-    fn report(window: f64, rows: [f64; 5], periods: [f64; 4]) -> Value {
+    fn report(window: f64, rows: [f64; 4], periods: [f64; 3]) -> Value {
         json!({
             "scale": 1.0, "window_s": window,
             "rows_positions": rows[0], "rows_subscribed": rows[1], "rows_vitals": rows[2],
-            "rows_ammo": rows[3], "rows_warehouses": rows[4],
+            "rows_warehouses": rows[3],
             "position_s": periods[0], "vitals_s": periods[1],
-            "ammo_s": periods[2], "warehouse_s": periods[3],
+            "warehouse_s": periods[2],
         })
     }
 
@@ -1917,21 +1915,13 @@ mod tests {
     }
 
     fn k1() -> Vec<Value> {
-        vec![report(
-            10.0,
-            [1000.0, 200.0, 200.0, 100.0, 50.0],
-            [1.0, 5.0, 6.0, 7.0],
-        )]
+        vec![report(10.0, [1000.0, 200.0, 200.0, 50.0], [1.0, 5.0, 7.0])]
     }
 
     #[test]
     fn the_tenth_order_passes_when_vitals_stretch_more_than_positions() {
         // Positions keep 0.8 of their rows and vitals 0.37.
-        let k01 = vec![report(
-            10.0,
-            [800.0, 200.0, 74.0, 30.0, 15.0],
-            [3.0, 10.5, 12.0, 14.0],
-        )];
+        let k01 = vec![report(10.0, [800.0, 200.0, 74.0, 15.0], [3.0, 10.5, 14.0])];
         assert_eq!(verdicts(&k1(), &k01, 1.0), [true, true, true]);
         assert!(tenth_order(&k1(), &k01, 1.0)[1].2.starts_with("in order"));
     }
@@ -1940,11 +1930,7 @@ mod tests {
     /// costs.
     #[test]
     fn the_tenth_order_reports_vitals_that_keep_more_than_positions() {
-        let k01 = vec![report(
-            10.0,
-            [400.0, 200.0, 190.0, 30.0, 15.0],
-            [3.0, 10.5, 12.0, 14.0],
-        )];
+        let k01 = vec![report(10.0, [400.0, 200.0, 190.0, 15.0], [3.0, 10.5, 14.0])];
         let checks = tenth_order(&k1(), &k01, 1.0);
         assert_eq!(checks[1].0, "the lower tiers stretch first, reported");
         assert!(checks[1].1);
@@ -1954,11 +1940,7 @@ mod tests {
 
     #[test]
     fn the_tenth_order_passes_a_starved_tier() {
-        let k01 = vec![report(
-            10.0,
-            [800.0, 200.0, 0.0, 0.0, 0.0],
-            [3.0, 40.0, 50.0, 60.0],
-        )];
+        let k01 = vec![report(10.0, [800.0, 200.0, 0.0, 0.0], [3.0, 40.0, 60.0])];
         assert_eq!(verdicts(&k1(), &k01, 1.0), [true, true, true]);
     }
 
@@ -1966,12 +1948,7 @@ mod tests {
     fn the_tenth_order_does_not_judge_a_tier_that_owed_nothing() {
         let mut base = k1();
         base[0]["rows_vitals"] = json!(0.0);
-        base[0]["rows_ammo"] = json!(0.0);
-        let k01 = vec![report(
-            10.0,
-            [400.0, 200.0, 190.0, 30.0, 15.0],
-            [3.0, 0.0, 0.0, 14.0],
-        )];
+        let k01 = vec![report(10.0, [400.0, 200.0, 190.0, 15.0], [3.0, 0.0, 14.0])];
         assert_eq!(verdicts(&base, &k01, 1.0), [true, true, true]);
     }
 
@@ -1979,13 +1956,7 @@ mod tests {
     /// ratio (the rank); their 90 % keep is reported.
     #[test]
     fn the_tenth_order_holds_the_subscribed_tier_to_the_rank() {
-        let kept = |sub: f64| {
-            vec![report(
-                10.0,
-                [800.0, sub, 74.0, 30.0, 15.0],
-                [3.0, 2.0, 12.0, 14.0],
-            )]
-        };
+        let kept = |sub: f64| vec![report(10.0, [800.0, sub, 74.0, 15.0], [3.0, 2.0, 14.0])];
         // Half their rows against the positions' 0.8: the rank fails.
         assert_eq!(verdicts(&k1(), &kept(100.0), 1.0), [false, true, true]);
         assert_eq!(verdicts(&k1(), &kept(0.0), 1.0), [false, true, true]);

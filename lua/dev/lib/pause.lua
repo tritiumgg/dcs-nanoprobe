@@ -69,7 +69,6 @@ local READ = [[
     put('by_id', type(x) == 'number')
     put('by_id_matches', type(x) == 'number' and math.abs(x - p.x) < 0.01 and math.abs(z - p.z) < 0.01)
     put('life', type(unit:getLife()) == 'number')
-    put('fuel', type(unit:getFuel()) == 'number')
     put('exist', unit:isExist() == true)
     local v = unit:getVelocity()
     put('velocity', type(v) == 'table' and type(v.x) == 'number')
@@ -226,7 +225,7 @@ function M.start(E, label)
     E.observe('spawn_ground_ms', last.ground_ms, { info = true })
     E.observe('spawn_air_ms', last.air_ms, { info = true })
     E.observe('births_while_paused', last.births, { info = true })
-    local getters = first.point and first.by_id and first.life and first.fuel and first.exist
+    local getters = first.point and first.by_id and first.life and first.exist
       and first.velocity and last.point and last.by_id and true or false
     E.observe('getters', getters, { windows = true })
     E.observe('by_id_matches_point', last.by_id_matches == true, { windows = true })

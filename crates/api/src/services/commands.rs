@@ -204,6 +204,29 @@ fn set_components(
     Ok(())
 }
 
+/// Check a unit's spawn life (spec/world.md, "Spawn state"): a percentage
+/// above 0 and up to 100. At 0 a unit leaves DCS with no death fact.
+fn spawn_state_ok(u: &pb::UnitSpec, f: &str) -> Result<(), Status> {
+    if let Some(p) = u.life_percent
+        && !(p.is_finite() && p > 0.0 && p <= 100.0)
+    {
+        return Err(invalid(
+            &format!("{f}.life_percent"),
+            "a percentage above 0 and up to 100",
+        ));
+    }
+    Ok(())
+}
+
+/// Store a unit's spawn life, when the spec gives one. A replacement that
+/// gives none keeps what the store knows.
+fn set_spawn_life(s: &mut Store, uid: EntityId, u: &pb::UnitSpec) -> Result<(), Status> {
+    if let Some(p) = u.life_percent {
+        s.set_spawn_life(uid, p).map_err(store_error)?;
+    }
+    Ok(())
+}
+
 fn put_group(g: &mut Inner, c: u64, r: &PutGroupRequest) -> Result<PutGroupResponse, Status> {
     let spec = r
         .spec
@@ -221,12 +244,7 @@ fn put_group(g: &mut Inner, c: u64, r: &PutGroupRequest) -> Result<PutGroupRespo
         if u.r#type.is_empty() {
             return Err(invalid(&format!("{f}.type"), "a unit needs its DCS type"));
         }
-        if u.life_percent.is_some() || u.fuel.is_some() || !u.ammo.is_empty() {
-            return Err(invalid(
-                &f,
-                "spawning with a captured life, fuel or ammunition is not built yet",
-            ));
-        }
+        spawn_state_ok(u, &f)?;
         finite(u.heading, &format!("{f}.heading"))?;
     }
     // Every check comes before the first store write: a call that fails
@@ -269,7 +287,6 @@ fn put_group(g: &mut Inner, c: u64, r: &PutGroupRequest) -> Result<PutGroupRespo
                     at,
                     heading: u.heading,
                     life: 0.0,
-                    fuel: 0.0,
                 },
             )
         });
@@ -297,6 +314,10 @@ fn put_group(g: &mut Inner, c: u64, r: &PutGroupRequest) -> Result<PutGroupRespo
         })
         .map_err(store_error)?;
     set_components(&mut slot.store, id, &spec.components)?;
+    let members = slot.store.group(id).expect("created").members.clone();
+    for (u, uid) in spec.units.iter().zip(members) {
+        set_spawn_life(&mut slot.store, uid, u)?;
+    }
     if let Some(o) = order {
         slot.store.set_order(id, o).map_err(store_error)?;
     }
@@ -385,6 +406,7 @@ fn replace_group(
         if cur.type_name != u.r#type {
             s.set_unit_type(uid, &u.r#type).map_err(store_error)?;
         }
+        set_spawn_life(s, uid, u)?;
     }
     set_components(s, id, &spec.components)?;
     if let Some(o) = order {
@@ -437,7 +459,6 @@ fn put_static(g: &mut Inner, c: u64, r: &PutStaticRequest) -> Result<PutStaticRe
                         at,
                         heading,
                         life: 0.0,
-                        fuel: 0.0,
                     },
                 )
             }],
@@ -672,7 +693,6 @@ fn set_sample_rates(
     for (v, f) in [
         (r.position_period, "position_period"),
         (r.vitals_period, "vitals_period"),
-        (r.ammo_period, "ammo_period"),
         (r.warehouse_period, "warehouse_period"),
         (r.enumeration_period, "enumeration_period"),
     ] {
@@ -683,7 +703,6 @@ fn set_sample_rates(
     slot.store.set_rates(Rates {
         position_s: r.position_period,
         vitals_s: r.vitals_period,
-        ammo_s: r.ammo_period,
         warehouse_s: r.warehouse_period,
         enumeration_s: r.enumeration_period,
     });

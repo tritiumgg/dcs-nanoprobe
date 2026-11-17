@@ -1622,7 +1622,7 @@ impl Link {
     /// tiers' achieved periods and the rows between clock reads
     /// (spec/sampling.md). Stored with the frame's other metrics in
     /// [`Link::end`].
-    pub fn set_sampling(&mut self, slice_us: f64, periods: [f64; 5], rows_per_clock: u64) {
+    pub fn set_sampling(&mut self, slice_us: f64, periods: [f64; 4], rows_per_clock: u64) {
         self.metrics.slice_us = slice_us;
         self.metrics.periods = periods;
         self.metrics.rows_per_clock = rows_per_clock;

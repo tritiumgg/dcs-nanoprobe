@@ -281,7 +281,7 @@ async fn keys_follow_the_secret_and_chat_goes_to_a_key() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn occupancy_player_events_attribution_and_fuel() {
+async fn occupancy_and_player_events_attribution() {
     let (hub, ch) = in_process(cfg(), fake_config()).await.expect("server");
     keyed(&hub);
     let l = lease(&ch).await;
@@ -322,15 +322,6 @@ async fn occupancy_player_events_attribution_and_fuel() {
     until(|| async { players_now(&ch, false).await[0].unit_id == unit }).await;
     let p = players_now(&ch, false).await.remove(0);
     assert_eq!((p.name.as_str(), p.seat), ("Anna", 0));
-
-    // Vitals of the occupied unit: the fuel used counts.
-    for fuel in [0.9f32, 0.6] {
-        fake(&hub, |s| s.emit_vitals(object, 1.0, fuel));
-        tokio::time::sleep(Duration::from_millis(30)).await;
-    }
-    until(|| async { players_now(&ch, false).await[0].fuel_used > 0.0 }).await;
-    let used = players_now(&ch, false).await[0].fuel_used;
-    assert!((used - 0.3).abs() < 1e-3, "{used}");
 
     // The occupied unit is subscribed.
     until(|| async { fake(&hub, |s| s.subscribed().contains(&object)) }).await;

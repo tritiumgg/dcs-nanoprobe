@@ -787,11 +787,6 @@ async fn refusals_before_any_write() {
     let c = campaign(&ch, &l, "refusals").await;
     let mut cmd = CommandsServiceClient::new(ch.clone());
     let detail = |e: &tonic::Status| nanoprobe_proto::errors::detail(e).expect("detail").field;
-    // Spawn state is not built: fuel is refused like life and ammunition.
-    let mut req = group(&l, "fuel", c, 0.0);
-    req.spec.as_mut().expect("spec").units[0].fuel = Some(0.5);
-    let e = cmd.put_group(req).await.expect_err("fuel");
-    assert_eq!(detail(&e), "spec.units[0]");
     // A spec whose spawn would be over the agent's command limit.
     let mut big = group(&l, "big", c, 0.0);
     let text = "x".repeat(200 * 1024);

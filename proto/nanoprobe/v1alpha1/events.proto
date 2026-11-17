@@ -6,6 +6,7 @@ package nanoprobe.v1alpha1;
 import "google/protobuf/struct.proto";
 import "nanoprobe/v1alpha1/common.proto";
 import "nanoprobe/v1alpha1/session.proto";
+import "nanoprobe/v1alpha1/world.proto";
 
 option java_multiple_files = true;
 option java_package = "nanoprobe.v1alpha1";
@@ -32,6 +33,7 @@ message Event {
     LifecycleEvent lifecycle = 8;
     RouteEvent route = 10;
     ModerationEvent moderation = 11;
+    LoadoutEvent loadout = 12;
   }
   // The campaign the sequence number belongs to, 0 for the server log.
   uint64 campaign_id = 9;
@@ -54,7 +56,7 @@ message WorldEvent {
   Position position = 9;
   optional string text = 10;
   // Rounds expended, for a shooting-end event: from the event where DCS
-  // sends a count, otherwise from the ammunition difference.
+  // sends a count, otherwise absent.
   optional uint32 rounds = 11;
   // Fields the platform read and has no typed field for.
   google.protobuf.Struct extra = 12;
@@ -167,6 +169,24 @@ enum ModerationAction {
   MODERATION_ACTION_BAN = 2;
   MODERATION_ACTION_UNBAN = 3;
   MODERATION_ACTION_MOVE = 4;
+}
+
+// The ammunition of a unit a player occupies, read at the unit's birth or
+// takeoff. One event per read, for a unit the store holds and for an adopted
+// one. It follows the world event that caused the read (spec/world.md,
+// "Ammunition").
+message LoadoutEvent {
+  // The unit the players occupy.
+  uint64 unit_id = 1;
+  uint64 group_id = 2;
+  // The unit's type name.
+  string type = 3;
+  // The players in the unit, by seat.
+  repeated string player_keys = 4;
+  // Counts by weapon type name; rows of one type are added up.
+  map<string, uint32> ammo = 5;
+  // The cause of the read and the stamps it was made under.
+  AmmoRead read = 6;
 }
 
 // A moderation call DCS applied.

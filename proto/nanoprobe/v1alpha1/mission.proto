@@ -34,9 +34,10 @@ enum Health {
 message SampleRates {
   google.protobuf.Duration position = 1;
   google.protobuf.Duration vitals = 2;
-  google.protobuf.Duration ammo = 3;
   google.protobuf.Duration warehouse = 4;
   google.protobuf.Duration enumeration = 5;
+  reserved 3;
+  reserved "ammo";
 }
 
 message ServerStatus {

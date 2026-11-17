@@ -304,7 +304,6 @@ fn a_store_reads_back_exactly_as_written() {
         w.store.set_rates(Rates {
             position_s: 1.0,
             vitals_s: 60.0,
-            ammo_s: 5.0,
             warehouse_s: 60.0,
             enumeration_s: 30.0,
         });
@@ -396,7 +395,7 @@ fn a_commit_without_a_checkpoint_leaves_the_sampled_state_at_the_checkpoint() {
             let mut at = u.state.at;
             at.x += 111.0;
             w.store.observe_position(u.id, at);
-            w.store.observe_vitals(u.id, 0.25, 0.75);
+            w.store.observe_vitals(u.id, 0.25);
         }
         w.store.commit().expect("commit");
         let file = units(&read_back(&path).1);
@@ -716,7 +715,6 @@ fn suspend_a_activate_b_then_a_and_each_returns_as_left() {
     w.store.set_rates(Rates {
         position_s: 3.0,
         vitals_s: 60.0,
-        ammo_s: 5.0,
         warehouse_s: 60.0,
         enumeration_s: 30.0,
     });
@@ -756,7 +754,6 @@ fn suspend_a_activate_b_then_a_and_each_returns_as_left() {
     let rates = |p: f64| Rates {
         position_s: p,
         vitals_s: 60.0,
-        ammo_s: 5.0,
         warehouse_s: 60.0,
         enumeration_s: 30.0,
     };

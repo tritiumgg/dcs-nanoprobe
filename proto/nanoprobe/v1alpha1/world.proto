@@ -62,10 +62,15 @@ message Unit {
   // DCS's own life value. Its scale depends on the unit type; life_max is the
   // value the unit started with.
   optional double life = 9;
-  // A fraction of internal fuel.
-  optional double fuel = 10;
-  // Ammunition by weapon type name.
+  // A player-occupied unit's ammunition by weapon type name, as `getAmmo`
+  // listed it at the read that `ammo_read` names. Empty for an AI unit, for a
+  // unit with no read yet, and for one with no ammunition. DCS sends no event
+  // for a rearm of an AI unit (E38), and none is known for a player aircraft,
+  // so a rearm is not read (spec/world.md, "Ammunition").
   map<string, uint32> ammo = 11;
+  // The read that gave `ammo`: its cause and the stamps it was read under.
+  // Absent when no read was made.
+  AmmoRead ammo_read = 16;
   // Player keys of the occupants, by seat.
   repeated string occupants = 12;
   Stamp sampled = 13;
@@ -76,6 +81,23 @@ message Unit {
   // until the controller removes the group; a mark inferred at an
   // enumeration's end clears at the load (spec/world.md, "Respawn gate").
   UnitLeft left = 15;
+  reserved 10;
+  reserved "fuel";
+}
+
+// The read of a player-occupied unit's ammunition.
+message AmmoRead {
+  AmmoReadCause cause = 1;
+  // When the read was made.
+  Stamp read = 2;
+}
+
+enum AmmoReadCause {
+  AMMO_READ_CAUSE_UNSPECIFIED = 0;
+  // The unit's birth: a player took its slot.
+  AMMO_READ_CAUSE_BIRTH = 1;
+  // The unit's takeoff.
+  AMMO_READ_CAUSE_TAKEOFF = 2;
 }
 
 enum UnitLeft {

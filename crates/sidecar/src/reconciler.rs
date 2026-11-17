@@ -139,6 +139,11 @@ pub struct Counters {
     /// `OBJECT` records whose coalition differs from the one the country map
     /// gives for the object's country (spec/commands.md, `COUNTRIES`).
     pub coalition_disagreements: u64,
+    /// `DAMAGE` commands sent to give a spawned unit its captured life.
+    pub lives_restored: u64,
+    /// Those that DCS did not apply, or that could not be sent: the unit
+    /// runs at the life DCS gave it, and the next life sample says so.
+    pub lives_lost: u64,
 }
 
 impl Counters {
@@ -163,6 +168,8 @@ impl Counters {
         self.respawns_held += o.respawns_held;
         self.enumerate_requests += o.enumerate_requests;
         self.coalition_disagreements += o.coalition_disagreements;
+        self.lives_restored += o.lives_restored;
+        self.lives_lost += o.lives_lost;
     }
 }
 
@@ -277,6 +284,13 @@ pub struct Reconciler {
     /// the loaded generation. A live entity whose store `spec_rev` is ahead
     /// of it is spawned again, in place (spec/world.md, "Revisions").
     spawn_applied: HashMap<EntityId, u64>,
+    /// A restored unit's life, as DCS reads it, held until the `DAMAGE` that
+    /// sets it is applied: a sample or capture before then, at the life the
+    /// spawn gave, does not replace it (spec/world.md, "Spawn state"). By
+    /// unit, with the (epoch, seq) of that `DAMAGE`. The life is None for a
+    /// unit whose life is the percentage a `PutGroup` asked for: the store
+    /// keeps that percentage until the `DAMAGE` is applied.
+    life_held: HashMap<EntityId, (Option<f32>, (u64, u64))>,
     /// The controller options the current spawn of each group applied.
     option_held: HashMap<EntityId, BTreeMap<u32, Lv>>,
     /// An option value DCS refused, by group and option; not sent again until
@@ -391,6 +405,7 @@ impl Reconciler {
             drift_destroy_failures: HashMap::new(),
             spawn_rejected: HashMap::new(),
             spawn_applied: HashMap::new(),
+            life_held: HashMap::new(),
             option_held: HashMap::new(),
             option_refused: HashMap::new(),
             opt_sent: HashMap::new(),
@@ -603,7 +618,12 @@ impl Reconciler {
                 if self.current(store, r.agent_boot) {
                     for v in rows {
                         if let Some(b) = self.binding.get(&v.object) {
-                            store.observe_vitals(b.unit, v.life, v.fuel);
+                            match self.life_held.get(&b.unit) {
+                                None if self.life_asked(store, b.unit) => {}
+                                None => store.observe_vitals(b.unit, v.life),
+                                Some((Some(held), _)) => store.observe_vitals(b.unit, *held),
+                                Some((None, _)) => {}
+                            }
                         }
                     }
                 }
@@ -619,8 +639,10 @@ impl Reconciler {
                 }
             }
             Input::Event(_) => self.counters.events += 1,
-            // Read by the API's event log, not by the reconciler.
+            // Read by the API's event log, not by the reconciler. The API
+            // hub folds an `AMMO` into the store's unit.
             Input::Other(_)
+            | Input::Ammo(_)
             | Input::AuthorEvent(_)
             | Input::Player(_)
             | Input::Menu(_)
@@ -681,6 +703,7 @@ impl Reconciler {
         self.pins_forget(store, false);
         self.spawn_rejected.clear();
         self.spawn_applied.clear();
+        self.life_held.clear();
         self.drift_destroy_failures.clear();
         self.held.clear();
         self.run = None;
@@ -786,6 +809,12 @@ impl Reconciler {
         res: Option<&CommandResult>,
     ) {
         self.inflight.remove(&(c.epoch, c.seq));
+        // A life-restore DAMAGE is the sidecar's own: nothing reads its
+        // result, so it stays out of the effect results.
+        let mut restore = false;
+        if c.opcode == opcode::DAMAGE {
+            restore = self.life_resolved((c.epoch, c.seq), outcome, res.map(|r| r.code));
+        }
         store.journal(Entry::Outcome {
             epoch: c.epoch,
             seq: c.seq,
@@ -794,24 +823,26 @@ impl Reconciler {
         if c.opcode == opcode::CLEAR_DEBRIS && self.fold_debris(c.epoch, c.seq, outcome, res) {
             return;
         }
-        if matches!(
-            c.opcode,
-            opcode::EXTENSION_INVOKE
-                | opcode::WAREHOUSE_ADJUST
-                | opcode::DAMAGE
-                | opcode::SOUND
-                | opcode::PICTURE
-                | opcode::PICTURE_STOP
-                | opcode::CAPTURE
-                | opcode::MESSAGE
-                | opcode::CHAT
-                | opcode::EVAL
-                | opcode::MISSION_LOAD
-                | opcode::MODERATE
-                | opcode::PLAYERS
-                | opcode::BANS
-                | opcode::CLEAR_DEBRIS
-        ) {
+        if !restore
+            && matches!(
+                c.opcode,
+                opcode::EXTENSION_INVOKE
+                    | opcode::WAREHOUSE_ADJUST
+                    | opcode::DAMAGE
+                    | opcode::SOUND
+                    | opcode::PICTURE
+                    | opcode::PICTURE_STOP
+                    | opcode::CAPTURE
+                    | opcode::MESSAGE
+                    | opcode::CHAT
+                    | opcode::EVAL
+                    | opcode::MISSION_LOAD
+                    | opcode::MODERATE
+                    | opcode::PLAYERS
+                    | opcode::BANS
+                    | opcode::CLEAR_DEBRIS
+            )
+        {
             self.effects.insert(
                 (c.epoch, c.seq),
                 EffectResult {
@@ -1114,6 +1145,7 @@ impl Reconciler {
             }
             let u = store.unit(p.entity).expect("unit");
             let (prev, prev_more) = (u.state, u.captured.clone());
+            let asked = self.life_asked(store, p.entity);
             let num = |k: &str, d: f64| lv::num_at(item, k).unwrap_or(d);
             store.observe_capture(
                 p.entity,
@@ -1124,8 +1156,11 @@ impl Reconciler {
                         z: num("z", prev.at.z),
                     },
                     heading: num("heading", prev.heading),
-                    life: num("life", f64::from(prev.life)) as f32,
-                    fuel: num("fuel", f64::from(prev.fuel)) as f32,
+                    life: match self.life_held.get(&p.entity) {
+                        Some((held, _)) => held.unwrap_or(prev.life),
+                        None if asked => prev.life,
+                        None => num("life", f64::from(prev.life)) as f32,
+                    },
                 },
             );
             store.observe_capture_more(
@@ -1134,7 +1169,13 @@ impl Reconciler {
                     life0: num("life0", prev_more.life0),
                     pitch: num("pitch", prev_more.pitch),
                     roll: num("roll", prev_more.roll),
-                    ammo: lv::get(item, "ammo").cloned().unwrap_or(prev_more.ammo),
+                    // observe_capture cleared what a PutGroup asked for;
+                    // a held percentage stays until its DAMAGE is applied.
+                    life_percent: match self.life_held.get(&p.entity) {
+                        Some((None, _)) => prev_more.life_percent,
+                        None if asked => prev_more.life_percent,
+                        _ => None,
+                    },
                 },
                 num("id", 0.0) as u64,
             );
@@ -1245,6 +1286,7 @@ impl Reconciler {
         }
         store.set_missing(row.unit, false);
         store.set_object(row.unit, o.object);
+        store.observe_life0(row.unit, f64::from(o.life0));
         store.observe_coalition(row.group, o.coalition);
         if let Some(c) = store.country_coalition(o.country)
             && c != o.coalition
@@ -1943,6 +1985,7 @@ impl Reconciler {
                 .expect("materializing");
             return false;
         }
+        let mut owed = Vec::new();
         let body = match g.kind {
             Kind::Group => {
                 let name = ids::name(NameKind::Group, campaign, id);
@@ -1959,6 +2002,11 @@ impl Reconciler {
                         ];
                         if !u.skill.is_empty() {
                             t.push(("skill", lv::s(&u.skill)));
+                        }
+                        if let Some(p) = u.spawn_life_percent()
+                            && p < FULL_LIFE
+                        {
+                            owed.push((u.id, p, u.state.life));
                         }
                         with_extra(lv::obj(t), &u.extra)
                     })
@@ -1992,7 +2040,83 @@ impl Reconciler {
                 }
             }
         };
-        self.send(store, sim, id, g.spec_rev, body)
+        let sent = self.send(store, sim, id, g.spec_rev, body);
+        if sent {
+            self.restore_lives(store, sim, owed);
+        }
+        sent
+    }
+
+    /// Queue a `DAMAGE` for each spawned unit owed a life, right after its
+    /// spawn: ring order runs it after the spawn, which names the unit
+    /// (spec/world.md, "Spawn state"). The life a sample would replace is
+    /// held until DCS applies the `DAMAGE`.
+    fn restore_lives(
+        &mut self,
+        store: &mut Store,
+        sim: &mut dyn SimAdapter,
+        owed: Vec<(EntityId, f64, f32)>,
+    ) {
+        for (unit, p, life) in owed {
+            let key = (self.epoch, self.next_seq);
+            if self.effect_ready(store)
+                && self.send(store, sim, unit, 0, Body::Damage { life_percent: p })
+            {
+                self.counters.lives_restored += 1;
+                self.life_held
+                    .insert(unit, ((life > 0.0).then_some(life), key));
+            } else {
+                self.life_lost(unit);
+            }
+        }
+    }
+
+    /// Whether a `PutGroup` life stands for the unit while its group's
+    /// respawn is owed: what DCS reads of the old spawn does not replace it.
+    fn life_asked(&self, store: &Store, unit: EntityId) -> bool {
+        let Some(u) = store.unit(unit) else {
+            return false;
+        };
+        u.captured.life_percent.is_some()
+            && store.group(u.group).is_some_and(|g| {
+                self.spawn_applied
+                    .get(&g.id)
+                    .is_some_and(|applied| *applied < g.spec_rev)
+            })
+    }
+
+    /// A restored life DCS did not take: counted, and reported once.
+    fn life_lost(&mut self, unit: EntityId) {
+        self.counters.lives_lost += 1;
+        eprintln!(
+            "nanoprobe: the life restore of unit {unit} was not applied; it runs at the life DCS gave it"
+        );
+    }
+
+    /// A `DAMAGE` that restored a life is answered: the life is no longer
+    /// held. One that DCS refused, rejected or never took is counted. One
+    /// rejected only for its moment is sent again with its spawn, and one
+    /// whose result was lost may have been applied: neither is counted.
+    /// Returns whether the key was a life restore.
+    fn life_resolved(&mut self, key: (u64, u64), outcome: Outcome, code: Option<u16>) -> bool {
+        let Some(unit) = self
+            .life_held
+            .iter()
+            .find(|(_, (_, k))| *k == key)
+            .map(|(u, _)| *u)
+        else {
+            return false;
+        };
+        self.life_held.remove(&unit);
+        match outcome {
+            Outcome::Applied => {}
+            Outcome::Unknown => eprintln!(
+                "nanoprobe: the life restore of unit {unit} may not have been applied; the next sample shows its life"
+            ),
+            Outcome::Rejected if code.is_some_and(rejected_for_now) => {}
+            _ => self.life_lost(unit),
+        }
+        true
     }
 
     /// Send each controller option the group's current spawn has not
@@ -2487,6 +2611,9 @@ impl Reconciler {
 /// A DCS table with the author's further keys added. A key the platform
 /// sets (name, type, position, heading, units, skill) keeps the platform's
 /// value: the platform's names are how it finds its objects again.
+/// A life at or above this percentage is spawned as is: no `DAMAGE` follows.
+const FULL_LIFE: f64 = 99.95;
+
 fn with_extra(table: Lv, extra: &Lv) -> Lv {
     let (Lv::Table(mut pairs), Lv::Table(more)) = (table.clone(), extra) else {
         // No further keys (nil), or a value that is not a table.

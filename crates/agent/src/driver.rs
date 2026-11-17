@@ -22,7 +22,8 @@ use nanoprobe_transport::layout::{
 use nanoprobe_transport::log::{Level, Value};
 use nanoprobe_transport::names::{self, Kind};
 use nanoprobe_transport::records::{
-    Airbase, AuthorEvent, Bind, CommandHeader, Event, ExtensionStats, Log, Menu, Player, Subscribe,
+    Airbase, Ammo, AuthorEvent, Bind, CommandHeader, Event, ExtensionStats, Log, Menu, Player,
+    Subscribe,
 };
 
 use crate::state;
@@ -66,13 +67,16 @@ struct Driver {
     sampler: Sampler,
     /// The DCS event IDs that remove a row, from the shim.
     deaths: Vec<u32>,
-    /// The DCS event IDs after which the target's life is read, after which
-    /// the initiator's ammunition is read, and of a birth.
+    /// The DCS event IDs after which the target's life is read, and of a
+    /// birth.
     life_events: Vec<u32>,
-    ammo_events: Vec<u32>,
     birth_events: Vec<u32>,
     /// The DCS event IDs after which the target's existence is checked.
     watch_events: Vec<u32>,
+    /// The DCS event IDs after which the initiator's ammunition is read if a
+    /// player occupies it: a birth, and a takeoff.
+    loadout_birth_events: Vec<u32>,
+    loadout_takeoff_events: Vec<u32>,
     /// A frame began and its `finish` has not run.
     open: bool,
     root: PathBuf,
@@ -274,7 +278,6 @@ pub fn start(root: &Path, dcs_version: &str) -> Result<String, String> {
     let rates = Rates {
         position_s: config.sampling.position_s,
         vitals_s: config.sampling.vitals_s,
-        ammo_s: config.sampling.ammo_s,
         warehouse_s: config.sampling.warehouse_s,
         enumeration_s: config.sampling.enumeration_s,
     };
@@ -282,9 +285,10 @@ pub fn start(root: &Path, dcs_version: &str) -> Result<String, String> {
         sampler: Sampler::new(rates, clock_cost()),
         deaths: Vec::new(),
         life_events: Vec::new(),
-        ammo_events: Vec::new(),
         birth_events: Vec::new(),
         watch_events: Vec::new(),
+        loadout_birth_events: Vec::new(),
+        loadout_takeoff_events: Vec::new(),
         open: false,
         link,
         root: root.to_path_buf(),
@@ -561,6 +565,11 @@ fn report(d: &mut Driver, r: &Report) {
     let pending = d.sampler.pending_len();
     let pending_counts = d.sampler.pending_counts();
     let enum_end_abandoned = d.sampler.enum_end_abandoned();
+    let loadouts = (
+        d.sampler.loadouts_waiting(),
+        d.sampler.loadouts_dropped(),
+        d.sampler.loadout_reads(),
+    );
     record(
         d,
         Level::Info,
@@ -584,9 +593,8 @@ fn report(d: &mut Driver, r: &Report) {
             ("births", Value::Int(r.births as i64)),
             ("position_s", Value::Num(r.periods[0])),
             ("vitals_s", Value::Num(r.periods[1])),
-            ("ammo_s", Value::Num(r.periods[2])),
-            ("warehouse_s", Value::Num(r.periods[3])),
-            ("enumeration_s", Value::Num(r.periods[4])),
+            ("warehouse_s", Value::Num(r.periods[2])),
+            ("enumeration_s", Value::Num(r.periods[3])),
             ("forgiven_us", Value::Num(r.forgiven_us)),
             ("scale", Value::Num(r.scale)),
             ("overrun_us", Value::Num(r.overrun_us)),
@@ -612,8 +620,7 @@ fn report(d: &mut Driver, r: &Report) {
             ("cost_positions", Value::Num(r.costs[3])),
             ("cost_stopped", Value::Num(r.costs[4])),
             ("cost_vitals", Value::Num(r.costs[5])),
-            ("cost_ammo", Value::Num(r.costs[6])),
-            ("cost_warehouses", Value::Num(r.costs[7])),
+            ("cost_warehouses", Value::Num(r.costs[6])),
             ("birth_step_p50_us", Value::Num(r.steps[0].0)),
             ("birth_step_p99_us", Value::Num(r.steps[0].1)),
             ("birth_step_max_us", Value::Num(r.steps[0].2)),
@@ -635,8 +642,7 @@ fn report(d: &mut Driver, r: &Report) {
             ("us_positions", Value::Num(r.spend.tier_us[3])),
             ("us_stopped", Value::Num(r.spend.tier_us[4])),
             ("us_vitals", Value::Num(r.spend.tier_us[5])),
-            ("us_ammo", Value::Num(r.spend.tier_us[6])),
-            ("us_warehouses", Value::Num(r.spend.tier_us[7])),
+            ("us_warehouses", Value::Num(r.spend.tier_us[6])),
             ("rows_births", Value::Int(r.spend.tier_rows[0] as i64)),
             ("rows_enumeration", Value::Int(r.spend.tier_rows[1] as i64)),
             ("rows_subscribed", Value::Int(r.spend.tier_rows[2] as i64)),
@@ -645,14 +651,11 @@ fn report(d: &mut Driver, r: &Report) {
             ("rows_vitals", Value::Int(r.spend.tier_rows[5] as i64)),
             ("due_vitals", Value::Num(r.vitals_due)),
             ("swept_vitals", Value::Int(r.vitals_swept as i64)),
-            ("rows_ammo", Value::Int(r.spend.tier_rows[6] as i64)),
-            ("rows_warehouses", Value::Int(r.spend.tier_rows[7] as i64)),
+            ("rows_warehouses", Value::Int(r.spend.tier_rows[6] as i64)),
             ("idle", Value::Int(r.idle as i64)),
-            ("marked_life", Value::Int(r.marked.0 as i64)),
-            ("marked_ammo", Value::Int(r.marked.1 as i64)),
+            ("marked_life", Value::Int(r.marked as i64)),
             ("sweeps", Value::Int(r.sweeps as i64)),
-            ("life_sweep_s", Value::Num(r.slow_periods[0])),
-            ("ammo_sweep_s", Value::Num(r.slow_periods[1])),
+            ("life_sweep_s", Value::Num(r.slow_periods)),
             ("sweep_row_us", Value::Num(r.sweep_row_us)),
             ("sweep_batch_us", Value::Num(r.sweep_batch_us)),
             ("sweep_cut", Value::Int(r.sweep_cut as i64)),
@@ -681,6 +684,9 @@ fn report(d: &mut Driver, r: &Report) {
             ("pending_overflow", Value::Int(pending_counts[1] as i64)),
             ("pending_expired", Value::Int(pending_counts[2] as i64)),
             ("enum_end_abandoned", Value::Int(enum_end_abandoned as i64)),
+            ("loadouts_waiting", Value::Int(loadouts.0 as i64)),
+            ("loadouts_dropped", Value::Int(loadouts.1 as i64)),
+            ("loadout_reads", Value::Int(loadouts.2 as i64)),
         ],
     );
     if r.starved > 0 {
@@ -1705,7 +1711,6 @@ fn control(d: &mut Driver, opcode: u16, body: &[u8]) -> Option<u64> {
                 d.sampler.set_rates(Rates {
                     position_s: r.position_s,
                     vitals_s: r.vitals_s,
-                    ammo_s: r.ammo_s,
                     warehouse_s: r.warehouse_s,
                     enumeration_s: r.enumeration_s,
                 });
@@ -1815,13 +1820,10 @@ pub fn event(event: Event, started: Instant) -> u32 {
                 .sampler
                 .death(&mut d.link, field(INITIATOR), field(INITIATOR_CATEGORY));
         }
-        // A hit asks for a read of the target's life, and a shot for a read
-        // of the shooter's ammunition (spec/sampling.md, "Tiers").
+        // A hit asks for a read of the target's life (spec/sampling.md,
+        // "Tiers").
         if d.life_events.contains(&event.id) {
-            d.sampler.mark(field(TARGET), true);
-        }
-        if d.ammo_events.contains(&event.id) {
-            d.sampler.mark(field(INITIATOR), false);
+            d.sampler.mark(field(TARGET));
         }
         // A hit, a damage assessment or a kill asks for one check of
         // whether the target still exists (spec/records.md, "The object
@@ -1836,6 +1838,16 @@ pub fn event(event: Event, started: Instant) -> u32 {
             && field(INITIATOR_CATEGORY).is_some_and(|c| [1.0, 3.0, 6.0].contains(&c))
         {
             d.sampler.birth_waits();
+        }
+        // A birth or a takeoff of a unit asks for a read of its ammunition
+        // if a player occupies it (spec/sampling.md, "Loadout reads").
+        if let Some(cause) = loadout_cause(
+            &d.loadout_birth_events,
+            &d.loadout_takeoff_events,
+            event.id,
+            field(INITIATOR_CATEGORY),
+        ) {
+            d.sampler.mark_loadout(field(INITIATOR), cause);
         }
         let max = d.link.outbound().ring().max_payload();
         let mut payload = event.encode();
@@ -1970,16 +1982,35 @@ pub fn set_deaths(ids: Vec<u32>) {
 }
 
 /// The DCS event IDs that ask for a read, from the shim's `world.event`:
-/// `which` 1 for the target's life, 2 for the initiator's ammunition, 3 for
-/// a birth, 4 for a check of whether the target still exists.
+/// `which` 1 for the target's life, 2 for a birth, 3 for a check of whether
+/// the target still exists, 4 and 5 for the initiator's ammunition after a
+/// birth and after a takeoff.
 pub fn set_reads(which: u32, ids: Vec<u32>) {
     with(|d| match which {
         1 => d.life_events = ids,
-        2 => d.ammo_events = ids,
-        3 => d.birth_events = ids,
-        4 => d.watch_events = ids,
+        2 => d.birth_events = ids,
+        3 => d.watch_events = ids,
+        4 => d.loadout_birth_events = ids,
+        5 => d.loadout_takeoff_events = ids,
         _ => {}
     });
+}
+
+/// The cause of a loadout read an event asks for: [`Ammo::BIRTH`] or
+/// [`Ammo::TAKEOFF`], or None for any other event. Only a unit's event
+/// counts: an initiator category that is present and not a unit's (1)
+/// asks for nothing.
+fn loadout_cause(birth: &[u32], takeoff: &[u32], id: u32, category: Option<f64>) -> Option<u32> {
+    if category.is_some_and(|c| c != 1.0) {
+        return None;
+    }
+    if birth.contains(&id) {
+        Some(Ammo::BIRTH)
+    } else if takeoff.contains(&id) {
+        Some(Ammo::TAKEOFF)
+    } else {
+        None
+    }
 }
 
 /// Queue a `LOG` record from Lua: `target` is `hook`, `shim` or `agent`.
@@ -2065,6 +2096,17 @@ pub fn checks(out: &mut Vec<u64>) -> usize {
     with(|d| if begun(d) { d.sampler.checks(out) } else { 0 }).unwrap_or(0)
 }
 
+/// The units whose ammunition the pump reads now, into `out` as pairs of a
+/// slot and a cause; how many.
+pub fn loadouts(out: &mut Vec<(u32, u32)>) -> usize {
+    with(|d| if begun(d) { d.sampler.loadouts(out) } else { 0 }).unwrap_or(0)
+}
+
+/// A player-occupied unit's ammunition, read for the event `cause` names.
+pub fn ammo(slot: u32, cause: u32, items: &[(Vec<u8>, f64)]) {
+    with(|d| d.sampler.ammo(&mut d.link, slot, cause, items));
+}
+
 /// An object in the table no longer exists, with what the reads that tell a
 /// death from a removal gave. Returns the slot plus one of the row removed,
 /// or 0.
@@ -2123,14 +2165,9 @@ pub fn spot(object: u64, p: [f64; 3]) {
     with(|d| d.sampler.spot(object, p));
 }
 
-/// Life and fuel for a slot of the batch; true to stop.
-pub fn vitals(slot: u32, life: Option<f64>, fuel: Option<f64>) -> bool {
-    with(|d| d.sampler.vitals(slot, life, fuel, Instant::now)).unwrap_or(true)
-}
-
-/// A unit's ammunition; true to stop.
-pub fn ammo(slot: u32, items: &[(Vec<u8>, f64)]) -> bool {
-    with(|d| d.sampler.ammo(&mut d.link, slot, items, Instant::now)).unwrap_or(true)
+/// Life for a slot of the batch; true to stop.
+pub fn vitals(slot: u32, life: Option<f64>) -> bool {
+    with(|d| d.sampler.vitals(slot, life, Instant::now)).unwrap_or(true)
 }
 
 /// One airbase of the batch, with its stock; true to stop.
@@ -2744,6 +2781,24 @@ mod tests {
             &[],
             vec![("entity", s("18446744073709551615"))],
         );
+    }
+
+    #[test]
+    fn only_a_birth_and_a_takeoff_of_a_unit_ask_for_a_loadout_read() {
+        let (birth, takeoff) = ([15], [3]);
+        let cause = |id, category| loadout_cause(&birth, &takeoff, id, category);
+        assert_eq!(cause(15, Some(1.0)), Some(Ammo::BIRTH));
+        assert_eq!(cause(3, Some(1.0)), Some(Ammo::TAKEOFF));
+        // An initiator with no category may still be a unit.
+        assert_eq!(cause(3, None), Some(Ammo::TAKEOFF));
+        // A static's or a cargo's birth asks for nothing.
+        assert_eq!(cause(15, Some(3.0)), None);
+        assert_eq!(cause(15, Some(6.0)), None);
+        // Any other event asks for nothing, and so does an empty list.
+        for id in [0, 1, 2, 4, 28, 54] {
+            assert_eq!(cause(id, Some(1.0)), None, "event {id}");
+        }
+        assert_eq!(loadout_cause(&[], &[], 15, Some(1.0)), None);
     }
 
     #[test]

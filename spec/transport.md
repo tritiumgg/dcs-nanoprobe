@@ -118,7 +118,7 @@ records that are consumed.
 | 0x0210 | f64 | frame_interval_us | agent | Running average of the interval between pump calls, microseconds |
 | 0x0218 | f64 | period_position | agent | Achieved period of the position tier, seconds |
 | 0x0220 | f64 | period_vitals | agent | Achieved period of the vitals tier, seconds |
-| 0x0228 | f64 | period_ammo | agent | Achieved period of the ammunition tier, seconds |
+| 0x0228 | pad[8] | reserved_period | agent | |
 | 0x0230 | f64 | period_warehouse | agent | Achieved period of the warehouse and airbase tier, seconds |
 | 0x0238 | f64 | period_enumeration | agent | Achieved period of the full enumeration, seconds |
 | 0x0240 | u64 | rows_per_clock | agent | Rows the sampling loop passes between clock reads |

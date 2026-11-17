@@ -47,6 +47,16 @@ pub struct Sample<T> {
     pub at: Stamp,
 }
 
+/// The ammunition of a player-occupied unit and the event that asked for its
+/// read.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Loadout {
+    /// [`Ammo::BIRTH`] or [`Ammo::TAKEOFF`].
+    pub cause: u32,
+    /// An array of tables, each with `type` and `count`.
+    pub ammo: Lv,
+}
+
 /// One object of the mirrored table.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Row {
@@ -56,12 +66,12 @@ pub struct Row {
     pub found_in: u64,
     /// The last position: DCS `x`, `y`, `z`, meters.
     pub position: Option<Sample<[f64; 3]>>,
-    /// The last life and fuel. Fuel is NaN for a static.
-    pub vitals: Option<Sample<(f32, f32)>>,
+    /// The last life.
+    pub vitals: Option<Sample<f32>>,
     /// The last heading, pitch and roll, radians.
     pub attitude: Option<Sample<[f32; 3]>>,
-    /// The last ammunition table.
-    pub ammo: Option<Sample<Lv>>,
+    /// The last ammunition read of a player-occupied unit, with its cause.
+    pub ammo: Option<Sample<Loadout>>,
     /// Positions taken for it.
     pub position_samples: u64,
     /// Real-time seconds between its last two positions, 0 before two.
@@ -507,12 +517,12 @@ impl Mirror {
     /// `VITALS`: one sample per row with a known object.
     fn vitals(&mut self, v: Vitals) {
         let at = self.stamp;
-        let n = v.object.len().min(v.life.len()).min(v.fuel.len());
+        let n = v.object.len().min(v.life.len());
         for i in 0..n {
             match self.rows.get_mut(&v.object[i]) {
                 Some(row) => {
                     row.vitals = Some(Sample {
-                        value: (v.life[i], v.fuel[i]),
+                        value: v.life[i],
                         at,
                     });
                 }
@@ -541,12 +551,18 @@ impl Mirror {
         }
     }
 
-    /// `AMMO`: the ammunition of a known object.
+    /// `AMMO`: the ammunition of a known object, with its cause.
     fn ammo(&mut self, a: Ammo) {
         let at = self.stamp;
         match self.rows.get_mut(&a.object) {
             Some(row) => {
-                row.ammo = Some(Sample { value: a.ammo, at });
+                row.ammo = Some(Sample {
+                    value: Loadout {
+                        cause: a.cause,
+                        ammo: a.ammo,
+                    },
+                    at,
+                });
             }
             None => self.counters.samples_unknown_object += 1,
         }
@@ -681,7 +697,6 @@ mod tests {
         let v = Vitals {
             object: ids.to_vec(),
             life: vec![10.0; ids.len()],
-            fuel: vec![f32::NAN; ids.len()],
         };
         (kind::VITALS, v.encode())
     }
@@ -731,10 +746,43 @@ mod tests {
         assert_eq!(p.at.mission_gen, 1);
         assert!(r.vitals.is_none());
         let v = m.get(2).unwrap().vitals.as_ref().unwrap();
-        assert_eq!(v.value.0, 10.0);
-        assert!(v.value.1.is_nan());
+        assert_eq!(v.value, 10.0);
         assert_eq!(m.counters().enumerations_used, 1);
         assert!(!m.wants_enumeration());
+    }
+
+    fn ammo(id: u64, cause: u32) -> (u64, Vec<u8>) {
+        let a = Ammo {
+            object: id,
+            cause,
+            ammo: Lv::Table(vec![(Lv::Number(1.0), Lv::Number(2.0))]),
+        };
+        (kind::AMMO, a.encode())
+    }
+
+    #[test]
+    fn the_latest_ammo_of_a_row_keeps_its_cause_and_stamps() {
+        let mut m = Mirror::new();
+        m.attached();
+        feed(
+            &mut m,
+            &[
+                frame(1, 10.0),
+                hello(),
+                object(1, 0),
+                object(2, 0),
+                ammo(1, Ammo::BIRTH),
+                frame(1, 20.0),
+                ammo(1, Ammo::TAKEOFF),
+                ammo(9, Ammo::BIRTH),
+            ],
+        );
+        let a = m.get(1).unwrap().ammo.as_ref().unwrap();
+        assert_eq!(a.value.cause, Ammo::TAKEOFF);
+        assert_eq!(a.at.real_time, 20.0);
+        // A row with no `AMMO` record has none, and an unknown object counts.
+        assert!(m.get(2).unwrap().ammo.is_none());
+        assert_eq!(m.counters().samples_unknown_object, 1);
     }
 
     #[test]
