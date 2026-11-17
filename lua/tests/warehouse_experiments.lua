@@ -71,8 +71,8 @@ rawset(hook.net, 'get_slot', function(id)
   return p and p.side, p and p.slot
 end)
 
-local function eval(id, source, seconds, during)
-  S.write(base .. 'in/' .. id .. '.hook.lua', source)
+local function eval(id, source, seconds, during, state)
+  S.write(base .. 'in/' .. id .. '.' .. (state or 'hook') .. '.lua', source)
   for i = 1, seconds * 60 do
     host:frame(1 / 60)
     if during then
@@ -160,4 +160,21 @@ do
   local seen = run('none')
   assert(seen.action.action == 'none' and #seen.changes == 0, 'none: watch only')
   S.ok('none: watch only')
+end
+
+-- unlimited-read.lua in the server state. The mock has no mission
+-- `warehouses` table, so the snippet picks the airbase whose by-name read is
+-- 1,000,000, runs E6's control there and leaves the count as it was.
+do
+  local source = S.read(root .. 'lua/experiments/warehouse/unlimited-read.lua')
+  local result, text = eval('unlimited', source, 10, nil, 'server')
+  assert(result.ok and result.reply.ok, 'unlimited-read: ' .. text)
+  local seen = {}
+  for _, o in ipairs(result.reply.observations or {}) do
+    seen[o.name] = o.value
+  end
+  assert(seen.control and seen.control.airbase == 'np-unlimited', 'unlimited-read: the control ran on ' .. text)
+  assert(seen.flags_readable == false, 'unlimited-read: the mock has no mission warehouses')
+  assert(unlimited.stock.weapon['weapons.bombs.Mk_82'] == 1000000, 'unlimited-read: the count is as it was')
+  S.ok('unlimited-read: ' .. #seen.airbases .. ' airbases, control on ' .. seen.control.airbase)
 end
