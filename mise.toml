@@ -31,6 +31,11 @@ zig = "0.15.2"
 python = "3.12.13"
 uv = "0.12.17"
 
+# The Kotlin hello campaign (examples/hello-kotlin). Gradle fetches the Kotlin,
+# protobuf and gRPC plugins and libraries the build names from Maven Central.
+java = "temurin-21.0.13+9.0.LTS"
+gradle = "9.9.1"
+
 # Cross-build of the agent DLL for x86_64-pc-windows-msvc on macOS and Linux.
 # cargo-xwin fetches the MSVC CRT and SDK; accept Microsoft's licence on its
 # first run. LLVM supplies clang, lld and llvm-dlltool, which turns
@@ -141,6 +146,15 @@ run = "uv run --frozen --project examples/hello-python python examples/hello-pyt
 description = "Run the Python hello campaign against the fake sidecar on a free loopback port"
 run = "sh examples/hello-python/check.sh"
 
+[tasks.hello-kotlin]
+description = "Run the Kotlin hello campaign: mise run hello-kotlin -- http://127.0.0.1:47311"
+dir = "{{config_root}}/examples/hello-kotlin"
+run = "gradle --no-daemon --quiet installDist && build/install/hello-kotlin/bin/hello-kotlin"
+
+[tasks.hello-kotlin-check]
+description = "Run the Kotlin hello campaign against the fake sidecar on a free loopback port"
+run = "sh examples/hello-kotlin/check.sh"
+
 [tasks.package]
 description = "Stage the Windows and Linux release archives in dist/ and check them"
 depends = ["dll"]
@@ -168,11 +182,16 @@ run = [
   # pinned wheels with uv; it goes before luatest.sh, whose sidecar test
   # runs the Python hello in that environment.
   "sh examples/hello-python/check.sh",
+  # The Kotlin hello against the fake sidecar. Its first build fetches the
+  # pinned plugins and libraries with Gradle. Like the Python hello, it runs
+  # here and not in CI.
+  "sh examples/hello-kotlin/check.sh",
   "sh tools/luatest.sh",
   "buf lint",
   "sh tools/protobreak.sh",
   "sh tools/protobreak-test.sh",
   "cargo xtask proto --check",
+  "sh tools/stage-schema-test.sh",
   "sh tools/secretscan-test.sh",
 ]
 

@@ -22,10 +22,11 @@ docker build -t nanoprobe-sidecar:<version> deploy/
 1. Replace the placeholders in `docker-compose.nanoprobe.yml`: the DCS service's name,
    the user and group that run DCS, and the host path of the DCS profile.
    In `sidecar.toml`, set `[missions] dcs_dir` to the profile's `nanoprobe\missions`
-   folder as DCS opens it, and copy
-   `templates/caucasus.miz` there as `Caucasus.miz` and `templates/afghanistan.miz` as
-   `Afghanistan.miz`. The sidecar
-   writes each campaign's shell under `shells/` in that folder.
+   folder as DCS opens it. Save a template for each map your campaigns use in that
+   folder, as `<theater>.miz` ([docs/mission-templates.md](../docs/mission-templates.md)).
+   The sidecar writes each campaign's shell under `shells/` in that folder.
+   `nanoprobe doctor --wine-prefix <prefix> --theater <theater>`, with one `--theater`
+   for each map, reports a missing template.
 2. Put `sidecar.toml` in `./nanoprobe/` beside your compose file, and create
    `./nanoprobe/data/` owned by the DCS user.
 3. In `<profile>/nanoprobe/agent.toml`, set `map_path = 'Z:\nanoprobe-shm\nanoprobe.map'`.

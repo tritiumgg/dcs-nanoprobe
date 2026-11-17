@@ -68,7 +68,7 @@ commands:
                             and wait until it starts
   run <name> <test> [--dll P] [--template T] [--dir D]
                             Deploy with --dev, restart DCS, load a fresh shell
-                            mission from T (default templates/caucasus.miz), run
+                            mission from T (default tests/fixtures/templates/caucasus.miz), run
                             the test, and collect a bundle. <test> is `suite` for
                             every probe, or a text that picks probes by file name
                             as `probes --only` does. Refuses a server with players.
@@ -641,7 +641,7 @@ fn load(name: &str, miz: &str) -> Result<ExitCode, String> {
 fn run(name: &str, test: &str, rest: &[&str]) -> Result<ExitCode, String> {
     let mut dll = None;
     let mut dir = None;
-    let mut template = repository().join("templates/caucasus.miz");
+    let mut template = repository().join("tests/fixtures/templates/caucasus.miz");
     let mut words = rest.iter();
     while let Some(word) = words.next() {
         let value = words

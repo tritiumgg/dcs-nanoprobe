@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use nanoprobe_install::autoexec::{AUTOEXEC, Merged};
 use nanoprobe_install::{Local, Payload, install, undeploy};
 
+use crate::doctor::{Missions, is_theater_name};
 use crate::profiles::{self, Env, Where};
 
 /// Options of `doctor`, `install` and `uninstall`.
@@ -17,6 +18,8 @@ pub struct Options {
     /// `--payload`: the folder holding what `install` installs. Without it,
     /// `payload/` beside the program.
     pub payload: Option<PathBuf>,
+    /// What `doctor` checks of the mission folder.
+    pub missions: Missions,
 }
 
 /// Parse the arguments after `doctor`, `install` or `uninstall`.
@@ -36,10 +39,21 @@ pub fn parse(sub: &str, args: &[String]) -> Result<Options, String> {
                 .map(PathBuf::from)
                 .ok_or_else(|| format!("{name} needs a value"))
         };
+        if flag == "--theater" && sub == "doctor" {
+            let theater = value(flag)?.to_string_lossy().into_owned();
+            if !is_theater_name(&theater) {
+                return Err(format!("--theater {theater:?} is not a theater name"));
+            }
+            if !options.missions.theaters.contains(&theater) {
+                options.missions.theaters.push(theater);
+            }
+            continue;
+        }
         let slot = match flag {
             "--profile" => &mut options.place.profile,
             "--wine-prefix" => &mut options.place.wine_prefix,
             "--payload" if sub == "install" => &mut options.payload,
+            "--missions" if sub == "doctor" => &mut options.missions.dir,
             _ => return Err(format!("unknown argument `{arg}` for `{sub}`")),
         };
         if slot.replace(value(flag)?).is_some() {
@@ -198,8 +212,19 @@ mod tests {
         assert_eq!(o.payload, Some("b".into()));
         let o = p("doctor", &["--wine-prefix", "w"]).unwrap();
         assert_eq!(o.place.wine_prefix, Some("w".into()));
+        let o = p(
+            "doctor",
+            &["--missions=m", "--theater", "Caucasus", "--theater=Syria"],
+        )
+        .unwrap();
+        assert_eq!(o.missions.dir, Some("m".into()));
+        assert_eq!(o.missions.theaters, ["Caucasus", "Syria"]);
         for bad in [
             ("doctor", &["--payload", "b"][..]),
+            ("install", &["--missions", "m"]),
+            ("doctor", &["--missions", "m", "--missions", "n"]),
+            ("doctor", &["--theater", "../x"]),
+            ("doctor", &["--theater"]),
             ("doctor", &["--profile"]),
             ("doctor", &["--profile", "a", "--profile", "b"]),
             ("uninstall", &["--profile", "a", "--wine-prefix", "b"]),

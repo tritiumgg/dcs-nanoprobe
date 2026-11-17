@@ -51,8 +51,8 @@ use crate::install::Profile as _;
 use crate::sampling::live::Run;
 
 /// The two committed templates.
-const CAUCASUS: &[u8] = include_bytes!("../../../templates/caucasus.miz");
-const AFGHANISTAN: &[u8] = include_bytes!("../../../templates/afghanistan.miz");
+const CAUCASUS: &[u8] = include_bytes!("../../../tests/fixtures/templates/caucasus.miz");
+const AFGHANISTAN: &[u8] = include_bytes!("../../../tests/fixtures/templates/afghanistan.miz");
 
 /// How long a mission load may take before the step fails. Not a design
 /// limit (a load has no fixed duration); only when this test gives up.

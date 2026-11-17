@@ -7,6 +7,9 @@ import "google/protobuf/duration.proto";
 import "google/protobuf/struct.proto";
 import "nanoprobe/v1alpha1/common.proto";
 
+option java_multiple_files = true;
+option java_package = "nanoprobe.v1alpha1";
+
 // The world of one campaign, active or archived. A call that names campaign
 // 0 while no campaign is active fails with NO_ACTIVE_CAMPAIGN.
 service WorldService {

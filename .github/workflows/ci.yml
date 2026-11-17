@@ -83,6 +83,9 @@ jobs:
       - name: Check the generated API code is current
         run: cargo xtask proto --check
 
+      - name: Check the release's schema archive and descriptor set
+        run: sh tools/stage-schema-test.sh
+
       - name: Cross-build the agent DLL
         run: cargo xwin build --release -p nanoprobe-agent --target x86_64-pc-windows-msvc
 

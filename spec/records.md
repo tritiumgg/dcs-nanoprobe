@@ -581,7 +581,7 @@ run 304 of 309 `S_EVENT_DEAD` events were of category 5 (LIVE, same report).
 it was within 0.004 s of model time when the event arrived (LIVE,
 `docs/results/2026-11-13-event-catalogue.md`). On `S_EVENT_MARK_ADDED` it was 28,799.1 s
 ahead of model time, which matches the time of day for a mission that starts at
-28,800 s after midnight, as the shell does (`start_time` in `templates/caucasus.miz`).
+28,800 s after midnight, as the shell does (`start_time` in `tests/fixtures/templates/caucasus.miz`).
 On `S_EVENT_MARK_REMOVED` it was at most 28,796.1 s ahead, 3 s less, and the scenario
 removed the line 3 s after adding it: the removal seems to carry the removed mark's add
 time, not the time of the removal (an inference from the report's per-cause maxima;

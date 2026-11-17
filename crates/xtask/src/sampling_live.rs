@@ -1596,8 +1596,8 @@ pub(crate) fn open(repository: &Path, name: &str, kind: &str) -> Result<Opened, 
     if !matches!(target, Target::DockerWine { .. }) {
         return Err(format!("{kind} runs on a docker-wine target"));
     }
-    let template = std::fs::read(repository.join("templates/caucasus.miz"))
-        .map_err(|e| format!("templates/caucasus.miz: {e}"))?;
+    let template = std::fs::read(repository.join("tests/fixtures/templates/caucasus.miz"))
+        .map_err(|e| format!("tests/fixtures/templates/caucasus.miz: {e}"))?;
     let shell = miz::generate(&template, &miz::Changes::default())?;
     let (remote, _, _) = crate::remote(name)?;
     let players = remote.players()?;
@@ -1636,8 +1636,8 @@ pub(crate) fn open_eval(
     if !matches!(target, Target::DockerWine { .. }) {
         return Err(format!("{kind} runs on a docker-wine target"));
     }
-    let template = std::fs::read(repository.join("templates/caucasus.miz"))
-        .map_err(|e| format!("templates/caucasus.miz: {e}"))?;
+    let template = std::fs::read(repository.join("tests/fixtures/templates/caucasus.miz"))
+        .map_err(|e| format!("tests/fixtures/templates/caucasus.miz: {e}"))?;
     let shell = miz::generate(&template, &miz::Changes::default())?;
     let (remote, _, _) = crate::remote(name)?;
     let players = remote.players()?;

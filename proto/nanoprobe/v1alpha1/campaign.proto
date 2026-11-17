@@ -9,6 +9,9 @@ import "nanoprobe/v1alpha1/common.proto";
 import "nanoprobe/v1alpha1/mission.proto";
 import "nanoprobe/v1alpha1/session.proto";
 
+option java_multiple_files = true;
+option java_package = "nanoprobe.v1alpha1";
+
 // Changes need the controller lease. These calls name their campaign
 // themselves, so they carry the lease and the idempotency key directly. A finished or suspended campaign stays
 // readable through WorldService and EventsService by its ID.

@@ -7,6 +7,9 @@ import "google/protobuf/struct.proto";
 import "nanoprobe/v1alpha1/common.proto";
 import "nanoprobe/v1alpha1/session.proto";
 
+option java_multiple_files = true;
+option java_package = "nanoprobe.v1alpha1";
+
 service EventsService {
   // Events from a sequence number onward, then live.
   rpc SubscribeEvents(SubscribeEventsRequest) returns (stream SubscribeEventsResponse);

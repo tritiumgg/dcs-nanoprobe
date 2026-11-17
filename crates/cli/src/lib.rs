@@ -45,7 +45,9 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
         }
         Command::Watch(o) => watch::run(&o, out, err),
         Command::Restore(o) => restore::run(&o, out, err),
-        Command::Doctor(o) => doctor::run(&o.place, &profiles::Env::current(), out, err),
+        Command::Doctor(o) => {
+            doctor::run(&o.place, &o.missions, &profiles::Env::current(), out, err)
+        }
         Command::Install(o) => setup::run_install(&o, &profiles::Env::current(), out, err),
         Command::Uninstall(o) => setup::run_uninstall(&o, &profiles::Env::current(), out, err),
         Command::Inspect { path, records } => {
