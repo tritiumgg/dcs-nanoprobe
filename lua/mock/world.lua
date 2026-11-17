@@ -240,9 +240,11 @@ local function inside(volume, p)
   return false
 end
 
--- world.removeJunk: the wrecks of killed units and statics inside the volume
--- leave the world, as Object.destroy on a wreck does. Returns how many. A
--- test sets `sim.junk_raises` to make the call raise.
+-- world.removeJunk: the wrecks of killed units inside the volume leave the
+-- world, as Object.destroy on a wreck does. A killed static stays, dead, and
+-- counts once for the junk around it (LIVE,
+-- docs/results/2026-11-16-clear-debris.md). Returns how many. A test sets
+-- `sim.junk_raises` to make the call raise.
 function Sim:remove_junk(volume)
   if self.junk_raises then
     error('mock: removeJunk raises', 3)
@@ -255,10 +257,8 @@ function Sim:remove_junk(volume)
       n = n + 1
     end
   end
-  for id, static in pairs(self.dead_statics) do
+  for _, static in pairs(self.dead_statics) do
     if inside(volume, static) then
-      self.dead_statics[id] = nil
-      self.gone_statics[id] = static
       n = n + 1
     end
   end
@@ -1329,12 +1329,33 @@ local function scripting(host, name)
     return out
   end
 
-  -- Call `fn` for each unit inside the sphere, until it returns false.
-  local function search(_, volume, fn, data)
-    local centre, radius = volume.params.point, volume.params.radius
-    for _, unit in pairs(sim.units) do
-      local dx, dy, dz = unit.x - centre.x, unit.y - centre.y, unit.z - centre.z
-      if dx * dx + dy * dy + dz * dz <= radius * radius and fn(handle(UNIT, unit.id), data) == false then
+  -- Call `fn` for each object of the categories (a number or a list) inside
+  -- the sphere or box, until it returns false: live units (1), and live and
+  -- dead statics (3; LIVE, a dead static is listed).
+  local function search(categories, volume, fn, data)
+    local wanted = {}
+    for _, c in ipairs(type(categories) == 'table' and categories or { categories }) do
+      wanted[c] = true
+    end
+    local found = {}
+    if wanted[1] then
+      for _, unit in pairs(sim.units) do
+        if inside(volume, unit) then
+          found[#found + 1] = handle(UNIT, unit.id)
+        end
+      end
+    end
+    if wanted[3] then
+      for _, list in ipairs({ sim.statics, sim.dead_statics }) do
+        for _, static in pairs(list) do
+          if inside(volume, static) then
+            found[#found + 1] = handle(STATIC, static.id)
+          end
+        end
+      end
+    end
+    for _, h in ipairs(found) do
+      if fn(h, data) == false then
         return
       end
     end

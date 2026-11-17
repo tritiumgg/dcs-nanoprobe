@@ -1416,7 +1416,25 @@ scenario('clear-debris', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   r = run({ sphere(unit, 5) }, 'clear debris that raises')
   expect(r[1], 22, 'CLEAR_DEBRIS that raises')
   sim.junk_raises = nil
-  S.ok('CLEAR_DEBRIS: a sphere or a box removes the wrecks inside and returns the count, a bad volume is BAD_PAYLOAD')
+
+  -- A dead static's object stays after removeJunk (LIVE); the handler
+  -- destroys it and counts it. A live static and a dead one outside the
+  -- volume stay.
+  local ruin = sim:add_static(2, { name = 'ruin', type = 'FARP Fuel Depot', x = 50000, y = 0 })
+  local beside = sim:add_static(2, { name = 'beside', type = 'FARP Fuel Depot', x = 50010, y = 0 })
+  local far = sim:add_static(2, { name = 'far', type = 'FARP Fuel Depot', x = 60000, y = 0 })
+  sim:doom_static(ruin)
+  sim:doom_static(far)
+  r = run({ sphere(ruin, 50), sphere(ruin, 50) }, 'clear debris on a dead static')
+  expect(r[1], APPLIED, 'CLEAR_DEBRIS on a dead static')
+  -- removeJunk counts the junk round the dead static, the destroy the static.
+  assert(r[1].value == 2, 'the clear on a dead static removed ' .. tostring(r[1].value) .. ', not 2')
+  assert(r[2].value == 0, 'a second clear removed ' .. tostring(r[2].value))
+  assert(sim.gone_statics[ruin.id] == ruin and not sim.dead_statics[ruin.id], 'the dead static was not destroyed')
+  assert(beside.alive and sim.statics.beside == beside, 'a clear removed a live static')
+  assert(sim.dead_statics[far.id] == far, 'a clear removed a dead static outside its volume')
+  S.ok('CLEAR_DEBRIS: a sphere or a box removes the wrecks inside and returns the count, a bad volume is BAD_PAYLOAD,'
+    .. ' a dead static inside is destroyed and counted')
 end)
 
 scenario('picture', nil, function(ctx)

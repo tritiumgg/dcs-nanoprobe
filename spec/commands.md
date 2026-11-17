@@ -873,10 +873,17 @@ and unit values are UNVERIFIED.
 | 1 | SPHERE | `x`, `y`, `z` and `radius` |
 | 2 | BOX | From `x`, `y`, `z` to `x2`, `y2`, `z2`, aligned with the axes |
 
-The handler calls `world.removeJunk` with a DCS volume of the code's shape, and returns
-the number DCS returns: how many junk objects it removed, which counts craters and
-debris as well as wrecks. The agent sends it as the `RESULT`'s value. A call that raises
-is `DCS_REFUSED` with its text; otherwise `APPLIED`.
+The handler calls `world.removeJunk` with a DCS volume of the code's shape. It then
+lists the statics in the same volume with `world.searchObjects` and calls `destroy` on
+each whose `getLife()` reads 0 or less, each call under `pcall`: `world.removeJunk`
+leaves a destroyed static, and a client keeps showing its ruin until `Object.destroy`
+removes it (LIVE, docs/results/2026-11-16-person-tests-2.md). The value is the number
+`world.removeJunk` returns, how many junk objects it removed (craters and debris as well
+as wrecks), plus the statics destroyed. The agent sends it as the `RESULT`'s value. A
+`world.removeJunk` call that raises is `DCS_REFUSED` with its text; otherwise `APPLIED`.
+A destroyed static is not a removal: a platform static that died keeps its death fact,
+its record is unchanged, and the sidecar sends no `STATIC_DESTROY` for it. A mission's
+own dead statics in the volume go too.
 
 The agent checks the payload, else `BAD_PAYLOAD`: a known `volume`, every number
 finite and within 10,000 km of 0, a sphere's `radius` above 0, and a box's `x`, `y`, `z`
@@ -884,9 +891,9 @@ each at most its `x2`, `y2`, `z2`.
 
 What DCS removes (LIVE, docs/results/2026-11-16-clear-debris.md): the wrecks of ground
 units that have stopped burning. A clear on open ground where an explosion struck
-returns 1, so a crater counts as junk (inferred from the count). DCS leaves every live
-unit and static, a wreck that is still burning, a dead static's object, and destroyed
-scenery. A clear around a dead aircraft or a dead static returns a count above 0; what it
+returns 1, so a crater counts as junk (inferred from the count). `world.removeJunk`
+leaves every live unit and static, a wreck that is still burning, a dead static's object
+(which the handler then destroys), and destroyed scenery. A clear around a dead aircraft or a dead static returns a count above 0; what it
 removes there is UNVERIFIED. A burning wreck it leaves still explodes and sends its death
 events, so a clear changes nothing in spec/records.md. A wreck it removes reads as a
 removed object: `isDead`, `getLife` and `getPoint` raise. The volume's edge is not exact

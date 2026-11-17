@@ -1986,6 +1986,23 @@ local HANDLERS = {
     if not ok then
       return DCS_REFUSED, nil, tostring(removed)
     end
+    -- removeJunk leaves a destroyed static, and a client keeps seeing its
+    -- ruin; Object.destroy on the dead static removes it (LIVE,
+    -- docs/results/2026-11-16-person-tests-2.md). Each static in the volume
+    -- whose life is 0 is destroyed, each call under pcall, and counted.
+    local dead = {}
+    pcall(world.searchObjects, Object.Category.STATIC, volume, function(s)
+      local got, life = pcall(s.getLife, s)
+      if got and type(life) == 'number' and life <= 0 then
+        dead[#dead + 1] = s
+      end
+      return true
+    end)
+    for _, s in ipairs(dead) do
+      if pcall(s.destroy, s) then
+        removed = (tonumber(removed) or 0) + 1
+      end
+    end
     return APPLIED, removed
   end,
   -- CAPTURE: a group's state, or a static's.

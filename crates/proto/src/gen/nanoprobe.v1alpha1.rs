@@ -5462,9 +5462,11 @@ pub struct Box {
 pub struct WholeMap {}
 /// Remove wrecks, craters and debris. DCS removes the wrecks of ground units
 /// that have stopped burning; craters count as junk too (inferred from the
-/// count). It leaves every live unit and static, a wreck that is still
-/// burning, a dead static's object and destroyed scenery. Around a dead
-/// aircraft or a dead static it removes something; what is UNVERIFIED. A burning wreck it
+/// count). It also destroys every dead static in the volume, so its ruin
+/// leaves the clients' screens; a managed static that died keeps its record.
+/// It leaves every live unit and static, a wreck that is still burning and
+/// destroyed scenery. Around a dead aircraft it removes something; what is
+/// UNVERIFIED. A burning wreck it
 /// leaves still explodes and sends its death events. Coordinates and sizes
 /// are within 10,000 km of 0.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -5528,7 +5530,7 @@ pub struct DoEffectResponse {
     #[prost(message, optional, tag = "1")]
     pub result: ::core::option::Option<CommandResult>,
     /// For ClearDebris: how many junk objects DCS removed, craters and debris
-    /// included. For a whole-map clear that did not apply, the count of the
+    /// included, plus the destroyed statics in the volume it removed. For a whole-map clear that did not apply, the count of the
     /// boxes that did. Absent when the clear has no result (unknown, not_sent)
     /// and for any other effect.
     #[prost(uint64, optional, tag = "2")]
