@@ -508,13 +508,15 @@ impl Target for LiveTarget<'_> {
     fn start_sidecar(&mut self) -> Result<(), String> {
         self.boots += 1;
         let a: Vec<&str> = self.args.iter().map(String::as_str).collect();
+        // `/missions` is writable: the sidecar writes each campaign's shell
+        // under `[missions] dir` (spec/config.md, "[missions]").
         self.host.sh(
             &format!(
                 "docker run -d --name {SIDECAR_C} --network container:\"$1\" --user \"$2\" \
                  -e {var}={TIMINGS_S} \
                  -v \"$3\":/nanoprobe-shm -v \"$4\":/etc/nanoprobe/agent-token:ro \
                  -v \"$5/sidecar.toml\":/etc/nanoprobe/sidecar.toml:ro -v \"$5/tokens.toml\":/etc/nanoprobe/tokens.toml:ro \
-                 -v \"$6\":/missions:ro -v \"$7\":/store \
+                 -v \"$6\":/missions:rw -v \"$7\":/store \
                  --tmpfs /var/lib/nanoprobe:rw,size=16m,uid={u},gid={g},mode=0700 {IMAGE} >/dev/null",
                 var = nanoprobe_api_timings_var(),
                 u = self.uid.0,

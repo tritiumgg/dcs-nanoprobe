@@ -273,9 +273,9 @@ A rearm is not read. Every fall in ammunition has a shot event. No event named a
 rearmed by a truck (LIVE, E38, docs/results/2026-11-14-e38-life-and-ammunition.md).
 Whether DCS sends one when ground crew rearm a player aircraft is UNVERIFIED, an open
 item for a live check. The `AMMO` record shows the load at the birth or the takeoff it
-names. The first call of `getPlayerName` on a running DCS is
-UNVERIFIED: that it returns nil, or an empty string, for an AI unit is the shim's
-assumption, and either one drops the unit.
+names. `getPlayerName` returns the player's name for a unit a client occupies and nil
+for an AI unit (LIVE, docs/results/2026-11-17-s19-spawn-state.md); the shim drops a unit
+for nil or an empty string.
 
 ### The sweep
 

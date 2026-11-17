@@ -153,3 +153,16 @@ model time and `junk2.lua` 312 s. Both kill what they spawn with scripted explos
 4 to 14 km from the mission's first airbase and clear their own wrecks at the end.
 `lua/tests/junk_experiment.lua` rehearses them on the mock. The results are in
 `docs/results/2026-11-16-clear-debris.md`.
+
+## Loadout
+
+The snippets in `loadout/` check the player loadout reads. Each runs alone in the
+`server` state with `cargo xtask eval <target> server <file>`. `player-name.lua` reads
+`Unit.getPlayerName` and `getAmmo` for every player unit, and `getPlayerName` for up to
+40 AI units. `ai-birth.lua` spawns one AI M-113 near the first player, lets 5 s of model
+time run, and destroys it, so a recording shows that an AI birth gives no `AMMO` record.
+`player-name.lua` runs with a client in an aircraft (`alone/e30-take-slot.lua`,
+`alone/e31-spawn.lua`). `ai-birth.lua` spawns near that client when there is one, and
+otherwise near the map origin.
+`lua/tests/loadout_experiments.lua` rehearses them on the mock. The results are in
+`docs/results/2026-11-17-s19-spawn-state.md`.

@@ -1763,9 +1763,10 @@ scenario('marks', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   assert(count(shim.marks) > 0, 'the shim holds no marks')
   ctx.stop()
   ctx.host:load_mission('second', { paused = true })
-  ctx.run(0.5, function()
-    return count(shim.marks) == 0
-  end)
+  -- The reset comes with the first pump of the new generation. With the
+  -- sidecar gone the hook may run no pump, so the test runs one itself.
+  ctx.run(0.1)
+  shim.pump()
   assert(count(shim.marks) == 0 and count(shim.menus) == 0, 'the shim kept marks across a mission load')
   S.ok('MARK_SET, DRAWING_SET and their removals: scopes, replacement under a new ID, NOT_BOUND, BAD_PAYLOAD, DCS_REFUSED, a load forgets them')
 end, '\n[lua]\nraw = true\n')
