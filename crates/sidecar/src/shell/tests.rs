@@ -119,7 +119,7 @@ fn only_the_runtime_fields_change() {
         };
         p
     };
-    let flags = ["dynamicSpawn", "allowHotStart"];
+    let flags = ["dynamicSpawn", "allowHotStart", "unlimitedAircrafts"];
     for ((ka, va), (kb, vb)) in airports(wa).into_iter().zip(airports(wb)) {
         assert_eq!(ka, kb);
         let Lv::Number(id) = ka else { panic!() };
@@ -135,8 +135,16 @@ fn only_the_runtime_fields_change() {
         };
         if id == 12.0 || id == 13.0 {
             let want = Lv::Bool(id == 12.0);
-            for f in flags {
+            for f in &flags[..2] {
                 assert_eq!(at(wb, &[Key::s("airports"), Key::Num(id), Key::s(f)]), want);
+            }
+            // Only the enabled airport's aircraft become limited; the
+            // disabled one keeps the template's flag.
+            let unlimited = [Key::s("airports"), Key::Num(id), Key::s("unlimitedAircrafts")];
+            if id == 12.0 {
+                assert_eq!(at(wb, &unlimited), Lv::Bool(false));
+            } else {
+                assert_eq!(at(wb, &unlimited), at(wa, &unlimited));
             }
             assert_eq!(strip(va), strip(vb));
         } else {
@@ -160,6 +168,7 @@ fn a_missing_flag_is_inserted() {
     let path = |k: &str| [Key::s("airports"), Key::Num(7.0), Key::s(k)];
     assert_eq!(at(&out, &path("dynamicSpawn")), Lv::Bool(true));
     assert_eq!(at(&out, &path("allowHotStart")), Lv::Bool(false));
+    assert_eq!(at(&out, &path("unlimitedAircrafts")), Lv::Bool(false));
     assert_eq!(at(&out, &path("size")), Lv::Number(100.0));
     assert!(
         String::from_utf8(out)
@@ -300,4 +309,20 @@ fn placed_names_are_read_from_the_coalition_table() {
 fn the_ends_of_i64_do_not_overflow_a_start() {
     let _ = Start::from_unix_ms(i64::MIN).unix_ms();
     let _ = Start::from_unix_ms(i64::MAX).unix_ms();
+}
+
+#[test]
+fn an_enabled_airport_gets_limited_aircraft() {
+    let src = b"warehouses = \n{\n\t[\"airports\"] = \n\t{\n\t\t[7] = \n\t\t{\n\t\t\t[\"unlimitedAircrafts\"] = true,\n\t\t\t[\"unlimitedMunitions\"] = true,\n\t\t},\n\t\t[8] = \n\t\t{\n\t\t\t[\"unlimitedAircrafts\"] = true,\n\t\t},\n\t},\n}\n";
+    let flags = |airbase, enabled| DynamicSpawn {
+        airbase,
+        enabled,
+        hot_start: false,
+    };
+    let out = edit_warehouses(src, &[flags(7, true), flags(8, false)]).unwrap();
+    let path = |id: f64, k: &str| [Key::s("airports"), Key::Num(id), Key::s(k)];
+    assert_eq!(at(&out, &path(7.0, "unlimitedAircrafts")), Lv::Bool(false));
+    assert_eq!(at(&out, &path(7.0, "unlimitedMunitions")), Lv::Bool(true));
+    assert_eq!(at(&out, &path(8.0, "unlimitedAircrafts")), Lv::Bool(true));
+    assert_eq!(at(&out, &path(8.0, "dynamicSpawn")), Lv::Bool(false));
 }

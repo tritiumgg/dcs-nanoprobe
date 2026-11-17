@@ -2078,6 +2078,10 @@ pub struct DynamicSpawn {
     #[prost(uint64, tag = "1")]
     pub airbase_id: u64,
     /// `dynamicSpawn`: players may spawn aircraft from the airport's stock.
+    /// True also makes the airport's aircraft limited (`unlimitedAircrafts`
+    /// false), so dynamic spawn offers the aircraft stock the controller sets
+    /// (SetWarehouseStock), to the coalition that owns the airport
+    /// (SetAirbaseOwner). AI the mission spawns there use the same stock.
     #[prost(bool, tag = "2")]
     pub enabled: bool,
     /// `allowHotStart`.

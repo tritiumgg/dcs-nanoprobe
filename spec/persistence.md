@@ -394,10 +394,19 @@ template with only these values changed, every other byte of every member kept:
 |---|---|---|
 | `mission` | `date` (`Day`, `Month`, `Year`) and `start_time` | `NextMission.start` when set, else the campaign clock, else the template's own |
 | `mission` | `weather` | `NextMission.weather` when set, else the template's |
-| `warehouses` | `airports[<id>].dynamicSpawn`, `allowHotStart` | `NextMission.dynamic_spawn`, by the airport ID in the template's `warehouses`; airports not named keep the template's flags. An ID the template does not hold is `INVALID_FIELD` |
+| `warehouses` | `airports[<id>].dynamicSpawn`, `allowHotStart`; `unlimitedAircrafts` false where `dynamicSpawn` is true | `NextMission.dynamic_spawn`, by the airport ID in the template's `warehouses`; airports not named, and airports named with `enabled` false, keep the template's `unlimitedAircrafts`; airports not named keep every flag. An ID the template does not hold is `INVALID_FIELD` |
 
 Airbase owners and warehouse stocks are not written into the file: the reconciler sets
-them after the new mission starts, as after any generation change. Units placed in a
+them after the new mission starts, as after any generation change.
+
+Dynamic spawn offers an airport only to the coalition that owns it, and offers the
+aircraft in its stock (ED-CODE, `Scripts/UI/MultiplayerSelectRoleMap/MultiplayerSelectDynamicDialog.lua`;
+LIVE, docs/results/2026-11-16-person-tests-2.md). The editor writes no aircraft list for
+an unlimited airport (ED-CODE, `MissionEditor/modules/me_mission.lua`), and an unlimited
+warehouse ignores a set (LIVE, E6). So an enabled airport's aircraft are limited, and
+the controller makes it offer spawns by setting its owner (`SetAirbaseOwner`) and its
+aircraft stock (`SetWarehouseStock`). Limited aircraft also limit what AI spawned at
+that airport by the mission can use. Munitions and fuel keep the template's flags. Units placed in a
 template stay unmanaged (spec/world.md, "Managed and unmanaged").
 
 Each campaign has two shell slots, `shells/<campaign ID>.a.miz` and `.b.miz`. A shell
