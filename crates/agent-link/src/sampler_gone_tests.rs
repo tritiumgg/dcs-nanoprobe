@@ -64,7 +64,7 @@ impl Port for Rec {
     fn served_boot(&self) -> u64 {
         1
     }
-    fn set_sampling(&mut self, _slice_us: f64, _periods: [f64; 5], _rows_per_clock: u64) {}
+    fn set_sampling(&mut self, _slice_us: f64, _periods: [f64; 4], _rows_per_clock: u64) {}
 }
 
 /// What `isDead` and `getLife` gave.

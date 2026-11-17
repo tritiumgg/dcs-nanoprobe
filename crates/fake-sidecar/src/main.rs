@@ -122,6 +122,34 @@ async fn main() -> ExitCode {
         }
     };
     println!("listening on {}", server.endpoint());
+    // The lives the fake DCS holds, for a test that reads them from the log
+    // (`cargo xtask persistence`): one line when they change.
+    let hub = std::sync::Arc::clone(&server.hub);
+    tokio::spawn(async move {
+        let mut last: Vec<(u64, f64)> = Vec::new();
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let mut now = {
+                let mut g = hub.lock();
+                let Some(any) = g.backend.as_any() else {
+                    continue;
+                };
+                let Some(sim) = any.downcast_mut::<FakeSim>() else {
+                    continue;
+                };
+                sim.lives()
+            };
+            now.sort_by_key(|l| l.0);
+            if now != last {
+                let lives: Vec<String> = now.iter().map(|(e, p)| format!("\"{e}\":{p}")).collect();
+                println!(
+                    "{{\"ev\":\"fake_lives\",\"lives\":{{{}}}}}",
+                    lives.join(",")
+                );
+                last = now;
+            }
+        }
+    });
     let code = if a.run.is_empty() {
         let _ = tokio::signal::ctrl_c().await;
         ExitCode::SUCCESS

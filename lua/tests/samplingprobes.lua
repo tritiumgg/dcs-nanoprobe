@@ -96,7 +96,6 @@ for _, name in ipairs({ 'design-objects', 'design-combat' }) do
     assert(#out.scale == 3 and out.scale[3].added == 1000, 'the static list was not grown to 1,000')
   else
     assert(out.units['np-design-b1'] and out.units['np-design-n1'], 'the probe watched no unit')
-    assert(next(out.fuel) ~= nil, 'no fuel was read')
   end
   S.ok(name .. '.lua: ran')
 end

@@ -61,7 +61,7 @@ fn longest_gap(
     (gap, gap_s, unread, pumps)
 }
 
-/// Every row's life and fuel are read once in `VITALS_EVERY` passes, with
+/// Every row's life is read once in `VITALS_EVERY` passes, with
 /// batches that end inside a lap at every size.
 #[test]
 fn the_slow_vitals_sweep_reads_every_row_in_every_cycle() {
@@ -140,7 +140,7 @@ fn the_slow_period_is_the_time_every_row_took() {
     let (mut s, mut rec, mut w) = rows_table(1200);
     let (_, gap_s, unread, _) = longest_gap(&mut s, &mut rec, &mut w, Tier::Vitals, 5 * every);
     assert_eq!(unread, 0);
-    let reported = s.slow_period[0];
+    let reported = s.slow_period;
     assert!(reported > 0.0, "no period reported");
     // No row waited longer than the period the sweep reports, within a
     // pass's time.

@@ -67,16 +67,10 @@ impl Backend for Fake {
         Some(&mut self.0)
     }
 
-    fn achieved(&self) -> Option<[f64; 5]> {
+    fn achieved(&self) -> Option<[f64; 4]> {
         // The fake samples at the rates it was told, never starved.
         let (r, received) = self.0.rates();
-        (received > 0).then_some([
-            r.position_s,
-            r.vitals_s,
-            r.ammo_s,
-            r.warehouse_s,
-            r.enumeration_s,
-        ])
+        (received > 0).then_some([r.position_s, r.vitals_s, r.warehouse_s, r.enumeration_s])
     }
 }
 

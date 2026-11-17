@@ -150,11 +150,11 @@ dematerialize and a materialize, and after a reload:
 | F-15C | `M61_20_HE` 940, `AIM_120` 2 | `Enfield11` |
 | M-113 | `M2_12_7_T` 104, `M2_12_7` 404 | empty |
 
-All three reads were equal, and the capture was `APPLIED`. The payload names three
-AIM-120B pylons and DCS loads two AIM-120. The control is an F-15C spawned outside the
-platform by `coalition.addGroup` with the same payload as a Lua table keyed by number: DCS
-loaded it with the same rows, `M61_20_HE` 940 and `AIM_120` 2. The conversion of the
-decimal-string keys is not the cause; why DCS loads two is UNVERIFIED.
+All three reads were equal, and the capture was `APPLIED`. The payload carries AIM-120B
+on pylons 1 and 11 and 610-gallon tanks on 2, 6 and 10 (the launchers as E39 named them,
+docs/results/2026-11-16-e39-spawn-state.md), so DCS loads two AIM-120. The control is an
+F-15C spawned outside the platform by `coalition.addGroup` with the same payload as a Lua
+table keyed by number: DCS loaded it with the same rows, `M61_20_HE` 940 and `AIM_120` 2.
 
 No string key looked like an integer in 218 keys of 55 tables: the F-15C's and the
 M-113's `getAmmo`, `getDesc` and `getPosition`, and the inventories of three Caucasus

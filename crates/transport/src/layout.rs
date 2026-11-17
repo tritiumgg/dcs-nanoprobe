@@ -80,7 +80,6 @@ pub mod status {
         FRAME_INTERVAL_US "frame_interval_us" 0x0210 8 1 Agent;
         PERIOD_POSITION "period_position" 0x0218 8 1 Agent;
         PERIOD_VITALS "period_vitals" 0x0220 8 1 Agent;
-        PERIOD_AMMO "period_ammo" 0x0228 8 1 Agent;
         PERIOD_WAREHOUSE "period_warehouse" 0x0230 8 1 Agent;
         PERIOD_ENUMERATION "period_enumeration" 0x0238 8 1 Agent;
         ROWS_PER_CLOCK "rows_per_clock" 0x0240 8 1 Agent;
@@ -101,8 +100,13 @@ pub mod status {
     /// Buckets in each histogram.
     pub const HIST_BUCKETS: usize = 32;
     /// The agent's `pad` fields: offset and bytes.
-    pub const AGENT_PADS: &[(usize, usize)] =
-        &[(0x68, 24), (0x140, 64), (0x248, 56), (0x780, 2176)];
+    pub const AGENT_PADS: &[(usize, usize)] = &[
+        (0x68, 24),
+        (0x140, 64),
+        (0x228, 8),
+        (0x248, 56),
+        (0x780, 2176),
+    ];
 }
 
 /// The side that writes a status field.

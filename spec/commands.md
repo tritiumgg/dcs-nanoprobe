@@ -436,12 +436,12 @@ Campaign column says `any`.
 |---|---|---|---|
 | 0x0000 | f64 | position_s | Target period of the position tier, seconds |
 | 0x0008 | f64 | vitals_s | Target period of the vitals tier |
-| 0x0010 | f64 | ammo_s | Target period of the ammunition tier |
+| 0x0010 | pad[8] | reserved | |
 | 0x0018 | f64 | warehouse_s | Target period of the warehouse and airbase tier |
 | 0x0020 | f64 | enumeration_s | Period of the full enumeration |
 
 A value of 0 keeps the default of spec/config.md. Rates are targets: the agent holds
-its time slice and lets the rates fall, in this order: ammunition and warehouses, then
+its time slice and lets the rates fall, in this order: warehouses, then
 vitals, then positions of objects no subscription names. Subscribed positions fall
 last. The full enumeration keeps its period.
 
@@ -556,8 +556,6 @@ raises leaves its key out.
 | `x`, `y`, `z` | Position, meters |
 | `heading`, `pitch`, `roll` | Attitude, radians, from `getPosition()` |
 | `life`, `life0` | `getLife()` and `getLife0()` |
-| `fuel` | `getFuel()`; a static has none |
-| `ammo` | A list with one `{type, count}` per `getAmmo()` row, `type` from the row's `desc.typeName`; a row whose read raises is left out. Nil for a unit with none and for a static. Flares and chaff are not among the rows (LIVE, E8). |
 
 For a group that does not exist the value is nil. The sidecar never sends this command again
 after a `refused`, `unknown` or `TOO_LARGE` outcome: it takes the group's last
@@ -926,8 +924,12 @@ an integer and a `c_unit_dead` guard: a dead unit is `NOT_BOUND`. A call that fa
 What the setter does (LIVE, E16, step S15): at 50 % an aircraft, a helicopter and a
 ground unit read back half their initial life. At 0 they leave DCS; only an airborne
 aircraft logged an event (`UNIT_LOST`, `EJECTION`). The one ship type tried, a
-speedboat, left DCS at 50 %. The setter does nothing to a static, which is why
-`DAMAGE` takes only a unit. On a dedicated server a setting of 10 killed a ground unit and the
+speedboat, left DCS at 50 % and stayed at 80 %; a PERRY frigate read back 80 % and 50 %
+(LIVE, E39). The setter does nothing to a static, which is why `DAMAGE` takes only a
+unit. The sidecar also queues a `DAMAGE` right after a `GROUP_SPAWN` to give a unit
+its stored life (spec/world.md, "Spawn state"); E39 found it applies in the spawn's
+frame while paused, and later with the simulation running; the running same-frame case
+is UNVERIFIED. On a dedicated server a setting of 10 killed a ground unit and the
 death did not reach a connected client (LIVE,
 docs/results/2026-11-11-first-dll-and-spikes.md, E18).
 

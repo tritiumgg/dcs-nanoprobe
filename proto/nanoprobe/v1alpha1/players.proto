@@ -7,6 +7,7 @@ import "google/protobuf/struct.proto";
 import "google/protobuf/timestamp.proto";
 import "nanoprobe/v1alpha1/common.proto";
 import "nanoprobe/v1alpha1/session.proto";
+import "nanoprobe/v1alpha1/world.proto";
 
 // Menu selections and chat arrive as events (EventsService).
 service PlayersService {
@@ -32,10 +33,17 @@ message Player {
   // The unit the player is in, 0 for none.
   uint64 unit_id = 5;
   uint32 seat = 6;
-  // Fuel the player used in the active campaign, in fractions of a full
-  // tank, summed over the units the player flew. A rise in a unit's fuel
-  // counts for nothing.
-  double fuel_used = 7;
+  reserved 7;
+  reserved "fuel_used";
+  // The ammunition of the unit in `unit_id`, by weapon type name, as the last
+  // birth or takeoff read gave it. It is the same loadout that `Unit.ammo`
+  // shows for a unit the store holds, and it also covers an adopted unit,
+  // which has no `Unit`. Empty when no read was made, when `unit_id` is 0 and
+  // after the player leaves the unit. A new mission generation clears it
+  // (spec/world.md, "Ammunition").
+  map<string, uint32> ammo = 8;
+  // The read that gave `ammo`. Absent when `ammo` has no read.
+  AmmoRead ammo_read = 9;
 }
 
 message Occupancy {

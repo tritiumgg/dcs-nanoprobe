@@ -357,12 +357,12 @@ async fn airbases_warehouses_and_rates() {
     cmd.set_sample_rates(pb::SetSampleRatesRequest {
         write: write(&l, "rates", c),
         position_period: 2.0,
-        ammo_period: 9.0,
+        warehouse_period: 9.0,
         ..pb::SetSampleRatesRequest::default()
     })
     .await
     .expect("rates");
-    until_fake(&hub, |s| s.rates().0.ammo_s == 9.0).await;
+    until_fake(&hub, |s| s.rates().0.warehouse_s == 9.0).await;
     let e = cmd
         .set_sample_rates(pb::SetSampleRatesRequest {
             write: write(&l, "rates-bad", c),

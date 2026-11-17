@@ -20,7 +20,7 @@ use nanoprobe_sidecar::eventfile::{EventFile, EventRow, Retained};
 use nanoprobe_sidecar::players::{LaunchRule, Note, Roster};
 use nanoprobe_sidecar::sim::RawRecord;
 use nanoprobe_sidecar::sim::wire::Input;
-use nanoprobe_sidecar::store::DiskError;
+use nanoprobe_sidecar::store::{DiskError, Loadout};
 use nanoprobe_transport::layout::{gap_class, lifecycle as lc};
 use nanoprobe_transport::records;
 
@@ -308,6 +308,7 @@ pub fn player_body(n: Note) -> event::Body {
             side,
             unit,
             seat,
+            ..
         } => (
             PlayerEventKind::LeaveUnit,
             key,
@@ -694,6 +695,29 @@ pub fn route_body(e: &nanoprobe_sidecar::store::RouteEvent) -> event::Body {
     })
 }
 
+/// The DCS event ID of `S_EVENT_TAKEOFF`.
+pub const S_EVENT_TAKEOFF: u32 = 3;
+/// The DCS event ID of `S_EVENT_BIRTH`.
+pub const S_EVENT_BIRTH: u32 = 15;
+
+/// The API's loadout event for an `AMMO` read of an occupied unit.
+pub fn loadout_body(
+    unit_id: u64,
+    group_id: u64,
+    type_name: &str,
+    player_keys: Vec<String>,
+    l: &Loadout,
+) -> event::Body {
+    event::Body::Loadout(pb::LoadoutEvent {
+        unit_id,
+        group_id,
+        r#type: type_name.to_owned(),
+        player_keys,
+        ammo: l.ammo.clone().into_iter().collect(),
+        read: Some(crate::convert::ammo_read(l)),
+    })
+}
+
 /// Whether an event passes a filter's DCS IDs and player key. Gap and
 /// lifecycle events pass every filter.
 pub fn passes(e: &Event, dcs_ids: &[u32], player_key: &str) -> bool {
@@ -711,6 +735,16 @@ pub fn passes(e: &Event, dcs_ids: &[u32], player_key: &str) -> bool {
         Some(event::Body::Author(a)) => {
             dcs_ids.is_empty()
                 && (player_key.is_empty() || a.player_keys.iter().any(|k| k == player_key))
+        }
+        // A loadout read passes the filter of the event that caused it.
+        Some(event::Body::Loadout(l)) => {
+            let cause = match l.read.as_ref().map(|r| r.cause) {
+                Some(c) if c == pb::AmmoReadCause::Birth as i32 => Some(S_EVENT_BIRTH),
+                Some(c) if c == pb::AmmoReadCause::Takeoff as i32 => Some(S_EVENT_TAKEOFF),
+                _ => None,
+            };
+            (dcs_ids.is_empty() || cause.is_some_and(|c| dcs_ids.contains(&c)))
+                && (player_key.is_empty() || l.player_keys.iter().any(|k| k == player_key))
         }
         Some(event::Body::Route(_)) => dcs_ids.is_empty() && player_key.is_empty(),
         Some(event::Body::Moderation(m)) => {

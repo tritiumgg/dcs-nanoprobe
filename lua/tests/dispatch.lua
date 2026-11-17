@@ -768,14 +768,13 @@ scenario('world', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   expect(r[1], APPLIED, 'CAPTURE')
   expect(r[2], APPLIED, 'GROUP_CAPTURE_DESTROY')
   assert(#r[2].value == 2, 'the capture holds ' .. #r[2].value .. ' units, not 2:\n' .. dump(ctx))
-  for _, key in ipairs({ 'name', 'id', 'type', 'x', 'y', 'z', 'heading', 'pitch', 'roll', 'life', 'life0',
-    'fuel', 'ammo' }) do
+  for _, key in ipairs({ 'name', 'id', 'type', 'x', 'y', 'z', 'heading', 'pitch', 'roll', 'life', 'life0' }) do
     assert(r[2].value[1][key] ~= nil, 'the captured unit has no ' .. key .. ':\n' .. dump(ctx))
   end
   assert(r[2].value[1].type == 'BTR-80' and r[2].value[1].life0 == 2, 'wrong capture:\n' .. dump(ctx))
   assert(r[1].value[1].name == r[2].value[1].name, 'CAPTURE and the capture-destroy disagree')
-  assert(r[2].value[1].ammo[1].type == 'weapons.shells.2A72_30' and r[2].value[1].ammo[1].count == 500
-    and r[2].value[1].ammo[1].desc == nil, 'an ammo row is not {type, count}:\n' .. dump(ctx))
+  assert(r[2].value[1].ammo == nil, 'the capture holds an ammo key:\n' .. dump(ctx))
+  assert(r[2].value[1].fuel == nil, 'the capture holds a fuel key:\n' .. dump(ctx))
   host:set_pause(false)
   ctx.run(0.5)
   host:set_pause(true)
@@ -805,12 +804,12 @@ scenario('world', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   assert(r[1].object ~= 0 and r[1].value == S.null, 'a static spawn carries no object:\n' .. dump(ctx))
   expect(r[2], APPLIED, 'CAPTURE of a static')
   assert(#r[2].value == 1 and r[2].value[1].name == S1 and r[2].value[1].life == 1
-    and r[2].value[1].x == 500 and r[2].value[1].fuel == nil, 'the static capture is wrong:\n' .. dump(ctx))
+    and r[2].value[1].x == 500, 'the static capture is wrong:\n' .. dump(ctx))
   expect(r[3], DCS_REFUSED, 'STATIC_SPAWN without a name')
   expect(r[4], APPLIED, 'STATIC_DESTROY')
   expect(r[5], APPLIED, 'STATIC_DESTROY of nothing')
 
-  -- A 30-unit group with a dozen ammo rows each is captured, not TOO_LARGE.
+  -- A 30-unit group is captured, not TOO_LARGE.
   local BIG, names = 'np!hGx9', {}
   for i = 1, 30 do
     names[i] = 'np.hGxbig' .. i
@@ -821,8 +820,8 @@ scenario('world', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
     { op = 'GROUP_CAPTURE_DESTROY', entity = 9 },
   }, 'a large capture')
   expect(r[1], APPLIED, 'GROUP_SPAWN of 30 units')
-  expect(r[2], APPLIED, 'GROUP_CAPTURE_DESTROY of 30 units with 12 ammo rows each')
-  assert(#r[2].value == 30 and #r[2].value[1].ammo == 12, 'the large capture is short:\n' .. dump(ctx):sub(1, 3000))
+  expect(r[2], APPLIED, 'GROUP_CAPTURE_DESTROY of 30 units')
+  assert(#r[2].value == 30, 'the large capture is short:\n' .. dump(ctx):sub(1, 3000))
   ctx.run(0.2)
   assert(sim.statics[S1] == nil, 'the static is still in the world')
 
@@ -1764,9 +1763,10 @@ scenario('marks', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   assert(count(shim.marks) > 0, 'the shim holds no marks')
   ctx.stop()
   ctx.host:load_mission('second', { paused = true })
-  ctx.run(0.5, function()
-    return count(shim.marks) == 0
-  end)
+  -- The reset comes with the first pump of the new generation. With the
+  -- sidecar gone the hook may run no pump, so the test runs one itself.
+  ctx.run(0.1)
+  shim.pump()
   assert(count(shim.marks) == 0 and count(shim.menus) == 0, 'the shim kept marks across a mission load')
   S.ok('MARK_SET, DRAWING_SET and their removals: scopes, replacement under a new ID, NOT_BOUND, BAD_PAYLOAD, DCS_REFUSED, a load forgets them')
 end, '\n[lua]\nraw = true\n')

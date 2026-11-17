@@ -57,7 +57,7 @@ layout status fixed=4096
   0x0210 f64 frame_interval_us agent
   0x0218 f64 period_position agent
   0x0220 f64 period_vitals agent
-  0x0228 f64 period_ammo agent
+  0x0228 pad[8] reserved_period agent
   0x0230 f64 period_warehouse agent
   0x0238 f64 period_enumeration agent
   0x0240 u64 rows_per_clock agent
@@ -282,7 +282,6 @@ layout VITALS fixed=8
   0x0004 pad[4] reserved
   + u64[n] object
   + f32[n] life
-  + f32[n] fuel
 layout ATTITUDE fixed=8
   0x0000 u32 n
   0x0004 pad[4] reserved
@@ -290,8 +289,10 @@ layout ATTITUDE fixed=8
   + f32[n] heading
   + f32[n] pitch
   + f32[n] roll
-layout AMMO fixed=8
+layout AMMO fixed=16
   0x0000 u64 object
+  0x0008 u32 cause
+  0x000c pad[4] reserved
   + lv ammo
 layout WAREHOUSE fixed=0
   + str airbase
@@ -384,7 +385,7 @@ layout CAMPAIGN fixed=8
 layout RATES fixed=40
   0x0000 f64 position_s
   0x0008 f64 vitals_s
-  0x0010 f64 ammo_s
+  0x0010 pad[8] reserved
   0x0018 f64 warehouse_s
   0x0020 f64 enumeration_s
 layout SUBSCRIBE fixed=16
@@ -541,4 +542,4 @@ codes moderation
   2 BAN call=net.banlist_add(player,_seconds,_reason);_with_player_0,_net.banlist_add_by_ucid(ucid,_seconds,_reason)
   3 UNBAN call=net.banlist_remove(ucid)
   4 SLOT call=net.force_player_slot(player,_side,_slot)
-hash fa87e5aa4e51ba9f
+hash 780c54caa5135621

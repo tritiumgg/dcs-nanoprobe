@@ -194,7 +194,6 @@ fn metrics(out: &mut String, live: &impl Memory) {
     for (name, v) in [
         "period_position",
         "period_vitals",
-        "period_ammo",
         "period_warehouse",
         "period_enumeration",
     ]

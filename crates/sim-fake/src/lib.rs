@@ -453,6 +453,11 @@ pub struct FakeSim {
     written_stamp: (u32, u64),
     /// Destroys to answer `DCS_REFUSED`.
     refuse_destroys: u32,
+    /// `DAMAGE` commands to answer `DCS_REFUSED`.
+    refuse_damages: u32,
+    /// The initial life an `OBJECT` record carries, by unit entity; 1 when
+    /// absent.
+    life0_of: HashMap<u64, f32>,
     /// `MISSION_LOAD`s still to refuse.
     refuse_loads: u32,
     /// DCS groups that were in DCS when the active campaign changed.
@@ -575,6 +580,8 @@ impl FakeSim {
             lose_result: false,
             written_stamp: (0, 0),
             refuse_destroys: 0,
+            refuse_damages: 0,
+            life0_of: HashMap::new(),
             refuse_loads: 0,
             orphans: BTreeSet::new(),
             losing: false,
@@ -648,6 +655,15 @@ impl FakeSim {
     pub fn life_percent_of(&self, entity: u64) -> Option<f64> {
         let (o, _) = self.objects.iter().find(|(_, x)| x.entity == entity)?;
         self.life.get(o).copied()
+    }
+
+    /// The unit entities in DCS that a `DAMAGE` set, with the percentage of
+    /// their initial life.
+    pub fn lives(&self) -> Vec<(u64, f64)> {
+        self.objects
+            .iter()
+            .filter_map(|(o, x)| Some((x.entity, *self.life.get(o)?)))
+            .collect()
     }
 
     /// The DCS object the group of an entity was told to attack with an
@@ -845,6 +861,16 @@ impl FakeSim {
     /// As [`FakeSim::birth_client_unit`], in the DCS group `group` (0 for
     /// none), of the type `type_name`.
     pub fn birth_client_unit_in(&mut self, mission_id: &str, group: u64, type_name: &str) -> u64 {
+        let id = self.place_client_unit_in(mission_id, group, type_name);
+        self.birth_event(id, Some(mission_id));
+        id
+    }
+
+    /// As [`FakeSim::birth_client_unit_in`] without the `S_EVENT_BIRTH`: the
+    /// unit's `OBJECT` record is queued and the birth is sent later with
+    /// [`FakeSim::birth_event`]. A record queued between the two reaches the
+    /// sidecar before the birth that seats the player.
+    pub fn place_client_unit_in(&mut self, mission_id: &str, group: u64, type_name: &str) -> u64 {
         let id = self.next_object;
         self.next_object += 1;
         self.objects.insert(
@@ -867,7 +893,6 @@ impl FakeSim {
         let o = self.object_record(id, 0);
         self.sent.insert(id);
         self.queued_out.push(o);
-        self.birth_event(id, Some(mission_id));
         id
     }
 
@@ -951,13 +976,38 @@ impl FakeSim {
     }
 
     /// A vitals row for an object, in the next frame.
-    pub fn emit_vitals(&mut self, object: u64, life: f32, fuel: f32) {
+    pub fn emit_vitals(&mut self, object: u64, life: f32) {
         self.queued_out
             .push(Input::Vitals(vec![nanoprobe_sidecar::sim::wire::Vitals {
                 object,
                 life,
-                fuel,
             }]));
+    }
+
+    /// An `AMMO` record for an object, in the next frame: what the agent
+    /// writes for a player-occupied unit at its birth (`cause` 1) or its
+    /// takeoff (2). `rows` are `getAmmo` type names and counts.
+    pub fn emit_ammo(&mut self, object: u64, cause: u32, rows: &[(&str, f64)]) {
+        let ammo = Lv::Table(
+            rows.iter()
+                .enumerate()
+                .map(|(i, (t, c))| {
+                    (
+                        Lv::Number((i + 1) as f64),
+                        Lv::Table(vec![
+                            (lv::s("type"), lv::s(t)),
+                            (lv::s("count"), Lv::Number(*c)),
+                        ]),
+                    )
+                })
+                .collect(),
+        );
+        self.queued_out
+            .push(Input::Ammo(nanoprobe_transport::records::Ammo {
+                object,
+                cause,
+                ammo,
+            }));
     }
 
     fn player_record(&mut self, event: u32, id: u32, text: &str) {
@@ -1252,7 +1302,7 @@ impl FakeSim {
             category: 2,
             coalition: 2,
             country: 2,
-            life0: 1.0,
+            life0: self.life0_of.get(&o.entity).copied().unwrap_or(1.0),
             name: o.name.clone(),
             type_name: o.type_name.clone(),
             group_name: if o.kind == object_kind::STATIC {
@@ -1392,12 +1442,15 @@ impl FakeSim {
         let cfg = self.cfg.clone();
         let ledger = std::mem::take(&mut self.ledger);
         let bans = std::mem::take(&mut self.bans);
+        // The mission's units keep their initial life.
+        let life0_of = std::mem::take(&mut self.life0_of);
         *self = FakeSim::new(Config {
             first_boot: boot,
             ..cfg
         });
         self.ledger = ledger;
         self.bans = bans;
+        self.life0_of = life0_of;
     }
 
     /// DCS dies and stays down: nothing runs, nothing is read, and records
@@ -1448,6 +1501,11 @@ impl FakeSim {
     /// `CONTROL_LOST` and its resync `HELLO` are not modeled.)
     pub fn lose_next_result(&mut self) {
         self.lose_result = true;
+    }
+
+    /// Take at most `n` commands a frame from now on; 0 stalls the ring.
+    pub fn set_commands_per_frame(&mut self, n: usize) {
+        self.cfg.commands_per_frame = n;
     }
 
     /// The agent's active campaign changes, as a `CAMPAIGN` command from a
@@ -1554,6 +1612,17 @@ impl FakeSim {
     /// `DCS_REFUSED`.
     pub fn refuse_destroys(&mut self, n: u32) {
         self.refuse_destroys = n;
+    }
+
+    /// The next `n` `DAMAGE` commands raise in DCS and are answered
+    /// `DCS_REFUSED`.
+    pub fn refuse_damages(&mut self, n: u32) {
+        self.refuse_damages = n;
+    }
+
+    /// The initial life the `OBJECT` records of a unit entity carry.
+    pub fn set_life0(&mut self, entity: u64, life0: f32) {
+        self.life0_of.insert(entity, life0);
     }
 
     /// The `OBJECT_GONE` `DEAD` records written and not yet read, as
@@ -2658,6 +2727,16 @@ impl FakeSim {
                 self.result(&cmd, rc::APPLIED, 0, "", Lv::Nil);
             }
             Body::Damage { life_percent } => {
+                if self.refuse_damages > 0 {
+                    self.refuse_damages -= 1;
+                    return self.result(
+                        &cmd,
+                        rc::DCS_REFUSED,
+                        0,
+                        "injected: the damage raised",
+                        Lv::Nil,
+                    );
+                }
                 let campaign = self.campaign;
                 let Some((o, _)) = self
                     .objects
@@ -3053,7 +3132,7 @@ impl FakeSim {
                     ("z", lv::n(o.at.z)),
                     ("heading", lv::n(0.0)),
                     ("life", lv::n(self.life.get(m).map_or(1.0, |p| p / 100.0))),
-                    ("fuel", lv::n(0.5)),
+                    ("life0", lv::n(1.0)),
                 ])
             })
             .collect();
