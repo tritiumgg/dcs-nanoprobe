@@ -821,8 +821,8 @@ local function stock(base)
   return n
 end
 
--- Whether an airbase a static makes is gone: its static no longer exists,
--- so it was destroyed or died. Its entry then stays as a tombstone,
+-- Whether an airbase a static makes is gone: its static, the one with the
+-- airbase's ID, no longer exists, so it was destroyed, died or was replaced. Its entry then stays as a tombstone,
 -- so the rows after it keep their index.
 local function farp_gone(base)
   if base.gone then
@@ -830,7 +830,7 @@ local function farp_gone(base)
   end
   local ok, alive = pcall(function()
     local s = StaticObject.getByName(base.name)
-    return s ~= nil and s:isExist() == true
+    return s ~= nil and rawget(s, 'id_') == base.id and s:isExist() == true
   end)
   base.gone = not (ok and alive)
   return base.gone
@@ -1723,7 +1723,8 @@ local HANDLERS = {
     -- A FARP static makes an airbase of its name, with its own warehouse
     -- (LIVE, docs/results/2026-11-16-person-tests-2.md). It joins the
     -- airbases this generation samples; a static spawned again under the
-    -- name takes over its entry.
+    -- name, or one spawned over a mission FARP of the name, takes over its
+    -- entry.
     -- The airbase has the static's ID (LIVE); an airbase of the name with
     -- another ID is not this static's. A static of the name that is no FARP
     -- leaves a tombstone.
@@ -1731,7 +1732,7 @@ local HANDLERS = {
     local ab_id = found and ab and rawget(ab, 'id_') or nil
     local at
     for i, base in ipairs(T.airbases) do
-      if base.spawned and base.name == a.name then
+      if base.static and base.name == a.name then
         at = i
         break
       end
@@ -2013,23 +2014,23 @@ local HANDLERS = {
     -- docs/results/2026-11-16-person-tests-2.md). Each static in the volume
     -- that reads life 0 and no longer exists, as a dead static does (LIVE,
     -- same document), is collected during the search and destroyed after
-    -- it returns, each call under pcall. A destroy counts once a generation.
+    -- it returns, each call under pcall. A static a destroy left is
+    -- destroyed again by a later clear, and counted once a generation.
     local dead = {}
     T.cleared = T.cleared or {}
     pcall(world.searchObjects, Object.Category.STATIC, volume, function(s)
       local got, life, exists = pcall(function()
         return s:getLife(), s:isExist()
       end)
-      local id = rawget(s, 'id_')
-      if got and type(life) == 'number' and life <= 0 and exists == false and not T.cleared[id] then
+      if got and type(life) == 'number' and life <= 0 and exists == false then
         dead[#dead + 1] = s
       end
       return true
     end)
     for _, s in ipairs(dead) do
-      if pcall(s.destroy, s) then
+      local id = rawget(s, 'id_')
+      if pcall(s.destroy, s) and not T.cleared[id] then
         removed = (tonumber(removed) or 0) + 1
-        local id = rawget(s, 'id_')
         if id ~= nil then
           T.cleared[id] = true
         end

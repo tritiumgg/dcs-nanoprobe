@@ -183,11 +183,15 @@ do
     'unlimited-read: unreadable flags settled something: ' .. text)
   assert(unlimited.stock.weapon['weapons.bombs.Mk_82'] == 1000000, 'unlimited-read: the count is as it was')
   local server_env = host.states.server.env
-  rawset(server_env, 'mission', { warehouses = { airports = {
-    [9001] = { unlimitedAircrafts = false, unlimitedMunitions = false, unlimitedFuel = false },
-    [9002] = { unlimitedAircrafts = true, unlimitedMunitions = true, unlimitedFuel = true,
-      aircrafts = { a = 1, b = 1 }, weapons = { a = 1, b = 1 } },
-  } } })
+  rawset(server_env, 'mission', { warehouses = {
+    airports = {
+      [9001] = { unlimitedAircrafts = false, unlimitedMunitions = false, unlimitedFuel = false },
+      [9002] = { unlimitedAircrafts = true, unlimitedMunitions = true, unlimitedFuel = true,
+        aircrafts = { a = 1, b = 1 }, weapons = { a = 1, b = 1 } },
+    },
+    -- A warehouse static whose unit ID equals the airport's: not read.
+    warehouses = { [9002] = { unlimitedAircrafts = false, unlimitedMunitions = false, unlimitedFuel = false } },
+  } })
   -- An unlimited warehouse reads 1,000,000 for any item (E6); the mock reads
   -- only what it holds.
   unlimited.stock.aircraft['F-15C'] = 1000000
@@ -199,7 +203,19 @@ do
   unlimited.stock.liquids[2] = 1000000
   assert(seen.verdict == 'fails' and seen.failed[1] == 'np-unlimited: fuel',
     'unlimited-read: a lower read did not fail: ' .. text)
+  local weapons = unlimited.stock.weapon
+  weapons['weapons.bombs.Mk_82'] = 999
+  seen, text = read('fails-munitions')
+  weapons['weapons.bombs.Mk_82'] = 1000000
+  assert(seen.verdict == 'fails' and seen.failed[1] == 'np-unlimited: munitions',
+    'unlimited-read: a lower weapon read did not fail: ' .. text)
+  weapons['weapons.bombs.Mk_84'] = 1000000
+  seen, text = read('fails-listed')
+  weapons['weapons.bombs.Mk_84'] = nil
+  assert(seen.verdict == 'fails' and seen.failed[1] == 'np-unlimited: munitions',
+    'unlimited-read: more weapons listed than the file did not fail: ' .. text)
   rawset(server_env, 'mission', nil)
   unlimited.stock.aircraft['F-15C'] = nil
-  S.ok('unlimited-read: inconclusive without flags, holds at 1,000,000, fails below')
+  S.ok('unlimited-read: inconclusive without flags, holds at 1,000,000, fails below or with more listed than the file;'
+    .. " an airport's flags win over a warehouse static of the same ID")
 end

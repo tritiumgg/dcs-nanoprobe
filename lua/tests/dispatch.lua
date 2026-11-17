@@ -868,22 +868,48 @@ scenario('world', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   assert(#shim.T.airbases == at and shim.T.airbases[at].gone and sampled()[at] == '',
     'a static of the name that is no FARP left no tombstone')
   -- A mission FARP's airbase goes with its static too.
-  local mfarp = sim:add_static(USA, { name = 'np#hGxM', type = 'FARP', x = 1200, y = 1200 })
+  local mfarp = sim:add_static(USA, { name = 'np#hGxG', type = 'FARP', x = 1200, y = 1200 })
   sim.airbases[#sim.airbases + 1] = { id = mfarp.id, name = mfarp.name, coalition = 2, x = 1200, z = 1200,
     stock = { aircraft = {}, weapon = {}, liquids = { [0] = 0, [1] = 0, [2] = 0, [3] = 0 } } }
   shim.read_airbases()
   local m = #shim.T.airbases
   assert(shim.T.airbases[m].static and not shim.T.airbases[1].static, 'a mission FARP is not marked, or an airfield is')
-  sim:doom_static(mfarp)
-  local mnames = {}
-  local real = shim.agent.airbase
-  shim.agent.airbase = function(index, _, _, name)
-    mnames[index] = name
-    return false
+  local function rows(indexes)
+    local out = {}
+    local real = shim.agent.airbase
+    shim.agent.airbase = function(index, _, _, name)
+      out[index] = name
+      return false
+    end
+    local ok, err = pcall(shim.warehouse_rows, indexes)
+    shim.agent.airbase = real
+    assert(ok, tostring(err))
+    return out
   end
-  local ok, err = pcall(shim.warehouse_rows, { 1, m })
-  shim.agent.airbase = real
-  assert(ok, tostring(err))
+  assert(rows({ 1, m })[m] == 'np#hGxG', 'a live mission FARP is not sampled')
+  -- A FARP spawned over a live mission FARP's name (the name the agent
+  -- gives entity 16) takes over its entry; a static of the name that is no
+  -- FARP leaves a tombstone.
+  r = run({ { op = 'STATIC_SPAWN', entity = 16, rev = 1, country = USA, name = 'np#hGxG',
+    static = { name = 'np#hGxG', type = 'FARP', category = 'Heliports', x = 1200, y = 1200, heading = 0 } } },
+    'a FARP over a mission FARP')
+  expect(r[1], APPLIED, 'STATIC_SPAWN of a FARP over a mission FARP')
+  assert(#shim.T.airbases == m and shim.T.airbases[m].id == r[1].object and rows({ m })[m] == 'np#hGxG',
+    'a FARP spawned over a mission FARP did not take its entry')
+  r = run({ { op = 'STATIC_SPAWN', entity = 16, rev = 2, country = USA, name = 'np#hGxG',
+    static = { name = 'np#hGxG', type = 'Barrier', x = 1200, y = 1200, heading = 0 } } }, 'a barrier over it')
+  expect(r[1], APPLIED, 'STATIC_SPAWN of a barrier over the FARP')
+  assert(#shim.T.airbases == m and rows({ m })[m] == '', 'a barrier over a FARP left no tombstone')
+  -- A mission FARP whose static dies is a tombstone.
+  r = run({ { op = 'STATIC_DESTROY', entity = 16 } }, 'the barrier destroyed')
+  local mfarp3 = sim:add_static(USA, { name = 'np#hGxN', type = 'FARP', x = 1300, y = 1300 })
+  sim.airbases[#sim.airbases + 1] = { id = mfarp3.id, name = mfarp3.name, coalition = 2, x = 1300, z = 1300,
+    stock = { aircraft = {}, weapon = {}, liquids = { [0] = 0, [1] = 0, [2] = 0, [3] = 0 } } }
+  shim.read_airbases()
+  m = #shim.T.airbases
+  assert(rows({ 1, m })[m] == 'np#hGxN', 'a live mission FARP is not sampled')
+  sim:doom_static(mfarp3)
+  local mnames = rows({ 1, m })
   assert(mnames[m] == '' and mnames[1] == shim.T.airbases[1].name, 'a dead mission FARP was sampled')
 
   -- A 30-unit group is captured, not TOO_LARGE.
@@ -1517,12 +1543,15 @@ scenario('clear-debris', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   expect(r[1], APPLIED, 'CLEAR_DEBRIS where a destroy raises')
   assert(r[1].value == 1, 'a destroy that raised was counted: ' .. tostring(r[1].value))
   assert(sim.dead_statics[far.id] == far, 'a static whose destroy raised is gone')
-  -- A static a destroy leaves in place is counted once a generation.
+  -- A static a destroy leaves in place is destroyed again by each clear and
+  -- counted once a generation.
   sim.destroy_keeps = true
+  sim.destroy_calls = 0
   r = run({ sphere(far, 50), sphere(far, 50) }, 'clear debris twice where a destroy leaves the static')
   sim.destroy_keeps = nil
   assert(r[1].value == 2 and r[2].value == 1,
     'a static a destroy left was counted again: ' .. tostring(r[1].value) .. ', ' .. tostring(r[2].value))
+  assert(sim.destroy_calls == 2, 'a static a destroy left was not destroyed again: ' .. sim.destroy_calls)
   -- A live static that reads life 0 stays.
   local zero = sim:add_static(2, { name = 'zero', type = 'FARP Fuel Depot', x = 70000, y = 0 })
   zero.life = 0

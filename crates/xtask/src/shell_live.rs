@@ -651,7 +651,7 @@ fn ruin_check(
         Ok(v.as_str().filter(|n| !n.is_empty()).map(str::to_string))
     })?;
     let read = format!(
-        "local out = {{}}\nlocal s = StaticObject.getByName({name:?})\nout.found = s ~= nil\nif s then out.exists = s:isExist() out.life = s:getLife() end\nout.listed = 0\nworld.searchObjects(Object.Category.STATIC, {{ id = world.VolumeType.SPHERE, params = {{ point = {{ x = {x}, y = land.getHeight({{ x = {x}, y = {z} }}), z = {z} }}, radius = 30 }} }}, function(o) if o:getName() == {name:?} then out.listed = out.listed + 1 end return true end)\nreturn out\n"
+        "local out = {{}}\nlocal s = StaticObject.getByName({name:?})\nout.found = s ~= nil\nif s then local ok, e = pcall(s.isExist, s) out.exists = ok and e or 'raised' local okl, l = pcall(s.getLife, s) out.life = okl and l or 'raised' end\nout.listed = 0\nworld.searchObjects(Object.Category.STATIC, {{ id = world.VolumeType.SPHERE, params = {{ point = {{ x = {x}, y = land.getHeight({{ x = {x}, y = {z} }}), z = {z} }}, radius = 30 }} }}, function(o) local ok, n = pcall(o.getName, o) if ok and n == {name:?} then out.listed = out.listed + 1 end return true end)\nreturn out\n"
     );
     run.eval(
         "server",
@@ -738,7 +738,17 @@ fn ruin_check(
         "box_cost_us": b.result.as_ref().map(|c| c.cost_us),
         "box_removed": b.debris_removed,
     });
-    println!("   ruin: {v}");
+    // The server-side verdict: the clear applied, found the dead static
+    // before it, counted at least one removal, and the static is gone from
+    // the search 5 s later. What a person's client showed is recorded by hand.
+    let applied = r.result.as_ref().map(|c| c.outcome) == Some(pb::Outcome::Applied as i32);
+    let fails = !applied
+        || killed["listed"].as_u64() == Some(0)
+        || r.debris_removed.unwrap_or(0) < 1
+        || later["listed"].as_u64().unwrap_or(0) > 0;
+    let mut v = v;
+    v["ruin_verdict"] = json!(if fails { "fails" } else { "passes" });
+    println!("   ruin ({}): {v}", v["ruin_verdict"]);
     Ok(v)
 }
 

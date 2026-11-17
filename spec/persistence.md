@@ -402,8 +402,8 @@ them after the new mission starts, as after any generation change.
 Dynamic spawn offers an airport only to a player of the coalition
 `DCS.getAirdromesCoalition()` gives it, and offers the aircraft in its stock (ED-CODE,
 `Scripts/UI/MultiplayerSelectRoleMap/MultiplayerSelectDynamicDialog.lua`; LIVE for a
-stocked FARP, docs/results/2026-11-16-person-tests-2.md). The editor writes no aircraft
-list for an unlimited airport (ED-CODE, `MissionEditor/modules/me_mission.lua`), and an
+stocked FARP, docs/results/2026-11-16-person-tests-2.md). The editor writes an empty
+aircraft list, or none, for an unlimited airport (ED-CODE, `MissionEditor/modules/me_mission.lua`), and an
 unlimited warehouse ignores a set (LIVE, E6). So an enabled airport's aircraft are
 limited, and the controller sets its aircraft stock (`SetWarehouseStock`) and its owner
 (`SetAirbaseOwner`). Whether the owner `SetAirbaseOwner` sets is the coalition

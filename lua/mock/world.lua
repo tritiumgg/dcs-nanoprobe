@@ -708,6 +708,7 @@ local function scripting(host, name)
         if sim.searching then
           sim.destroyed_in_search = (sim.destroyed_in_search or 0) + 1
         end
+        sim.destroy_calls = (sim.destroy_calls or 0) + 1
         -- A test sets `sim.destroy_keeps` for a destroy that leaves the
         -- static where it is.
         if sim.destroy_keeps then

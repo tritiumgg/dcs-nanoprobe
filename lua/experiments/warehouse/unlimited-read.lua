@@ -42,11 +42,14 @@ local function flags_of(id)
   if type(w) ~= 'table' then
     return nil
   end
-  local entry
+  -- `airports` is keyed by airdrome ID and `warehouses` by static unit ID,
+  -- which can be equal: `airports` comes first.
+  local entry, from
   for _, group in ipairs({ 'airports', 'warehouses' }) do
     local list = w[group]
-    if type(list) == 'table' then
-      entry = list[id] or list[tostring(id)] or entry
+    if not entry and type(list) == 'table' then
+      entry = list[id] or list[tostring(id)]
+      from = entry and group
     end
   end
   if type(entry) ~= 'table' then
@@ -58,6 +61,7 @@ local function flags_of(id)
     return n
   end
   return {
+    group = from,
     aircraft = entry.unlimitedAircrafts == true,
     munitions = entry.unlimitedMunitions == true,
     fuel = entry.unlimitedFuel == true,

@@ -895,8 +895,8 @@ lists the statics in the same volume with `world.searchObjects` and collects eac
 `Object.destroy` removes it (LIVE, docs/results/2026-11-16-person-tests-2.md). A destroy
 that raises is skipped and not counted. The value is the number `world.removeJunk`
 returns, how many junk objects it removed (craters and debris as well as wrecks), plus
-the statics destroyed; a static a destroy left where it was counts once a mission
-generation. The agent sends it as the `RESULT`'s value. A
+the statics destroyed. A static a destroy left where it was is destroyed again by each
+later clear and counted once a mission generation. The agent sends it as the `RESULT`'s value. A
 `world.removeJunk` call that raises is `DCS_REFUSED` with its text; otherwise `APPLIED`.
 A destroyed static is not a removal: a platform static that died keeps its death fact,
 its record is unchanged, and the sidecar sends no `STATIC_DESTROY` for it. A mission's
