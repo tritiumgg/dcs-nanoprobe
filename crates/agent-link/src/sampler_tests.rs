@@ -817,6 +817,35 @@ fn a_tombstone_airbase_writes_nothing() {
     );
 }
 
+/// A FARP spawned within a generation adds an airbase: the count the shim
+/// gives grows, and the new index is read with the others.
+#[test]
+fn an_airbase_count_that_grows_reads_the_new_airbase() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 110.0);
+    let mut w = world(10, 0, 2);
+    run(&mut s, &mut rec, &mut w, 130.0, 110.0, 200.0);
+    let names = |rec: &Rec| -> Vec<String> {
+        rec.of(kind::AIRBASE)
+            .filter_map(|p| Airbase::decode(p).ok())
+            .map(|a| a.airbase)
+            .collect()
+    };
+    let before = names(&rec);
+    assert!(!before.contains(&"base2".to_string()), "{before:?}");
+    w.airbases = 3;
+    run(&mut s, &mut rec, &mut w, 130.0, 110.0, 200.0);
+    let after = names(&rec);
+    let count = |n: &str, v: &[String]| v.iter().filter(|x| *x == n).count();
+    assert!(count("base2", &after) > 0, "the new airbase was not read");
+    for n in ["base0", "base1"] {
+        assert!(
+            count(n, &after) > count(n, &before),
+            "{n} was not read again"
+        );
+    }
+}
+
 /// The host sweeps the units' positions in `frame` with LIVE costs (S10: a
 /// row 0.7 µs, a batch 1.5 µs around its rows, the call 29 µs, the link's
 /// work 2.2 µs): every unit is read once a second, the pump runs for the

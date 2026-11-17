@@ -685,6 +685,10 @@ local function scripting(host, name)
       end
       local static = static_of(self)
       if static then
+        -- A test sets `sim.destroy_raises` to make a static's destroy raise.
+        if sim.destroy_raises then
+          error('mock: Object.destroy raises', 2)
+        end
         sim.queue[#sim.queue + 1] = { destroy_static = static }
       end
     end,

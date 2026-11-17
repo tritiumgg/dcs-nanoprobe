@@ -354,6 +354,15 @@ fn edit_warehouses(src: &[u8], dynamic: &[DynamicSpawn]) -> Result<Vec<u8>, Stri
                 }),
             }
         }
+        // A limited airport needs an aircraft table to hold the stock; the
+        // editor leaves it out for an unlimited one. An existing table is
+        // kept as it is.
+        if f.enabled && a.get(&Key::s("aircrafts")).is_none() {
+            edits.push(Edit {
+                span: a.span.start + 1..a.span.start + 1,
+                text: format!("\n{indent}\t[\"aircrafts\"] = {{}},").into_bytes(),
+            });
+        }
     }
     lua::apply(src, edits)
 }

@@ -394,7 +394,7 @@ template with only these values changed, every other byte of every member kept:
 |---|---|---|
 | `mission` | `date` (`Day`, `Month`, `Year`) and `start_time` | `NextMission.start` when set, else the campaign clock, else the template's own |
 | `mission` | `weather` | `NextMission.weather` when set, else the template's |
-| `warehouses` | `airports[<id>].dynamicSpawn`, `allowHotStart`; `unlimitedAircrafts` false where `dynamicSpawn` is true | `NextMission.dynamic_spawn`, by the airport ID in the template's `warehouses`; airports not named, and airports named with `enabled` false, keep the template's `unlimitedAircrafts`; airports not named keep every flag. An ID the template does not hold is `INVALID_FIELD` |
+| `warehouses` | `airports[<id>].dynamicSpawn`, `allowHotStart`; `unlimitedAircrafts` false, and `aircrafts = {}` when the airport has no `aircrafts`, where `dynamicSpawn` is true | `NextMission.dynamic_spawn`, by the airport ID in the template's `warehouses`; airports not named, and airports named with `enabled` false, keep the template's `unlimitedAircrafts`; airports not named keep every flag. An ID the template does not hold is `INVALID_FIELD` |
 
 Airbase owners and warehouse stocks are not written into the file: the reconciler sets
 them after the new mission starts, as after any generation change.

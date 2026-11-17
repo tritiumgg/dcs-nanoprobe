@@ -604,7 +604,14 @@ impl FakeSim {
     /// Add an airbase to the mission, as the mission file has it. It is in
     /// DCS now and after each mission load.
     pub fn add_airbase(&mut self, name: &str, coalition: u32, stock: Stock) {
-        let object = 1_000_000 + self.airbase_seed.len() as u64;
+        let object = 1_000_000
+            + self
+                .airbases
+                .values()
+                .chain(self.airbase_seed.values())
+                .map(|a| a.object - 999_999)
+                .max()
+                .unwrap_or(0);
         let a = FAirbase {
             object,
             coalition,
@@ -612,6 +619,22 @@ impl FakeSim {
         };
         self.airbase_seed.insert(name.to_owned(), a.clone());
         self.airbases.insert(name.to_owned(), a);
+    }
+
+    /// A FARP static that made an airbase is destroyed: the airbase goes
+    /// with it, and the agent reports the static's object, which is the
+    /// airbase's, gone. A later `add_airbase` of the name is the FARP
+    /// spawned again, with a new object.
+    pub fn destroy_farp(&mut self, name: &str) {
+        if let Some(a) = self.airbases.remove(name) {
+            self.airbase_seed.remove(name);
+            self.queued_out.push(Input::ObjectGone(ObjectGone {
+                object: a.object,
+                reason: gone_reason::DESTROYED,
+                entity: 0,
+                group_entity: 0,
+            }));
+        }
     }
 
     /// DCS captures an airbase: its owner changes without a command.

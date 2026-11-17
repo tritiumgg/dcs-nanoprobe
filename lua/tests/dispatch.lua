@@ -1464,8 +1464,16 @@ scenario('clear-debris', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   assert(sim.gone_statics[ruin.id] == ruin and not sim.dead_statics[ruin.id], 'the dead static was not destroyed')
   assert(beside.alive and sim.statics.beside == beside, 'a clear removed a live static')
   assert(sim.dead_statics[far.id] == far, 'a clear removed a dead static outside its volume')
+  -- A destroy that raises is skipped and not counted; the clear still
+  -- applies.
+  sim.destroy_raises = true
+  r = run({ sphere(far, 50) }, 'clear debris where a destroy raises')
+  sim.destroy_raises = nil
+  expect(r[1], APPLIED, 'CLEAR_DEBRIS where a destroy raises')
+  assert(r[1].value == 1, 'a destroy that raised was counted: ' .. tostring(r[1].value))
+  assert(sim.dead_statics[far.id] == far, 'a static whose destroy raised is gone')
   S.ok('CLEAR_DEBRIS: a sphere or a box removes the wrecks inside and returns the count, a bad volume is BAD_PAYLOAD,'
-    .. ' a dead static inside is destroyed and counted')
+    .. ' a dead static inside is destroyed and counted, a destroy that raises is skipped')
 end)
 
 scenario('picture', nil, function(ctx)
