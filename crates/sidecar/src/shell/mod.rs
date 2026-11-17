@@ -360,6 +360,20 @@ fn show(path: &[Key]) -> String {
 /// The folder under `[missions] dir` that holds the shells.
 pub const SHELLS: &str = "shells";
 
+/// The longest theater name a template file may carry, bytes.
+pub const THEATER_MAX: usize = 64;
+
+/// Whether `theater` can name a shared template `<theater>.miz`
+/// (spec/config.md): 1 to [`THEATER_MAX`] bytes of `A`-`Z`, `a`-`z`, `0`-`9`,
+/// `_` and `-`.
+pub fn is_theater_name(theater: &str) -> bool {
+    !theater.is_empty()
+        && theater.len() <= THEATER_MAX
+        && theater
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+}
+
 /// A campaign's shell file name in slot `slot` (`a` or `b`).
 pub fn shell_name(campaign: u64, slot: u8) -> String {
     format!("{campaign}.{}.miz", char::from(slot))

@@ -1,14 +1,15 @@
 #!/bin/sh
 # Check the archives tools/stage-release.sh wrote: each holds exactly the
 # expected files, the programs are a Windows and a Linux executable, both
-# carry the same payload, and SHA256SUMS matches.
+# carry the same payload, the schema is staged (tools/stage-schema-test.sh),
+# and SHA256SUMS matches.
 #
 # Usage: sh tools/stage-release-test.sh [out-dir]
 # POSIX sh. Needs unzip, tar, and sha256sum or shasum.
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-OUT=${1:-$ROOT/dist}
+OUT=$(CDPATH= cd -- "${1:-$ROOT/dist}" && pwd)
 VERSION=$(awk '
     /^\[workspace\.package\]/ { in_sec = 1; next }
     /^\[/ { in_sec = 0 }
@@ -130,6 +131,17 @@ if cmp -s "$TMP/before" "$TMP/after" && [ "$(cat "$PROFILE/Config/autoexec.cfg")
 else
     fail "uninstall left the profile changed"
     diff "$TMP/before" "$TMP/after" >&2 || true
+fi
+
+sh "$ROOT/tools/stage-schema-test.sh" "$OUT" "$VERSION" || FAILED=1
+printf '%s\n' "$WIN.zip" "$LINUX.tar.gz" "nanoprobe-$VERSION-agent.pdb" \
+    "nanoprobe-$VERSION-schema.tar.gz" "nanoprobe-$VERSION-schema.binpb" | LC_ALL=C sort >"$TMP/sums.want"
+awk '{ print $2 }' "$OUT/SHA256SUMS" | LC_ALL=C sort >"$TMP/sums.got"
+if cmp -s "$TMP/sums.want" "$TMP/sums.got"; then
+    pass "SHA256SUMS lists the two archives, the PDB and the schema's two files"
+else
+    fail "SHA256SUMS lists other files (- expected, + found):"
+    diff "$TMP/sums.want" "$TMP/sums.got" >&2 || true
 fi
 
 if command -v sha256sum >/dev/null 2>&1; then

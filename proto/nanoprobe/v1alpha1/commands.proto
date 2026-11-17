@@ -8,6 +8,9 @@ import "nanoprobe/v1alpha1/common.proto";
 import "nanoprobe/v1alpha1/session.proto";
 import "nanoprobe/v1alpha1/world.proto";
 
+option java_multiple_files = true;
+option java_package = "nanoprobe.v1alpha1";
+
 // A set-state call returns when the desired state is journalled; it does not
 // wait for DCS. An effect returns with its outcome.
 service CommandsService {

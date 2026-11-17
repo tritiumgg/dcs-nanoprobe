@@ -7,9 +7,9 @@
 /bundles/
 /recordings/
 
-# Missions are not committed, except the empty shells under templates/.
+# Missions are not committed, except the test fixtures under tests/fixtures/templates/.
 *.miz
-!/templates/*.miz
+!/tests/fixtures/templates/*.miz
 
 # Target profiles live outside the repository, in ~/.config/nanoprobe/.
 targets.toml
@@ -28,4 +28,9 @@ CLAUDE.local.md
 /examples/hello-python/gen/
 /examples/hello-python/.venv/
 __pycache__/
+
+# The Kotlin hello campaign's build output and Gradle state.
+/examples/hello-kotlin/build/
+/examples/hello-kotlin/.gradle/
+/examples/hello-kotlin/.kotlin/
 /deploy/nanoprobe-sidecar

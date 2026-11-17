@@ -7,6 +7,9 @@ import "google/protobuf/timestamp.proto";
 import "nanoprobe/v1alpha1/common.proto";
 import "nanoprobe/v1alpha1/session.proto";
 
+option java_multiple_files = true;
+option java_package = "nanoprobe.v1alpha1";
+
 // Players are named by player key. The API never carries a ucid: a ucid
 // goes in only where an admin bans or unbans one. Each
 // applied call is a ModerationEvent in the event stream, with the role of

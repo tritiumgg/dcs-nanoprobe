@@ -3177,7 +3177,7 @@ mod tests {
     use super::*;
 
     /// The committed Caucasus template.
-    const TEMPLATE: &[u8] = include_bytes!("../../../templates/caucasus.miz");
+    const TEMPLATE: &[u8] = include_bytes!("../../../tests/fixtures/templates/caucasus.miz");
 
     /// A DCS that never answers.
     struct Silent;
@@ -3756,7 +3756,8 @@ mod tests {
     #[test]
     fn a_reload_switches_theater_and_back_with_the_other_map_s_entities_virtual() {
         use nanoprobe_sidecar::lifecycle::State;
-        const AFGHANISTAN: &[u8] = include_bytes!("../../../templates/afghanistan.miz");
+        const AFGHANISTAN: &[u8] =
+            include_bytes!("../../../tests/fixtures/templates/afghanistan.miz");
         let dir = tempfile::tempdir().expect("dir");
         std::fs::write(dir.path().join("Caucasus.miz"), TEMPLATE).expect("miz");
         std::fs::write(dir.path().join("Afghanistan.miz"), AFGHANISTAN).expect("miz");

@@ -24,7 +24,7 @@
 //!
 //! A Windows client starts at its main menu with no mission, so the test
 //! first hosts a private session there (`lua/experiments/alone/host-session.lua`)
-//! with a shell mission from `templates/caucasus.miz`.
+//! with a shell mission from `tests/fixtures/templates/caucasus.miz`.
 //!
 //! The pass rules are the plan's: the handshake visible, every reload read
 //! within 2 s, the kill switch within 2 s.
@@ -500,8 +500,8 @@ fn at_main_menu(windows: &windows::Windows, name: &str) -> Result<(), String> {
 /// mission, and wait until the shim has started in it.
 pub(crate) fn host_session(profile: &dyn Profile) -> Result<(), String> {
     let repo = crate::repository();
-    let template = std::fs::read(repo.join("templates/caucasus.miz"))
-        .map_err(|e| format!("templates/caucasus.miz: {e}"))?;
+    let template = std::fs::read(repo.join("tests/fixtures/templates/caucasus.miz"))
+        .map_err(|e| format!("tests/fixtures/templates/caucasus.miz: {e}"))?;
     let shell = miz::generate(&template, &miz::Changes::default())?;
     profile.write("nanoprobe/dev/missions/np-shell.miz", &shell)?;
     let started = |p: &dyn Profile| {

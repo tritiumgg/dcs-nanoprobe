@@ -7,6 +7,9 @@ import "google/protobuf/struct.proto";
 import "nanoprobe/v1alpha1/common.proto";
 import "nanoprobe/v1alpha1/session.proto";
 
+option java_multiple_files = true;
+option java_package = "nanoprobe.v1alpha1";
+
 // The Lua calls need raw Lua switched on in the agent's own file.
 service ExtensionService {
   // Declare an author event or component, with its schema version.

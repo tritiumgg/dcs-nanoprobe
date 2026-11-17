@@ -944,8 +944,8 @@ fn live_run(repository: &Path, name: &str) -> Result<ExitCode, String> {
     if !matches!(target, Target::DockerWine { .. }) {
         return Err("catalogue runs on a docker-wine target".into());
     }
-    let template = std::fs::read(repository.join("templates/caucasus.miz"))
-        .map_err(|e| format!("templates/caucasus.miz: {e}"))?;
+    let template = std::fs::read(repository.join("tests/fixtures/templates/caucasus.miz"))
+        .map_err(|e| format!("tests/fixtures/templates/caucasus.miz: {e}"))?;
     let shell = miz::generate(&template, &miz::Changes::default())?;
     let (remote, _, _) = crate::remote(name)?;
     let players = remote.players()?;

@@ -523,8 +523,8 @@ pub fn run(repository: &Path, name: &str) -> Result<ExitCode, String> {
              through the start task and closes it through the stop task."
         ));
     }
-    let template = std::fs::read(repository.join("templates/caucasus.miz"))
-        .map_err(|e| format!("templates/caucasus.miz: {e}"))?;
+    let template = std::fs::read(repository.join("tests/fixtures/templates/caucasus.miz"))
+        .map_err(|e| format!("tests/fixtures/templates/caucasus.miz: {e}"))?;
     miz::generate(&template, &miz::Changes::default())?;
     let probe = link::build_for(
         "x86_64-pc-windows-msvc",
