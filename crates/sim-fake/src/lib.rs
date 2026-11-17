@@ -475,6 +475,9 @@ pub struct FakeSim {
     full: bool,
     /// The mission's airbases as the mission file has them, by name.
     airbase_seed: BTreeMap<String, FAirbase>,
+    /// The next airbase object ID. It never goes down, so an airbase added
+    /// after a destroy never takes the destroyed one's ID.
+    next_airbase_object: u64,
     /// The airbases as DCS holds them now.
     airbases: BTreeMap<String, FAirbase>,
     /// Controller options applied, by group entity.
@@ -591,6 +594,7 @@ impl FakeSim {
             sent: BTreeSet::new(),
             full: true,
             airbase_seed: BTreeMap::new(),
+            next_airbase_object: 1_000_000,
             airbases: BTreeMap::new(),
             options: BTreeMap::new(),
             life: BTreeMap::new(),
@@ -611,14 +615,8 @@ impl FakeSim {
     /// Add an airbase to the mission, as the mission file has it. It is in
     /// DCS now and after each mission load.
     pub fn add_airbase(&mut self, name: &str, coalition: u32, stock: Stock) {
-        let object = 1_000_000
-            + self
-                .airbases
-                .values()
-                .chain(self.airbase_seed.values())
-                .map(|a| a.object - 999_999)
-                .max()
-                .unwrap_or(0);
+        let object = self.next_airbase_object;
+        self.next_airbase_object += 1;
         let a = FAirbase {
             object,
             coalition,
@@ -656,6 +654,11 @@ impl FakeSim {
         if let Some(a) = self.airbases.get_mut(name) {
             a.stock.set(item, count);
         }
+    }
+
+    /// The object ID of an airbase in DCS.
+    pub fn airbase_object(&self, name: &str) -> Option<u64> {
+        self.airbases.get(name).map(|a| a.object)
     }
 
     /// The owner of an airbase in DCS.

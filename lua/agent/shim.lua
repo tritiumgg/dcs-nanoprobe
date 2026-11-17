@@ -821,8 +821,8 @@ local function stock(base)
   return n
 end
 
--- Whether an airbase a spawned static made is gone: its static no longer
--- exists, so it was destroyed or died. Its entry then stays as a tombstone,
+-- Whether an airbase a static makes is gone: its static no longer exists,
+-- so it was destroyed or died. Its entry then stays as a tombstone,
 -- so the rows after it keep their index.
 local function farp_gone(base)
   if base.gone then
@@ -842,17 +842,18 @@ local function warehouses(rows)
     local index = buf[i]
     local base = T.airbases[index]
     local stop
-    if base and base.spawned and farp_gone(base) then
+    if base and base.static and farp_gone(base) then
       -- A tombstone: the agent writes no record for an empty name.
       stop = agent.airbase(index, 0, 0, '', false)
     elseif base then
       current = nil
       local got, coalition_of = pcall(base.object.getCoalition, base.object)
-      if not got or type(coalition_of) ~= 'number' then
-        coalition_of = 0
-      end
       local ok, n = pcall(stock, base.object)
-      if ok then
+      if not got or type(coalition_of) ~= 'number' then
+        -- An airbase whose coalition cannot be read writes nothing this pass:
+        -- coalition 0 would read as a capture.
+        stop = agent.airbase(index, 0, 0, '', false)
+      elseif ok then
         stop = agent.airbase(index, base.id, coalition_of, base.name, true, unpack(list, 1, n))
       else
         stop = agent.airbase(index, base.id, coalition_of, base.name, false)
@@ -864,6 +865,14 @@ local function warehouses(rows)
       return true
     end
   end
+end
+
+-- The warehouse tier over the given airbase indexes, for the host tests.
+function M.warehouse_rows(indexes)
+  for i, index in ipairs(indexes) do
+    buf[i] = index
+  end
+  return warehouses(#indexes)
 end
 
 local RUN = {
@@ -882,15 +891,28 @@ local function reset(gen)
   T.gen = gen
   T.ids, T.objs, T.unit, T.births, T.airbases, T.enum = {}, {}, {}, {}, {}, nil
   T.slot_of = {}
+  -- The statics CLEAR_DEBRIS destroyed this generation: one a later clear
+  -- finds again is not counted again.
+  T.cleared = {}
   -- A mission load removed every mark, drawing and menu item from DCS.
   M.marks, M.menus = {}, {}
+  M.read_airbases()
+end
+
+-- The mission's airbases, read when a generation starts.
+function M.read_airbases()
+  T.airbases = {}
   local ok, bases = pcall(world.getAirbases)
   if ok and type(bases) == 'table' then
     for _, base in ipairs(bases) do
       local got, name = pcall(base.getName, base)
       local id = rawget(base, 'id_')
       if got and type(name) == 'string' and type(id) == 'number' then
-        T.airbases[#T.airbases + 1] = { object = base, id = id, name = name }
+        -- An airbase a mission FARP static makes has the static's name and
+        -- ID; it goes when its static goes, as a spawned FARP's does.
+        local found, st = pcall(StaticObject.getByName, name)
+        local static = found and st ~= nil and rawget(st, 'id_') == id
+        T.airbases[#T.airbases + 1] = { object = base, id = id, name = name, static = static or nil }
       end
     end
   end
@@ -1715,7 +1737,7 @@ local HANDLERS = {
       end
     end
     if ab_id == id then
-      T.airbases[at or #T.airbases + 1] = { object = ab, id = ab_id, name = a.name, spawned = true }
+      T.airbases[at or #T.airbases + 1] = { object = ab, id = ab_id, name = a.name, spawned = true, static = true }
     elseif at then
       T.airbases[at].gone = true
     end
@@ -1989,11 +2011,17 @@ local HANDLERS = {
     -- removeJunk leaves a destroyed static, and a client keeps seeing its
     -- ruin; Object.destroy on the dead static removes it (LIVE,
     -- docs/results/2026-11-16-person-tests-2.md). Each static in the volume
-    -- whose life is 0 is destroyed, each call under pcall, and counted.
+    -- that reads life 0 and no longer exists, as a dead static does (LIVE,
+    -- same document), is collected during the search and destroyed after
+    -- it returns, each call under pcall. A destroy counts once a generation.
     local dead = {}
+    T.cleared = T.cleared or {}
     pcall(world.searchObjects, Object.Category.STATIC, volume, function(s)
-      local got, life = pcall(s.getLife, s)
-      if got and type(life) == 'number' and life <= 0 then
+      local got, life, exists = pcall(function()
+        return s:getLife(), s:isExist()
+      end)
+      local id = rawget(s, 'id_')
+      if got and type(life) == 'number' and life <= 0 and exists == false and not T.cleared[id] then
         dead[#dead + 1] = s
       end
       return true
@@ -2001,6 +2029,10 @@ local HANDLERS = {
     for _, s in ipairs(dead) do
       if pcall(s.destroy, s) then
         removed = (tonumber(removed) or 0) + 1
+        local id = rawget(s, 'id_')
+        if id ~= nil then
+          T.cleared[id] = true
+        end
       end
     end
     return APPLIED, removed

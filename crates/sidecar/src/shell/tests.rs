@@ -333,9 +333,11 @@ fn an_enabled_airport_gets_limited_aircraft() {
     // gets none.
     assert_eq!(at(&out, &path(7.0, "aircrafts")), Lv::Table(vec![]));
     assert!(
-        !String::from_utf8(out.clone())
+        lua::parse(&out)
             .unwrap()
-            .contains("[8] = \n\t\t{\n\t\t\t[\"aircrafts\"]")
+            .root
+            .at(&path(8.0, "aircrafts"))
+            .is_none()
     );
     // An existing aircraft table is kept.
     let kept = b"warehouses = \n{\n\t[\"airports\"] = \n\t{\n\t\t[7] = \n\t\t{\n\t\t\t[\"aircrafts\"] = \n\t\t\t{\n\t\t\t\t[\"helicopters\"] = 1,\n\t\t\t},\n\t\t},\n\t},\n}\n";

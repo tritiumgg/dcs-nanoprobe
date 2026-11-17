@@ -705,6 +705,14 @@ local function scripting(host, name)
         if sim.destroy_raises then
           error('mock: Object.destroy raises', 2)
         end
+        if sim.searching then
+          sim.destroyed_in_search = (sim.destroyed_in_search or 0) + 1
+        end
+        -- A test sets `sim.destroy_keeps` for a destroy that leaves the
+        -- static where it is.
+        if sim.destroy_keeps then
+          return
+        end
         sim.queue[#sim.queue + 1] = { destroy_static = static }
       end
     end,
@@ -883,9 +891,12 @@ local function scripting(host, name)
       return static and static.type
     end,
     -- A static's life, country, coalition and description (UNVERIFIED
-    -- figures: a static has life 1 here).
+    -- figures: a static has life 1 here, or the `life` a test sets).
     getLife = function(self)
       local static = static_of(self) or error('mock: UNVERIFIED: getLife on a static that no longer exists', 2)
+      if static.alive and static.life ~= nil then
+        return static.life
+      end
       return static.alive and 1 or 0
     end,
     getCountry = function(self)
@@ -986,6 +997,10 @@ local function scripting(host, name)
       return self.id_
     end,
     getCoalition = function(self)
+      -- A test sets `sim.coalition_raises` to make the call raise.
+      if sim.coalition_raises then
+        error('mock: Airbase.getCoalition raises', 2)
+      end
       return airbase_of(self).coalition
     end,
     -- Every mock airbase is an airdrome with one free fighter spot, in the
@@ -1397,11 +1412,20 @@ local function scripting(host, name)
         end
       end
     end
+    -- A destroy inside the callback is a fault: DCS's search walks a list
+    -- the destroy changes. `sim.destroyed_in_search` counts them.
+    sim.searching = true
     for _, h in ipairs(found) do
-      if fn(h, data) == false then
-        return
+      local ok, go_on = pcall(fn, h, data)
+      if not ok then
+        sim.searching = false
+        error(go_on, 0)
+      end
+      if go_on == false then
+        break
       end
     end
+    sim.searching = false
   end
 
   if name == 'server' then

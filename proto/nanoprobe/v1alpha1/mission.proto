@@ -103,8 +103,9 @@ message DynamicSpawn {
   // `dynamicSpawn`: players may spawn aircraft from the airport's stock.
   // True also makes the airport's aircraft limited (`unlimitedAircrafts`
   // false), so dynamic spawn offers the aircraft stock the controller sets
-  // (SetWarehouseStock), to the coalition that owns the airport
-  // (SetAirbaseOwner). AI the mission spawns there use the same stock.
+  // (SetWarehouseStock). Whether the owner SetAirbaseOwner sets decides the
+  // coalition it offers them to is UNVERIFIED (spec/persistence.md). AI the
+  // mission spawns there use the same stock.
   bool enabled = 2;
   // `allowHotStart`.
   bool hot_start = 3;

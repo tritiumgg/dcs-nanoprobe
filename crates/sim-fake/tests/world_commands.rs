@@ -126,12 +126,15 @@ fn a_farp_spawned_again_gets_its_owner_and_stock_again() {
     assert_eq!(sent(&w, opcode::WAREHOUSE_SET), 1);
 
     // The FARP is destroyed, then spawned again in the same generation with
-    // the mission's owner and an empty warehouse: the desired values, kept
-    // by name, are sent again.
+    // the mission's owner, an empty warehouse and a new object: the desired
+    // values, kept by name, are sent again. Nothing is sent while it is gone.
+    let first = w.sim.airbase_object("np#farp");
     w.sim.destroy_farp("np#farp");
-    ticks(&mut w, 12);
+    ticks(&mut w, 30);
     assert_eq!(sent(&w, opcode::AIRBASE_OWNER), 1);
+    assert_eq!(sent(&w, opcode::WAREHOUSE_SET), 1);
     w.sim.add_airbase("np#farp", 1, Stock::default());
+    assert_ne!(w.sim.airbase_object("np#farp"), first);
     ticks(&mut w, 15);
     assert_eq!(w.sim.airbase_owner("np#farp"), Some(2));
     let stock = w.sim.airbase_stock("np#farp").unwrap();

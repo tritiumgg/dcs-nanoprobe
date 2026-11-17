@@ -162,19 +162,44 @@ do
   S.ok('none: watch only')
 end
 
--- unlimited-read.lua in the server state. The mock has no mission
--- `warehouses` table, so the snippet picks the airbase whose by-name read is
--- 1,000,000, runs E6's control there and leaves the count as it was.
+-- unlimited-read.lua in the server state. Without a mission `warehouses`
+-- table the snippet picks the airbase whose by-name read is 1,000,000, runs
+-- E6's control there, leaves the count as it was, and settles nothing. With
+-- the flags readable it holds for 1,000,000 reads and fails for a lower one.
 do
   local source = S.read(root .. 'lua/experiments/warehouse/unlimited-read.lua')
-  local result, text = eval('unlimited', source, 10, nil, 'server')
-  assert(result.ok and result.reply.ok, 'unlimited-read: ' .. text)
-  local seen = {}
-  for _, o in ipairs(result.reply.observations or {}) do
-    seen[o.name] = o.value
+  local function read(what)
+    local result, text = eval('unlimited-' .. what, source, 10, nil, 'server')
+    assert(result.ok and result.reply.ok, 'unlimited-read ' .. what .. ': ' .. text)
+    local seen = {}
+    for _, o in ipairs(result.reply.observations or {}) do
+      seen[o.name] = o.value
+    end
+    return seen, text
   end
+  local seen, text = read('unreadable')
   assert(seen.control and seen.control.airbase == 'np-unlimited', 'unlimited-read: the control ran on ' .. text)
-  assert(seen.flags_readable == false, 'unlimited-read: the mock has no mission warehouses')
+  assert(seen.flags_readable == false and seen.checked == 0 and seen.verdict == 'inconclusive',
+    'unlimited-read: unreadable flags settled something: ' .. text)
   assert(unlimited.stock.weapon['weapons.bombs.Mk_82'] == 1000000, 'unlimited-read: the count is as it was')
-  S.ok('unlimited-read: ' .. #seen.airbases .. ' airbases, control on ' .. seen.control.airbase)
+  local server_env = host.states.server.env
+  rawset(server_env, 'mission', { warehouses = { airports = {
+    [9001] = { unlimitedAircrafts = false, unlimitedMunitions = false, unlimitedFuel = false },
+    [9002] = { unlimitedAircrafts = true, unlimitedMunitions = true, unlimitedFuel = true,
+      aircrafts = { a = 1, b = 1 }, weapons = { a = 1, b = 1 } },
+  } } })
+  -- An unlimited warehouse reads 1,000,000 for any item (E6); the mock reads
+  -- only what it holds.
+  unlimited.stock.aircraft['F-15C'] = 1000000
+  seen, text = read('holds')
+  assert(seen.flags_readable == true and seen.checked == 3 and seen.verdict == 'holds',
+    'unlimited-read: 1,000,000 reads did not hold: ' .. text)
+  unlimited.stock.liquids[2] = 999
+  seen, text = read('fails')
+  unlimited.stock.liquids[2] = 1000000
+  assert(seen.verdict == 'fails' and seen.failed[1] == 'np-unlimited: fuel',
+    'unlimited-read: a lower read did not fail: ' .. text)
+  rawset(server_env, 'mission', nil)
+  unlimited.stock.aircraft['F-15C'] = nil
+  S.ok('unlimited-read: inconclusive without flags, holds at 1,000,000, fails below')
 end

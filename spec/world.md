@@ -35,7 +35,9 @@ one of: a FARP. `coalition.addStaticObject` of a FARP makes an airbase under the
 name, with the static's ID, and its own empty limited warehouse (LIVE,
 docs/results/2026-11-16-person-tests-2.md). Such an airbase is listed and sampled like
 the mission's from its `STATIC_SPAWN` until the static is destroyed or dies, when the
-sidecar drops it; a new mission generation drops it until the static is spawned again,
+sidecar drops it. The airbase of a FARP the mission file places goes the same way when
+its static goes; that it has its static's ID is UNVERIFIED, and an airbase whose ID is
+not a static's of its name stays; a new mission generation drops it until the static is spawned again,
 and its warehouse starts empty each time. The desired owner and stock the controller set
 for it are kept by name, and sent again once a FARP spawned again under the name is
 sampled. The platform destroys an airbase only by destroying its FARP. Owner and stock

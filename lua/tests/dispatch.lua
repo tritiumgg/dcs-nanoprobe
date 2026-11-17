@@ -814,31 +814,77 @@ scenario('world', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   -- a static of the name that is no FARP, leaves a tombstone in its place.
   local shim = server.__nanoprobe_shim
   local before_bases = #shim.T.airbases
+  local at = before_bases + 1
   local FARP = 'np#hGxF'
   local function farp(entity, rev)
     return { op = 'STATIC_SPAWN', entity = entity, rev = rev, country = USA, name = FARP,
       static = { name = FARP, type = 'FARP', category = 'Heliports', x = 900, y = 900, heading = 0,
         dynamicSpawn = true, allowHotStart = true, dynamicCargo = true, hidden = false } }
   end
+  -- The warehouse tier over the airbase before the FARP's and the FARP's:
+  -- the names it writes, by index.
+  local function sampled()
+    local real, names = shim.agent.airbase, {}
+    shim.agent.airbase = function(index, _, _, name)
+      names[index] = name
+      return false
+    end
+    local ok, err = pcall(shim.warehouse_rows, { before_bases, at })
+    shim.agent.airbase = real
+    assert(ok, tostring(err))
+    return names
+  end
+  local mission_name = shim.T.airbases[before_bases].name
   r = run({ farp(15, 1) }, 'a FARP')
   expect(r[1], APPLIED, 'STATIC_SPAWN of a FARP')
-  local entry = shim.T.airbases[before_bases + 1]
-  assert(#shim.T.airbases == before_bases + 1 and entry.spawned and entry.name == FARP and entry.id == r[1].object,
+  local entry = shim.T.airbases[at]
+  assert(#shim.T.airbases == at and entry.spawned and entry.name == FARP and entry.id == r[1].object,
     'the FARP is not in the airbase list')
-  assert(not shim.farp_gone(entry), 'a live FARP reads as gone')
+  local names = sampled()
+  assert(names[at] == FARP and names[before_bases] == mission_name, 'a live FARP is not sampled')
   r = run({ farp(15, 2) }, 'the FARP again')
   expect(r[1], APPLIED, 'STATIC_SPAWN of the FARP again')
-  assert(#shim.T.airbases == before_bases + 1 and shim.T.airbases[before_bases + 1].id == r[1].object,
+  assert(#shim.T.airbases == at and shim.T.airbases[at].id == r[1].object,
     'the FARP spawned again did not take its entry')
+  -- An airbase whose coalition cannot be read writes nothing this pass.
+  sim.coalition_raises = true
+  names = sampled()
+  sim.coalition_raises = nil
+  assert(names[at] == '' and names[before_bases] == '', 'an airbase whose getCoalition raised was written')
   r = run({ { op = 'STATIC_DESTROY', entity = 15 } }, 'the FARP destroyed')
   expect(r[1], APPLIED, 'STATIC_DESTROY of the FARP')
   ctx.run(0.2)
-  assert(shim.farp_gone(shim.T.airbases[before_bases + 1]), 'a destroyed FARP does not read as gone')
-  r = run({ farp(15, 3), { op = 'STATIC_SPAWN', entity = 15, rev = 4, country = USA, name = FARP,
-    static = { name = FARP, type = 'Barrier', x = 900, y = 900, heading = 0 } } }, 'a FARP then a barrier')
-  expect(r[2], APPLIED, 'STATIC_SPAWN of a barrier under the FARP name')
-  assert(#shim.T.airbases == before_bases + 1 and shim.T.airbases[before_bases + 1].gone,
+  names = sampled()
+  assert(names[at] == '' and names[before_bases] == mission_name and #shim.T.airbases == at,
+    'a destroyed FARP is not a tombstone, or the airbase before it moved')
+  r = run({ farp(15, 3) }, 'the FARP after its destroy')
+  expect(r[1], APPLIED, 'STATIC_SPAWN of the FARP after its destroy')
+  assert(shim.T.airbases[at].id == r[1].object and not shim.T.airbases[at].gone,
+    'the FARP spawned after its destroy did not take a fresh entry')
+  assert(sampled()[at] == FARP, 'the FARP spawned after its destroy is not sampled')
+  r = run({ { op = 'STATIC_SPAWN', entity = 15, rev = 4, country = USA, name = FARP,
+    static = { name = FARP, type = 'Barrier', x = 900, y = 900, heading = 0 } } }, 'a barrier under the FARP name')
+  expect(r[1], APPLIED, 'STATIC_SPAWN of a barrier under the FARP name')
+  assert(#shim.T.airbases == at and shim.T.airbases[at].gone and sampled()[at] == '',
     'a static of the name that is no FARP left no tombstone')
+  -- A mission FARP's airbase goes with its static too.
+  local mfarp = sim:add_static(USA, { name = 'np#hGxM', type = 'FARP', x = 1200, y = 1200 })
+  sim.airbases[#sim.airbases + 1] = { id = mfarp.id, name = mfarp.name, coalition = 2, x = 1200, z = 1200,
+    stock = { aircraft = {}, weapon = {}, liquids = { [0] = 0, [1] = 0, [2] = 0, [3] = 0 } } }
+  shim.read_airbases()
+  local m = #shim.T.airbases
+  assert(shim.T.airbases[m].static and not shim.T.airbases[1].static, 'a mission FARP is not marked, or an airfield is')
+  sim:doom_static(mfarp)
+  local mnames = {}
+  local real = shim.agent.airbase
+  shim.agent.airbase = function(index, _, _, name)
+    mnames[index] = name
+    return false
+  end
+  local ok, err = pcall(shim.warehouse_rows, { 1, m })
+  shim.agent.airbase = real
+  assert(ok, tostring(err))
+  assert(mnames[m] == '' and mnames[1] == shim.T.airbases[1].name, 'a dead mission FARP was sampled')
 
   -- A 30-unit group is captured, not TOO_LARGE.
   local BIG, names = 'np!hGx9', {}
@@ -1471,8 +1517,22 @@ scenario('clear-debris', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   expect(r[1], APPLIED, 'CLEAR_DEBRIS where a destroy raises')
   assert(r[1].value == 1, 'a destroy that raised was counted: ' .. tostring(r[1].value))
   assert(sim.dead_statics[far.id] == far, 'a static whose destroy raised is gone')
+  -- A static a destroy leaves in place is counted once a generation.
+  sim.destroy_keeps = true
+  r = run({ sphere(far, 50), sphere(far, 50) }, 'clear debris twice where a destroy leaves the static')
+  sim.destroy_keeps = nil
+  assert(r[1].value == 2 and r[2].value == 1,
+    'a static a destroy left was counted again: ' .. tostring(r[1].value) .. ', ' .. tostring(r[2].value))
+  -- A live static that reads life 0 stays.
+  local zero = sim:add_static(2, { name = 'zero', type = 'FARP Fuel Depot', x = 70000, y = 0 })
+  zero.life = 0
+  r = run({ sphere(zero, 50) }, 'clear debris on a live static of life 0')
+  expect(r[1], APPLIED, 'CLEAR_DEBRIS on a live static of life 0')
+  assert(zero.alive and sim.statics.zero == zero, 'a clear removed a live static of life 0')
+  assert((sim.destroyed_in_search or 0) == 0, 'a static was destroyed inside the search')
   S.ok('CLEAR_DEBRIS: a sphere or a box removes the wrecks inside and returns the count, a bad volume is BAD_PAYLOAD,'
-    .. ' a dead static inside is destroyed and counted, a destroy that raises is skipped')
+    .. ' a dead static inside is destroyed after the search and counted once, a destroy that raises is skipped,'
+    .. ' a live static of life 0 stays')
 end)
 
 scenario('picture', nil, function(ctx)

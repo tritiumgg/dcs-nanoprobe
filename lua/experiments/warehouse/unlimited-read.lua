@@ -14,10 +14,14 @@
 -- unlimited (else whose by-name reads are 1,000,000): `addItem` 5 of the
 -- weapon, both reads, `removeItem` 5, both reads. The count is restored at
 -- the end and at reset.
--- Rule: the hypothesis holds when, on every airbase the flags mark unlimited,
--- `getItemCount` and `getLiquidAmount` read 1,000,000 and `getInventory`
--- lists no weapon or aircraft the file does not list; it fails on any other
--- reading. Recorded as read either way.
+-- Rule: each kind the mission's flags mark unlimited at an airbase is
+-- checked on its own: munitions, the weapon's `getItemCount` reads 1,000,000
+-- and `getInventory` lists no more weapons than the file; aircraft, the same
+-- for the aircraft; fuel, `getLiquidAmount` of liquids 0 to 3 reads
+-- 1,000,000. The hypothesis holds when at least one kind was checked and
+-- every check passed, and fails on any failed check. With the flags
+-- unreadable, or no kind marked unlimited, the result is inconclusive and
+-- settles nothing. Recorded as read either way.
 -- states: server
 -- timeout: 30
 
@@ -102,19 +106,36 @@ for _, base in ipairs(world.getAirbases()) do
 end
 E.observe('airbases', rows, { info = true })
 
-local holds = #rows > 0
-for _, row in ipairs(rows) do
-  local f = row.flags
-  if f and f.munitions and f.aircraft and f.fuel then
-    local r = row.read
-    holds = holds and r.by_name.weapon == UNLIMITED and r.by_name.aircraft == UNLIMITED
-    for i = 0, 3 do
-      holds = holds and r.liquid_amount[tostring(i)] == UNLIMITED
-    end
-    holds = holds and r.inventory.weapon <= f.file_weapons and r.inventory.aircraft <= f.file_aircrafts
+local checked, failed = 0, {}
+local function check(row, kind, ok)
+  checked = checked + 1
+  if not ok then
+    failed[#failed + 1] = tostring(row.name) .. ': ' .. kind
   end
 end
-E.observe('flags_readable', rows[1] ~= nil and rows[1].flags ~= nil, { info = true })
+local readable = false
+for _, row in ipairs(rows) do
+  local f, r = row.flags, row.read
+  if f then
+    readable = true
+    if f.munitions then
+      check(row, 'munitions', r.by_name.weapon == UNLIMITED and r.inventory.weapon <= f.file_weapons)
+    end
+    if f.aircraft then
+      check(row, 'aircraft', r.by_name.aircraft == UNLIMITED and r.inventory.aircraft <= f.file_aircrafts)
+    end
+    if f.fuel then
+      local all = true
+      for i = 0, 3 do
+        all = all and r.liquid_amount[tostring(i)] == UNLIMITED
+      end
+      check(row, 'fuel', all)
+    end
+  end
+end
+E.observe('flags_readable', readable, { info = true })
+E.observe('checked', checked, { info = true })
+E.observe('failed', failed, { info = true })
 
 if chosen then
   local wh, name = chosen.wh, ITEMS.weapon
@@ -131,5 +152,11 @@ if chosen then
   control.after_remove = read(wh)
   E.observe('control', control, { info = true })
 end
-E.observe('hypothesis_holds', holds, { info = true })
-return holds and 'holds' or 'fails'
+local verdict = 'inconclusive'
+if #failed > 0 then
+  verdict = 'fails'
+elseif checked > 0 then
+  verdict = 'holds'
+end
+E.observe('verdict', verdict, { info = true })
+return verdict

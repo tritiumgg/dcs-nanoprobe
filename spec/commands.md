@@ -594,6 +594,7 @@ takes these keys from `StaticSpec.extra`; the sidecar adds none of them:
 
 | Key | Effect |
 |---|---|
+| `category` | `"Heliports"`, which makes the static a FARP. `StaticSpec` has no category field, so it comes from `extra`. Whether DCS makes the airbase without it is UNVERIFIED |
 | `dynamicSpawn` | `true`: players may spawn aircraft at the FARP from its warehouse. Read only at spawn time; setting it later changes nothing (LIVE) |
 | `allowHotStart` | `true`: those spawns may start hot. Whether dynamic spawn needs it is UNVERIFIED; the LIVE run set it |
 | `dynamicCargo` | `true`: dynamic cargo at the FARP. Set in the LIVE run that offered a spawn; whether dynamic spawn needs it is UNVERIFIED |
@@ -887,12 +888,15 @@ and unit values are UNVERIFIED.
 | 2 | BOX | From `x`, `y`, `z` to `x2`, `y2`, `z2`, aligned with the axes |
 
 The handler calls `world.removeJunk` with a DCS volume of the code's shape. It then
-lists the statics in the same volume with `world.searchObjects` and calls `destroy` on
-each whose `getLife()` reads 0 or less, each call under `pcall`: `world.removeJunk`
-leaves a destroyed static, and a client keeps showing its ruin until `Object.destroy`
-removes it (LIVE, docs/results/2026-11-16-person-tests-2.md). The value is the number
-`world.removeJunk` returns, how many junk objects it removed (craters and debris as well
-as wrecks), plus the statics destroyed. The agent sends it as the `RESULT`'s value. A
+lists the statics in the same volume with `world.searchObjects` and collects each whose
+`getLife()` reads 0 or less and whose `isExist()` reads false, as a dead static's do
+(LIVE). After the search returns it calls `destroy` on each, under `pcall`:
+`world.removeJunk` leaves a destroyed static, and a client keeps showing its ruin until
+`Object.destroy` removes it (LIVE, docs/results/2026-11-16-person-tests-2.md). A destroy
+that raises is skipped and not counted. The value is the number `world.removeJunk`
+returns, how many junk objects it removed (craters and debris as well as wrecks), plus
+the statics destroyed; a static a destroy left where it was counts once a mission
+generation. The agent sends it as the `RESULT`'s value. A
 `world.removeJunk` call that raises is `DCS_REFUSED` with its text; otherwise `APPLIED`.
 A destroyed static is not a removal: a platform static that died keeps its death fact,
 its record is unchanged, and the sidecar sends no `STATIC_DESTROY` for it. A mission's
@@ -906,8 +910,8 @@ What DCS removes (LIVE, docs/results/2026-11-16-clear-debris.md): the wrecks of 
 units that have stopped burning. A clear on open ground where an explosion struck
 returns 1, so a crater counts as junk (inferred from the count). `world.removeJunk`
 leaves every live unit and static, a wreck that is still burning, a dead static's object
-(which the handler then destroys), and destroyed scenery. A clear around a dead aircraft or a dead static returns a count above 0; what it
-removes there is UNVERIFIED. A burning wreck it leaves still explodes and sends its death
+(which the handler then destroys), and destroyed scenery. A clear around a dead aircraft
+or a dead static returns a count above 0; what it removes there is UNVERIFIED. A burning wreck it leaves still explodes and sends its death
 events, so a clear changes nothing in spec/records.md. A wreck it removes reads as a
 removed object: `isDead`, `getLife` and `getPoint` raise. The volume's edge is not exact
 to an object's position. A 2,000 km sphere removed the wrecks of a whole run in one
@@ -918,7 +922,9 @@ The cost: the `world.removeJunk` call alone takes about 4 us per object it remov
 4 to 6 us when it removes nothing, at any size. A `CLEAR_DEBRIS` command's `cost_us`
 includes the pump around it: 20 us at the median for a box that removes little, 37 us
 at p99, 981 us at most, and 6.4 ms in all for a whole-map clear of 217 objects, spread
-over 4 frames (LIVE, run 3 of the results).
+over 4 frames (LIVE, run 3 of the results). These figures were measured before the
+handler searched the volume for dead statics. The search, a `getLife` and `isExist` on
+each static in the volume and a destroy of each dead one add a cost that is UNVERIFIED.
 
 A clear of the whole map is not one command, so that no single command removes the junk
 of the whole map at once. The sidecar sends it as boxes 250 km square that tile x and z

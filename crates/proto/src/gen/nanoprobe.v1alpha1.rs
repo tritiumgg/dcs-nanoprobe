@@ -3082,8 +3082,9 @@ pub struct DynamicSpawn {
     /// `dynamicSpawn`: players may spawn aircraft from the airport's stock.
     /// True also makes the airport's aircraft limited (`unlimitedAircrafts`
     /// false), so dynamic spawn offers the aircraft stock the controller sets
-    /// (SetWarehouseStock), to the coalition that owns the airport
-    /// (SetAirbaseOwner). AI the mission spawns there use the same stock.
+    /// (SetWarehouseStock). Whether the owner SetAirbaseOwner sets decides the
+    /// coalition it offers them to is UNVERIFIED (spec/persistence.md). AI the
+    /// mission spawns there use the same stock.
     #[prost(bool, tag = "2")]
     pub enabled: bool,
     /// `allowHotStart`.
@@ -5531,9 +5532,8 @@ pub struct WholeMap {}
 /// leaves the clients' screens; a managed static that died keeps its record.
 /// It leaves every live unit and static, a wreck that is still burning and
 /// destroyed scenery. Around a dead aircraft it removes something; what is
-/// UNVERIFIED. A burning wreck it
-/// leaves still explodes and sends its death events. Coordinates and sizes
-/// are within 10,000 km of 0.
+/// UNVERIFIED. A burning wreck it leaves still explodes and sends its death
+/// events. Coordinates and sizes are within 10,000 km of 0.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ClearDebris {
     #[prost(oneof = "clear_debris::Volume", tags = "1, 2, 3")]
@@ -5595,9 +5595,10 @@ pub struct DoEffectResponse {
     #[prost(message, optional, tag = "1")]
     pub result: ::core::option::Option<CommandResult>,
     /// For ClearDebris: how many junk objects DCS removed, craters and debris
-    /// included, plus the destroyed statics in the volume it removed. For a
-    /// whole-map clear that did not apply, the count of the boxes that did. Absent when the clear has no result (unknown, not_sent)
-    /// and for any other effect.
+    /// included, plus the dead statics in the volume it destroyed. For a
+    /// whole-map clear that did not apply, the count of the boxes that did.
+    /// Absent when the clear has no result (unknown, not_sent) and for any
+    /// other effect.
     #[prost(uint64, optional, tag = "2")]
     pub debris_removed: ::core::option::Option<u64>,
 }

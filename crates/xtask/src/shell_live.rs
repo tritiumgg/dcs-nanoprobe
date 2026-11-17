@@ -364,10 +364,12 @@ const PERSON_HOLD: Duration = Duration::from_secs(45 * 60);
 
 /// With `NP_SHELL_PERSON=<stop file>`: activate a campaign with `template` as
 /// its own template and dynamic spawn on its first airport, as step 3 does,
-/// set that airport blue and stock it, spawn and stock a FARP beside it, and
-/// clear a dead static's ruin (`owned_and_stocked`, `ruin_check`), then keep
-/// the lease while a person, or a scripted client, looks at the slot screen.
-/// Ends when the stop file exists on this machine, or after `PERSON_HOLD`.
+/// set that airport blue and stock it, and spawn and stock a FARP beside it
+/// (`owned_and_stocked`), then keep the lease while a person, or a scripted
+/// client, looks at the slot screen. A dead static's ruin is cleared
+/// (`ruin_check`) when the ruin file (the stop file with extension `ruin`)
+/// exists, else at the hold's end. Ends when the stop file exists on this
+/// machine, or after `PERSON_HOLD`.
 /// The dynamic-spawn reads and the hook's slot list are recorded at the start
 /// and at the end.
 fn person(
@@ -411,7 +413,6 @@ fn person(
         .map_err(status_text("ActivateCampaign"))?;
     loaded(run, api, &theater, generation)?;
     let farp = owned_and_stocked(run, api, c, &theater, airport)?;
-    let ruin = ruin_check(run, api, c, &theater, &farp)?;
     let read = format!(
         "local out = {{ airport = {airport}, slots = {{}} }}\nlocal ok, s = pcall(DCS.getDynamicSpawnSettings, {airport}, true)\nout.settings = ok and type(s) == 'table' and (tostring(s.dynamicSpawnAvailable) .. ',' .. tostring(s.allowHotSpawn)) or tostring(s)\nfor _, side in ipairs({{ 'red', 'blue' }}) do for _, s in ipairs(DCS.getAvailableSlots(side) or {{}}) do local e = {{ side = side }}\nfor k, v in pairs(s) do e[tostring(k)] = tostring(v) end\nout.slots[#out.slots + 1] = e end end\nout.players = #(net.get_player_list() or {{}})\nout.coalitions = {{}}\nfor _, v in pairs(DCS.getAirdromesCoalition() or {{}}) do if v.airdromeId == {airport} then out.coalitions[#out.coalitions + 1] = tostring(v.coalition) end end\nout.farps = {{}}\nfor id, v in pairs((DCS.getFarpsAndCarriersMissionData() or {{}}).farps or {{}}) do local f = {{ id = tostring(id), coalition = tostring(v.coalition) }}\nlocal okf, fs = pcall(DCS.getDynamicSpawnSettings, id, false)\nf.settings = okf and type(fs) == 'table' and tostring(fs.dynamicSpawnAvailable) or tostring(fs)\nout.farps[#out.farps + 1] = f end\nreturn out\n"
     );
@@ -427,11 +428,27 @@ fn person(
     if stop.exists() {
         std::fs::remove_file(stop).map_err(|e| format!("{}: {e}", stop.display()))?;
     }
-    println!("   touch {} to end the hold", stop.display());
+    // The ruin check runs when the person is at the FARP and touches the
+    // ruin file, so the client sees the ruin go; else at the hold's end.
+    let go = stop.with_extension("ruin");
+    let _ = std::fs::remove_file(&go);
+    println!(
+        "   touch {} to run the ruin check, {} to end the hold",
+        go.display(),
+        stop.display()
+    );
     let held = Instant::now();
+    let mut ruin = Value::Null;
     while held.elapsed() < PERSON_HOLD && !stop.exists() {
         std::thread::sleep(Duration::from_secs(15));
         api.keep();
+        if ruin.is_null() && go.exists() {
+            let _ = std::fs::remove_file(&go);
+            ruin = ruin_check(run, api, c, &theater, &farp)?;
+        }
+    }
+    if ruin.is_null() {
+        ruin = ruin_check(run, api, c, &theater, &farp)?;
     }
     let ended = if stop.exists() {
         "stop_file"
@@ -644,6 +661,17 @@ fn ruin_check(
     )?;
     let _ = run.hold(10.0);
     let killed = run.eval("server", "s19-person-ruin-killed", &read, 60)?;
+    if killed["life"].as_f64().is_some_and(|l| l > 0.0) || killed["exists"] == json!(true) {
+        return Err(format!(
+            "the explosion left the ruin static alive: {killed}"
+        ));
+    }
+    let players = run.eval(
+        "hook",
+        "s19-person-ruin-players",
+        "return #(net.get_player_list() or {})\n",
+        60,
+    )?;
     let req = pb::DoEffectRequest {
         write: api.write("clear", campaign),
         effect: Some(pb::Effect {
@@ -668,14 +696,47 @@ fn ruin_check(
     let after = run.eval("server", "s19-person-ruin-after", &read, 60)?;
     let _ = run.hold(5.0);
     let later = run.eval("server", "s19-person-ruin-later", &read, 60)?;
+    // The cost of one 250 km box, as a whole-map clear sends, centered on
+    // the FARP: the static search runs over every static in it.
+    let req = pb::DoEffectRequest {
+        write: api.write("clear-box", campaign),
+        effect: Some(pb::Effect {
+            effect: Some(pb::effect::Effect::ClearDebris(pb::ClearDebris {
+                volume: Some(pb::clear_debris::Volume::Box(pb::Box {
+                    min: Some(pb::Position {
+                        theater: theater.to_string(),
+                        north: x - 125_000.0,
+                        east: z - 125_000.0,
+                        alt: -10_000.0,
+                    }),
+                    max: Some(pb::Position {
+                        theater: theater.to_string(),
+                        north: x + 125_000.0,
+                        east: z + 125_000.0,
+                        alt: 100_000.0,
+                    }),
+                })),
+            })),
+        }),
+    };
+    let b = api
+        .rt
+        .block_on(api.commands.do_effect(req))
+        .map_err(status_text("DoEffect box"))?
+        .into_inner();
     let v = json!({
         "static": name,
+        "players": players,
         "killed": killed,
         "outcome": r.result.as_ref().map(|c| c.outcome),
         "message": r.result.as_ref().map(|c| c.message.clone()),
+        "cost_us": r.result.as_ref().map(|c| c.cost_us),
         "debris_removed": r.debris_removed,
         "after": after,
         "after_5s": later,
+        "box_outcome": b.result.as_ref().map(|c| c.outcome),
+        "box_cost_us": b.result.as_ref().map(|c| c.cost_us),
+        "box_removed": b.debris_removed,
     });
     println!("   ruin: {v}");
     Ok(v)

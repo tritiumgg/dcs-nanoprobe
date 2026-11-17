@@ -781,11 +781,12 @@ fn a_tombstone_airbase_writes_nothing() {
         .collect();
     let want: BTreeSet<String> = ["base0", "base2"].iter().map(|n| n.to_string()).collect();
     assert_eq!(names, want);
-    assert!(
-        rec.of(kind::WAREHOUSE)
-            .filter_map(|p| Warehouse::decode(p).ok())
-            .all(|x| x.airbase != "base1" && !x.airbase.is_empty())
-    );
+    let stocked: BTreeSet<String> = rec
+        .of(kind::WAREHOUSE)
+        .filter_map(|p| Warehouse::decode(p).ok())
+        .map(|x| x.airbase)
+        .collect();
+    assert_eq!(stocked, want);
 }
 
 /// A FARP spawned within a generation adds an airbase: the count the shim
