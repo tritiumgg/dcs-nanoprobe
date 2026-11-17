@@ -433,8 +433,8 @@ message DoEffectRequest {
 message DoEffectResponse {
   CommandResult result = 1;
   // For ClearDebris: how many junk objects DCS removed, craters and debris
-  // included, plus the destroyed statics in the volume it removed. For a whole-map clear that did not apply, the count of the
-  // boxes that did. Absent when the clear has no result (unknown, not_sent)
+  // included, plus the destroyed statics in the volume it removed. For a
+  // whole-map clear that did not apply, the count of the boxes that did. Absent when the clear has no result (unknown, not_sent)
   // and for any other effect.
   optional uint64 debris_removed = 2;
 }

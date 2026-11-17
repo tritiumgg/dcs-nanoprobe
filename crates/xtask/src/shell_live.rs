@@ -364,7 +364,9 @@ const PERSON_HOLD: Duration = Duration::from_secs(45 * 60);
 
 /// With `NP_SHELL_PERSON=<stop file>`: activate a campaign with `template` as
 /// its own template and dynamic spawn on its first airport, as step 3 does,
-/// then keep the lease while a person at a client looks at the slot screen.
+/// set that airport blue and stock it, spawn and stock a FARP beside it, and
+/// clear a dead static's ruin (`owned_and_stocked`, `ruin_check`), then keep
+/// the lease while a person, or a scripted client, looks at the slot screen.
 /// Ends when the stop file exists on this machine, or after `PERSON_HOLD`.
 /// The dynamic-spawn reads and the hook's slot list are recorded at the start
 /// and at the end.
@@ -408,9 +410,16 @@ fn person(
         .block_on(api.campaigns.activate_campaign(req))
         .map_err(status_text("ActivateCampaign"))?;
     loaded(run, api, &theater, generation)?;
+    let farp = owned_and_stocked(run, api, c, &theater, airport)?;
+    let ruin = ruin_check(run, api, c, &theater, &farp)?;
     let read = format!(
-        "local out = {{ airport = {airport}, slots = {{}} }}\nlocal ok, s = pcall(DCS.getDynamicSpawnSettings, {airport}, true)\nout.settings = ok and type(s) == 'table' and (tostring(s.dynamicSpawnAvailable) .. ',' .. tostring(s.allowHotSpawn)) or tostring(s)\nfor _, side in ipairs({{ 'red', 'blue' }}) do for _, s in ipairs(DCS.getAvailableSlots(side) or {{}}) do local e = {{ side = side }}\nfor k, v in pairs(s) do e[tostring(k)] = tostring(v) end\nout.slots[#out.slots + 1] = e end end\nout.players = #(net.get_player_list() or {{}})\nreturn out\n"
+        "local out = {{ airport = {airport}, slots = {{}} }}\nlocal ok, s = pcall(DCS.getDynamicSpawnSettings, {airport}, true)\nout.settings = ok and type(s) == 'table' and (tostring(s.dynamicSpawnAvailable) .. ',' .. tostring(s.allowHotSpawn)) or tostring(s)\nfor _, side in ipairs({{ 'red', 'blue' }}) do for _, s in ipairs(DCS.getAvailableSlots(side) or {{}}) do local e = {{ side = side }}\nfor k, v in pairs(s) do e[tostring(k)] = tostring(v) end\nout.slots[#out.slots + 1] = e end end\nout.players = #(net.get_player_list() or {{}})\nout.coalitions = {{}}\nfor _, v in pairs(DCS.getAirdromesCoalition() or {{}}) do if v.airdromeId == {airport} then out.coalitions[#out.coalitions + 1] = tostring(v.coalition) end end\nout.farps = {{}}\nfor id, v in pairs((DCS.getFarpsAndCarriersMissionData() or {{}}).farps or {{}}) do local f = {{ id = tostring(id), coalition = tostring(v.coalition) }}\nlocal okf, fs = pcall(DCS.getDynamicSpawnSettings, id, false)\nf.settings = okf and type(fs) == 'table' and tostring(fs.dynamicSpawnAvailable) or tostring(fs)\nout.farps[#out.farps + 1] = f end\nreturn out\n"
     );
+    let stock_read = format!(
+        "local out = {{}}\nlocal function inv(base) if not base then return 'none' end local i = base:getWarehouse():getInventory() local a = {{}} for k, v in pairs(i.aircraft or {{}}) do a[#a + 1] = k .. '=' .. v end return {{ coalition = base:getCoalition(), aircraft = table.concat(a, ' '), jet = (i.liquids or {{}})[0] }} end\nfor _, b in ipairs(world.getAirbases()) do if b:getID() == {airport} then out.airport = inv(b) end end\nout.farp = inv(Airbase.getByName({farp:?}))\nreturn out\n"
+    );
+    let stocks = run.eval("server", "s19-person-stock", &stock_read, 60)?;
+    println!("   stock: {stocks}");
     let start = run.eval("hook", "s19-person-start", &read, 60)?;
     println!("   held: {start}");
     // A stop file left from an earlier hold would end this one at once.
@@ -440,9 +449,236 @@ fn person(
         "held_s": held.elapsed().as_secs(),
         "start": start,
         "end": end,
+        "farp": farp,
+        "stock": stocks,
+        "ruin": ruin,
     });
     println!("== HELD ({ended}); the verdict is the person's, recorded by hand");
     Ok(())
+}
+
+/// The aircraft the hold stocks: `NP_SHELL_AIRCRAFT`, a comma-separated
+/// list of DCS type names, else the AH-64D of the S19 template.
+fn hold_aircraft() -> Vec<String> {
+    std::env::var("NP_SHELL_AIRCRAFT")
+        .unwrap_or_else(|_| "AH-64D_BLK_II".into())
+        .split(',')
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+/// After the hold's mission loads: the flagged airport is set to blue with
+/// `SetAirbaseOwner` and stocked with `SetWarehouseStock` (4 of each hold
+/// aircraft, 50,000 kg of jet fuel), and a FARP is spawned 2 km north of it
+/// with `PutStatic` and the four dynamic-spawn keys, then stocked the same
+/// way under its DCS name (spec/persistence.md, "Mission shells";
+/// spec/commands.md, "Layout: STATIC_SPAWN"). Returns the FARP's DCS name.
+fn owned_and_stocked(
+    run: &Run,
+    api: &mut Api,
+    campaign: u64,
+    theater: &str,
+    airport: u64,
+) -> Result<String, String> {
+    let at = run.eval(
+        "server",
+        "s19-person-airport",
+        &format!(
+            "for _, b in ipairs(world.getAirbases()) do if b:getID() == {airport} then local p = b:getPoint() return {{ name = b:getName(), x = p.x, z = p.z }} end end\nreturn 'none'\n"
+        ),
+        60,
+    )?;
+    let name = at["name"]
+        .as_str()
+        .ok_or_else(|| format!("airport {airport} not found: {at}"))?
+        .to_string();
+    let (x, z) = (
+        at["x"].as_f64().unwrap_or(0.0),
+        at["z"].as_f64().unwrap_or(0.0),
+    );
+    let aircraft: std::collections::BTreeMap<String, f64> =
+        hold_aircraft().into_iter().map(|t| (t, 4.0)).collect();
+    let stock = |api: &mut Api, airbase: &str| -> Result<(), String> {
+        let req = pb::SetWarehouseStockRequest {
+            write: api.write("stock", campaign),
+            theater: theater.to_string(),
+            airbase: airbase.to_string(),
+            aircraft: aircraft.clone(),
+            liquids: [(0u32, 50_000.0)].into_iter().collect(),
+            ..pb::SetWarehouseStockRequest::default()
+        };
+        api.rt
+            .block_on(api.commands.set_warehouse_stock(req))
+            .map_err(status_text("SetWarehouseStock"))?;
+        Ok(())
+    };
+    let req = pb::SetAirbaseOwnerRequest {
+        write: api.write("owner", campaign),
+        theater: theater.to_string(),
+        airbase: name.clone(),
+        owner: pb::Coalition::Blue as i32,
+    };
+    api.rt
+        .block_on(api.commands.set_airbase_owner(req))
+        .map_err(status_text("SetAirbaseOwner"))?;
+    stock(api, &name)?;
+    let flag = |b: bool| prost_types::Value {
+        kind: Some(prost_types::value::Kind::BoolValue(b)),
+    };
+    let text = |t: &str| prost_types::Value {
+        kind: Some(prost_types::value::Kind::StringValue(t.into())),
+    };
+    let extra = prost_types::Struct {
+        fields: [
+            ("category", text("Heliports")),
+            ("dynamicSpawn", flag(true)),
+            ("allowHotStart", flag(true)),
+            ("dynamicCargo", flag(true)),
+            ("hidden", flag(false)),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect(),
+    };
+    let req = pb::PutStaticRequest {
+        write: api.write("farp", campaign),
+        static_id: 0,
+        spec: Some(pb::StaticSpec {
+            label: "person-fixes FARP".into(),
+            country: 2,
+            r#type: "FARP".into(),
+            position: Some(pb::Position {
+                theater: theater.to_string(),
+                north: x + 2000.0,
+                east: z,
+                ..pb::Position::default()
+            }),
+            heading: 0.0,
+            extra: Some(extra),
+        }),
+    };
+    api.rt
+        .block_on(api.commands.put_static(req))
+        .map_err(status_text("PutStatic"))?;
+    let farp = wait(
+        run,
+        api,
+        Duration::from_secs(60),
+        "the FARP's airbase",
+        |_| {
+            let v = run.eval(
+                "server",
+                "s19-person-farp",
+                "for _, s in ipairs(coalition.getStaticObjects(2) or {}) do local n = s:getName() if n:sub(1, 3) == 'np#' and s:getTypeName() == 'FARP' and Airbase.getByName(n) then return n end end\nreturn ''\n",
+                60,
+            )?;
+            Ok(v.as_str().filter(|n| !n.is_empty()).map(str::to_string))
+        },
+    )?;
+    stock(api, &farp)?;
+    println!("   {name} set blue and stocked; FARP {farp} spawned and stocked");
+    Ok(farp)
+}
+
+/// A dead static's ruin through `DoEffect` `ClearDebris` (spec/commands.md,
+/// "Layout: CLEAR_DEBRIS"): a `FARP Fuel Depot` put 300 m east of the FARP
+/// with `PutStatic`, killed with a scripted explosion of power 1,000, then a
+/// 30 m sphere cleared on it 10 s later. Records the clear's count and what
+/// the server state reads of the static before and after, by name and by
+/// `world.searchObjects`, at once and 5 s later.
+fn ruin_check(
+    run: &Run,
+    api: &mut Api,
+    campaign: u64,
+    theater: &str,
+    farp: &str,
+) -> Result<Value, String> {
+    let at = run.eval(
+        "server",
+        "s19-person-ruin-at",
+        &format!(
+            "local p = Airbase.getByName({farp:?}):getPoint() return {{ x = p.x, z = p.z }}\n"
+        ),
+        60,
+    )?;
+    let (x, z) = (
+        at["x"].as_f64().ok_or("no FARP point")?,
+        at["z"].as_f64().ok_or("no FARP point")? + 300.0,
+    );
+    let req = pb::PutStaticRequest {
+        write: api.write("ruin", campaign),
+        static_id: 0,
+        spec: Some(pb::StaticSpec {
+            label: "person-fixes ruin".into(),
+            country: 2,
+            r#type: "FARP Fuel Depot".into(),
+            position: Some(pb::Position {
+                theater: theater.to_string(),
+                north: x,
+                east: z,
+                ..pb::Position::default()
+            }),
+            heading: 0.0,
+            extra: None,
+        }),
+    };
+    api.rt
+        .block_on(api.commands.put_static(req))
+        .map_err(status_text("PutStatic"))?;
+    let find = format!(
+        "for _, s in ipairs(coalition.getStaticObjects(2) or {{}}) do local p = s:getPoint() if s:getTypeName() == 'FARP Fuel Depot' and math.abs(p.x - {x}) < 5 and math.abs(p.z - {z}) < 5 then return s:getName() end end\nreturn ''\n"
+    );
+    let name = wait(run, api, Duration::from_secs(60), "the ruin static", |_| {
+        let v = run.eval("server", "s19-person-ruin-find", &find, 60)?;
+        Ok(v.as_str().filter(|n| !n.is_empty()).map(str::to_string))
+    })?;
+    let read = format!(
+        "local out = {{}}\nlocal s = StaticObject.getByName({name:?})\nout.found = s ~= nil\nif s then out.exists = s:isExist() out.life = s:getLife() end\nout.listed = 0\nworld.searchObjects(Object.Category.STATIC, {{ id = world.VolumeType.SPHERE, params = {{ point = {{ x = {x}, y = land.getHeight({{ x = {x}, y = {z} }}), z = {z} }}, radius = 30 }} }}, function(o) if o:getName() == {name:?} then out.listed = out.listed + 1 end return true end)\nreturn out\n"
+    );
+    run.eval(
+        "server",
+        "s19-person-ruin-kill",
+        &format!("trigger.action.explosion({{ x = {x}, y = land.getHeight({{ x = {x}, y = {z} }}), z = {z} }}, 1000) return 'ok'\n"),
+        60,
+    )?;
+    let _ = run.hold(10.0);
+    let killed = run.eval("server", "s19-person-ruin-killed", &read, 60)?;
+    let req = pb::DoEffectRequest {
+        write: api.write("clear", campaign),
+        effect: Some(pb::Effect {
+            effect: Some(pb::effect::Effect::ClearDebris(pb::ClearDebris {
+                volume: Some(pb::clear_debris::Volume::Sphere(pb::Sphere {
+                    center: Some(pb::Position {
+                        theater: theater.to_string(),
+                        north: x,
+                        east: z,
+                        ..pb::Position::default()
+                    }),
+                    radius: 30.0,
+                })),
+            })),
+        }),
+    };
+    let r = api
+        .rt
+        .block_on(api.commands.do_effect(req))
+        .map_err(status_text("DoEffect"))?
+        .into_inner();
+    let after = run.eval("server", "s19-person-ruin-after", &read, 60)?;
+    let _ = run.hold(5.0);
+    let later = run.eval("server", "s19-person-ruin-later", &read, 60)?;
+    let v = json!({
+        "static": name,
+        "killed": killed,
+        "outcome": r.result.as_ref().map(|c| c.outcome),
+        "message": r.result.as_ref().map(|c| c.message.clone()),
+        "debris_removed": r.debris_removed,
+        "after": after,
+        "after_5s": later,
+    });
+    println!("   ruin: {v}");
+    Ok(v)
 }
 
 /// Wait for the mission on `theater` loaded after `generation`.
