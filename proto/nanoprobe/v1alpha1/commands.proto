@@ -15,6 +15,11 @@ option java_package = "nanoprobe.v1alpha1";
 // wait for DCS. An effect returns with its outcome.
 service CommandsService {
   rpc PutGroup(PutGroupRequest) returns (PutGroupResponse);
+  // Create a group from a group template of the DCS Mission Editor: one
+  // entry of a `templates.lua` file the administrator provides. The sidecar
+  // reads the file once and keeps the converted spec; nothing reads the file
+  // again. The group is changed afterwards with PutGroup.
+  rpc PutGroupFromTemplate(PutGroupFromTemplateRequest) returns (PutGroupFromTemplateResponse);
   rpc PutStatic(PutStaticRequest) returns (PutStaticResponse);
   rpc SetOrder(SetOrderRequest) returns (SetOrderResponse);
   rpc SetOptions(SetOptionsRequest) returns (SetOptionsResponse);
@@ -139,6 +144,36 @@ message PutGroupRequest {
 
 message PutGroupResponse {
   uint64 group_id = 1;
+  repeated uint64 unit_ids = 2;
+  uint64 spec_revision = 3;
+  // The store revision of the change.
+  uint64 revision = 4;
+}
+
+message PutGroupFromTemplateRequest {
+  Write write = 1;
+  // The template file, as the sidecar opens it: an absolute path to a file
+  // in a folder that `[missions] template_dirs` lists (spec/config.md).
+  string path = 2;
+  // The template's name in the file.
+  string template = 3;
+  // Where the template's origin goes. Each unit is placed at its offset from
+  // this point, on its theater and at its altitude.
+  Position anchor = 4;
+  // Radians, clockwise from north. Turns the layout about the anchor and is
+  // added to each unit's heading. 0 keeps the layout as the file has it.
+  double heading = 5;
+  // The DCS country number. Absent takes the template's own.
+  optional uint32 country = 6;
+  // The group's label. Empty takes the template's name.
+  string label = 7;
+  // Optional first order.
+  Order order = 8;
+}
+
+message PutGroupFromTemplateResponse {
+  uint64 group_id = 1;
+  // In the template's unit order.
   repeated uint64 unit_ids = 2;
   uint64 spec_revision = 3;
   // The store revision of the change.

@@ -3188,6 +3188,8 @@ fn apply_loadout(
 mod tests {
     use super::*;
 
+    mod group_template;
+
     /// The committed Caucasus template.
     const TEMPLATE: &[u8] = include_bytes!("../../../tests/fixtures/templates/caucasus.miz");
 

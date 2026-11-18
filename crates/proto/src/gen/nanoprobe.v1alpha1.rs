@@ -5220,6 +5220,48 @@ pub struct PutGroupResponse {
     pub revision: u64,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PutGroupFromTemplateRequest {
+    #[prost(message, optional, tag = "1")]
+    pub write: ::core::option::Option<Write>,
+    /// The template file, as the sidecar opens it: an absolute path to a file
+    /// in a folder that `\[missions\] template_dirs` lists (spec/config.md).
+    #[prost(string, tag = "2")]
+    pub path: ::prost::alloc::string::String,
+    /// The template's name in the file.
+    #[prost(string, tag = "3")]
+    pub template: ::prost::alloc::string::String,
+    /// Where the template's origin goes. Each unit is placed at its offset from
+    /// this point, on its theater and at its altitude.
+    #[prost(message, optional, tag = "4")]
+    pub anchor: ::core::option::Option<Position>,
+    /// Radians, clockwise from north. Turns the layout about the anchor and is
+    /// added to each unit's heading. 0 keeps the layout as the file has it.
+    #[prost(double, tag = "5")]
+    pub heading: f64,
+    /// The DCS country number. Absent takes the template's own.
+    #[prost(uint32, optional, tag = "6")]
+    pub country: ::core::option::Option<u32>,
+    /// The group's label. Empty takes the template's name.
+    #[prost(string, tag = "7")]
+    pub label: ::prost::alloc::string::String,
+    /// Optional first order.
+    #[prost(message, optional, tag = "8")]
+    pub order: ::core::option::Option<Order>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PutGroupFromTemplateResponse {
+    #[prost(uint64, tag = "1")]
+    pub group_id: u64,
+    /// In the template's unit order.
+    #[prost(uint64, repeated, tag = "2")]
+    pub unit_ids: ::prost::alloc::vec::Vec<u64>,
+    #[prost(uint64, tag = "3")]
+    pub spec_revision: u64,
+    /// The store revision of the change.
+    #[prost(uint64, tag = "4")]
+    pub revision: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PutStaticRequest {
     #[prost(message, optional, tag = "1")]
     pub write: ::core::option::Option<Write>,
@@ -5880,6 +5922,39 @@ pub mod commands_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Create a group from a group template of the DCS Mission Editor: one
+        /// entry of a `templates.lua` file the administrator provides. The sidecar
+        /// reads the file once and keeps the converted spec; nothing reads the file
+        /// again. The group is changed afterwards with PutGroup.
+        pub async fn put_group_from_template(
+            &mut self,
+            request: impl tonic::IntoRequest<super::PutGroupFromTemplateRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::PutGroupFromTemplateResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nanoprobe.v1alpha1.CommandsService/PutGroupFromTemplate",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "nanoprobe.v1alpha1.CommandsService",
+                        "PutGroupFromTemplate",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn put_static(
             &mut self,
             request: impl tonic::IntoRequest<super::PutStaticRequest>,
@@ -6328,6 +6403,17 @@ pub mod commands_service_server {
             tonic::Response<super::PutGroupResponse>,
             tonic::Status,
         >;
+        /// Create a group from a group template of the DCS Mission Editor: one
+        /// entry of a `templates.lua` file the administrator provides. The sidecar
+        /// reads the file once and keeps the converted spec; nothing reads the file
+        /// again. The group is changed afterwards with PutGroup.
+        async fn put_group_from_template(
+            &self,
+            request: tonic::Request<super::PutGroupFromTemplateRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::PutGroupFromTemplateResponse>,
+            tonic::Status,
+        >;
         async fn put_static(
             &self,
             request: tonic::Request<super::PutStaticRequest>,
@@ -6554,6 +6640,55 @@ pub mod commands_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = PutGroupSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/nanoprobe.v1alpha1.CommandsService/PutGroupFromTemplate" => {
+                    #[allow(non_camel_case_types)]
+                    struct PutGroupFromTemplateSvc<T: CommandsService>(pub Arc<T>);
+                    impl<
+                        T: CommandsService,
+                    > tonic::server::UnaryService<super::PutGroupFromTemplateRequest>
+                    for PutGroupFromTemplateSvc<T> {
+                        type Response = super::PutGroupFromTemplateResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::PutGroupFromTemplateRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as CommandsService>::put_group_from_template(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = PutGroupFromTemplateSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

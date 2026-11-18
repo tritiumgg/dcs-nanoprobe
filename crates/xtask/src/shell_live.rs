@@ -50,6 +50,8 @@ use tonic::transport::{Channel, Endpoint};
 use crate::install::Profile as _;
 use crate::sampling::live::Run;
 
+pub mod template;
+
 /// The two committed templates.
 const CAUCASUS: &[u8] = include_bytes!("../../../tests/fixtures/templates/caucasus.miz");
 const AFGHANISTAN: &[u8] = include_bytes!("../../../tests/fixtures/templates/afghanistan.miz");

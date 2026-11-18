@@ -177,7 +177,7 @@ commands:
                             client_address and client_password_file; the password
                             goes to the client through SSH's standard input and is
                             never printed, logged or kept.
-  sidecar <name> [--part all|conformance|hello]
+  sidecar <name> [--part all|conformance|hello|template]
                             The S17 live test on a docker-wine target: the sidecar in
                             its own container in the game container's network
                             namespace, the conformance suite through RealSim, and both

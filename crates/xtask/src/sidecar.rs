@@ -1,6 +1,7 @@
-//! `sidecar <name> [--part all|conformance|hello|shell [--template FILE]]`:
-//! the S17 live test, and with `--part shell` the S19 one
-//! (`shell_live.rs`), on a
+//! `sidecar <name> [--part all|conformance|hello|template|shell [--template FILE]]`:
+//! the S17 live test, with `--part shell` the S19 one (`shell_live.rs`), and
+//! with `--part template` a group made from a group template file
+//! (`shell_live/template.rs`), on a
 //! docker-wine target. The product's sidecar runs in a container of its own
 //! that shares the game container's network namespace, as the example
 //! compose overlay in `deploy/` sets it up, but started by hand and removed
@@ -74,13 +75,12 @@ const LIMIT_S: u64 = 900;
 /// spawns at the start.
 pub(crate) const HELLO_POINTS: [(f64, f64); 2] = [(-290_000.0, 680_000.0), (-289_000.0, 680_000.0)];
 
-const USAGE: &str =
-    "usage: cargo xtask sidecar <name> [--part all|conformance|hello|shell [--template FILE]]";
+const USAGE: &str = "usage: cargo xtask sidecar <name> [--part all|conformance|hello|template|shell [--template FILE]]";
 
 pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
     let (name, part, template) = match args {
         [name] => (*name, "all", None),
-        [name, "--part", p] if ["all", "conformance", "hello", "shell"].contains(p) => {
+        [name, "--part", p] if ["all", "conformance", "hello", "template", "shell"].contains(p) => {
             (*name, *p, None)
         }
         [name, "--part", "shell", "--template", t] => (*name, "shell", Some(*t)),
@@ -110,6 +110,8 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
     // saw is recorded by hand.
     let keys: &[&str] = if part == "shell" && results.get("person").is_some() {
         &[]
+    } else if part == "template" {
+        &["template"]
     } else if part == "shell" {
         &[
             "reload",
@@ -573,7 +575,7 @@ fn with_map(
         }
     }
 
-    if part == "all" || part == "hello" || part == "shell" {
+    if part == "all" || part == "hello" || part == "shell" || part == "template" {
         let token: String = (0..4)
             .map(|_| format!("{:016x}", nanoprobe_transport::random_nonzero()))
             .collect();
@@ -639,6 +641,17 @@ fn with_map(
             .port();
         let mut forward = Forward::start(&host.ssh, local, &ip, API_PORT)?;
         let endpoint = format!("http://127.0.0.1:{local}");
+        if part == "template" {
+            let r = crate::shell_live::template::drive(run, &endpoint, &token, results);
+            results["sidecar_logs"] =
+                json!(host.text("docker logs --tail 200 \"$1\" 2>&1 || true", &[SIDECAR_C])?);
+            forward.stop();
+            host.sh("docker stop -t 20 \"$1\" >/dev/null", &[SIDECAR_C], b"")?;
+            results["sidecar"] = json!({
+                "exit_code_after_stop": host.text("docker inspect -f '{{.State.ExitCode}}' \"$1\"", &[SIDECAR_C])?,
+            });
+            return r;
+        }
         if part == "shell" {
             let container = host.container.clone();
             let r = crate::shell_live::drive(

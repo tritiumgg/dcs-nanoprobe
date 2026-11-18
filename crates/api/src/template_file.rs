@@ -1,6 +1,7 @@
-//! The file a `SetCampaignTemplate` names (spec/config.md, `[missions]
-//! template_dirs`): resolved, held to the listed folders, and read once.
-//! The bytes read are the campaign's copy; nothing reads the path again.
+//! The file a `SetCampaignTemplate` or a `PutGroupFromTemplate` names
+//! (spec/config.md, `[missions] template_dirs`): resolved, held to the
+//! listed folders, and read once. What the call keeps is made from the
+//! bytes read; nothing reads the path again.
 
 use std::io::Read;
 use std::path::{Component, Path, PathBuf, Prefix};
@@ -44,6 +45,25 @@ fn elsewhere(dirs: &[PathBuf], named: &Path) -> bool {
 /// the listed folders are the administrator's, and the API gives no way to
 /// write into them.
 pub fn read(dirs: &[PathBuf], path: &str) -> Result<Vec<u8>, String> {
+    read_for(
+        "SetCampaignTemplate",
+        "a template",
+        TEMPLATE_MAX,
+        dirs,
+        path,
+    )
+}
+
+/// `read` for the call `call`, which the sidecar's log names with the cause
+/// of a refusal, of a file of at most `max` bytes. `what` names the file in
+/// the refusal of a larger one.
+pub fn read_for(
+    call: &str,
+    what: &str,
+    max: usize,
+    dirs: &[PathBuf],
+    path: &str,
+) -> Result<Vec<u8>, String> {
     let named = Path::new(path);
     if !named.is_absolute() {
         return Err(format!(
@@ -51,7 +71,7 @@ pub fn read(dirs: &[PathBuf], path: &str) -> Result<Vec<u8>, String> {
         ));
     }
     let refuse = |why: &str| {
-        eprintln!("SetCampaignTemplate refused {path:?}: {why}");
+        eprintln!("{call} refused {path:?}: {why}");
         format!("{path:?} {NOT_LISTED}")
     };
     if elsewhere(dirs, named) {
@@ -75,16 +95,16 @@ pub fn read(dirs: &[PathBuf], path: &str) -> Result<Vec<u8>, String> {
     let unreadable = |e: std::io::Error| format!("{path:?} could not be read: {}", e.kind());
     let file = std::fs::File::open(&resolved).map_err(unreadable)?;
     let size = file.metadata().map_err(unreadable)?.len();
-    let too_large = || format!("a template is at most {TEMPLATE_MAX} bytes");
-    if size > TEMPLATE_MAX as u64 {
+    let too_large = || format!("{what} is at most {max} bytes");
+    if size > max as u64 {
         return Err(too_large());
     }
     // The limit holds for a file that grows while it is read.
     let mut bytes = Vec::with_capacity(size as usize);
-    file.take(TEMPLATE_MAX as u64 + 1)
+    file.take(max as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(unreadable)?;
-    if bytes.len() > TEMPLATE_MAX {
+    if bytes.len() > max {
         return Err(too_large());
     }
     Ok(bytes)
@@ -319,5 +339,26 @@ mod tests {
         drop(f);
         let got = read(&[d.path().to_path_buf()], at.to_str().expect("utf-8")).expect("at limit");
         assert_eq!(got.len(), TEMPLATE_MAX);
+    }
+
+    #[test]
+    fn a_call_gives_its_own_limit_and_its_own_name_for_the_file() {
+        let d = tempfile::tempdir().expect("dir");
+        let dirs = [d.path().to_path_buf()];
+        let at = d.path().join("at.lua");
+        std::fs::write(&at, [b'a'; 16]).expect("at");
+        let over = d.path().join("over.lua");
+        std::fs::write(&over, [b'a'; 17]).expect("over");
+        let path = |p: &Path| p.to_str().expect("utf-8").to_owned();
+        assert_eq!(
+            read_for("X", "a thing", 16, &dirs, &path(&at)).as_deref(),
+            Ok(&[b'a'; 16][..])
+        );
+        assert_eq!(
+            read_for("X", "a thing", 16, &dirs, &path(&over)),
+            Err("a thing is at most 16 bytes".to_owned())
+        );
+        // The same file under the template's own limit is read.
+        assert_eq!(read(&dirs, &path(&over)).map(|b| b.len()), Ok(17));
     }
 }

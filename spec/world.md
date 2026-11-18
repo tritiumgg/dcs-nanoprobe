@@ -522,6 +522,76 @@ object is bound in the same agent boot and mission generation, then applies it: 
 most 64 reads. A newer read of an object replaces its held one, a full table drops its
 oldest read, and a new mission generation or agent boot drops them all.
 
+## Group templates
+
+`PutGroupFromTemplate` makes a group from a group template of the DCS Mission Editor.
+DCS ships its group templates in one Lua file,
+`MissionEditor/data/scripts/templates.lua`: one assignment
+`templates = { ["<name>"] = {...}, ... }` of literal values (ED-CODE,
+docs/results/2026-11-18-spawn-template.md). That the editor saves a user's own
+templates in a file of the same form is UNVERIFIED. The administrator provides the
+file; the
+call names it by its path as the sidecar opens it, in a folder that
+`[missions] template_dirs` lists (spec/config.md), under the path rules of
+`SetCampaignTemplate` (spec/persistence.md, "Set a template").
+
+The sidecar reads the file once, converts the named template to a group spec, and
+journals the group as `PutGroup` journals one of that spec. The store keeps the spec
+alone: a mission load, a restore, an export and a restarted sidecar never read the file,
+and the group is changed afterwards with `PutGroup`. The path and the template's name
+are written to the sidecar's standard error. A repeat under an answered idempotency key
+returns the first answer whatever has become of the file.
+
+The file is read as data, by the reader that reads a mission template's members. No
+code from it runs. The reader takes one assignment of a name to a value and nothing
+after it. A value is a table constructor, with `[key] = v`, `name = v` and positional
+fields separated by `,` or `;`; a double-quoted, single-quoted or long-bracket string;
+a number; `true`, `false` or `nil`. Tables nest at most 200 deep, and `--` comments are
+skipped. Anything else refuses the file with the line it is on: a second statement,
+`local`, `return`, a call, a function, an operator, a name used as a value. So is a
+file over 1 MiB. The file Eagle Dynamics ships is 185,899 bytes (ED-CODE). A file the editor
+saved for a user has not been read; one in another form is refused.
+
+| In the file | In the spec |
+|---|---|
+| The template's key | The template the request's `template` names. Of two with one name, the later |
+| `type` | Must be `"vehicle"`, which gives a ground group. The shipped file has no other value (ED-CODE); a template with another is refused. Which values the editor saves for other groups is UNVERIFIED |
+| `country` | The DCS country number, unless the request gives `country` |
+| `name` | Not used. An empty `label` in the request takes the template's key |
+| `units[i].name` | The unit's DCS type |
+| `units[i].dx`, `dy` | The unit's place: `dx` meters north and `dy` meters east of the request's `anchor`, on the anchor's theater and at its `alt` |
+| `units[i].heading` | The unit's heading, radians |
+| `units[i].skill` | The unit's skill. One that is not text is left out |
+| Any other key | Dropped, and named in the sidecar's standard error |
+
+The request's `heading`, radians clockwise from north, turns the layout about the
+anchor and is added to each unit's heading. The heading is then the truncated remainder
+of the sum by 2π, as the editor's `math.mod` gives it (ED-CODE,
+docs/results/2026-11-18-spawn-template.md): it keeps the sum's sign, so a turn to the
+left can give a negative heading. At 0 each offset and heading is the file's own
+number. A unit gets the platform's own name, as every unit does ("Names"); the file
+names none.
+
+The sidecar adds `dx` to the anchor's `north` and `dy` to its `east`, on these facts:
+
+- The Mission Editor saves a unit's `dx` as its mission `x` less the group's and its
+  `dy` as its `y` less the group's, and turns a group by the same rotation (ED-CODE,
+  the same document).
+- A unit table's `x` and `y` are the world's `x` and `z`: a group spawned again from
+  its sampled place stood within 25 m of it (LIVE,
+  docs/results/2026-11-15-s18-persistence-live.md).
+- The API names DCS `x` `north` and DCS `z` `east` ("Positions and theaters").
+
+Where a unit made by this call stands on DCS is UNVERIFIED; the live part of
+docs/results/2026-11-18-spawn-template.md reads it back.
+
+The editor also saves a `payload` for a unit that has one, and its script names the
+group types `"plane"` and `"helicopter"` (ED-CODE); the `type` it saves for them is
+UNVERIFIED. A `payload` is dropped as any other key.
+
+A country the loaded mission does not hold, or a unit type DCS does not have, is DCS's
+refusal: it shows as the group's last error, as with `PutGroup`.
+
 ## Lua tables in the API
 
 The API carries DCS tables as JSON-like values (`google.protobuf.Struct`), whose keys
