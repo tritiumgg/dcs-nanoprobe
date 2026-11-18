@@ -274,9 +274,10 @@ or takeoff, and only for a unit a player occupies:
   dynamic-spawn slot's ID equals its unit's mission ID is UNVERIFIED; where it does not,
   the birth is not read. A birth that comes before its slot's `PLAYER` record is not
   marked, and neither is that unit's takeoff; the sidecar's join of a player to a unit
-  takes either order (spec/world.md, "Seat occupancy"). The server's own connection writes no `PLAYER` record
-  (spec/records.md, "Layout: PLAYER"), so it holds no slot here: the aircraft of a
-  player who hosts the server from the client has no loadout read. The held slots are
+  takes either order (spec/world.md, "Seat occupancy"). The server's own connection
+  writes no `PLAYER` record (spec/records.md, "Layout: PLAYER"), so it holds no slot
+  here: the aircraft of a player who hosts the server from the client has no loadout
+  read. The held slots are
   not cleared on a mission load. Whether DCS reports a slot change for each connected
   player then is UNVERIFIED; a slot left held marks the birth of a unit of the next
   mission whose mission ID equals it, which costs that unit one `getPlayerName` call.
@@ -303,8 +304,9 @@ for at the cost of a vitals row each, and at least one; the rest wait for the ne
 A mark costs more than a vitals row: its `getPlayerName` call and bookkeeping take about
 22 µs (LIVE, docs/results/2026-11-17-s19-spawn-state.md, on AI units), and the `getAmmo`
 call of a player's unit adds a cost that is UNVERIFIED. Marks come only for players'
-units, a few at a time, so the difference is the frame's debt. A pump with no birth pending and a mark
-that has its row counts as having work ("The pump's worth"). The list holds at most 1,024
+units, a few at a time, so the difference is the frame's debt. A pump with no birth
+pending and a mark that has its row counts as having work ("The pump's worth"). The list
+holds at most 1,024
 marks; when it is full, a new mark drops the oldest and the drop is counted. For each
 mark the shim calls `Unit.getPlayerName` under `pcall`, in the pump and never in the event
 handler. A unit with no player name is dropped with no further read and no record. For a

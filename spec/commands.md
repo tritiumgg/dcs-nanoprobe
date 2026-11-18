@@ -516,8 +516,8 @@ a replacing spawn they also come before the old rows' `OBJECT_GONE`. A sidecar t
 reads the `RESULT` has therefore read the `OBJECT` of every unit the handler could read,
 unless the agent's event queue dropped the record: the `GAP` it writes then makes the
 sidecar force a full enumeration, which writes the unit's `OBJECT` (spec/records.md,
-"Delivery classes"). A unit whose read raises, or that does not exist yet, gets no record here and the result
-stays `APPLIED`: its birth or the next full enumeration adds it. The reads are part of
+"Delivery classes"). A unit whose read raises, or that does not exist yet, gets no
+record here and the result stays `APPLIED`: its birth or the next full enumeration adds it. The reads are part of
 the command: their time is in its `cost_us` and counts as commanded work, not as the
 agent's overhead. The later `S_EVENT_BIRTH` of a unit the handler added costs the births
 tier one `wants` check and writes nothing.

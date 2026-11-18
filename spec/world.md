@@ -598,9 +598,8 @@ replaces the one before. A controller reads it for a loadout check.
 An AI unit has no ammunition read: its `ammo` is empty and it has no `ammo_read`. So has
 a player unit before its first read, and a player unit the agent does not mark: the
 aircraft of a player who hosts the server from the client, and the other cases that
-spec/sampling.md, "Loadout reads", lists. A player unit read with no ammunition rows has an
-empty `ammo` and an `ammo_read`. Nothing sees a
-rearm. No event named an AI M-1 rearmed by a truck (LIVE, E38,
+spec/sampling.md, "Loadout reads", lists. A player unit read with no ammunition rows has
+an empty `ammo` and an `ammo_read`. Nothing sees a rearm. No event named an AI M-1 rearmed by a truck (LIVE, E38,
 docs/results/2026-11-14-e38-life-and-ammunition.md); whether DCS sends one for a player
 aircraft rearmed by ground crew is UNVERIFIED, an open item for a live check. The
 loadout is the one at the last birth or takeoff. A read whose record the ring drops is
