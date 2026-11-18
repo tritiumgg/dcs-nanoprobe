@@ -1,0 +1,36 @@
+# sidecar.toml for a sidecar that runs on Windows beside DCS, as the account
+# that runs DCS. Replace every placeholder in angle brackets, then start it:
+#
+#   nanoprobe-sidecar.exe run --config sidecar.toml
+#
+# Every key and its default is in spec/config.md in the project's repository.
+# Relative paths are relative to the folder that holds this file: the sidecar
+# keeps its campaign stores in `campaigns` there. Keep this file outside the
+# DCS profile's `nanoprobe` folder, which `nanoprobe uninstall` removes. The
+# sidecar writes its log to standard output and standard error, not to a file.
+
+[agent]
+# The file the agent and the sidecar share. The agent makes it in the temp
+# folder (%TEMP%) of the account that runs DCS, unless `map_path` in
+# <DCS profile>\nanoprobe\agent.toml names another place.
+map_path = '<temp folder of the account that runs DCS>\nanoprobe-47310.map'
+# The token `nanoprobe install` made.
+token_path = '<DCS profile>\nanoprobe\token'
+
+[api]
+# Loopback: only programs on this machine reach the API, and each has the
+# admin role. For a controller on another machine, listen on an address it
+# reaches and name a tokens file, which any address but loopback needs:
+#   listen = "0.0.0.0:47311"
+#   tokens_path = "tokens.toml"
+listen = "127.0.0.1:47311"
+
+[missions]
+# The mission folder: the template `<theater>.miz` of each map a campaign
+# uses, which you save in the Mission Editor. The sidecar writes each
+# campaign's mission under `shells\` there, and DCS loads it by `dcs_dir`.
+# On Windows both keys name the same folder.
+dir = '<DCS profile>\nanoprobe\missions'
+dcs_dir = '<DCS profile>\nanoprobe\missions'
+# The folders a controller may name a template file in. None by default.
+#   template_dirs = ['<templates folder>']

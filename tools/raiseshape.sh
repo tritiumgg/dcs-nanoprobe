@@ -33,8 +33,15 @@ if [ $# -ge 1 ]; then
     ASM=$1
 else
     case "$(uname -s)" in
-        MINGW* | MSYS* | CYGWIN* | Windows_NT) CARGO='cargo rustc' ;;
-        *) CARGO='cargo xwin rustc' ;;
+        MINGW* | MSYS* | CYGWIN* | Windows_NT)
+            CARGO='cargo rustc'
+            REMAP= ;;
+        *)
+            # The flags of `mise run windows` off Windows (tools/remap.sh), so
+            # this build is the one that ships and leaves the DLL in target/
+            # as that task made it.
+            CARGO='cargo xwin rustc'
+            REMAP="--config=$(sh "$ROOT/tools/remap.sh" "$TARGET")" ;;
     esac
     DIR=$ROOT/target
     [ -z "${FEATURES:-}" ] || DIR=$ROOT/target/faults
@@ -44,7 +51,8 @@ else
     rm -f "$ASM"
     touch "$ROOT/crates/agent/src/lib.rs"
     (cd "$ROOT" && $CARGO -p nanoprobe-agent --release --target "$TARGET" \
-        --target-dir "$DIR" ${FEATURES:+--features "$FEATURES"} -- --emit=asm)
+        --target-dir "$DIR" ${FEATURES:+--features "$FEATURES"} \
+        ${REMAP:+"$REMAP"} -- --emit=asm)
 fi
 
 [ -f "$ASM" ] || {

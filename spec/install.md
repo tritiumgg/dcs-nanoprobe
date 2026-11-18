@@ -98,7 +98,8 @@ needs or that it cannot read, by line number and key, and nothing else from the 
 
 A release is two archives, the agent's PDB (`nanoprobe-<version>-agent.pdb`, which
 symbolizes its crash records and is not installed), the API schema, and `SHA256SUMS`
-over the five files, built by `mise run package` (`tools/stage-release.sh`). The schema
+over the five files, built by `mise run package` (`tools/stage-release.sh`) on macOS or
+Linux. The schema
 is `nanoprobe-<version>-schema.tar.gz`, one folder `nanoprobe-<version>-schema/` with
 `buf.yaml`, `LICENSE` and `proto/`, and `nanoprobe-<version>-schema.binpb`, the file
 descriptor set `buf build` makes of it, with its imports and comments. Users generate
@@ -107,16 +108,42 @@ they are published. Each archive holds one folder,
 `nanoprobe-<version>-<platform>/`:
 
 ```
-nanoprobe[.exe]                 doctor, install, uninstall, inspect, top, watch
-install.cmd, uninstall.cmd      Windows only
+nanoprobe[.exe]                 doctor, install, uninstall, inspect, top, watch, restore
+nanoprobe-sidecar[.exe]         the sidecar (spec/config.md)
+install.cmd, uninstall.cmd      Windows only: run the program on a double click
+install.sh, uninstall.sh        Linux only: run the program with their arguments
+README.txt                      what the folder holds and the first steps
+sidecar.toml                    Windows only: an example for a sidecar beside DCS
+deploy/                         Linux only: the repository's deploy/ folder
 LICENSE
 payload/nanoprobe-hook.lua      the loader
 payload/nanoprobe_agent.dll     the agent DLL
 payload/lua/hook.lua, log.lua, shim.lua
 ```
 
-The platforms are `windows-x86_64` (a zip) and `linux-x86_64` (a tar.gz with a static
-`nanoprobe`). The payload is the same in both: a Linux server runs DCS under Wine.
+`install.sh` and `uninstall.sh` run `nanoprobe install` and `nanoprobe uninstall` with
+the program beside them, and pass on every argument and the program's exit code.
+`deploy/` holds the sidecar's `Dockerfile`, a compose overlay and an example
+`sidecar.toml` for a DCS server in a container. The image is built from the archive's
+`nanoprobe-sidecar`, where it runs; no image is published. Each example `sidecar.toml`
+is one the sidecar accepts once its placeholders are replaced. The Windows archive's
+`README.txt` and `sidecar.toml` end their lines with CR LF.
+
+No file in an archive holds a path of the machine that built it: the builds map the
+checkout, cargo's registry and the toolchain to `nanoprobe`, `cargo` and `rust`
+(`tools/remap.sh`), and the archive test fails on the builder's home folder. The PDB is
+not covered: the linker writes into it the absolute path of every object file and
+library it read.
+
+The sidecar is not installed: the user runs it from the unpacked folder or from the
+image, with a `sidecar.toml` of their own. `nanoprobe install` and `uninstall` write no
+`sidecar.toml`, and place and remove nothing of the sidecar: its stores are in its own
+folder (spec/config.md) and stay. The exception is a folder the user puts
+inside `<profile>/nanoprobe`, the mission folder included, which undeploy removes with
+the rest.
+
+The platforms are `windows-x86_64` (a zip) and `linux-x86_64` (a tar.gz whose two
+programs are static). The payload is the same in both: a Linux server runs DCS under Wine.
 `nanoprobe install` reads `payload/` beside the program. It installs into the one DCS
 profile it finds, or the one `--profile` names: a folder named `DCS` or `DCS.<branch>`
 in `%USERPROFILE%\Saved Games` on Windows, or in `<prefix>/drive_c/users/*/Saved Games`
@@ -129,13 +156,24 @@ folder's access list decides.
 
 `nanoprobe doctor` checks an install from outside DCS and writes nothing. It prints one
 line per check, marked `ok`, `fail` or `note`, and exits 0 when nothing failed, 1 when a
-check failed, and 2 when it has no profile to check: none found, or, without
-`--profile`, none that holds the loader. Without `--profile`
+check failed, and 2 when it has no one profile to check: none found, or, without
+`--profile`, none that holds the loader, or more than one with `--sidecar-config`. Without `--profile`
 it checks every profile found, as install finds them, that holds the loader. It also checks
 the per-map templates in the mission folder: `--missions DIR` names the folder the
 sidecar's `[missions] dir` names, as the machine doctor runs on sees it, and defaults to
 `nanoprobe/missions` in the profile. Each `--theater NAME` names a theater whose
 template must be there.
+
+`--sidecar-config FILE` names the sidecar's `sidecar.toml` (spec/config.md), for a
+machine that sees the paths in it as the sidecar does: a sidecar that runs as a program
+on the machine doctor runs on. Doctor reads the file as the sidecar does, and takes
+`[missions] dir` and `template_dirs` from it. A sidecar serves one DCS: when
+`--sidecar-config` is given and more than one profile holds the loader, doctor checks
+nothing, asks for `--profile`, and exits 2. For a sidecar in a container the paths in
+the file are the container's, so doctor is given the folders instead: `--missions DIR`,
+and `--template-dir DIR` once for each folder `template_dirs` lists, as the machine
+doctor runs on sees them. A folder given this way replaces the file's. Doctor prints no
+token.
 
 | Check | Fails when | A note when |
 |---|---|---|
@@ -147,6 +185,11 @@ template must be there.
 | `logs/hook.log` and `logs/shim.log`, newest start | an `error` record; a `capabilities` record with a name absent; no `hook loaded` record of the newest session and no `hook.log.1` | no shim record yet in that start; the start record rotated out; the newest start ran no hook, and the logs are not checked |
 | `autoexec.cfg` | the block is edited or cut short; an assignment after the block, or anywhere without one, sets a list that lacks the needed name | no block; a value doctor cannot read |
 | Per-map templates | the folder holds no `<theater>.miz`, or none for a `--theater`; a template the sidecar cannot write a shell from (spec/persistence.md, "Mission shells"); the mission folder does not read, except when `nanoprobe/missions` is absent and neither `--missions` nor `--theater` is given | a `.miz` whose name is no theater's; no `nanoprobe/missions` in the profile and no `--missions` or `--theater` |
+| `sidecar.toml`, with `--sidecar-config` | the sidecar would refuse to start with the file: the file does not parse, it cannot read the agent's token file or the tokens file, or the listener is off loopback with no tokens file; the token it names is not the profile's; one of `[missions] dir` and `dcs_dir` is set without the other | `[missions] dir` is empty, and the per-map templates are then not checked; `template_dirs` is empty |
+| Template folders, from `--template-dir` or the file | a folder does not resolve or is not a folder, so the sidecar allows no file in it; on Linux and macOS, every user can write in it | on Linux and macOS, its group can write in it |
+
+A template folder's check reads the folder a symbolic link names, and only that
+folder's own mode: not its parents', and not a Windows access list.
 
 The newest start is the part of `dcs.log` after its last `=== Log opened UTC <time>`
 line, which also says when it began (the log's modification time when there is no such

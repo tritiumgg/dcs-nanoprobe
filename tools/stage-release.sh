@@ -4,8 +4,7 @@
 # Both archives carry the same payload: the loader, the agent DLL and the
 # version's Lua, which `nanoprobe install` puts in a DCS Saved Games profile.
 # A Linux DCS server runs under Wine, so its archive carries the Windows DLL
-# too. Only the `nanoprobe` program differs: a Windows executable, or a static
-# Linux one.
+# too. The two programs differ: Windows executables, or static Linux ones.
 #
 #   dist/nanoprobe-<v>-windows-x86_64.zip
 #   dist/nanoprobe-<v>-linux-x86_64.tar.gz
@@ -16,20 +15,38 @@
 #
 # Each archive holds one folder, nanoprobe-<v>-<platform>/, with:
 #
-#   nanoprobe[.exe]                  doctor, install, uninstall, inspect, top, watch
-#   install.cmd, uninstall.cmd       Windows only: run the program on a double click
+#   nanoprobe[.exe]                  doctor, install, uninstall, inspect, top, watch,
+#                                    restore
+#   nanoprobe-sidecar[.exe]          the sidecar
+#   install.cmd, uninstall.cmd       Windows: run the program on a double click
+#   install.sh, uninstall.sh         Linux: run the program with their arguments
+#   README.txt                       what the folder holds and the first steps
+#   sidecar.toml                     Windows: an example for a sidecar beside DCS
+#   deploy/                          Linux: the sidecar's container image, compose
+#                                    overlay and example sidecar.toml (deploy/)
 #   LICENSE
 #   payload/nanoprobe-hook.lua
 #   payload/nanoprobe_agent.dll
 #   payload/lua/hook.lua, log.lua, shim.lua
 #
 # Run it through `mise run package`, which first builds the DLL and checks it
-# with tools/checkdll.sh. This script builds the program for both platforms.
+# with tools/checkdll.sh. This script builds the two programs for both
+# platforms.
+#
+# Runs on macOS and Linux. A Windows host can build the DLL (`mise run dll`)
+# but not stage a release: the Linux programs need a C compiler for musl, and
+# tools/remap.sh maps POSIX paths.
 #
 # Usage: sh tools/stage-release.sh [out-dir]
-# POSIX sh. Needs cargo, cargo-xwin (on macOS and Linux), buf, git, zip, tar,
-# and sha256sum or shasum.
+# POSIX sh. Needs cargo, cargo-xwin, zig, buf, git, zip, tar, awk, and
+# sha256sum or shasum.
 set -eu
+
+case $(uname -s) in
+    MINGW* | MSYS* | CYGWIN* | Windows_NT)
+        printf 'tools/stage-release.sh stages a release on macOS or Linux, not on Windows\n' >&2
+        exit 2 ;;
+esac
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 mkdir -p "${1:-$ROOT/dist}"
@@ -58,16 +75,34 @@ PDB=target/$WIN/release/nanoprobe.pdb
 # build; run it again here so the script cannot stage one on its own.
 sh tools/checkdll.sh "$DLL" >/dev/null
 
-# The program builds into its own target folder. In the shared one, the
+# No program carries this machine's paths (tools/remap.sh). The programs build
+# into their own target folder. In the shared one, the
 # Windows build's nanoprobe.pdb would replace the agent's, which has the same
 # name.
 CLI_TARGET=target/release-cli
-case $(uname -s) in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT)
-        cargo build --release -p nanoprobe-cli --target "$WIN" --target-dir "$CLI_TARGET" ;;
-    *) cargo xwin build --release -p nanoprobe-cli --target "$WIN" --target-dir "$CLI_TARGET" ;;
+PROGRAMS='-p nanoprobe-cli --bin nanoprobe -p nanoprobe-api --bin nanoprobe-sidecar'
+# shellcheck disable=SC2086 # PROGRAMS is a list of arguments.
+cargo xwin build --release $PROGRAMS --target "$WIN" --target-dir "$CLI_TARGET" \
+    --config "$(sh tools/remap.sh "$WIN")"
+# Both programs hold the bundled SQLite, which needs a C compiler for musl:
+# zig's, unless the caller names another.
+: "${CC_x86_64_unknown_linux_musl:=$ROOT/tools/zigcc-musl.sh}"
+: "${AR_x86_64_unknown_linux_musl:=$ROOT/tools/zigar.sh}"
+export CC_x86_64_unknown_linux_musl AR_x86_64_unknown_linux_musl
+# The C compiler writes its source paths too. The last map that matches a
+# path applies, so the maps go from the widest to the narrowest. The cc crate
+# splits these flags at white space and has no quoting.
+CARGO_DIR=${CARGO_HOME:-$HOME/.cargo}
+case "$HOME$ROOT$CARGO_DIR" in
+    *[[:space:]]*)
+        printf 'tools/stage-release.sh: white space in the path of the home folder, the checkout or cargo: the C compiler flags cannot carry it\n' >&2
+        exit 2 ;;
 esac
-cargo build --release -p nanoprobe-cli --target "$LINUX" --target-dir "$CLI_TARGET"
+CFLAGS_x86_64_unknown_linux_musl="${CFLAGS_x86_64_unknown_linux_musl:-} -ffile-prefix-map=$HOME=home -ffile-prefix-map=$ROOT=nanoprobe -ffile-prefix-map=$CARGO_DIR=cargo"
+export CFLAGS_x86_64_unknown_linux_musl
+# shellcheck disable=SC2086
+cargo build --release $PROGRAMS --target "$LINUX" --target-dir "$CLI_TARGET" \
+    --config "$(sh tools/remap.sh "$LINUX")"
 
 sha() {
     if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi
@@ -80,11 +115,11 @@ rm -f "$OUT"/nanoprobe-*-windows-x86_64.zip "$OUT"/nanoprobe-*-linux-x86_64.tar.
     "$OUT"/nanoprobe-*-agent.pdb "$OUT"/nanoprobe-*-schema.tar.gz \
     "$OUT"/nanoprobe-*-schema.binpb "$OUT/SHA256SUMS"
 
-# stage <platform> <program>
+# stage <platform> <program> <sidecar>
 stage() {
     dir=$OUT/stage/nanoprobe-$VERSION-$1
     mkdir -p "$dir/payload/lua"
-    cp "$2" "$dir/"
+    cp "$2" "$3" "$dir/"
     cp LICENSE "$dir/LICENSE"
     cp lua/hook/nanoprobe-hook.lua "$dir/payload/nanoprobe-hook.lua"
     cp "$DLL" "$dir/payload/nanoprobe_agent.dll"
@@ -95,14 +130,36 @@ stage() {
         "$dir/payload/nanoprobe_agent.dll" "$dir/payload/lua/"*.lua
 }
 
-stage windows-x86_64 "$CLI_TARGET/$WIN/release/nanoprobe.exe"
+# The text files a Windows user opens end their lines as Windows does.
+crlf() {
+    awk '{ sub(/\r$/, ""); printf "%s\r\n", $0 }' "$1" >"$2"
+    chmod 0644 "$2"
+}
+
+stage windows-x86_64 "$CLI_TARGET/$WIN/release/nanoprobe.exe" \
+    "$CLI_TARGET/$WIN/release/nanoprobe-sidecar.exe"
 WINDIR=$OUT/stage/nanoprobe-$VERSION-windows-x86_64
 for verb in install uninstall; do
     printf '@echo off\r\n"%%~dp0nanoprobe.exe" %s %%*\r\npause\r\n' "$verb" >"$WINDIR/$verb.cmd"
 done
+crlf tools/release/README.windows.txt "$WINDIR/README.txt"
+crlf tools/release/sidecar.windows.toml "$WINDIR/sidecar.toml"
 
-stage linux-x86_64 "$CLI_TARGET/$LINUX/release/nanoprobe"
-chmod 0755 "$OUT/stage/nanoprobe-$VERSION-linux-x86_64/nanoprobe"
+stage linux-x86_64 "$CLI_TARGET/$LINUX/release/nanoprobe" \
+    "$CLI_TARGET/$LINUX/release/nanoprobe-sidecar"
+LINUXDIR=$OUT/stage/nanoprobe-$VERSION-linux-x86_64
+cp tools/release/install.sh tools/release/uninstall.sh "$LINUXDIR/"
+chmod 0755 "$LINUXDIR/nanoprobe" "$LINUXDIR/nanoprobe-sidecar" \
+    "$LINUXDIR/install.sh" "$LINUXDIR/uninstall.sh"
+cp tools/release/README.linux.txt "$LINUXDIR/README.txt"
+mkdir "$LINUXDIR/deploy"
+# The files git tracks: a program copied into deploy/ for a local image build
+# is not part of a release.
+git ls-files -- deploy | while IFS= read -r f; do
+    cp "$f" "$LINUXDIR/$f"
+    chmod 0644 "$LINUXDIR/$f"
+done
+chmod 0644 "$LINUXDIR/README.txt"
 
 # Archive entries in a fixed order, without macOS metadata files.
 (

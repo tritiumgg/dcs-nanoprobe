@@ -18,6 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 nanoprobe-agent-link = { path = "../agent-link" }
+nanoprobe-api = { path = "../api" }
 nanoprobe-install = { path = "../install" }
 nanoprobe-proto = { path = "../proto" }
 nanoprobe-sidecar = { path = "../sidecar", features = ["disk"] }
