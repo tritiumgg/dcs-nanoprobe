@@ -156,13 +156,24 @@ folder's access list decides.
 
 `nanoprobe doctor` checks an install from outside DCS and writes nothing. It prints one
 line per check, marked `ok`, `fail` or `note`, and exits 0 when nothing failed, 1 when a
-check failed, and 2 when it has no profile to check: none found, or, without
-`--profile`, none that holds the loader. Without `--profile`
+check failed, and 2 when it has no one profile to check: none found, or, without
+`--profile`, none that holds the loader, or more than one with `--sidecar-config`. Without `--profile`
 it checks every profile found, as install finds them, that holds the loader. It also checks
 the per-map templates in the mission folder: `--missions DIR` names the folder the
 sidecar's `[missions] dir` names, as the machine doctor runs on sees it, and defaults to
 `nanoprobe/missions` in the profile. Each `--theater NAME` names a theater whose
 template must be there.
+
+`--sidecar-config FILE` names the sidecar's `sidecar.toml` (spec/config.md), for a
+machine that sees the paths in it as the sidecar does: a sidecar that runs as a program
+on the machine doctor runs on. Doctor reads the file as the sidecar does, and takes
+`[missions] dir` and `template_dirs` from it. A sidecar serves one DCS: when
+`--sidecar-config` is given and more than one profile holds the loader, doctor checks
+nothing, asks for `--profile`, and exits 2. For a sidecar in a container the paths in
+the file are the container's, so doctor is given the folders instead: `--missions DIR`,
+and `--template-dir DIR` once for each folder `template_dirs` lists, as the machine
+doctor runs on sees them. A folder given this way replaces the file's. Doctor prints no
+token.
 
 | Check | Fails when | A note when |
 |---|---|---|
@@ -174,6 +185,11 @@ template must be there.
 | `logs/hook.log` and `logs/shim.log`, newest start | an `error` record; a `capabilities` record with a name absent; no `hook loaded` record of the newest session and no `hook.log.1` | no shim record yet in that start; the start record rotated out; the newest start ran no hook, and the logs are not checked |
 | `autoexec.cfg` | the block is edited or cut short; an assignment after the block, or anywhere without one, sets a list that lacks the needed name | no block; a value doctor cannot read |
 | Per-map templates | the folder holds no `<theater>.miz`, or none for a `--theater`; a template the sidecar cannot write a shell from (spec/persistence.md, "Mission shells"); the mission folder does not read, except when `nanoprobe/missions` is absent and neither `--missions` nor `--theater` is given | a `.miz` whose name is no theater's; no `nanoprobe/missions` in the profile and no `--missions` or `--theater` |
+| `sidecar.toml`, with `--sidecar-config` | the sidecar would refuse to start with the file: the file does not parse, it cannot read the agent's token file or the tokens file, or the listener is off loopback with no tokens file; the token it names is not the profile's; one of `[missions] dir` and `dcs_dir` is set without the other | `[missions] dir` is empty, and the per-map templates are then not checked; `template_dirs` is empty |
+| Template folders, from `--template-dir` or the file | a folder does not resolve or is not a folder, so the sidecar allows no file in it; on Linux and macOS, every user can write in it | on Linux and macOS, its group can write in it |
+
+A template folder's check reads the folder a symbolic link names, and only that
+folder's own mode: not its parents', and not a Windows access list.
 
 The newest start is the part of `dcs.log` after its last `=== Log opened UTC <time>`
 line, which also says when it began (the log's modification time when there is no such

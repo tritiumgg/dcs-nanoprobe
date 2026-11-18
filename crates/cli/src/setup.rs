@@ -49,11 +49,19 @@ pub fn parse(sub: &str, args: &[String]) -> Result<Options, String> {
             }
             continue;
         }
+        if flag == "--template-dir" && sub == "doctor" {
+            let dir = value(flag)?;
+            if !options.missions.template_dirs.contains(&dir) {
+                options.missions.template_dirs.push(dir);
+            }
+            continue;
+        }
         let slot = match flag {
             "--profile" => &mut options.place.profile,
             "--wine-prefix" => &mut options.place.wine_prefix,
             "--payload" if sub == "install" => &mut options.payload,
             "--missions" if sub == "doctor" => &mut options.missions.dir,
+            "--sidecar-config" if sub == "doctor" => &mut options.missions.sidecar_config,
             _ => return Err(format!("unknown argument `{arg}` for `{sub}`")),
         };
         if slot.replace(value(flag)?).is_some() {
@@ -219,6 +227,29 @@ mod tests {
         .unwrap();
         assert_eq!(o.missions.dir, Some("m".into()));
         assert_eq!(o.missions.theaters, ["Caucasus", "Syria"]);
+        let o = p(
+            "doctor",
+            &[
+                "--sidecar-config=s.toml",
+                "--template-dir",
+                "t",
+                "--template-dir=u",
+            ],
+        )
+        .unwrap();
+        assert_eq!(o.missions.sidecar_config, Some("s.toml".into()));
+        assert_eq!(o.missions.template_dirs, [PathBuf::from("t"), "u".into()]);
+        for bad in [
+            ("install", &["--sidecar-config", "s"][..]),
+            ("uninstall", &["--template-dir", "t"]),
+            (
+                "doctor",
+                &["--sidecar-config", "s", "--sidecar-config", "t"],
+            ),
+            ("doctor", &["--template-dir"]),
+        ] {
+            assert!(p(bad.0, bad.1).is_err(), "{bad:?}");
+        }
         for bad in [
             ("doctor", &["--payload", "b"][..]),
             ("install", &["--missions", "m"]),
