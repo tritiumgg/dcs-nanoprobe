@@ -154,6 +154,11 @@ model time and `junk2.lua` 312 s. Both kill what they spawn with scripted explos
 `lua/tests/junk_experiment.lua` rehearses them on the mock. The results are in
 `docs/results/2026-11-16-clear-debris.md`.
 
+`column-origin.lua`, `column-kill.lua` and `column-read.lua` are the reads and the kill
+of the clear-debris check, `cargo xtask commands <target> --part debris`, which fills
+their placeholders and runs them in the `server` state. `lua/tests/world_exit.lua debris`
+runs them on the mock.
+
 ## Loadout
 
 The snippets in `loadout/` check the player loadout reads. Each runs alone in the
