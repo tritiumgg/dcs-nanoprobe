@@ -1137,7 +1137,9 @@ pub struct Unit {
     pub life: ::core::option::Option<f64>,
     /// A player-occupied unit's ammunition by weapon type name, as `getAmmo`
     /// listed it at the read that `ammo_read` names. Empty for an AI unit, for a
-    /// unit with no read yet, and for one with no ammunition. DCS sends no event
+    /// unit with no read yet, for a player unit the agent does not mark
+    /// (spec/sampling.md, "Loadout reads"), and for one with no ammunition. DCS
+    /// sends no event
     /// for a rearm of an AI unit (E38), and none is known for a player aircraft,
     /// so a rearm is not read (spec/world.md, "Ammunition").
     #[prost(btree_map = "string, uint32", tag = "11")]

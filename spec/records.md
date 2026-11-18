@@ -564,7 +564,10 @@ event, so a cut `EVENT` always fits (see "Oversized records").
 `HIT` and `KILL` in the catalogue, scenery included (LIVE). The API reports them as
 `initiator_type` and `target_type`, from the mission's mirror when the event has none.
 `INITIATOR_MISSION_ID` joins a player's slot to the unit born in it (spec/world.md,
-"Players"); that it equals the slot ID DCS gives the player is UNVERIFIED.
+"Players"). It equals the slot ID DCS gives the player for a client slot of the mission
+(LIVE, docs/results/2026-11-17-bind-lag.md); for a dynamic-spawn slot that is UNVERIFIED.
+The agent uses the same join to mark a player's unit for its loadout read
+(spec/sampling.md, "Loadout reads").
 The agent reads `INITIATOR_TYPE` on every event type whose row below lists
 `INITIATOR_CATEGORY`, `TARGET_TYPE` on every one that lists `TARGET_CATEGORY`, and
 `INITIATOR_MISSION_ID` on `S_EVENT_BIRTH` only.
@@ -838,7 +841,10 @@ subscribed object, and once when an object stops.
 
 The agent writes `AMMO` only for a unit a player occupies, and only after one of two
 events names the unit as initiator: `S_EVENT_BIRTH`, which a player taking a slot
-causes, and `S_EVENT_TAKEOFF`. The next pump checks `Unit.getPlayerName` for the unit;
+causes, and `S_EVENT_TAKEOFF`. The agent marks a birth only when a connected player
+holds the slot its mission ID names, and a takeoff only when that unit's birth was
+marked (spec/sampling.md, "Loadout reads"). The next pump checks `Unit.getPlayerName`
+for a marked unit;
 a unit with no player name gets no read and no record, so an AI unit never has an
 `AMMO` record. If both events name a unit before a pump reads it, one record is written
 with the later cause. A pump reads at most a few marked units (spec/sampling.md,

@@ -115,6 +115,140 @@ fn with_no_faults_every_group_goes_live_and_takes_its_order() {
     }
 }
 
+/// The bind-lag diagnostic times every unit of an applied spawn once, from
+/// the spawn's result to the `OBJECT` record that binds it, and is silent
+/// until it is turned on.
+#[test]
+fn the_bind_lag_diagnostic_times_each_unit_of_a_spawn_once() {
+    let mut w = World::new(5, 2, LostPolicy::Report);
+    assert_eq!(
+        w.rec.take_bind_lags(),
+        (Vec::new(), 0, 0),
+        "off: nothing kept"
+    );
+    w.rec.measure_binds();
+    w.settle().unwrap();
+    let units: usize = w
+        .store
+        .groups()
+        .inspect(|g| assert_eq!(g.state, State::Live, "{}", g.id))
+        .map(|g| g.members.len())
+        .sum();
+    let (ms, waiting, late) = w.rec.take_bind_lags();
+    assert_eq!(ms.len(), units, "one lag for each unit");
+    assert_eq!(waiting, 0, "every unit of a live group is bound");
+    // The two statics' `OBJECT` records follow their results; a group's
+    // units come before theirs.
+    assert_eq!(late, 2, "the statics, and no unit of a group");
+    // Taken: the next report starts empty, and no unit is timed twice.
+    w.settle().unwrap();
+    assert_eq!(w.rec.take_bind_lags(), (Vec::new(), 0, 0));
+}
+
+/// A group's units are bound when the group turns `live`: the agent writes
+/// each unit's `OBJECT` before the spawn's `RESULT` (spec/commands.md,
+/// "Layout: GROUP_SPAWN"), so the reconciler has read them when it reads the
+/// result. Checked after every step, and by the diagnostic: no unit of a
+/// group waited for its `OBJECT` after the result.
+#[test]
+fn every_unit_of_a_group_is_bound_when_the_group_turns_live() {
+    let mut w = World::new(8, 0, LostPolicy::Report);
+    w.rec.measure_binds();
+    let mut live = 0;
+    for _ in 0..400 {
+        w.tick().expect("tick");
+        live = 0;
+        for g in w.store.groups().filter(|g| g.state == State::Live) {
+            live += 1;
+            for m in &g.members {
+                assert!(
+                    w.rec.binding().values().any(|b| b.unit == *m),
+                    "unit {m} of live group {} has no object",
+                    g.id
+                );
+            }
+        }
+    }
+    assert_eq!(live, 8, "every group went live");
+    let (ms, waiting, late) = w.rec.take_bind_lags();
+    assert!(!ms.is_empty() && ms.iter().all(|m| *m == 0), "lags {ms:?}");
+    assert_eq!((waiting, late), (0, 0), "no `OBJECT` after its result");
+}
+
+/// A replacing spawn's records in the agent's order (spec/commands.md,
+/// "Layout: GROUP_SPAWN"): the new unit's `OBJECT`, then the old object's
+/// `OBJECT_GONE`. The agent writes `DESTROYED` there; a death or a leave
+/// of the old object that arrives late is tried too. Whatever the reason,
+/// the unit stays bound to the new object, alive and not missing, and its
+/// group stays `live`.
+#[test]
+fn a_new_object_ahead_of_the_old_object_s_gone_keeps_the_unit_bound() {
+    use nanoprobe_sidecar::sim::wire::{Input, Object, ObjectGone, gone_reason};
+    for reason in [
+        gone_reason::DESTROYED,
+        gone_reason::DEAD,
+        gone_reason::MISSING,
+        gone_reason::REMOVED,
+    ] {
+        let mut w = World::new(1, 0, LostPolicy::Report);
+        w.settle().unwrap();
+        let group = w.store.groups().next().unwrap().id;
+        let members = w.store.group(group).unwrap().members.clone();
+        assert!(!members.is_empty());
+        let in_dcs = w.units_in_dcs();
+        let mut f = Feed::new(&w);
+        // Every new `OBJECT` first, then every old `OBJECT_GONE`, as one
+        // command writes them.
+        let pairs: Vec<_> = members
+            .iter()
+            .enumerate()
+            .map(|(i, unit)| {
+                let old = in_dcs.iter().find(|(_, e)| *e == unit.0).expect("in DCS").0;
+                (*unit, old, 9_000_000 + i as u64)
+            })
+            .collect();
+        for (unit, _, fresh) in &pairs {
+            f.apply(
+                &mut w,
+                Input::Object(Object {
+                    object: *fresh,
+                    entity: unit.0,
+                    group_entity: group.0,
+                    enumeration: 0,
+                    ..Object::default()
+                }),
+            );
+        }
+        for (unit, old, _) in &pairs {
+            f.apply(
+                &mut w,
+                Input::ObjectGone(ObjectGone {
+                    object: *old,
+                    reason,
+                    entity: unit.0,
+                    group_entity: group.0,
+                }),
+            );
+        }
+        for (unit, old, fresh) in &pairs {
+            let u = w.store.unit(*unit).unwrap();
+            assert_eq!(u.object, *fresh, "reason {reason}");
+            assert!(!u.dead && !u.missing && !u.removed, "reason {reason}");
+            assert_eq!(
+                w.rec.binding().get(fresh).map(|b| b.unit),
+                Some(*unit),
+                "reason {reason}"
+            );
+            assert!(!w.rec.binding().contains_key(old), "reason {reason}");
+        }
+        assert_eq!(
+            w.store.group(group).unwrap().state,
+            State::Live,
+            "reason {reason}"
+        );
+    }
+}
+
 #[test]
 fn a_silently_removed_group_stays_lost_after_a_mission_load() {
     let mut w = World::new(1, 0, LostPolicy::Report);

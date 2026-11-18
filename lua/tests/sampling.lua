@@ -752,10 +752,28 @@ local function main()
     assert(#m1.subscribed == 20, 'subscribed ' .. #m1.subscribed)
     assert(A.inject('sampling', 0.1), 'the module has no fault injection')
     local mark = #S.lines(out)
-    -- Births go on at k = 0.1: a new group, and deaths.
+    -- Births go on at k = 0.1: a new group, and deaths. The deaths leave the
+    -- subscribed units alone: the order check below counts the subscribed
+    -- rows sampled in a window, so a subscribed unit that died would read as
+    -- a rate that fell. The churn kills the last unit of a group, and which
+    -- units the probe subscribed follows the order their rows were added in.
     run(15)
     scenario.spawn_mixed(50, { label = 'c' })
-    scenario.churn(spawned.groups, 10)
+    local subscribed_id = {}
+    for _, id in ipairs(m1.subscribed) do
+      subscribed_id[id] = true
+    end
+    local targets = {}
+    for _, name in ipairs(spawned.groups) do
+      local group = server.Group.getByName(name)
+      local units = group and group:getUnits() or {}
+      local last = units[#units]
+      if not (last and subscribed_id[last.id_]) then
+        targets[#targets + 1] = name
+      end
+    end
+    local hit = scenario.churn(targets, 10)
+    assert(#hit == 10, 'churn hit ' .. #hit .. ' units')
     run(15)
     -- Compare once the mirror holds every object DCS holds (S10 ruling 3c).
     -- New objects enter through the enumeration, which runs back to back at
