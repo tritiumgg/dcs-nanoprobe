@@ -36,15 +36,21 @@
 //! restores the target.
 //!
 //! `commands <name> --part debris`: the `CLEAR_DEBRIS` check. It deploys and
-//! loads a fresh shell mission as above, then runs `command-probe --part world
-//! --scenario debris` (the probe's module documents it). When the probe
+//! loads a fresh shell mission as above, or one made from `--template`, then
+//! runs `command-probe --part world --scenario debris` (the probe's module
+//! documents it) round the first airbase, or with `--min-ground` the first
+//! whose ground is at least that many meters above sea level. When the probe
 //! reports `spawned`, this tool kills the grid's units with a scripted
 //! explosion 6 m beside each, holds model time [`COOL_S`] so the wrecks stop
-//! burning, and writes the ground height at the first unit into the probe's
-//! `go` file. The kill must find every unit, and it keeps their handles.
-//! After the probe's verdict this tool reads DCS: every killed unit's reads
-//! raise (its wreck was removed, LIVE run 1) and every control unit exists
-//! alive. The run passes when the probe's verdict and that read pass. Everything goes under
+//! burning, reads DCS, and writes the ground height at the first unit into
+//! the probe's `go` file. The kill must find every unit, and it keeps their
+//! handles. When the probe reports `column`, only the column has cleared, and
+//! this tool reads DCS again ([`judge_column`]): the column's wrecks are gone,
+//! the outside group's are left, and the control units and the managed static
+//! stand. After the probe's verdict this tool reads DCS: every killed unit's
+//! reads raise (its wreck was removed, LIVE run 1) and every control unit
+//! exists alive. The run passes when the probe's verdict and both reads pass.
+//! Everything goes under
 //! `bundles/commands-debris-<name>-<time>/`, with `debris.json`; the caller
 //! restores the target.
 
@@ -543,27 +549,112 @@ fn attempt_names(
     result
 }
 
-/// Lua for the server state: kill each named unit with an explosion of power
-/// 30, 6 m beside it, keep its handle in `E.store.debris`, and return `hit y`:
-/// the units it found and the ground height at the first, `%.1f`.
-fn kill_source(names: &[String]) -> String {
+/// The debris check's snippets for the server state; each file says what it
+/// does. `lua/tests/world_exit.lua debris` runs them on the mock.
+const COLUMN_ORIGIN: &str = include_str!("../../../../lua/experiments/junk/column-origin.lua");
+const COLUMN_KILL: &str = include_str!("../../../../lua/experiments/junk/column-kill.lua");
+const COLUMN_READ: &str = include_str!("../../../../lua/experiments/junk/column-read.lua");
+
+/// Names as a Lua list's items: `'a','b'`.
+fn quoted(names: &[String]) -> String {
     let names: Vec<String> = names.iter().map(|n| format!("'{n}'")).collect();
-    format!(
-        "local E = ...\n\
-         local y, hit = nil, {{}}\n\
-         for _, n in ipairs({{{}}}) do\n\
-           local u = Unit.getByName(n)\n\
-           if u then\n\
-             local p = u:getPoint()\n\
-             y = y or p.y\n\
-             hit[#hit + 1] = u\n\
-             trigger.action.explosion({{ x = p.x, y = p.y, z = p.z - 6 }}, 30)\n\
-           end\n\
-         end\n\
-         E.store.debris = hit\n\
-         return string.format('%d %.1f', #hit, y or 0)\n",
-        names.join(",")
-    )
+    names.join(",")
+}
+
+/// Lua for the server state: the first airbase whose ground is at least
+/// `min_ground` meters up, or the first airbase with no minimum.
+fn origin_source(min_ground: Option<f64>) -> String {
+    let min = min_ground.map_or("-math.huge".to_owned(), |m| format!("{m}"));
+    COLUMN_ORIGIN.replace("__MIN_GROUND__", &min)
+}
+
+/// What the origin read gives: `(x, z, ground, airbase)`.
+pub(super) fn parse_origin(read: &str) -> Result<(String, String, f64, String), String> {
+    let mut parts = read.splitn(4, ' ');
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(x), Some(z), Some(ground), Some(airbase))
+            if x.parse::<f64>().is_ok() && z.parse::<f64>().is_ok() =>
+        {
+            let ground = ground
+                .parse()
+                .map_err(|_| format!("the origin is {read}"))?;
+            Ok((x.into(), z.into(), ground, airbase.into()))
+        }
+        (Some("none"), Some(highest), None, None) => Err(format!(
+            "no airbase stands on ground that high; the highest is at {highest} m"
+        )),
+        _ => Err(format!("the origin is {read}")),
+    }
+}
+
+/// Lua for the server state: kill each named unit, keep its handle, and
+/// return `hit y`: the units it found and the height of the first, `%.1f`.
+fn kill_source(names: &[String]) -> String {
+    COLUMN_KILL.replace("__NAMES__", &quoted(names))
+}
+
+/// Lua for the server state: `inside outside alive static all`, read before
+/// and after the column clear.
+fn column_read_source(
+    inside: &[String],
+    outside: &[String],
+    control: &[String],
+    managed: &str,
+) -> String {
+    COLUMN_READ
+        .replace("__INSIDE__", &quoted(inside))
+        .replace("__OUTSIDE__", &quoted(outside))
+        .replace("__CONTROL__", &quoted(control))
+        .replace("__STATIC__", &format!("'{managed}'"))
+}
+
+/// One read round the column: `(inside_left, outside_left, control_alive,
+/// static, all_left)`. `all_left` counts every killed unit's wreck that is
+/// left. It is recorded and not judged: it shows how far past its edge the
+/// box reached, which no rule fixes.
+pub(super) fn column_read(read: &str) -> Option<(u64, u64, u64, &str, u64)> {
+    let mut parts = read.split(' ');
+    let out = (
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?,
+        parts.next()?.parse().ok()?,
+    );
+    parts.next().is_none().then_some(out)
+}
+
+/// Whether the column cleared its row and nothing else. Before it, every
+/// wreck of the row and of the outside group answers its reads, or the read
+/// after could not tell a removed wreck from one that was never there. After
+/// it, none of the row's does, every one of the outside group's does, every
+/// control unit is alive, and the managed static exists with life above 0.
+/// The static's life is not compared with its life before: a fire from the
+/// kills may still lower it, and a clear that destroyed it leaves none.
+pub(super) fn judge_column(
+    before: &str,
+    after: &str,
+    inside: usize,
+    outside: usize,
+    control: usize,
+) -> bool {
+    let (Some(b), Some(a)) = (column_read(before), column_read(after)) else {
+        return false;
+    };
+    let standing = |s: &str| {
+        let mut parts = s.split(':');
+        parts.next() == Some("true")
+            && parts
+                .next()
+                .and_then(|l| l.parse::<f64>().ok())
+                .is_some_and(|l| l > 0.0)
+    };
+    (b.0, b.1) == (inside as u64, outside as u64)
+        && (a.0, a.1, a.2) == (0, outside as u64, control as u64)
+        && inside > 0
+        && outside > 0
+        && standing(b.3)
+        && standing(a.3)
 }
 
 /// Lua for the server state, after the clears: `left alive`, the killed
@@ -603,19 +694,33 @@ pub fn run_debris(
     name: &str,
     groups: u64,
     units: u64,
+    template: Option<&Path>,
+    min_ground: Option<f64>,
 ) -> Result<ExitCode, String> {
     let Opened { run, shell, .. } = live::open(repository, name, "commands-debris")?;
+    // Another map's template in place of the default shell.
+    let shell = match template {
+        Some(path) => {
+            let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            crate::miz::generate(&bytes, &crate::miz::Changes::default())?
+        }
+        None => shell,
+    };
     let started = bundle::utc_now();
-    let result = attempt_debris(&run, name, &shell, groups, units);
-    let ok = result
-        .as_ref()
-        .is_ok_and(|v| v["pass"] == json!(true) && v["dcs_after"]["ok"] == json!(true));
+    let result = attempt_debris(&run, name, &shell, groups, units, min_ground);
+    let ok = result.as_ref().is_ok_and(|v| {
+        v["pass"] == json!(true)
+            && v["dcs_after"]["ok"] == json!(true)
+            && v["column_check"]["ok"] == json!(true)
+    });
     let out = json!({
         "target": name,
         "started": started,
         "ended": bundle::utc_now(),
         "groups": groups,
         "units": units,
+        "template": template.map(|p| p.display().to_string()),
+        "min_ground": min_ground,
         "verdict": result.as_ref().ok(),
         "error": result.as_ref().err(),
         "agent_build": crate::soak::agent_build(name),
@@ -647,6 +752,7 @@ fn attempt_debris(
     shell: &[u8],
     groups: u64,
     units: u64,
+    min_ground: Option<f64>,
 ) -> Result<Value, String> {
     let probe = link::build_linux_bins(&[("nanoprobe-fake-agent", "command-probe")])?
         .pop()
@@ -669,12 +775,13 @@ fn attempt_debris(
     link::upload_container(&run.remote, DIR, &probe, "command-probe")?;
     run.sh(&format!("mkdir -p {DIR}/control"), &[])?;
     let result = (|| {
-        let origin = run.eval("server", "debris-origin", ORIGIN_SOURCE, 60)?;
-        let origin = origin.as_str().ok_or("the origin is not a string")?;
-        let (x, z) = origin
-            .split_once(' ')
-            .ok_or_else(|| format!("the origin is {origin}"))?;
-        println!("== debris: {groups} groups of {units}, origin {x} {z}, budget {budget} ms");
+        let origin = run.eval("server", "debris-origin", &origin_source(min_ground), 60)?;
+        let (x, z, ground, airbase) =
+            parse_origin(origin.as_str().ok_or("the origin is not a string")?)?;
+        println!(
+            "== debris: {groups} groups of {units}, origin {x} {z} at {airbase}, ground \
+             {ground} m, budget {budget} ms"
+        );
         start(
             run,
             "debris",
@@ -686,30 +793,69 @@ fn attempt_debris(
         )?;
         let mut killed = false;
         let mut control = Vec::new();
+        // The read round the column: its source, the read before the clear,
+        // and the check once the column has answered.
+        let mut read_source = String::new();
+        let (mut inside, mut outside) = (0usize, 0usize);
+        let mut before = String::new();
+        let mut column_check = Value::Null;
         let mut verdict = drive(run, "debris", &mut |run, lines| {
-            if killed {
+            if !killed {
+                let Some(p) = Stage::phase(lines, "spawned") else {
+                    return Ok(());
+                };
+                let names = Stage::strings(&p["kill"]);
+                control = Stage::strings(&p["control"]);
+                let (row, far) = (Stage::strings(&p["column"]), Stage::strings(&p["outside"]));
+                let managed = p["static"].as_str().ok_or("the probe named no static")?;
+                (inside, outside) = (row.len(), far.len());
+                read_source = column_read_source(&row, &far, &control, managed);
+                let read = run.eval("server", "debris-kill", &kill_source(&names), 60)?;
+                let (hit, y) = read
+                    .as_str()
+                    .and_then(|t| t.split_once(' '))
+                    .and_then(|(h, y)| Some((h.parse::<usize>().ok()?, y.parse::<f64>().ok()?)))
+                    .ok_or_else(|| format!("the kill read is {read}"))?;
+                if hit != names.len() {
+                    return Err(format!("the kill found {hit} of {} units", names.len()));
+                }
+                println!("== killed {hit} units; {COOL_S} s for the wrecks to burn out");
+                run.hold(COOL_S)?;
+                let read = run.eval("server", "debris-column-before", &read_source, 60)?;
+                before = read.as_str().unwrap_or("").to_owned();
+                println!("   DCS before the column: {before}");
+                run.sh(&format!("printf '%s' '{y:.1}' > {DIR}/control/go"), &[])?;
+                killed = true;
                 return Ok(());
             }
-            let Some(p) = Stage::phase(lines, "spawned") else {
-                return Ok(());
-            };
-            let names = Stage::strings(&p["kill"]);
-            control = Stage::strings(&p["control"]);
-            let read = run.eval("server", "debris-kill", &kill_source(&names), 60)?;
-            let (hit, y) = read
-                .as_str()
-                .and_then(|t| t.split_once(' '))
-                .and_then(|(h, y)| Some((h.parse::<usize>().ok()?, y.parse::<f64>().ok()?)))
-                .ok_or_else(|| format!("the kill read is {read}"))?;
-            if hit != names.len() {
-                return Err(format!("the kill found {hit} of {} units", names.len()));
+            if column_check.is_null()
+                && let Some(p) = Stage::phase(lines, "column")
+            {
+                // Only the column has cleared: its row's wrecks are gone and
+                // the far group's are left.
+                let read = run.eval("server", "debris-column-after", &read_source, 60)?;
+                let after = read.as_str().unwrap_or("");
+                println!("   DCS after the column: {after}");
+                let ok = judge_column(&before, after, inside, outside, control.len());
+                column_check = json!({
+                    "ok": ok,
+                    "before": before,
+                    "after": after,
+                    "inside": inside,
+                    "outside": outside,
+                    "control": control.len(),
+                    "wrecks_left_before": column_read(&before).map(|r| r.4),
+                    "wrecks_left_after": column_read(after).map(|r| r.4),
+                    "removed": p["removed"],
+                    "cost_us": p["cost_us"],
+                    "half_width": p["half_width"],
+                });
+                run.sh(&format!("touch {DIR}/control/column-checked"), &[])?;
             }
-            println!("== killed {hit} units; {COOL_S} s for the wrecks to burn out");
-            run.hold(COOL_S)?;
-            run.sh(&format!("printf '%s' '{y:.1}' > {DIR}/control/go"), &[])?;
-            killed = true;
             Ok(())
         })?;
+        verdict["origin"] = json!({ "x": x, "z": z, "ground": ground, "airbase": airbase });
+        verdict["column_check"] = column_check;
         // DCS after the clears: no wreck left, every control unit alive.
         let read = run.eval("server", "debris-after", &after_source(&control), 60)?;
         let (ok, left, alive) = judge_after(read.as_str().unwrap_or(""), control.len());
@@ -819,6 +965,40 @@ mod tests {
 
     #[test]
     fn the_read_after_the_clears_is_judged() {
+        // The column: its row's 4 wrecks gone, the outside group's 4 left,
+        // 4 control units alive, the static standing.
+        let (b, a) = ("4 4 4 true:3600.0:912.5 36", "0 4 4 true:3600.0:912.5 32");
+        assert!(judge_column(b, a, 4, 4, 4));
+        // The static's life may fall, and the count of all wrecks left is
+        // not judged.
+        assert!(judge_column(b, "0 4 4 true:3100.0:912.5 30", 4, 4, 4));
+        assert!(!judge_column(b, "1 4 4 true:3600.0:912.5 33", 4, 4, 4));
+        assert!(!judge_column(b, "0 3 4 true:3600.0:912.5 31", 4, 4, 4));
+        assert!(!judge_column(b, "0 4 3 true:3600.0:912.5 32", 4, 4, 4));
+        assert!(!judge_column(b, "0 4 4 gone 32", 4, 4, 4));
+        assert!(!judge_column(b, "0 4 4 false:0.0:912.5 32", 4, 4, 4));
+        assert!(!judge_column("3 4 4 true:3600.0:912.5 35", a, 4, 4, 4));
+        assert!(!judge_column("", a, 4, 4, 4));
+        assert!(!judge_column(b, "", 4, 4, 4));
+        assert!(!judge_column(b, "0 4 4 true:3600.0:912.5", 4, 4, 4));
+        assert_eq!(column_read(a).map(|r| r.4), Some(32));
+        assert_eq!(
+            parse_origin("-100.5 2000.0 964.2 Herat Airfield"),
+            Ok((
+                "-100.5".into(),
+                "2000.0".into(),
+                964.2,
+                "Herat Airfield".into()
+            ))
+        );
+        assert!(parse_origin("none 480.0").is_err());
+        assert!(parse_origin("x").is_err());
+        assert!(origin_source(None).contains("local MIN = -math.huge"));
+        assert!(origin_source(Some(500.0)).contains("local MIN = 500"));
+        assert!(
+            !column_read_source(&["a".into()], &["b".into()], &["c".into()], "s").contains("__")
+        );
+        assert!(kill_source(&["a".into()]).contains("ipairs({ 'a' })"));
         assert_eq!(judge_after("0 4", 4), (true, 0, 4));
         assert_eq!(judge_after("1 4", 4), (false, 1, 4));
         assert_eq!(judge_after("0 3", 4), (false, 0, 3));

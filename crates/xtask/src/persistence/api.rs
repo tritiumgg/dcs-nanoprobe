@@ -48,6 +48,8 @@ pub struct Api<'r> {
     mission: MissionServiceClient<Svc>,
     pub lease: Option<pb::Lease>,
     renew: Option<tokio::task::JoinHandle<()>>,
+    /// How long one call waits for its answer.
+    call_timeout: Duration,
     /// Makes each idempotency key unique in the run.
     keys: u64,
     run: String,
@@ -64,9 +66,21 @@ impl<'r> Api<'r> {
         run: &str,
         patience: Duration,
     ) -> Result<Api<'r>, String> {
+        Api::connect_with(rt, endpoint, token, run, patience, Duration::from_secs(120))
+    }
+
+    /// [`Api::connect`], with how long one call waits for its answer.
+    pub fn connect_with(
+        rt: &'r Runtime,
+        endpoint: &str,
+        token: Option<&str>,
+        run: &str,
+        patience: Duration,
+        call_timeout: Duration,
+    ) -> Result<Api<'r>, String> {
         let deadline = std::time::Instant::now() + patience;
         loop {
-            match Api::try_connect(rt, endpoint, token, run) {
+            match Api::try_connect(rt, endpoint, token, run, call_timeout) {
                 Ok(a) => return Ok(a),
                 Err(e) if std::time::Instant::now() >= deadline => return Err(e),
                 Err(_) => std::thread::sleep(Duration::from_secs(2)),
@@ -79,12 +93,13 @@ impl<'r> Api<'r> {
         endpoint: &str,
         token: Option<&str>,
         run: &str,
+        call_timeout: Duration,
     ) -> Result<Api<'r>, String> {
         let channel = rt.block_on(async {
             Endpoint::from_shared(endpoint.to_owned())
                 .map_err(|e| format!("endpoint: {e}"))?
                 .connect_timeout(Duration::from_secs(10))
-                .timeout(Duration::from_secs(120))
+                .timeout(call_timeout)
                 .connect()
                 .await
                 .map_err(|e| format!("cannot connect to {endpoint}: {e}"))
@@ -105,6 +120,7 @@ impl<'r> Api<'r> {
             mission: MissionServiceClient::with_interceptor(channel, auth),
             lease: None,
             renew: None,
+            call_timeout,
             keys: 0,
             // A connection of its own in the keys: a key repeated across
             // connections would be taken as a repeat of the first call.
@@ -158,7 +174,14 @@ impl<'r> Api<'r> {
             .run
             .rsplit_once('/')
             .map_or(self.run.as_str(), |(r, _)| r);
-        Api::connect(self.rt, endpoint, token, run, Duration::from_secs(120))
+        Api::connect_with(
+            self.rt,
+            endpoint,
+            token,
+            run,
+            Duration::from_secs(120),
+            self.call_timeout,
+        )
     }
 
     /// Give the lease up.
@@ -545,6 +568,154 @@ impl<'r> Api<'r> {
         Ok((r.result.map_or(0, |x| x.outcome), r.debris_removed))
     }
 
+    /// Give a group an order (`SetOrder`).
+    pub fn set_order(&mut self, campaign: u64, group: u64, order: pb::Order) -> Result<(), String> {
+        let req = pb::SetOrderRequest {
+            write: self.write(campaign, "order"),
+            group_id: group,
+            order: Some(order),
+        };
+        let mut c = self.commands.clone();
+        self.rt
+            .block_on(c.set_order(req))
+            .map_err(fail("SetOrder"))?;
+        Ok(())
+    }
+
+    /// What `ExportCampaign` streams, counted by line kind: lines and bytes
+    /// of each `kind`, and for the journal the lines of each entry kind.
+    /// The bytes are the export's JSON, not the store's rows.
+    pub fn export_counts(&mut self, campaign: u64) -> Result<serde_json::Value, String> {
+        let mut c = self.campaigns.clone();
+        self.rt.block_on(async move {
+            let mut s = c
+                .export_campaign(pb::ExportCampaignRequest {
+                    campaign_id: campaign,
+                })
+                .await
+                .map_err(fail("ExportCampaign"))?
+                .into_inner();
+            let mut kinds: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+            let mut entries: BTreeMap<String, u64> = BTreeMap::new();
+            while let Some(page) = s.message().await.map_err(fail("ExportCampaign"))? {
+                for line in page.lines.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
+                    let v: serde_json::Value = serde_json::from_slice(line)
+                        .map_err(|e| format!("ExportCampaign: a line is not JSON: {e}"))?;
+                    let kind = v["kind"].as_str().unwrap_or("?").to_owned();
+                    if kind == "journal" {
+                        *entries
+                            .entry(v["entry"].as_str().unwrap_or("?").to_owned())
+                            .or_default() += 1;
+                    }
+                    let k = kinds.entry(kind).or_default();
+                    k.0 += 1;
+                    k.1 += line.len() as u64;
+                }
+            }
+            let of = |k: &str| kinds.get(k).copied().unwrap_or_default();
+            Ok(serde_json::json!({
+                "journal_rows": of("journal").0,
+                "journal_json_bytes": of("journal").1,
+                "event_rows": of("event").0,
+                "event_json_bytes": of("event").1,
+                "entity_rows": of("entity").0,
+                "inflight_rows": of("inflight").0,
+                "journal_entries": entries,
+            }))
+        })
+    }
+
+    /// Keep a world watch and an event subscription open on `campaign`
+    /// until the returned [`Streams`] is dropped, counting what they send.
+    /// Each stream opens again 5 s after it ends: a sidecar restart ends
+    /// both. The watch resumes from the last revision it saw, and after a
+    /// refusal from the revision an area query gives, as a client that
+    /// resynchronizes does.
+    pub fn attach_streams(&self, campaign: u64) -> Streams {
+        let counts = std::sync::Arc::new(StreamCounts::default());
+        let filter = pb::WorldFilter {
+            campaign_id: campaign,
+            ..pb::WorldFilter::default()
+        };
+        let (mut w, n) = (self.world.clone(), std::sync::Arc::clone(&counts));
+        let watch = self.rt.spawn(async move {
+            use std::sync::atomic::Ordering::Relaxed;
+            let mut since = 0u64;
+            loop {
+                let opened = w
+                    .watch_world(pb::WatchWorldRequest {
+                        filter: Some(filter.clone()),
+                        since_revision: since,
+                        ..pb::WatchWorldRequest::default()
+                    })
+                    .await;
+                n.watch_opens.fetch_add(1, Relaxed);
+                if let Ok(s) = opened {
+                    let mut s = s.into_inner();
+                    while let Ok(Some(m)) = s.message().await {
+                        since = m.revision;
+                        n.watch_messages.fetch_add(1, Relaxed);
+                        n.watch_changes.fetch_add(m.changes.len() as u64, Relaxed);
+                    }
+                } else if let Ok(r) = w
+                    .query_area(pb::QueryAreaRequest {
+                        filter: Some(pb::WorldFilter {
+                            radius: 1.0,
+                            center: Some(pb::Position::default()),
+                            ..filter.clone()
+                        }),
+                    })
+                    .await
+                {
+                    since = r.into_inner().revision;
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        });
+        let (mut e, n) = (self.events.clone(), std::sync::Arc::clone(&counts));
+        let events = self.rt.spawn(async move {
+            use std::sync::atomic::Ordering::Relaxed;
+            let mut after = 0u64;
+            loop {
+                let opened = e
+                    .subscribe_events(pb::SubscribeEventsRequest {
+                        filter: Some(pb::EventFilter {
+                            campaign_id: campaign,
+                            ..pb::EventFilter::default()
+                        }),
+                        after_sequence: after,
+                        live_only: false,
+                    })
+                    .await;
+                n.event_opens.fetch_add(1, Relaxed);
+                if let Ok(s) = opened {
+                    let mut s = s.into_inner();
+                    while let Ok(Some(m)) = s.message().await {
+                        let Some(ev) = m.event else { continue };
+                        after = after.max(ev.sequence);
+                        n.event_sequence.store(after, Relaxed);
+                        n.events.fetch_add(1, Relaxed);
+                        if let Some(pb::event::Body::World(w)) = &ev.body {
+                            // DCS's event IDs: 8 is S_EVENT_DEAD and 15 is
+                            // S_EVENT_BIRTH (LIVE: the event catalogue,
+                            // docs/results/2026-11-13-event-catalogue.md).
+                            match w.dcs_id {
+                                8 => n.deaths.fetch_add(1, Relaxed),
+                                15 => n.births.fetch_add(1, Relaxed),
+                                _ => 0,
+                            };
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        });
+        Streams {
+            counts,
+            tasks: vec![watch, events],
+        }
+    }
+
     /// The campaign's events after `after`, at most `limit`.
     pub fn events(
         &mut self,
@@ -566,6 +737,53 @@ impl<'r> Api<'r> {
             .map_err(fail("ReadEvents"))?
             .into_inner()
             .events)
+    }
+}
+
+/// What the streams of [`Api::attach_streams`] have sent.
+#[derive(Default)]
+pub struct StreamCounts {
+    pub watch_opens: std::sync::atomic::AtomicU64,
+    pub watch_messages: std::sync::atomic::AtomicU64,
+    pub watch_changes: std::sync::atomic::AtomicU64,
+    pub event_opens: std::sync::atomic::AtomicU64,
+    pub events: std::sync::atomic::AtomicU64,
+    /// The newest event sequence number the subscription has seen.
+    pub event_sequence: std::sync::atomic::AtomicU64,
+    pub deaths: std::sync::atomic::AtomicU64,
+    pub births: std::sync::atomic::AtomicU64,
+}
+
+/// A watch and an event subscription that stay attached; dropping it ends
+/// both.
+pub struct Streams {
+    pub counts: std::sync::Arc<StreamCounts>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl Streams {
+    /// The counts as JSON, cumulative since the streams were attached.
+    pub fn snapshot(&self) -> serde_json::Value {
+        use std::sync::atomic::Ordering::Relaxed;
+        let c = &self.counts;
+        serde_json::json!({
+            "watch_opens": c.watch_opens.load(Relaxed),
+            "watch_messages": c.watch_messages.load(Relaxed),
+            "watch_changes": c.watch_changes.load(Relaxed),
+            "event_opens": c.event_opens.load(Relaxed),
+            "events": c.events.load(Relaxed),
+            "event_sequence": c.event_sequence.load(Relaxed),
+            "deaths": c.deaths.load(Relaxed),
+            "births": c.births.load(Relaxed),
+        })
+    }
+}
+
+impl Drop for Streams {
+    fn drop(&mut self) {
+        for t in &self.tasks {
+            t.abort();
+        }
     }
 }
 

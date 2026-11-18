@@ -22,9 +22,9 @@ mod disk;
 
 #[cfg(feature = "disk")]
 pub use disk::{
-    CampaignRecord, CampaignState, Checkpoint, DiskError, MIGRATIONS, Migration, REVISION_RESERVE,
-    SCHEMA, TierPeriod, backup_file, checkpoint_of, idempotency_of, ident_of, journal_of,
-    next_entity_of, next_mission_of, rebase_world, record_of, revision_of, schema_of,
+    CampaignRecord, CampaignState, Checkpoint, DiskError, JournalPrune, MIGRATIONS, Migration,
+    REVISION_RESERVE, SCHEMA, TierPeriod, backup_file, checkpoint_of, idempotency_of, ident_of,
+    journal_of, next_entity_of, next_mission_of, rebase_world, record_of, revision_of, schema_of,
     shell_slot_of, state_of, template_of, template_theaters_of,
 };
 

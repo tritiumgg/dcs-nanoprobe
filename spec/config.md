@@ -84,6 +84,7 @@ checkpoint_s = 5            # positions and life
 backup_interval_h = 24      # consistent copies of the active store
 backup_keep = 7
 event_retention_days = 0    # event history; 0 keeps it for the life of the campaign
+journal_retention_days = 0  # the store's journal; 0 keeps it for the life of the campaign
 server_log_days = 30        # events recorded while no campaign is active
 idempotency_keep_h = 24     # how long an idempotency key is remembered
 world_changes_keep = 100000 # changes kept for a watch to resume from

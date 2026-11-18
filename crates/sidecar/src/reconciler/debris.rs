@@ -1,6 +1,7 @@
 //! Clearing wrecks, craters and debris (spec/commands.md, "Layout: CLEAR_DEBRIS").
 //!
-//! A clear of a sphere or a box is one `CLEAR_DEBRIS` effect. A clear of the
+//! A clear of a sphere or a box is one `CLEAR_DEBRIS` effect. So is a clear
+//! of a column, which is sent as the box [`column`] gives. A clear of the
 //! whole map is one effect per tile of [`tiles`], so that no single command
 //! removes the junk of the whole map at once: a call costs DCS about 4 us per
 //! object it removes (LIVE, docs/results/2026-11-16-clear-debris.md), and the
@@ -47,6 +48,18 @@ pub fn tiles() -> Vec<Debris> {
         }
     }
     out
+}
+
+/// The box a column sends: a square on the map centered at `north`, `east`,
+/// `half_width` to each edge, with the tiles' floor and ceiling. The box
+/// spans every ground height, so no caller and no handler reads the terrain.
+/// It cleared the wrecks under it on ground 970 m up (LIVE,
+/// docs/results/2026-11-18-clear-debris-column.md).
+pub fn column(north: f64, east: f64, half_width: f64) -> Debris {
+    Debris::Box {
+        min: [north - half_width, FLOOR_M, east - half_width],
+        max: [north + half_width, CEILING_M, east + half_width],
+    }
 }
 
 /// A whole-map clear whose tiles are answering.
@@ -146,6 +159,20 @@ impl Reconciler {
             self.debris_single.insert(key);
         }
         sent.then_some(key)
+    }
+
+    /// Remove the junk at a place whatever the ground's height there: one
+    /// `CLEAR_DEBRIS` of [`column`]'s box. The caller has checked that the
+    /// box's edges are within the agent's reach.
+    pub fn clear_debris_column(
+        &mut self,
+        store: &mut Store,
+        sim: &mut dyn SimAdapter,
+        north: f64,
+        east: f64,
+        half_width: f64,
+    ) -> Option<(u64, u64)> {
+        self.clear_debris(store, sim, column(north, east, half_width))
     }
 
     /// Remove the junk of the whole map: a `CLEAR_DEBRIS` for each of
@@ -322,6 +349,17 @@ mod tests {
             Some(&answer(10, rc::APPLIED, Lv::Number(1.0)))
         ));
         assert_eq!(b.result().outcome, Outcome::NotSent);
+    }
+
+    #[test]
+    fn a_column_is_a_square_box_from_the_floor_to_the_ceiling() {
+        assert_eq!(
+            column(1_000.0, -2_000.0, 30.0),
+            Debris::Box {
+                min: [970.0, -10_000.0, -2_030.0],
+                max: [1_030.0, 100_000.0, -1_970.0],
+            }
+        );
     }
 
     #[test]

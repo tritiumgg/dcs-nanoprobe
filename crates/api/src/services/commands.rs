@@ -981,6 +981,16 @@ fn debris_point(slot: &Slot, p: Option<&pb::Position>, field: &str) -> Result<[f
 fn clear_debris_start(g: &mut Inner, c: u64, d: &pb::ClearDebris) -> Result<(u64, u64), Status> {
     use pb::clear_debris::Volume;
     const F: &str = "effect.clear_debris";
+    /// What the reconciler is asked for.
+    enum Clear {
+        One(Debris),
+        Column {
+            north: f64,
+            east: f64,
+            half_width: f64,
+        },
+        Map,
+    }
     let slot = g.campaigns.get(&c).expect("resolved campaign");
     let volume = match &d.volume {
         Some(Volume::Sphere(s)) => {
@@ -991,7 +1001,7 @@ fn clear_debris_start(g: &mut Inner, c: u64, d: &pb::ClearDebris) -> Result<(u64
                     "above 0, at most 10,000 km",
                 ));
             }
-            Some(Debris::Sphere {
+            Clear::One(Debris::Sphere {
                 center,
                 radius: s.radius,
             })
@@ -1013,14 +1023,49 @@ fn clear_debris_start(g: &mut Inner, c: u64, d: &pb::ClearDebris) -> Result<(u64
                     ));
                 }
             }
-            Some(Debris::Box { min, max })
+            Clear::One(Debris::Box { min, max })
         }
-        Some(Volume::WholeMap(_)) => None,
+        Some(Volume::Column(col)) => {
+            // `alt` is ignored, whatever it holds: the point is checked
+            // with 0 in its place.
+            let center = col.center.clone().map(|mut p| {
+                p.alt = 0.0;
+                p
+            });
+            let [north, _, east] =
+                debris_point(slot, center.as_ref(), &format!("{F}.column.center"))?;
+            let half_width = col.half_width;
+            if !(half_width.is_finite() && half_width > 0.0 && half_width <= DEBRIS_REACH_M) {
+                return Err(invalid(
+                    &format!("{F}.column.half_width"),
+                    "above 0, at most 10,000 km",
+                ));
+            }
+            // The agent refuses a box with a corner beyond its reach.
+            if north.abs() + half_width > DEBRIS_REACH_M || east.abs() + half_width > DEBRIS_REACH_M
+            {
+                return Err(invalid(
+                    &format!("{F}.column.half_width"),
+                    "each edge of the column is within 10,000 km of 0",
+                ));
+            }
+            Clear::Column {
+                north,
+                east,
+                half_width,
+            }
+        }
+        Some(Volume::WholeMap(_)) => Clear::Map,
         None => return Err(invalid(&format!("{F}.volume"), "a volume is required")),
     };
     g.with_rec(c, |rec, store, sim| match volume {
-        Some(v) => rec.clear_debris(store, sim, v),
-        None => rec.clear_debris_everywhere(store, sim),
+        Clear::One(v) => rec.clear_debris(store, sim, v),
+        Clear::Column {
+            north,
+            east,
+            half_width,
+        } => rec.clear_debris_column(store, sim, north, east, half_width),
+        Clear::Map => rec.clear_debris_everywhere(store, sim),
     })
     .flatten()
     .ok_or_else(dcs_not_ready)
