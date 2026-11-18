@@ -1230,6 +1230,9 @@ pub struct Static {
     pub coalition: i32,
     #[prost(uint32, tag = "6")]
     pub country: u32,
+    /// False for a destroyed static. A destroyed managed static stays listed,
+    /// in state `dead`, where it stood: DCS shows its ruin (spec/world.md,
+    /// "Ruins"). Only RemoveEntity takes it out.
     #[prost(bool, tag = "7")]
     pub alive: bool,
     #[prost(message, optional, tag = "8")]
@@ -1240,7 +1243,9 @@ pub struct Static {
     pub life: ::core::option::Option<f64>,
     #[prost(enumeration = "EntityState", tag = "11")]
     pub state: i32,
-    /// The engine's error for an unspawnable static.
+    /// The engine's error for an unspawnable static, or for a dead static
+    /// whose ruin DCS refused, until a spawn of the ruin applies
+    /// (spec/world.md, "Ruins").
     #[prost(string, tag = "12")]
     pub last_error: ::prost::alloc::string::String,
     /// Changes when the spec changes, and when a lost static is spawned again,
@@ -5132,8 +5137,16 @@ pub struct StaticSpec {
     pub position: ::core::option::Option<Position>,
     #[prost(double, tag = "5")]
     pub heading: f64,
+    /// Further keys of the DCS static table. A `dead` key is refused: use the
+    /// field below.
     #[prost(message, optional, tag = "6")]
     pub extra: ::core::option::Option<::prost_types::Struct>,
+    /// Create the static destroyed. It is in state `dead` from the start, and
+    /// DCS shows its ruin, spawned with `dead = true`, wherever a live static
+    /// would be in DCS. Some types have no destroyed model and show intact
+    /// (spec/world.md, "Ruins").
+    #[prost(bool, tag = "7")]
+    pub dead: bool,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Waypoint {
@@ -5514,7 +5527,10 @@ pub struct Picture {
 /// Take every picture off screen.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct PictureStop {}
-/// A sphere, in DCS coordinates.
+/// A sphere, in DCS coordinates. The center's `alt` is above sea level, and 0
+/// is sea level: a 30 m sphere at 0 removed nothing on an airfield about
+/// 970 m above sea level (LIVE). To clear at the ground without its height,
+/// use `Column`.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Sphere {
     #[prost(message, optional, tag = "1")]
@@ -5524,13 +5540,32 @@ pub struct Sphere {
     pub radius: f64,
 }
 /// A box aligned with the axes, in DCS coordinates. Each of `min`'s
-/// coordinates is at most the same one of `max`.
+/// coordinates is at most the same one of `max`. Each `alt` is above sea
+/// level, and 0 is sea level. To clear at the ground without its height, use
+/// `Column`.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Box {
     #[prost(message, optional, tag = "1")]
     pub min: ::core::option::Option<Position>,
     #[prost(message, optional, tag = "2")]
     pub max: ::core::option::Option<Position>,
+}
+/// A square on the map, at every height: 2 x `half_width` on a side, aligned
+/// with north and east, from 10 km below sea level to 100 km above it. It
+/// clears the ground at a place whose height the caller does not know: on
+/// ground 970 m up, a column of `half_width` 50 removed the wrecks under it
+/// and none 70 m past its edge (LIVE). Its corners reach 1.41 x `half_width`
+/// from the center, and the edge DCS applies is not exact: an 8 m sphere
+/// removed wrecks 10 and 30 m from its center (LIVE).
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Column {
+    /// Only `theater`, `north` and `east` are read. `alt` is ignored.
+    #[prost(message, optional, tag = "1")]
+    pub center: ::core::option::Option<Position>,
+    /// Meters, a finite number above 0. Each edge, `north` and `east` less and
+    /// plus `half_width`, is within 10,000 km of 0.
+    #[prost(double, tag = "2")]
+    pub half_width: f64,
 }
 /// The map: x and z from -2,000 km to 2,000 km. That this covers every
 /// theater is UNVERIFIED.
@@ -5544,10 +5579,11 @@ pub struct WholeMap {}
 /// It leaves every live unit and static, a wreck that is still burning and
 /// destroyed scenery. Around a dead aircraft it removes something; what is
 /// UNVERIFIED. A burning wreck it leaves still explodes and sends its death
-/// events. Coordinates and sizes are within 10,000 km of 0.
+/// events. Coordinates and sizes are within 10,000 km of 0, except a column's
+/// `alt`, which is not read.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ClearDebris {
-    #[prost(oneof = "clear_debris::Volume", tags = "1, 2, 3")]
+    #[prost(oneof = "clear_debris::Volume", tags = "1, 2, 3, 4")]
     pub volume: ::core::option::Option<clear_debris::Volume>,
 }
 /// Nested message and enum types in `ClearDebris`.
@@ -5562,6 +5598,10 @@ pub mod clear_debris {
         /// whole map at once.
         #[prost(message, tag = "3")]
         WholeMap(super::WholeMap),
+        /// Sent to DCS as one box, from 10 km below sea level to 100 km above
+        /// it.
+        #[prost(message, tag = "4")]
+        Column(super::Column),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]

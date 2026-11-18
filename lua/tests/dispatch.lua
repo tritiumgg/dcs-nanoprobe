@@ -891,6 +891,59 @@ scenario('world', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   expect(r[4], APPLIED, 'STATIC_DESTROY')
   expect(r[5], APPLIED, 'STATIC_DESTROY of nothing')
 
+  -- A static spawned dead, a ruin (spec/world.md, "Ruins"): `dead = true` in
+  -- the table reaches DCS, and the result carries the static's ID. It reads
+  -- life 0 and does not exist, so the agent holds no row for it. A spawn
+  -- again at the revision is AT_REVISION, a clear leaves it, and only the
+  -- destroy removes it; a spawn after the destroy runs again.
+  local R1 = 'np#hGxR'
+  local function ruin_spawn()
+    return { op = 'STATIC_SPAWN', entity = 27, rev = 3, country = USA, name = R1,
+      static = { name = R1, type = 'Barrier', x = 700, y = 800, heading = 0, dead = true } }
+  end
+  local function ruin_of()
+    for _, s in pairs(sim.dead_statics) do
+      if s.name == R1 then
+        return s
+      end
+    end
+  end
+  -- A dead static nobody manages beside it: the control that the clear's
+  -- sphere holds the place.
+  local loose = sim:add_static(USA, { name = 'loose by the ruin', type = 'Barrier', x = 705, y = 800 })
+  sim:doom_static(loose)
+  r = run({
+    ruin_spawn(),
+    ruin_spawn(),
+    { op = 'CLEAR_DEBRIS', volume = 1, x = 700, y = 0, z = 800, radius = 50 },
+  }, 'a static spawned dead')
+  expect(r[1], APPLIED, 'STATIC_SPAWN dead')
+  local ruin = ruin_of()
+  assert(ruin and not ruin.alive and sim.statics[R1] == nil, 'the static was not spawned dead:\n' .. dump(ctx))
+  assert(r[1].object == ruin.id, 'object is ' .. tostring(r[1].object) .. ', not the ruin ID ' .. ruin.id)
+  assert(server.StaticObject.getByName(R1):getLife() == 0 and not server.StaticObject.getByName(R1):isExist(),
+    'the ruin reads alive')
+  assert(server.__nanoprobe_shim.T.slot_of[ruin.id] == nil, 'the shim holds a row for a ruin')
+  expect(r[2], AT_REVISION, 'STATIC_SPAWN dead again')
+  expect(r[3], APPLIED, 'CLEAR_DEBRIS on a ruin')
+  assert(sim.gone_statics[loose.id] == loose and r[3].value >= 1,
+    'the clear missed the unmanaged dead static beside the ruin: ' .. tostring(r[3].value))
+  assert(ruin_of() == ruin, 'a clear destroyed a ruin the platform manages')
+  r = run({ { op = 'STATIC_DESTROY', entity = 27 }, ruin_spawn() }, 'a ruin destroyed and spawned again')
+  expect(r[1], APPLIED, 'STATIC_DESTROY of a ruin')
+  assert(sim.gone_statics[ruin.id] == ruin, 'the destroy left the ruin')
+  expect(r[2], APPLIED, 'STATIC_SPAWN dead after its destroy')
+  assert(ruin_of() and ruin_of() ~= ruin, 'the ruin was not spawned again after its destroy')
+  -- A live static under the ruin's name replaces it, and its old ID is
+  -- reported destroyed.
+  local second = ruin_of()
+  r = run({ { op = 'STATIC_SPAWN', entity = 27, rev = 4, country = USA, name = R1,
+    static = { name = R1, type = 'Barrier', x = 700, y = 800, heading = 0 } },
+    { op = 'STATIC_DESTROY', entity = 27 } }, 'a live static over a ruin')
+  expect(r[1], APPLIED, 'STATIC_SPAWN over a ruin')
+  assert(sim.gone_statics[second.id] == second and ruin_of() == nil, 'the ruin outlived the static spawned over it')
+  expect(r[2], APPLIED, 'STATIC_DESTROY of the static over a ruin')
+
   -- A FARP static makes an airbase: the shim samples it this generation. A
   -- FARP spawned again under the name takes its entry; one that is gone, or
   -- a static of the name that is no FARP, leaves a tombstone in its place.
@@ -1660,10 +1713,62 @@ scenario('clear-debris', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   r = run({ sphere(zero, 50) }, 'clear debris on a live static of life 0')
   expect(r[1], APPLIED, 'CLEAR_DEBRIS on a live static of life 0')
   assert(zero.alive and sim.statics.zero == zero, 'a clear removed a live static of life 0')
+  -- A column, as the sidecar sends it: a square box from 10 km below sea
+  -- level to 100 km above it (spec/commands.md, "Layout: CLEAR_DEBRIS"). On
+  -- ground 900 m up a sphere at y = 0 holds nothing; the column's box
+  -- removes the wreck inside it and the unmanaged dead static, and leaves
+  -- the wreck outside it, the live unit and the managed dead static. The
+  -- handler reads no ground height. At sea level the box removes the same.
+  local function column(x, z, half)
+    return { op = 'CLEAR_DEBRIS', volume = 2, x = x - half, y = -10000, z = z - half,
+      x2 = x + half, y2 = 100000, z2 = z + half }
+  end
+  for _, place in ipairs({ { x = 200000, ground = 900 }, { x = 300000, ground = 0 } }) do
+    sim.ground = function(x)
+      return x >= 200000 and x < 300000 and 900 or 0
+    end
+    local tag = tostring(place.ground)
+    local group = sim:add_group(2, 2, { name = 'column ' .. tag, units = {
+      { name = 'in ' .. tag, type = 'M-113', x = place.x, y = 0, heading = 0 },
+      { name = 'out ' .. tag, type = 'M-113', x = place.x + 200, y = 0, heading = 0 },
+      { name = 'live ' .. tag, type = 'M-113', x = place.x + 10, y = 10, heading = 0 } } })
+    local inside, outside, alive = group.units[1], group.units[2], group.units[3]
+    assert(inside.y == place.ground, 'the mock spawned a unit at ' .. inside.y .. ', not on the ground')
+    local managed = sim:add_static(2, { name = 'np#col' .. tag, type = 'FARP Fuel Depot', x = place.x + 5, y = -5 })
+    local loose_ruin = sim:add_static(2, { name = 'ruin ' .. tag, type = 'FARP Fuel Depot', x = place.x + 15, y = 5 })
+    assert(managed.y == place.ground and loose_ruin.y == place.ground, 'the mock spawned a static off the ground')
+    sim:doom(inside)
+    sim:doom(outside)
+    sim:doom_static(managed)
+    sim:doom_static(loose_ruin)
+    sim.height_reads = 0
+    local clears = { column(place.x, 0, 30) }
+    if place.ground > 0 then
+      table.insert(clears, 1, sphere({ x = place.x, y = 0, z = 0 }, 30))
+    end
+    r = run(clears, 'a column at ' .. tag .. ' m')
+    if place.ground > 0 then
+      expect(r[1], APPLIED, 'a sphere at y = 0 under ground at ' .. tag .. ' m')
+      assert(r[1].value == 0, 'a sphere at y = 0 under high ground removed ' .. tostring(r[1].value))
+    end
+    local col = r[#clears]
+    expect(col, APPLIED, 'a column where the ground is at ' .. tag .. ' m')
+    -- The mock counts the wreck, the junk of each of the two dead statics,
+    -- and the unmanaged static's destroy.
+    assert(col.value == 4, 'the column removed ' .. tostring(col.value) .. ' at ' .. tag .. ' m, not 4')
+    assert(sim.removed[inside.id] == inside, 'the column left the wreck inside it at ' .. tag .. ' m')
+    assert(sim.dead[outside.id] == outside, 'the column removed a wreck outside it at ' .. tag .. ' m')
+    assert(alive.alive, 'the column removed a live unit at ' .. tag .. ' m')
+    assert(sim.gone_statics[loose_ruin.id] == loose_ruin, 'the column left an unmanaged dead static at ' .. tag .. ' m')
+    assert(sim.dead_statics[managed.id] == managed, 'the column destroyed a managed dead static at ' .. tag .. ' m')
+    assert(sim.height_reads == 0, 'a clear read the ground height ' .. sim.height_reads .. ' times')
+  end
+  sim.ground = nil
   assert((sim.destroyed_in_search or 0) == 0, 'a static was destroyed inside the search')
   S.ok('CLEAR_DEBRIS: a sphere or a box removes the wrecks inside and returns the count, a bad volume is BAD_PAYLOAD,'
     .. ' a dead static inside is destroyed after the search and counted once, a destroy that raises is skipped,'
-    .. ' a live static of life 0 and a dead static the platform manages stay')
+    .. ' a live static of life 0 and a dead static the platform manages stay, and a column\'s box clears ground'
+    .. ' 900 m up and at sea level with no height read')
 end)
 
 scenario('picture', nil, function(ctx)

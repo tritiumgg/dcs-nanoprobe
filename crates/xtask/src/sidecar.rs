@@ -790,52 +790,7 @@ fn materialized_after_load(text: &str) -> bool {
     count(before) == 0 && count(loaded) == 1
 }
 
-/// A loopback port here forwarded over SSH to `ip:port` on the host's side.
-pub(crate) struct Forward(pub(crate) Option<Child>);
-
-impl Forward {
-    pub(crate) fn start(dest: &str, local: u16, ip: &str, port: u16) -> Result<Forward, String> {
-        let child = Command::new("ssh")
-            .args([
-                "-N",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ExitOnForwardFailure=yes",
-                "-L",
-            ])
-            .arg(format!("127.0.0.1:{local}:{ip}:{port}"))
-            .args(["--", dest])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("ssh -L: {e}"))?;
-        let mut f = Forward(Some(child));
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while std::net::TcpStream::connect(("127.0.0.1", local)).is_err() {
-            if Instant::now() > deadline {
-                f.stop();
-                return Err("the SSH forward did not come up".into());
-            }
-            std::thread::sleep(Duration::from_millis(200));
-        }
-        Ok(f)
-    }
-
-    pub(crate) fn stop(&mut self) {
-        if let Some(mut c) = self.0.take() {
-            let _ = c.kill();
-            let _ = c.wait();
-        }
-    }
-}
-
-impl Drop for Forward {
-    fn drop(&mut self) {
-        self.stop();
-    }
-}
+pub(crate) use crate::ssh::Forward;
 
 /// Hold the simulation running for [`HOLD_S`] model seconds, or until a
 /// mission load starts model time again: a campaign's activation loads its

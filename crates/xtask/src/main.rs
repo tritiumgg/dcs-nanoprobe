@@ -137,6 +137,34 @@ commands:
                             Writes bundles/routes-<name>-<time>/ with routes.json
                             and routes.txt: mean and p5 fps, model/real, DCS CPU and
                             the moving share per shape. Refuses a server with players.
+  soak campaign <name> [--hours 8 | --minutes M] [--control FOLDER] [--detach]
+  soak control <name> [--hours 2 | --minutes M] [--detach]
+  soak pilot <name> [--minutes 10] [--detach]
+  soak rehearse [--minutes 6] [--leak-kib-per-s N [--baseline FOLDER]] [--restart-at S]
+                [--stall-at S] [--detach]
+  soak status | soak stop <folder> | soak judge <folder> [--control FOLDER]
+                            The long soak (S21). `campaign` runs the real sidecar
+                            and a client on a docker-wine target and churns a
+                            campaign through the API: handovers, groups removed
+                            and created, kills, orders, effects, queries, with a
+                            watch and an event subscription open. `control` runs
+                            the same churn of DCS objects with no agent loaded,
+                            through the eval channel. Once a minute both record,
+                            on one clock, the Lua heaps (floors after forced
+                            collects), the memory, threads and descriptors of DCS,
+                            the Wine server and the sidecar, the object IDs, the
+                            agent's own sizes, slowest steps and share, and the
+                            sizes of the store, its WAL, the journal and the event
+                            history. The verdict gives each series a slope, its
+                            noise, flat, growing or unresolved against its limit,
+                            the difference from the control, and the value
+                            projected to 24 hours. A player joining is recorded; a
+                            DCS restart ends a segment and the run goes on.
+                            `pilot` is a short control and campaign soak in one
+                            go; `rehearse` runs the campaign soak against the fake
+                            sidecar here, with a planted leak or an injected
+                            restart; --detach runs in the background, and `status`
+                            finds the run again. Exit 0 PASS, 1 FAIL, 2 EXTEND.
   soak <name> [--minutes 30] [--units 1200] [--collect-every MIN] [--no-sidecar]
                             The S11 churn soak on a docker-wine target: deploy with
                             --dev, restart DCS, load a fresh shell, attach link-probe
@@ -187,7 +215,8 @@ commands:
                             The S18 live tests on a docker-wine target, the sidecar
                             as `sidecar` runs it with its store on disk: reload and
                             DCS kill, paused burst, switch, death pending, tables,
-                            owed load, write cost. `rehearse` runs them against
+                            owed load, write cost, spawn state, virtualization,
+                            ruins. `rehearse` runs them against
                             the fake sidecar here. Refuses a server with players.
   hello [<name>]            Run the Rust hello campaign against the API server
                             over the fake sim: here, or built for the target and

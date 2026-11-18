@@ -177,6 +177,17 @@ local function new_sim(host)
   return sim
 end
 
+-- The ground's height at x, z: 0 everywhere, until a test sets `sim.ground`
+-- to a number or to a function of x and z. Ground units and statics are
+-- spawned at it, and land.getHeight reads it.
+function Sim:height(x, z)
+  local ground = self.ground
+  if type(ground) == 'function' then
+    return ground(x, z)
+  end
+  return ground or 0
+end
+
 function Sim:object_id()
   self.next_object = self.next_object + 256
   return self.next_object
@@ -368,7 +379,7 @@ function Sim:add_group(country, category, data)
       kind = kind,
       group = group,
       x = u.x,
-      y = kind.air and (u.alt or 0) or 0,
+      y = kind.air and (u.alt or 0) or self:height(u.x, u.y),
       z = u.y,
       heading = u.heading or 0,
       speed = kind.air and (u.speed or 0) or 0,
@@ -398,14 +409,33 @@ function Sim:add_static(country, data)
     type = data.type,
     country = country,
     x = data.x,
-    y = 0,
+    y = self:height(data.x, data.y),
     z = data.y,
     alive = true,
     static = true,
     -- A static of the `Cargos` category can move (LIVE).
     cargo = data.category == 'Cargos',
   }
-  self.statics[static.name] = static
+  -- A new object under a taken name removes the old holder with no event
+  -- (LIVE for a live holder, docs/results/2026-11-15-s15-world-commands.md;
+  -- UNVERIFIED for a dead one).
+  for id, old in pairs(self.dead_statics) do
+    if old.name == static.name then
+      self.dead_statics[id] = nil
+      self.gone_statics[id] = old
+    end
+  end
+  if data.dead == true then
+    -- Added dead: it reads life 0 and `isExist` false from the start, and
+    -- `StaticObject.getByName` finds it (LIVE,
+    -- docs/results/2026-11-17-person-fixes.md). Whether DCS sends a birth
+    -- event for it is UNVERIFIED; the mock sends one, the harder case.
+    static.alive = false
+    self.statics[static.name] = nil
+    self.dead_statics[static.id] = static
+  else
+    self.statics[static.name] = static
+  end
   self.queue[#self.queue + 1] = { event = 'S_EVENT_BIRTH', initiator = static }
   return static
 end
@@ -878,6 +908,16 @@ local function scripting(host, name)
   state.StaticObject = ns(name, 'StaticObject', {
     getByName = function(static_name)
       local static = sim.statics[static_name]
+      if not static then
+        -- A dead static is found by its name too (LIVE,
+        -- docs/results/2026-11-17-person-fixes.md).
+        for _, dead in pairs(sim.dead_statics) do
+          if dead.name == static_name then
+            static = dead
+            break
+          end
+        end
+      end
       return static and handle(STATIC, static.id) or nil
     end,
     getName = function(self)
@@ -1364,8 +1404,15 @@ local function scripting(host, name)
 
   state.land = ns(name, 'land', {
     SurfaceType = { LAND = 1, SHALLOW_WATER = 2, WATER = 3, ROAD = 4, RUNWAY = 5 },
-    getHeight = function()
-      return 0
+    -- The ground's height at a 2D point `{ x = x, y = z }` (Sim:height).
+    -- `sim.height_reads` counts the calls. What DCS does with another
+    -- argument is UNVERIFIED; the mock raises.
+    getHeight = function(point)
+      if type(point) ~= 'table' or type(point.x) ~= 'number' or type(point.y) ~= 'number' then
+        error('mock: land.getHeight takes { x = x, y = z }', 2)
+      end
+      sim.height_reads = (sim.height_reads or 0) + 1
+      return sim:height(point.x, point.y)
     end,
     -- Water (3) from 20 km south of the origin, land (1) elsewhere: a
     -- made-up coast, so the mixed scenario finds water. UNVERIFIED.
