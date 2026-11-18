@@ -421,7 +421,10 @@ fn person(
     );
     let stocks = run.eval("server", "s19-person-stock", &stock_read, 60)?;
     println!("   stock: {stocks}");
-    let dead = dead_static(run, &farp)?;
+    let dead = dead_static(run, &farp).unwrap_or_else(|e| {
+        println!("   dead statics: {e}");
+        Vec::new()
+    });
     let start = run.eval("hook", "s19-person-start", &read, 60)?;
     println!("   held: {start}");
     // A stop file left from an earlier hold would end this one at once.
@@ -445,20 +448,26 @@ fn person(
         api.keep();
         if ruin.is_null() && go.exists() {
             let _ = std::fs::remove_file(&go);
-            ruin = ruin_check(run, api, c, &theater, &farp)?;
+            ruin =
+                ruin_check(run, api, c, &theater, &farp).unwrap_or_else(|e| json!({ "error": e }));
         }
     }
     if ruin.is_null() {
-        ruin = ruin_check(run, api, c, &theater, &farp)?;
+        ruin = ruin_check(run, api, c, &theater, &farp).unwrap_or_else(|e| json!({ "error": e }));
     }
-    let dead = dead_static_clear(run, api, c, &theater, dead)?;
+    // An error in a step after the hold is recorded, so the hold's record
+    // is written.
+    let dead =
+        dead_static_clear(run, api, c, &theater, dead).unwrap_or_else(|e| json!({ "error": e }));
     let ended = if stop.exists() {
         "stop_file"
     } else {
         "timeout"
     };
     let _ = std::fs::remove_file(stop);
-    let end = run.eval("hook", "s19-person-end", &read, 60)?;
+    let end = run
+        .eval("hook", "s19-person-end", &read, 60)
+        .unwrap_or_else(|e| json!({ "error": e }));
     // No verdict: what the person saw is recorded by hand.
     results["person"] = json!({
         "verdict": "recorded by hand",
