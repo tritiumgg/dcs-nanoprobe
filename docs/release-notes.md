@@ -1,8 +1,8 @@
 # Release notes
 
-## Draft: the first release (version not set)
+## Draft: 0.1, the first release
 
-The first release of nanoprobe: an agent inside DCS World, a sidecar that owns a
+The first release of nanoprobe, 0.1: an agent inside DCS World, a sidecar that owns a
 persistent campaign world, and a gRPC API for a controller in any language. The
 [README](../README.md) says what the platform tracks and how fresh it is.
 
@@ -13,19 +13,22 @@ persistent campaign world, and a gRPC API for a controller in any language. The
 | `nanoprobe-<version>-windows-x86_64.zip` | `nanoprobe.exe`, `nanoprobe-sidecar.exe`, `install.cmd`, `uninstall.cmd`, `README.txt`, an example `sidecar.toml`, and the agent |
 | `nanoprobe-<version>-linux-x86_64.tar.gz` | static `nanoprobe` and `nanoprobe-sidecar`, `install.sh`, `uninstall.sh`, `README.txt`, `deploy/` for the sidecar's container, and the agent |
 | `nanoprobe-<version>-schema.tar.gz`, `nanoprobe-<version>-schema.binpb` | the API schema `nanoprobe.v1alpha1` and its descriptor set |
-| `nanoprobe-<version>-agent.pdb` | symbols for the agent's crash records |
-| `SHA256SUMS` | checksums of the five files |
+| `SHA256SUMS` | checksums of the four files |
 
 No client package and no container image is published. Clients generate code from the
 schema ([api-clients.md](api-clients.md)); the sidecar's image is built from the Linux
-archive ([deploy/README.md](../deploy/README.md)).
+archive ([deploy/README.md](../deploy/README.md)). The files' names carry the workspace
+version, `0.1.0`: `nanoprobe-0.1.0-windows-x86_64.zip`, for example.
 
 ### How the files were built
 
 The files are cross-built on a development machine with `mise run package`: the Windows
 programs and the agent DLL with `cargo-xwin`, the Linux programs as static musl
-binaries. They are not built on a Windows runner. `SHA256SUMS` identifies the exact
-files the acceptance run tested.
+binaries. These cross-built files are the release: the acceptance run tested exactly
+the files `SHA256SUMS` lists. A later release is built on a Windows CI runner.
+
+The agent's PDB is not published. It names the folders of the machine that built it,
+and the builder keeps it to turn the agent's crash records into function names.
 
 ### Where it is verified
 
@@ -41,9 +44,12 @@ The soak runs on the Wine server only.
 
 ### Know before you install
 
-- `nanoprobe uninstall` removes the whole `nanoprobe` folder in the DCS profile. A
-  mission folder kept there, with the templates you saved, goes with it. Copy your
-  templates out first.
+- `nanoprobe uninstall` removes the whole `nanoprobe` folder in the DCS profile,
+  `nanoprobe/missions/` included: a mission folder kept there, with the templates you
+  saved, goes with it. To keep the per-map templates, make the mission folder a folder
+  in the profile outside `nanoprobe/`, or copy them out first; keep other template
+  files in a folder listed in the sidecar's `[missions] template_dirs`
+  ([install.md](install.md), "Uninstall").
 - The API is `v1alpha1` and can change in a way that breaks clients.
 - The API has no TLS. A listener off loopback needs a tokens file and a trusted network.
 - The project ships no mission. Save a template for each map in the Mission Editor
@@ -61,14 +67,16 @@ The soak runs on the Wine server only.
 Run `nanoprobe doctor`. It passes, or it names each DCS function the platform calls and
 no longer finds. The conformance suite, which checks the agent's behavior against the
 specification on a running DCS, is not in the release: it runs from a source checkout
-with the development tooling ([acceptance.md](acceptance.md), criterion 6). It must pass
-in full when `doctor` reports every name present. When `doctor` reports a name absent,
-the suite has no list of which checks need that name, and a person reads its result.
+with the development tooling ([acceptance.md](acceptance.md), criterion 6). The
+project's recorded run passed 9 of 9 on 2026-11-15, on DCS 2.9.31.29434 under Wine, with
+an earlier agent build than this release's (LIVE,
+[2026-11-15-s17-api-on-real-dcs.md](results/2026-11-15-s17-api-on-real-dcs.md)). The
+suite must pass in full when `doctor` reports every name present (Open items says what
+happens when one is absent).
 
 ### Open items
 
 To be completed when the release is cut.
 
-- The agent's PDB names the folders of the machine that built it: the linker writes the
-  path of each object file and library into it. Publish a PDB only from a build whose
-  paths may be public.
+- The conformance suite has no table from each check to the DCS names it needs. When
+  `doctor` reports a name absent, a person reads the suite's result.
