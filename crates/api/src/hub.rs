@@ -7,7 +7,7 @@
 //! driver and every successful change advance.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime};
 use nanoprobe_proto::errors::status;
 use nanoprobe_proto::v1alpha1::{self as pb, ErrorReason, Health, event};
 use nanoprobe_sidecar::campaigns::{Backup, BackupReason, Campaigns};
-use nanoprobe_sidecar::eventfile::EventFile;
+use nanoprobe_sidecar::eventfile::{EventFile, Retained};
 use nanoprobe_sidecar::ids::{CampaignId, EntityId};
 use nanoprobe_sidecar::players::{Ctx as RosterCtx, Keyring, Roster, Unmanaged};
 use nanoprobe_sidecar::reconciler::{Config as RecConfig, EffectResult, Reconciler};
@@ -269,6 +269,13 @@ pub struct Inner {
     /// runs in each step until none remain. Set when a campaign becomes
     /// active (at activation and at the sidecar's start) and once an hour.
     journal_prune_due: bool,
+    /// Some log has old events to delete: a batch runs in each step until
+    /// none remain, for every campaign log not finished and the server log.
+    /// Set where `journal_prune_due` is, and once an hour.
+    events_prune_due: bool,
+    /// The logs the event retention's pass still has to look at; `None`
+    /// before a pass starts.
+    events_left: Option<BTreeSet<u64>>,
     /// The scheduled backup running on a worker thread.
     backup_job: Option<BackupJob>,
     /// Campaigns with a backup running: one at a time each.
@@ -448,6 +455,8 @@ impl Inner {
                 .get(&campaign)
                 .map_or(self.on_lost, |s| s.on_lost),
             destroy_retries: cfg.destroy_retries.max(1),
+            removed_keep_ms: ms(cfg.removed_keep),
+            dead_keep_ms: ms(cfg.dead_keep),
         }
     }
 
@@ -556,6 +565,9 @@ impl Inner {
         let records = match (self.active, self.rec.as_mut()) {
             (Some(id), Some(rec)) => {
                 let slot = self.campaigns.get_mut(&id).expect("active campaign");
+                // Removal and death times, the purge and the expiry read the
+                // step's wall clock (spec/world.md, "Removal").
+                slot.store.set_now(wall_ms());
                 let mut tee = Tee {
                     inner: self.backend.sim(),
                     seen: Vec::new(),
@@ -962,12 +974,10 @@ impl Inner {
             keyring_of(&server)
                 .map_err(|e| format!("the server store in {}: {e}", sf.dir.display()))?,
         );
-        let mut log = EventFile::open(&server.events_path(), 0)
+        self.server_log = EventFile::open(&server.events_path(), 0)
             .and_then(|f| EventLog::open(f, cfg.events_keep))
             .map_err(|e| format!("the server event log: {e}"))?;
-        retain(&mut log, 0, sf.server_log_retention)
-            .map_err(|e| format!("the server event log: {e}"))?;
-        self.server_log = log;
+        self.events_prune_due = true;
         self.epoch_floor = server.epoch();
         self.server = Some(server);
         let files = Campaigns::new(&sf.dir, cfg.world_changes_keep, sf.backup_keep)
@@ -998,7 +1008,7 @@ impl Inner {
                 let mut l = EventLog::open(f, cfg.events_keep)?;
                 // A finished campaign is read-only: its history is kept whole.
                 if record.state != CampaignState::Finished {
-                    retain(&mut l, id.0, sf.event_retention)?;
+                    retain(&mut l, id.0, cfg.event_retention, cfg.events_max_bytes)?;
                 }
                 Ok(l)
             });
@@ -1191,6 +1201,50 @@ impl Inner {
             .sum()
         }));
         Some((free, held))
+    }
+
+    /// What the active campaign's store holds, `None` with no active
+    /// campaign.
+    pub fn store_size(&self) -> Option<pb::StoreSize> {
+        let id = self.active?;
+        let slot = self.campaigns.get(&id)?;
+        let store = &slot.store;
+        let s = store.sizes();
+        let (journal_rows, journal_at) = store.journal_extent();
+        let (purged, expired) = store.purged_expired();
+        let (mut store_bytes, mut events_bytes) = (0u64, 0u64);
+        if let Some(files) = self.files.as_ref() {
+            let size = |p: std::path::PathBuf| std::fs::metadata(p).map_or(0, |m| m.len());
+            let with_wal = |p: std::path::PathBuf| {
+                let mut wal = p.clone().into_os_string();
+                wal.push("-wal");
+                size(p) + size(std::path::PathBuf::from(wal))
+            };
+            store_bytes = with_wal(files.store_path(CampaignId(id)));
+            events_bytes = with_wal(files.events_path(CampaignId(id)));
+        }
+        let work = self.rec.as_ref().map_or(0, |r| r.work_len() as u64);
+        Some(pb::StoreSize {
+            groups_live: s.live,
+            groups_dead: s.dead,
+            ruins: s.ruins,
+            awaiting_purge: s.awaiting_purge,
+            units: s.units,
+            oldest_removal: s.oldest_removal_ms.map(timestamp_ms),
+            journal_rows,
+            oldest_journal_entry: journal_at.map(timestamp_ms),
+            event_rows: slot.events.rows(),
+            oldest_event: slot.events.oldest_ms().map(timestamp_ms),
+            store_file_bytes: store_bytes,
+            events_file_bytes: events_bytes,
+            purged,
+            expired,
+            purged_deaths: store.purge_drops().0,
+            orphan_destroys: store.purge_drops().1,
+            journal_bytes: store.journal_bytes(),
+            event_bytes: slot.events.bytes(),
+            work_set: work,
+        })
     }
 
     /// Refuse with `SPACE_LOW` when the store's file system has less free
@@ -1419,15 +1473,17 @@ impl Inner {
         // A suspended campaign's journal waits for its next activation; a
         // finished campaign's is never deleted.
         self.journal_prune_due = true;
+        self.events_prune_due = true;
         self.next_checkpoint_ms = now.saturating_add(ms(sf.checkpoint));
         self.next_backup_ms = newest.saturating_add(ms(sf.backup_interval));
     }
 
     /// Run one batch of the journal retention on the active campaign's
-    /// store (spec/persistence.md, "Journal retention") while one is due.
-    /// A clock behind the newest entry deletes nothing and is logged. A
-    /// failed delete stops the sidecar.
-    fn prune_journal_batch(&mut self, retention: Duration) {
+    /// store (spec/persistence.md, "Journal retention") while one is due:
+    /// the time limit and the size limit of `cfg`. A clock behind the newest
+    /// entry skips the time limit and is logged when nothing else is
+    /// deleted. A failed delete stops the sidecar.
+    fn prune_journal_batch(&mut self, cfg: &Config) {
         if !self.journal_prune_due {
             return;
         }
@@ -1438,15 +1494,17 @@ impl Inner {
         let Some(slot) = self.campaigns.get_mut(&id).filter(|s| s.opened) else {
             return;
         };
-        match slot
-            .store
-            .prune_journal(ms(retention), wall_ms(), JOURNAL_BATCH)
-        {
+        match slot.store.prune_journal(
+            ms(cfg.journal_retention),
+            wall_ms(),
+            JOURNAL_BATCH,
+            cfg.journal_max_bytes,
+        ) {
             Ok(JournalPrune::Deleted { more: true, .. }) => {}
             Ok(JournalPrune::ClockBehind { now_ms, newest_ms }) => {
                 eprintln!(
                     "nanoprobe: the clock ({now_ms} ms) is behind the newest journal entry of \
-                     campaign {id} ({newest_ms} ms): its retention is skipped"
+                     campaign {id} ({newest_ms} ms): its time limit is skipped"
                 );
                 self.journal_prune_due = false;
             }
@@ -1455,31 +1513,103 @@ impl Inner {
         }
     }
 
-    /// The active campaign's checkpoint and scheduled backup, when due. A
-    /// checkpoint that fails stops the sidecar; a backup that fails is
-    /// reported in `backup_error` and taken again at the next interval.
+    /// Run one batch of the event retention on every campaign log not
+    /// finished and on the server log, while one is due. A clock behind a
+    /// log's newest event deletes nothing from it and is logged. A failed
+    /// delete stops the sidecar.
+    fn prune_events_batch(&mut self, cfg: &Config) {
+        if !self.events_prune_due {
+            return;
+        }
+        // The logs this pass still has to look at: a log is retained once
+        // more after a batch that may have left old events, and not again
+        // in the pass once it reports none, so a warning is logged once.
+        let left = self.events_left.get_or_insert_with(|| {
+            let mut ids: BTreeSet<u64> = self
+                .campaigns
+                .values()
+                .filter(|s| s.meta.state != pb::CampaignState::Finished as i32)
+                .map(|s| s.meta.id)
+                .collect();
+            ids.insert(0);
+            ids
+        });
+        let ids: Vec<u64> = left.iter().copied().collect();
+        let mut done = Vec::new();
+        for id in ids {
+            let r = if id == 0 {
+                retain(&mut self.server_log, 0, cfg.server_log_retention, 0).unwrap_or_else(|e| {
+                    panic!("the server event log could not be written, stopping: {e}")
+                })
+            } else {
+                // A campaign finished since the pass began keeps its log.
+                let Some(slot) = self
+                    .campaigns
+                    .get_mut(&id)
+                    .filter(|s| s.meta.state != pb::CampaignState::Finished as i32)
+                else {
+                    done.push(id);
+                    continue;
+                };
+                retain(
+                    &mut slot.events,
+                    id,
+                    cfg.event_retention,
+                    cfg.events_max_bytes,
+                )
+                .unwrap_or_else(|e| {
+                    panic!("the event log of campaign {id} could not be written, stopping: {e}")
+                })
+            };
+            if !r {
+                done.push(id);
+            }
+        }
+        let left = self.events_left.as_mut().expect("the pass");
+        for id in done {
+            left.remove(&id);
+        }
+        if left.is_empty() {
+            self.events_left = None;
+            self.events_prune_due = false;
+        }
+    }
+
+    /// The journal retention of a store in memory: entries older than the
+    /// retention, and the oldest while the bytes kept are over the size
+    /// limit, leave every campaign not finished; the newest stays.
+    fn prune_memory_journals(&mut self, retention: Duration, max_bytes: u64) {
+        if retention.is_zero() && max_bytes == 0 {
+            return;
+        }
+        let now = wall_ms();
+        for slot in self.campaigns.values_mut() {
+            if slot.meta.state != pb::CampaignState::Finished as i32 {
+                slot.store
+                    .prune_memory_journal(now, ms(retention), max_bytes);
+            }
+        }
+    }
+
+    /// The active campaign's checkpoint and scheduled backup, when due; the
+    /// hourly and per-step retentions. With the store off only the
+    /// retentions run, in memory.
     fn timers(&mut self, cfg: &Config) {
+        let now = wall_ms();
         let Some(sf) = cfg.store.as_ref() else {
+            if now >= self.next_retention_ms {
+                self.events_prune_due = true;
+                self.prune_memory_journals(cfg.journal_retention, cfg.journal_max_bytes);
+                self.next_retention_ms = now.saturating_add(RETENTION_EVERY_MS);
+            }
+            self.prune_events_batch(cfg);
             return;
         };
-        let now = wall_ms();
         self.collect_backup(false);
         if now >= self.next_retention_ms {
-            // Every hour, each log of a campaign not finished.
-            for slot in self.campaigns.values_mut() {
-                if slot.meta.state != pb::CampaignState::Finished as i32
-                    && let Err(e) = retain(&mut slot.events, slot.meta.id, sf.event_retention)
-                {
-                    panic!(
-                        "the event log of campaign {} could not be written, stopping: {e}",
-                        slot.meta.id
-                    );
-                }
-            }
-            if let Err(e) = retain(&mut self.server_log, 0, sf.server_log_retention) {
-                panic!("the server event log could not be written, stopping: {e}");
-            }
-            // The active campaign's journal, in batches below.
+            // Every hour: the event logs and the active campaign's journal,
+            // in batches below.
+            self.events_prune_due = true;
             self.journal_prune_due = true;
             // Keys past `idempotency_keep_h`, from every store.
             let before = now.saturating_sub(ms(self.idem_keep));
@@ -1500,10 +1630,11 @@ impl Inner {
             }
             self.next_retention_ms = now.saturating_add(RETENTION_EVERY_MS);
         }
-        // One batch of the journal retention per step while it is due. A
-        // step ends with `settle`, which commits the store, so a commit
-        // comes between two batches.
-        self.prune_journal_batch(sf.journal_retention);
+        // One batch of each retention per step while it is due. A step ends
+        // with `settle`, which commits the store, so a commit comes between
+        // two batches.
+        self.prune_events_batch(cfg);
+        self.prune_journal_batch(cfg);
         let Some(id) = self.active else {
             return;
         };
@@ -2364,21 +2495,29 @@ impl Inner {
     }
 }
 
-/// Apply the event retention to a log (spec/persistence.md, "Event
-/// history"). A clock behind the newest event deletes nothing and is logged.
-fn retain(l: &mut EventLog, campaign: u64, retention: Duration) -> Result<(), DiskError> {
-    if retention.is_zero() {
-        return Ok(());
+/// Apply one batch of the event retention to a log (spec/persistence.md,
+/// "Event history"); true when more old events remain. A clock behind the
+/// newest event deletes nothing and is logged.
+fn retain(
+    l: &mut EventLog,
+    campaign: u64,
+    retention: Duration,
+    max_bytes: u64,
+) -> Result<bool, DiskError> {
+    if retention.is_zero() && max_bytes == 0 {
+        return Ok(false);
     }
-    if let nanoprobe_sidecar::eventfile::Retained::ClockBehind { now_ms, newest_ms } =
-        l.retain(retention, wall_ms())?
-    {
-        eprintln!(
-            "nanoprobe: the clock ({now_ms} ms) is behind the newest event of log {campaign} \
-             ({newest_ms} ms): its retention is skipped"
-        );
+    match l.retain(retention, wall_ms(), EVENT_BATCH, max_bytes)? {
+        Retained::Deleted { more, .. } => Ok(more),
+        Retained::ClockBehind { now_ms, newest_ms } => {
+            eprintln!(
+                "nanoprobe: the clock ({now_ms} ms) is behind the newest event of log \
+                 {campaign} ({newest_ms} ms): its time limit is skipped"
+            );
+            Ok(false)
+        }
+        Retained::Kept => Ok(false),
     }
-    Ok(())
 }
 
 /// The server's keyring: the secret the server store keeps, made and kept
@@ -2427,6 +2566,9 @@ const RETENTION_EVERY_MS: u64 = 3_600_000;
 /// writer free between steps, and a backlog of ten million rows drains in
 /// about 20 seconds at one batch per 2 ms step.
 pub const JOURNAL_BATCH: usize = 1_000;
+
+/// The most events one step's event retention deletes from one log.
+pub const EVENT_BATCH: usize = 1_000;
 
 fn ms(d: Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
@@ -2575,6 +2717,8 @@ impl Hub {
                 epoch_floor: 0,
                 next_retention_ms: 0,
                 journal_prune_due: false,
+                events_prune_due: false,
+                events_left: None,
                 backup_job: None,
                 backing_up: std::collections::BTreeSet::new(),
                 hold_after: None,
@@ -2895,6 +3039,12 @@ impl Hub {
                             .and_then(|c| {
                                 let f = f.take().expect("a call runs once");
                                 let inner: &mut Inner = &mut g;
+                                // A removal or a death the call makes is
+                                // dated by the wall clock, also on a
+                                // campaign the driver does not step.
+                                if let Some(slot) = inner.campaigns.get_mut(&c) {
+                                    slot.store.set_now(wall_ms());
+                                }
                                 catch_unwind(AssertUnwindSafe(|| {
                                     let r = f(inner, c);
                                     if let Ok((resp, acted)) = &r {
@@ -3565,6 +3715,28 @@ mod tests {
         }
     }
 
+    /// A store linked to a file holds only the entries it has not written: a
+    /// step's commit empties the in-memory journal.
+    #[test]
+    fn a_store_on_disk_does_not_keep_written_entries_in_memory() {
+        let (_dir, missions, cfg) = owed_setup();
+        let hub = folder_hub(&cfg, &missions, 0x1000);
+        hub.start();
+        add_and_activate(&hub, &cfg, true);
+        {
+            let mut g = hub.lock();
+            let store = &mut g.campaigns.get_mut(&1).expect("slot").store;
+            store.journal(nanoprobe_sidecar::store::Entry::Captured {
+                entity: nanoprobe_sidecar::ids::EntityId(1),
+            });
+            assert!(!store.entries().is_empty(), "journalled, not yet written");
+        }
+        steps(&hub, 20);
+        let g = hub.lock();
+        let store = &g.campaigns[&1].store;
+        assert!(store.entries().is_empty(), "{:?}", store.entries());
+    }
+
     #[test]
     fn a_finished_campaign_reads_through_a_copy_and_refuses_changes() {
         let (_dir, missions, cfg) = owed_setup();
@@ -3734,6 +3906,12 @@ mod tests {
         g.commit(1);
     }
 
+    impl Inner {
+        fn slots_events_replace(&mut self, id: u64, log: EventLog) {
+            self.campaigns.get_mut(&id).expect("slot").events = log;
+        }
+    }
+
     fn journal_rows(g: &Inner) -> usize {
         let path = g.files().expect("files").store_path(CampaignId(1));
         nanoprobe_sidecar::store::journal_of(&path)
@@ -3756,9 +3934,7 @@ mod tests {
         g.timers(&cfg);
         assert_eq!(journal_rows(&g), before);
         assert!(!g.journal_prune_due);
-        if let Some(sf) = cfg.store.as_mut() {
-            sf.journal_retention = Duration::from_millis(1);
-        }
+        cfg.journal_retention = Duration::from_millis(1);
         g.journal_prune_due = true;
         let t0 = Instant::now();
         g.timers(&cfg);
@@ -3775,9 +3951,7 @@ mod tests {
     #[test]
     fn the_hourly_timer_sets_the_flag_and_a_suspended_campaign_is_not_pruned() {
         let (_dir, missions, mut cfg) = owed_setup();
-        if let Some(sf) = cfg.store.as_mut() {
-            sf.journal_retention = Duration::from_millis(1);
-        }
+        cfg.journal_retention = Duration::from_millis(1);
         let hub = folder_hub(&cfg, &missions, 0x9000);
         add_and_activate(&hub, &cfg, true);
         let mut g = hub.lock();
@@ -3809,12 +3983,343 @@ mod tests {
         assert!(journal_rows(&g) < suspended);
     }
 
+    /// A stamp whose wall time is `ms`.
+    fn stamp_at(ms: u64) -> pb::Stamp {
+        pb::Stamp {
+            wall: Some(prost_types::Timestamp {
+                seconds: i64::try_from(ms / 1000).expect("seconds"),
+                nanos: i32::try_from((ms % 1000) * 1_000_000).expect("nanos"),
+            }),
+            ..pb::Stamp::default()
+        }
+    }
+
+    fn lifecycle() -> event::Body {
+        event::Body::Lifecycle(pb::LifecycleEvent::default())
+    }
+
+    /// `old` events a minute old and one from `newest_ms`, in a log on a
+    /// file of its own, committed.
+    fn file_log(dir: &std::path::Path, old: u64, newest_ms: u64) -> EventLog {
+        let f = EventFile::open(&dir.join("events.sqlite"), 1).expect("open");
+        let mut l = EventLog::open(f, 100).expect("log");
+        for i in 0..old {
+            l.push(1, stamp_at(newest_ms - 60_000 + i), lifecycle());
+        }
+        l.push(1, stamp_at(newest_ms), lifecycle());
+        l.commit().expect("commit");
+        l
+    }
+
+    /// The size the active campaign's store reports counts what it holds.
+    #[test]
+    fn the_store_size_counts_groups_rows_and_files() {
+        let new_group = || nanoprobe_sidecar::store::NewGroup {
+            theater: "Caucasus".into(),
+            country: 2,
+            category: 2,
+            coalition: 2,
+            units: vec![nanoprobe_sidecar::store::NewUnit::new(
+                "M-113",
+                nanoprobe_sidecar::store::UnitState::default(),
+            )],
+            authority: nanoprobe_sidecar::store::Authority::Campaign,
+            label: String::new(),
+            extra: nanoprobe_transport::codec::Lv::Nil,
+        };
+        let (_dir, missions, cfg) = owed_setup();
+        let hub = folder_hub(&cfg, &missions, 0x1000);
+        assert!(hub.lock().store_size().is_none(), "no active campaign");
+        add_and_activate(&hub, &cfg, true);
+        let mut g = hub.lock();
+        let (a, b) = {
+            let slot = g.campaigns.get_mut(&1).expect("slot");
+            let a = slot.store.create_group(new_group()).expect("a");
+            let b = slot.store.create_group(new_group()).expect("b");
+            slot.store.create_group(new_group()).expect("c");
+            slot.store.set_now(1_700_000_000_000);
+            slot.store.remove_entity(b).expect("remove");
+            slot.events
+                .push(1, stamp_at(1_700_000_000_000), lifecycle());
+            (a, b)
+        };
+        assert_ne!(a, b);
+        g.commit_events();
+        g.commit(1);
+        let s = g.store_size().expect("size");
+        assert_eq!(s.groups_live, 2);
+        assert_eq!(s.groups_dead, 0);
+        assert_eq!(s.ruins, 0);
+        assert_eq!(s.awaiting_purge, 1);
+        assert_eq!(s.units, 3);
+        assert_eq!(
+            s.oldest_removal.map(|t| t.seconds),
+            Some(1_700_000_000),
+            "the removal time"
+        );
+        assert!(s.journal_rows > 0, "the journal holds rows");
+        assert!(s.oldest_journal_entry.is_some());
+        assert!(s.event_rows > 0, "the log holds an event");
+        assert!(s.oldest_event.is_some());
+        assert!(s.store_file_bytes > 0);
+        assert!(s.events_file_bytes > 0);
+        // The counted bytes are the stores' own running counts.
+        let slot = &g.campaigns[&1];
+        assert_eq!(s.journal_bytes, slot.store.journal_bytes());
+        assert!(s.journal_bytes > 0);
+        assert_eq!(s.event_bytes, slot.events.bytes());
+        assert!(s.event_bytes > 0);
+        assert_eq!(
+            s.work_set,
+            g.rec.as_ref().map_or(0, |r| r.work_len() as u64)
+        );
+        assert_eq!(
+            (s.purged_deaths, s.orphan_destroys),
+            slot.store.purge_drops()
+        );
+        drop(g);
+
+        let (_dir, missions, cfg) = owed_setup();
+        let cfg = Config { store: None, ..cfg };
+        let hub = folder_hub(&cfg, &missions, 0x1000);
+        add_and_activate(&hub, &cfg, true);
+        let mut g = hub.lock();
+        g.campaigns
+            .get_mut(&1)
+            .expect("slot")
+            .store
+            .create_group(new_group())
+            .expect("group");
+        let s = g.store_size().expect("size");
+        assert_eq!(s.groups_live, 1);
+        assert!(s.journal_rows > 0, "a store in memory holds its journal");
+        assert!(s.journal_bytes > 0, "and counts its entries' bytes");
+        assert_eq!(s.store_file_bytes, 0);
+        assert_eq!(s.events_file_bytes, 0);
+    }
+
+    #[test]
+    fn an_event_backlog_drains_one_batch_a_step_with_a_commit_between() {
+        let (dir, missions, mut cfg) = owed_setup();
+        cfg.event_retention = Duration::from_secs(1);
+        let hub = folder_hub(&cfg, &missions, 0xb000);
+        add_and_activate(&hub, &cfg, true);
+        let mut g = hub.lock();
+        assert!(g.events_prune_due, "an activation sets it");
+        g.slots_events_replace(1, file_log(dir.path(), 2_500, wall_ms()));
+        g.next_retention_ms = u64::MAX;
+        g.timers(&cfg);
+        assert_eq!(g.campaigns[&1].events.first(), 1_001, "one batch");
+        assert!(g.events_prune_due, "more remain");
+        g.commit(1);
+        g.timers(&cfg);
+        assert_eq!(g.campaigns[&1].events.first(), 2_001);
+        assert!(g.events_prune_due);
+        g.commit(1);
+        g.timers(&cfg);
+        let log = &g.campaigns[&1].events;
+        assert_eq!(log.first(), 2_501, "the newest stays");
+        assert_eq!(log.last(), 2_501);
+        assert!(!g.events_prune_due);
+    }
+
+    /// A campaign finished in the middle of a retention pass keeps its log,
+    /// and the pass ends.
+    #[test]
+    fn the_event_retention_pass_skips_a_campaign_finished_mid_pass() {
+        let (dir, missions, mut cfg) = owed_setup();
+        cfg.event_retention = Duration::from_secs(1);
+        let hub = folder_hub(&cfg, &missions, 0xb100);
+        add_and_activate(&hub, &cfg, true);
+        let mut g = hub.lock();
+        g.slots_events_replace(1, file_log(dir.path(), 2_500, wall_ms()));
+        g.next_retention_ms = u64::MAX;
+        g.timers(&cfg);
+        assert_eq!(g.campaigns[&1].events.first(), 1_001, "one batch");
+        assert!(g.events_prune_due, "more remain");
+        g.commit(1);
+        g.campaigns.get_mut(&1).expect("slot").meta.state = pb::CampaignState::Finished as i32;
+        g.timers(&cfg);
+        assert_eq!(g.campaigns[&1].events.first(), 1_001, "the log was cut");
+        assert!(!g.events_prune_due, "the pass did not end");
+        assert!(g.events_left.is_none());
+    }
+
+    #[test]
+    fn an_event_size_limit_drains_oldest_first_and_expires_an_earlier_resume() {
+        let (dir, missions, mut cfg) = owed_setup();
+        let hub = folder_hub(&cfg, &missions, 0xb300);
+        add_and_activate(&hub, &cfg, true);
+        let mut g = hub.lock();
+        g.slots_events_replace(1, file_log(dir.path(), 2_500, wall_ms()));
+        let one = g.campaigns[&1].events.after(2_000, 1)[0].encoded_len() as u64;
+        // The time limit (90 days) takes none of them; the size limit keeps
+        // about 100 events.
+        cfg.events_max_bytes = 100 * one;
+        g.next_retention_ms = u64::MAX;
+        g.events_prune_due = true;
+        g.timers(&cfg);
+        assert_eq!(g.campaigns[&1].events.first(), 1_001, "one batch");
+        assert!(g.events_prune_due, "more remain");
+        g.commit(1);
+        g.timers(&cfg);
+        assert_eq!(g.campaigns[&1].events.first(), 2_001);
+        g.commit(1);
+        g.timers(&cfg);
+        let log = &g.campaigns[&1].events;
+        assert!((70..=140).contains(&log.rows()), "{} rows", log.rows());
+        assert_eq!(log.last(), 2_501, "the newest stays");
+        assert!(!g.events_prune_due);
+        // A resume from before the cut is answered SEQUENCE_EXPIRED
+        // (`covers` is the service's test); one from inside it goes on.
+        assert!(!log.covers(1_000));
+        assert!(!log.covers(log.first().saturating_sub(2)));
+        assert!(log.covers(log.first() - 1));
+        assert!(log.covers(2_500));
+    }
+
+    #[test]
+    fn with_the_store_off_the_size_limits_apply_in_memory() {
+        let (_dir, missions, mut cfg) = owed_setup();
+        cfg.store = None;
+        let hub = folder_hub(&cfg, &missions, 0xb400);
+        add_and_activate(&hub, &cfg, true);
+        let mut g = hub.lock();
+        let now = wall_ms();
+        let slot = g.campaigns.get_mut(&1).expect("slot");
+        let mut log = EventLog::new(100);
+        slot.store.set_now(now);
+        for i in 0..50 {
+            log.push(1, stamp_at(now), lifecycle());
+            slot.store.journal(nanoprobe_sidecar::store::Entry::Spec {
+                entity: nanoprobe_sidecar::ids::EntityId(i),
+                rev: i,
+            });
+        }
+        let one = log.after(0, 1)[0].encoded_len() as u64;
+        slot.events = log;
+        // Both time limits (30 and 90 days) take none; the size limits do.
+        cfg.events_max_bytes = 10 * one;
+        cfg.journal_max_bytes = 300;
+        g.timers(&cfg);
+        let held = g.campaigns[&1].events.after(0, usize::MAX).len();
+        assert!((9..=11).contains(&held), "{held} events");
+        assert_eq!(g.campaigns[&1].events.last(), 50);
+        let entries = g.campaigns[&1].store.entries().len();
+        assert!((2..50).contains(&entries), "{entries} entries");
+        // A limit of 1 byte keeps the newest of each.
+        cfg.events_max_bytes = 1;
+        cfg.journal_max_bytes = 1;
+        g.next_retention_ms = 0;
+        g.timers(&cfg);
+        assert_eq!(g.campaigns[&1].events.after(0, usize::MAX).len(), 1);
+        assert_eq!(g.campaigns[&1].store.entries().len(), 1);
+        // Zero is no limit.
+        cfg.events_max_bytes = 0;
+        cfg.journal_max_bytes = 0;
+        g.campaigns
+            .get_mut(&1)
+            .expect("slot")
+            .events
+            .push(1, stamp_at(now), lifecycle());
+        g.next_retention_ms = 0;
+        g.timers(&cfg);
+        assert_eq!(g.campaigns[&1].events.after(0, usize::MAX).len(), 2);
+    }
+
+    #[test]
+    fn a_journal_size_limit_drains_a_backlog_one_batch_a_step() {
+        let (_dir, missions, mut cfg) = owed_setup();
+        let hub = folder_hub(&cfg, &missions, 0x8100);
+        add_and_activate(&hub, &cfg, true);
+        let mut g = hub.lock();
+        old_and_new_journal(&mut g, 2_500);
+        let before = journal_rows(&g);
+        assert!(before > 2_500);
+        // The time limit (30 days) takes none; a 1-byte size limit takes
+        // every row but the newest, a batch a step.
+        cfg.journal_max_bytes = 1;
+        g.journal_prune_due = true;
+        g.next_retention_ms = u64::MAX;
+        g.timers(&cfg);
+        assert_eq!(journal_rows(&g), before - JOURNAL_BATCH, "one batch");
+        assert!(g.journal_prune_due, "more remain");
+        for _ in 0..5 {
+            g.timers(&cfg);
+        }
+        assert_eq!(journal_rows(&g), 1, "the newest row stays");
+        assert!(!g.journal_prune_due);
+    }
+
+    #[test]
+    fn a_clock_behind_the_newest_event_deletes_no_event() {
+        let (dir, missions, mut cfg) = owed_setup();
+        cfg.event_retention = Duration::from_millis(1);
+        let hub = folder_hub(&cfg, &missions, 0xb100);
+        add_and_activate(&hub, &cfg, true);
+        let mut g = hub.lock();
+        g.slots_events_replace(1, file_log(dir.path(), 20, wall_ms() + 3_600_000));
+        g.next_retention_ms = u64::MAX;
+        g.events_prune_due = true;
+        g.timers(&cfg);
+        assert_eq!(g.campaigns[&1].events.first(), 1);
+        assert!(!g.events_prune_due, "the pass ends");
+    }
+
+    #[test]
+    fn with_the_store_off_old_journal_entries_and_events_leave_memory() {
+        let (_dir, missions, mut cfg) = owed_setup();
+        cfg.store = None;
+        cfg.event_retention = Duration::from_millis(50);
+        cfg.journal_retention = Duration::from_millis(50);
+        let hub = folder_hub(&cfg, &missions, 0xb200);
+        add_and_activate(&hub, &cfg, true);
+        let mut g = hub.lock();
+        let meta = pb::Campaign {
+            id: 2,
+            name: "c2".into(),
+            ..pb::Campaign::default()
+        };
+        g.add_campaign(&cfg, meta, "Caucasus".into()).expect("add");
+        g.campaigns.get_mut(&2).expect("slot").meta.state = pb::CampaignState::Finished as i32;
+        let now = wall_ms();
+        let entry = |i| nanoprobe_sidecar::store::Entry::Spec {
+            entity: nanoprobe_sidecar::ids::EntityId(i),
+            rev: i,
+        };
+        for id in [1, 2] {
+            let slot = g.campaigns.get_mut(&id).expect("slot");
+            let mut log = EventLog::new(100);
+            slot.store.set_now(now - 10_000);
+            for i in 0..3 {
+                log.push(id, stamp_at(now - 10_000 + i), lifecycle());
+                slot.store.journal(entry(i));
+            }
+            slot.store.set_now(now);
+            log.push(id, stamp_at(now), lifecycle());
+            slot.store.journal(entry(9));
+            slot.events = log;
+        }
+        // The server log keeps 30 days with the store off.
+        for _ in 0..3 {
+            g.server_log
+                .push(0, stamp_at(now - 40 * 86_400_000), lifecycle());
+        }
+        g.server_log.push(0, stamp_at(now), lifecycle());
+        g.timers(&cfg);
+        let held = |l: &EventLog| l.after(0, usize::MAX).len();
+        assert_eq!(held(&g.campaigns[&1].events), 1, "the newest stays");
+        assert_eq!(g.campaigns[&1].store.entries().len(), 1);
+        assert_eq!(held(&g.server_log), 1);
+        assert_eq!(held(&g.campaigns[&2].events), 4, "finished: untouched");
+        assert_eq!(g.campaigns[&2].store.entries().len(), 4);
+        assert!(g.next_retention_ms > 0, "the hour passed");
+    }
+
     #[test]
     fn a_finished_campaigns_journal_is_never_pruned() {
         let (_dir, missions, mut cfg) = owed_setup();
-        if let Some(sf) = cfg.store.as_mut() {
-            sf.journal_retention = Duration::from_millis(1);
-        }
+        cfg.journal_retention = Duration::from_millis(1);
         let hub = folder_hub(&cfg, &missions, 0xa000);
         hub.start();
         add_and_activate(&hub, &cfg, true);

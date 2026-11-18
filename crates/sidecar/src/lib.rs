@@ -16,6 +16,7 @@ pub mod mirror;
 pub mod players;
 pub mod reconciler;
 pub mod replay;
+pub mod retention;
 #[cfg(feature = "disk")]
 pub mod server;
 #[cfg(feature = "disk")]

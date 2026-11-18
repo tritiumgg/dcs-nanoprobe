@@ -1296,6 +1296,14 @@ impl FakeSim {
         &self.ledger
     }
 
+    /// Forget what the ledger recorded and the dead objects kept for a
+    /// revival, for a long run that checks no invariant from them and must
+    /// not grow with them.
+    pub fn clear_ledger(&mut self) {
+        self.ledger = Ledger::default();
+        self.graves.clear();
+    }
+
     /// The agent's boot.
     pub fn agent_boot(&self) -> u64 {
         self.agent_boot

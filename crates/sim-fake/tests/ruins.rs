@@ -570,6 +570,7 @@ fn ruins_restored_while_paused_use_the_burst() {
             materialize_per_frame: 2,
             on_lost: LostPolicy::Report,
             destroy_retries: 3,
+            ..nanoprobe_sidecar::reconciler::Config::default()
         },
     );
     for id in &ids {

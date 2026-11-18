@@ -58,6 +58,7 @@ impl MissionService for Mission {
                 agent_interface: g.link.agent_interface,
                 store_free_bytes: space.map(|(free, _)| free),
                 store_space_low: space.is_some_and(|(free, held)| free < held),
+                store_size: g.store_size(),
                 ..ServerStatus::default()
             }),
         }))

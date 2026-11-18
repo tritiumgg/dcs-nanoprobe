@@ -153,6 +153,11 @@ impl Reconciler {
             .map(|b| (b.unit.0, b.group.0))
     }
 
+    /// Whether the object is an adopted unit's.
+    pub(super) fn adopted_object(&self, object: u64) -> bool {
+        self.adopted.rows.contains_key(&object)
+    }
+
     /// Whether the entity is an adopted unit or group of the loaded mission.
     pub fn is_adopted(&self, id: EntityId) -> bool {
         id.0 != 0

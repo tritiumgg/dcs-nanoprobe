@@ -278,13 +278,31 @@ message PositionBatch {
   Stamp sampled = 6;
 }
 
+// Who removed an entity (spec/world.md, "Removal" and "Expiry").
+enum RemovalCause {
+  REMOVAL_CAUSE_UNSPECIFIED = 0;
+  // The controller, with RemoveEntity.
+  REMOVAL_CAUSE_CONTROLLER = 1;
+  // The sidecar: a dead group past dead_keep_h.
+  REMOVAL_CAUSE_EXPIRED = 2;
+}
+
+// A group or static the watcher held was removed. It follows the upsert of
+// the entity's last state.
+message Removal {
+  uint64 id = 1;
+  RemovalCause cause = 2;
+}
+
 message WorldChange {
   oneof change {
     // An entity appeared or changed anything but a position.
     Entity upsert = 1;
-    // An entity left the store.
+    // An entity the watcher held left the store (its rows were purged)
+    // before the watch read its removal.
     uint64 removed_id = 2;
     PositionBatch positions = 3;
+    Removal removal = 4;
   }
 }
 

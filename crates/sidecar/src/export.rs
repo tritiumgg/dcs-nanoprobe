@@ -467,7 +467,7 @@ mod tests {
             .expect("conn")
             .execute_batch("UPDATE journal SET at_ms = seq * 1000")
             .expect("stamp");
-        s.prune_journal(1_500, 1_000_000, 1_000).expect("prune");
+        s.prune_journal(1_500, 1_000_000, 1_000, 0).expect("prune");
         let mut seqs = Vec::new();
         export(3, &c.store_path(id), &c.events_path(id), &mut |l| {
             let v: Value = serde_json::from_slice(&l).expect("json");

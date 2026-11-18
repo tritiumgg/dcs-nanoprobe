@@ -2368,6 +2368,7 @@ fn unanswered_spawns_hold_the_plan_to_the_budget() {
             materialize_per_frame: N,
             on_lost: LostPolicy::Report,
             destroy_retries: 3,
+            ..RecConfig::default()
         },
     );
     for _ in 0..100 {

@@ -475,6 +475,15 @@ pub struct World {
     /// Statics created destroyed ([`World::create_ruin`]): each has a death
     /// fact and never died in DCS.
     born_dead: BTreeSet<EntityId>,
+    /// The simulated wall clock the store reads, in milliseconds. It
+    /// starts at 0.
+    pub clock_ms: u64,
+    /// How far one frame moves the clock. 0 by default: time stands still,
+    /// so nothing is purged or expires.
+    pub frame_ms: u64,
+    /// A long run that measures memory: no check that keeps a record of
+    /// the run ([`World::lean`]).
+    lean: bool,
 }
 
 /// The theater every group is on.
@@ -530,6 +539,7 @@ impl World {
                 materialize_per_frame: 2,
                 on_lost,
                 destroy_retries: 3,
+                ..RecConfig::default()
             },
         )
     }
@@ -549,9 +559,35 @@ impl World {
             sidecar_boot: 1,
             trace: Vec::new(),
             born_dead: BTreeSet::new(),
+            clock_ms: 0,
+            frame_ms: 0,
+            lean: false,
         };
         w.sim.attach(w.sidecar_boot);
         w
+    }
+
+    /// Keep nothing that grows with the run: the recording, the fake sim's
+    /// ledger and dead objects, and the store's written journal are dropped
+    /// after each frame,
+    /// and the journal and safety checks, which read them, are skipped. For
+    /// a churn test that measures the sidecar's memory. The convergence
+    /// check ([`World::settle`]) still runs.
+    pub fn lean(&mut self) {
+        self.lean = true;
+        self.store.keep_journal(false);
+    }
+
+    /// The reconciler's settings.
+    pub fn rec_config(&self) -> RecConfig {
+        self.rec_cfg
+    }
+
+    /// Run the reconciler with other settings, keeping its state: a new
+    /// reconciler over the same store, as at a sidecar restart.
+    pub fn set_rec_config(&mut self, cfg: RecConfig) {
+        self.rec_cfg = cfg;
+        self.restart_sidecar();
     }
 
     /// Create a static destroyed, as `PutStatic` with `dead` does.
@@ -605,6 +641,8 @@ impl World {
     /// that far. It then starts again from the store.
     fn tick_crashing(&mut self, crash_after: Option<usize>) -> Result<(), Violation> {
         quiet_crash_panics();
+        self.clock_ms = self.clock_ms.saturating_add(self.frame_ms);
+        self.store.set_now(self.clock_ms);
         self.sim.frame();
         let mut logged = Logged {
             sim: &mut self.sim,
@@ -622,6 +660,14 @@ impl World {
             Err(p) => std::panic::resume_unwind(p),
         };
         let sent = logged.sent;
+        if self.lean {
+            self.recording.batches.clear();
+            self.sim.clear_ledger();
+            if crashed {
+                self.restart_sidecar();
+            }
+            return Ok(());
+        }
         check_journal(&self.store, &self.scan, &sent)?;
         if crashed {
             self.restart_sidecar();
@@ -780,7 +826,7 @@ impl World {
         self.store.seed_epoch(epoch);
         // The checks read the journal from memory; an opened store starts
         // with none.
-        self.store.keep_journal(true);
+        self.store.keep_journal(!self.lean);
         self.scan = Scan {
             before: self.sim.ledger().taken.keys().copied().collect(),
             // Deaths the earlier store read and acknowledged. Those unread,

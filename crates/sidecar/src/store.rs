@@ -15,6 +15,7 @@ use crate::grid::Grid;
 use crate::ids::{CampaignId, EntityId, MAX_ID};
 use crate::intents::{self, Intent};
 use crate::lifecycle::{self, State, Trigger};
+use crate::retention;
 use crate::stock::{Item, Stock};
 
 #[cfg(feature = "disk")]
@@ -41,6 +42,21 @@ mod disk {
         pub fn commit(&mut self) -> Result<(), std::convert::Infallible> {
             Ok(())
         }
+
+        /// Nothing on disk to count.
+        pub(super) fn disk_journal_extent(&self) -> (u64, Option<u64>) {
+            (0, None)
+        }
+
+        /// Nothing on disk to count.
+        pub(super) fn disk_journal_bytes(&self) -> u64 {
+            0
+        }
+    }
+
+    /// The size of an entry in a file this build never writes.
+    pub(crate) fn entry_bytes(_: &super::Entry) -> u64 {
+        0
     }
 }
 
@@ -248,6 +264,24 @@ impl Unit {
     }
 }
 
+/// What a store holds, by [`Store::sizes`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Sizes {
+    /// Groups and statics neither dead nor removed.
+    pub live: u64,
+    /// Dead groups, not statics, not removed.
+    pub dead: u64,
+    /// Dead statics, not removed.
+    pub ruins: u64,
+    /// Removed groups and statics whose rows are kept.
+    pub awaiting_purge: u64,
+    /// Unit rows.
+    pub units: u64,
+    /// The removal time of the oldest of those awaiting purge,
+    /// milliseconds since the Unix epoch.
+    pub oldest_removal_ms: Option<u64>,
+}
+
 /// A managed group or static.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Group {
@@ -282,6 +316,17 @@ pub struct Group {
     /// holds none of it, and the API no longer lists it. Its ID is never
     /// reused.
     pub removed: bool,
+    /// When it was removed, by the controller or by the dead groups' expiry:
+    /// wall-clock milliseconds since the Unix epoch. `None` in a body
+    /// written without it: the purge counts from the first step that sees it
+    /// (spec/world.md, "Removal").
+    pub removed_at_ms: Option<u64>,
+    /// The removal was the dead groups' expiry, not the controller's.
+    pub expired: bool,
+    /// When it became `dead`, wall-clock milliseconds since the Unix epoch.
+    /// `None` in a body written without it: the expiry counts from the first
+    /// step that sees it (spec/world.md, "Expiry").
+    pub dead_at_ms: Option<u64>,
     /// Controller options by DCS option ID. Not spec: a change moves only
     /// the store revision (spec/world.md, "Revisions").
     pub options: BTreeMap<u32, Lv>,
@@ -373,6 +418,15 @@ pub enum Outcome {
     NotSent,
 }
 
+/// Who removed an entity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RemoveCause {
+    /// The controller, through the API.
+    Controller,
+    /// The sidecar: a dead group past `dead_keep_h` (spec/world.md, "Expiry").
+    Expired,
+}
+
 /// One journal entry. Every entry is written before what it describes is
 /// acted on.
 #[derive(Clone, Debug, PartialEq)]
@@ -396,8 +450,16 @@ pub enum Entry {
         /// The extension's name.
         name: String,
     },
-    /// The controller removed a group, static or marker.
+    /// The controller removed a group, static or marker, or the sidecar
+    /// expired a dead group.
     Removed {
+        /// The entity.
+        entity: EntityId,
+        /// Who removed it.
+        cause: RemoveCause,
+    },
+    /// A removed entity's rows left the store (spec/world.md, "Removal").
+    Purged {
         /// The entity.
         entity: EntityId,
     },
@@ -658,6 +720,43 @@ pub struct Store {
     dirty: BTreeSet<EntityId>,
     /// Every row may have changed since the last write.
     dirty_all: bool,
+    /// Groups changed since the last checkpoint, a unit by its group: the
+    /// checkpoint compares only these, with their members, unless
+    /// `dirty_all` (spec/persistence.md, "Writes").
+    since_checkpoint: BTreeSet<EntityId>,
+    /// Every row may have changed since the last checkpoint: a bulk change
+    /// whose `dirty_all` a step commit then cleared. The next checkpoint
+    /// compares every row.
+    checkpoint_all: bool,
+    /// Groups changed since the reconciler's plan last took them, a unit by
+    /// its group, and whether every group may have changed. The plan keeps
+    /// its work set from them.
+    touched: BTreeSet<EntityId>,
+    touched_all: bool,
+    /// The wall-clock time of the step, milliseconds since the Unix epoch,
+    /// as the driver sets it. Removal and death times are read from it.
+    now_ms: u64,
+    /// Removed groups and statics whose rows are still kept.
+    removed_ids: BTreeSet<EntityId>,
+    /// Groups and statics purged, by the revision of their purge, while the
+    /// change ring holds that revision.
+    purged_recent: BTreeSet<(u64, EntityId)>,
+    /// Dead groups (not statics) that are not removed: the expiry's
+    /// candidates.
+    dead_ids: BTreeSet<EntityId>,
+    /// The wall-clock time and the encoded size of each journal entry in
+    /// `journal`, for the retention of a store in memory. The size is 0 in a
+    /// store with a file.
+    journal_at: Vec<(u64, u64)>,
+    /// The sum of `journal_at`'s sizes: a running count, so no pass sums it.
+    journal_mem_bytes: u64,
+    /// Since the store was made or opened: removed entities purged, dead
+    /// groups expired, late deaths dropped for purged units, and drift
+    /// destroys of objects of entities the store does not hold.
+    purged: u64,
+    expired: u64,
+    purged_deaths: u64,
+    orphan_destroys: u64,
     disk: disk::Slot,
 }
 
@@ -785,6 +884,20 @@ impl Store {
             route_events: Vec::new(),
             dirty: BTreeSet::new(),
             dirty_all: true,
+            since_checkpoint: BTreeSet::new(),
+            checkpoint_all: true,
+            touched: BTreeSet::new(),
+            touched_all: true,
+            now_ms: 0,
+            removed_ids: BTreeSet::new(),
+            purged_recent: BTreeSet::new(),
+            dead_ids: BTreeSet::new(),
+            journal_at: Vec::new(),
+            journal_mem_bytes: 0,
+            purged: 0,
+            expired: 0,
+            purged_deaths: 0,
+            orphan_destroys: 0,
             disk: disk::Slot::default(),
         }
     }
@@ -849,15 +962,37 @@ impl Store {
     }
 
     /// Remove a group or static: it goes to campaign authority, so the
-    /// reconciler takes it out of DCS, and it is hidden from the API. A
-    /// removed entity stays in the store, so its ID is never reused and its
-    /// objects in DCS are still destroyed as drift.
+    /// reconciler takes it out of DCS, and it is hidden from the API. Its
+    /// units leave the grid. The rows stay until the reconciler purges them
+    /// ([`Store::purge`]); the ID is never given again either way.
     pub fn remove_entity(&mut self, id: EntityId) -> Result<(), StoreError> {
+        self.remove_as(id, RemoveCause::Controller)
+    }
+
+    /// Expire a dead group (not a static): a removal by the sidecar, with no
+    /// command to DCS (spec/world.md, "Expiry"). Returns whether it expired.
+    pub fn expire(&mut self, id: EntityId) -> Result<bool, StoreError> {
+        let g = self.group(id).ok_or(StoreError::NoSuchEntity(id))?;
+        if g.kind != Kind::Group || g.state != State::Dead || g.removed {
+            return Ok(false);
+        }
+        self.remove_as(id, RemoveCause::Expired)?;
+        self.expired += 1;
+        Ok(true)
+    }
+
+    fn remove_as(&mut self, id: EntityId, cause: RemoveCause) -> Result<(), StoreError> {
         if self.group_mut(id)?.removed {
             return Ok(());
         }
         self.set_authority(id, Authority::Campaign)?;
-        self.group_mut(id)?.removed = true;
+        let now = self.clock_ms();
+        let g = self.group_mut(id)?;
+        g.removed = true;
+        g.removed_at_ms = Some(now);
+        g.expired = cause == RemoveCause::Expired;
+        self.removed_ids.insert(id);
+        self.dead_ids.remove(&id);
         // The controller's removal releases every member's mark: it is the
         // one way out of a mark kept across a generation (spec/world.md,
         // "Respawn gate").
@@ -868,10 +1003,267 @@ impl Store {
                 u.removed = false;
                 u.left_logged = false;
             }
+            self.grid.remove(m);
         }
-        self.journal(Entry::Removed { entity: id });
+        self.journal(Entry::Removed { entity: id, cause });
         self.touch(id);
         Ok(())
+    }
+
+    /// Take a removed entity's rows out of the store: the group or static
+    /// and its units, from memory and, at the next write, from the file.
+    /// The caller has checked that DCS holds nothing of it. Returns its
+    /// members, or `None` when it is not a removed entity.
+    pub fn purge(&mut self, id: EntityId) -> Option<Vec<EntityId>> {
+        if !self.groups.get(&id).is_some_and(|g| g.removed) {
+            return None;
+        }
+        self.journal(Entry::Purged { entity: id });
+        // Before the rows go: the revision moves and the write compares the
+        // group's row, which is gone, so the file drops it and its members.
+        self.touch(id);
+        self.purged_recent.insert((self.rev, id));
+        let g = self.groups.remove(&id).expect("removed group");
+        for m in &g.members {
+            self.units.remove(m);
+            self.grid.remove(*m);
+        }
+        self.removed_ids.remove(&id);
+        self.dead_ids.remove(&id);
+        self.purged += 1;
+        Some(g.members)
+    }
+
+    /// The removed groups and statics whose rows are kept, by ID.
+    pub fn removed_ids(&self) -> impl Iterator<Item = EntityId> + '_ {
+        self.removed_ids.iter().copied()
+    }
+
+    /// The dead groups (not statics) that are not removed, by ID.
+    pub fn dead_ids(&self) -> impl Iterator<Item = EntityId> + '_ {
+        self.dead_ids.iter().copied()
+    }
+
+    /// Give a removed or dead group the step's time as its removal or death
+    /// time, when its body was written without one. Returns the time.
+    pub fn stamp_removed(&mut self, id: EntityId) -> Option<u64> {
+        let now = self.clock_ms();
+        let g = self.groups.get(&id)?;
+        if let Some(t) = g.removed_at_ms {
+            return Some(t);
+        }
+        self.group_mut(id).ok()?.removed_at_ms = Some(now);
+        Some(now)
+    }
+
+    /// Test accessor: clear every group's removal and death time, as a body
+    /// written by an older build has none.
+    #[doc(hidden)]
+    pub fn forget_stamps(&mut self) {
+        let ids: Vec<EntityId> = self.groups.keys().copied().collect();
+        for id in ids {
+            let g = self.group_mut(id).expect("group");
+            g.removed_at_ms = None;
+            g.dead_at_ms = None;
+        }
+    }
+
+    /// As [`Store::stamp_removed`], for the time a group became `dead`.
+    pub fn stamp_dead(&mut self, id: EntityId) -> Option<u64> {
+        let now = self.clock_ms();
+        let g = self.groups.get(&id)?;
+        if let Some(t) = g.dead_at_ms {
+            return Some(t);
+        }
+        self.group_mut(id).ok()?.dead_at_ms = Some(now);
+        Some(now)
+    }
+
+    /// Removed entities purged and dead groups expired since the store was
+    /// made or opened.
+    pub fn purged_expired(&self) -> (u64, u64) {
+        (self.purged, self.expired)
+    }
+
+    /// Late deaths dropped for purged units and drift destroys of objects of
+    /// entities the store does not hold, since the store was made or opened.
+    pub fn purge_drops(&self) -> (u64, u64) {
+        (self.purged_deaths, self.orphan_destroys)
+    }
+
+    /// Count a late death dropped because its unit was purged.
+    pub fn count_purged_death(&mut self) {
+        self.purged_deaths += 1;
+    }
+
+    /// Count a drift destroy of an object of an entity the store does not
+    /// hold.
+    pub fn count_orphan_destroy(&mut self) {
+        self.orphan_destroys += 1;
+    }
+
+    /// The bytes of the journal's entries kept, as the size limit counts
+    /// them: those written to the file of a store on disk, or all those of
+    /// a store in memory.
+    pub fn journal_bytes(&self) -> u64 {
+        if self.disk.0.is_some() {
+            return self.disk_journal_bytes();
+        }
+        self.journal_mem_bytes
+    }
+
+    /// Counts of what the store holds, from one pass over the groups.
+    pub fn sizes(&self) -> Sizes {
+        let mut s = Sizes {
+            units: self.units.len() as u64,
+            ..Sizes::default()
+        };
+        for g in self.groups.values() {
+            if g.removed {
+                s.awaiting_purge += 1;
+                if let Some(t) = g.removed_at_ms {
+                    s.oldest_removal_ms = Some(s.oldest_removal_ms.map_or(t, |o| o.min(t)));
+                }
+            } else if g.state != State::Dead {
+                s.live += 1;
+            } else if g.kind == Kind::Group {
+                s.dead += 1;
+            } else {
+                s.ruins += 1;
+            }
+        }
+        s
+    }
+
+    /// The journal rows held and the time of the oldest, in milliseconds
+    /// since the Unix epoch: the rows written to the file of a store on
+    /// disk, or all those of a store in memory.
+    pub fn journal_extent(&self) -> (u64, Option<u64>) {
+        if self.disk.0.is_some() {
+            return self.disk_journal_extent();
+        }
+        (
+            self.journal.len() as u64,
+            self.journal_at.first().map(|a| a.0),
+        )
+    }
+
+    /// The groups the next checkpoint compares: those marked since the last
+    /// one.
+    pub fn checkpoint_marks(&self) -> usize {
+        self.since_checkpoint.len()
+    }
+
+    /// Whether the next checkpoint compares every row (after a bulk change).
+    pub fn checkpoint_compares_all(&self) -> bool {
+        self.checkpoint_all || self.dirty_all
+    }
+
+    /// The next `EntityId` the store gives. Every ID below it was given
+    /// once and is never given again.
+    pub fn next_entity(&self) -> u64 {
+        self.next_entity
+    }
+
+    /// The step's wall-clock time, or the system's when no step set one:
+    /// the time journal entries, removals and deaths are stamped with.
+    fn clock_ms(&self) -> u64 {
+        if self.now_ms != 0 {
+            return self.now_ms;
+        }
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+    }
+
+    /// Set the step's wall-clock time, milliseconds since the Unix epoch.
+    pub fn set_now(&mut self, ms: u64) {
+        self.now_ms = ms;
+    }
+
+    /// The step's wall-clock time, milliseconds since the Unix epoch.
+    pub fn now_ms(&self) -> u64 {
+        self.now_ms
+    }
+
+    /// The groups changed since the last call, and whether every group may
+    /// have changed (a new store, a load, a new mission generation). For the
+    /// reconciler's work set.
+    pub fn take_touched(&mut self) -> (BTreeSet<EntityId>, bool) {
+        let all = std::mem::take(&mut self.touched_all);
+        (std::mem::take(&mut self.touched), all)
+    }
+
+    /// Rebuild what the store derives from its rows: the removed and dead
+    /// sets. After a load.
+    #[cfg_attr(not(feature = "disk"), allow(dead_code))]
+    pub(crate) fn reindex(&mut self) {
+        self.removed_ids = self
+            .groups
+            .values()
+            .filter(|g| g.removed)
+            .map(|g| g.id)
+            .collect();
+        self.dead_ids = self
+            .groups
+            .values()
+            .filter(|g| !g.removed && g.kind == Kind::Group && g.state == State::Dead)
+            .map(|g| g.id)
+            .collect();
+        self.touched_all = true;
+    }
+
+    /// Delete journal entries from a store in memory (spec/persistence.md,
+    /// "Journal retention"), by the rule of the journal on disk: those older
+    /// than `retention_ms` before the earlier of `now_ms` and the newest
+    /// entry's time (0 turns that off; skipped when the clock is behind the
+    /// newest entry), and while the bytes of the entries kept, as the journal
+    /// encodes them, are over `max_bytes` (0 turns that off). A store on disk
+    /// holds only what it has not written, and its entries are not deleted
+    /// here. The newest entry is kept. Returns how many were deleted.
+    pub fn prune_memory_journal(
+        &mut self,
+        now_ms: u64,
+        retention_ms: u64,
+        max_bytes: u64,
+    ) -> usize {
+        if self.disk.0.is_some() || self.journal.len() < 2 {
+            return 0;
+        }
+        let newest_at = self.journal_at.last().map_or(0, |a| a.0);
+        let before_ms = if retention_ms == 0 || now_ms < newest_at {
+            0
+        } else {
+            now_ms.min(newest_at).saturating_sub(retention_ms).max(1)
+        };
+        let total = self.journal_mem_bytes;
+        let excess = if max_bytes == 0 {
+            0
+        } else {
+            total.saturating_sub(max_bytes)
+        };
+        let batch: Vec<retention::Row> = self
+            .journal_at
+            .iter()
+            .enumerate()
+            .map(|(i, a)| (i as u64, a.0, a.1))
+            .collect();
+        let newest = batch.len() as u64 - 1;
+        let cut = retention::cut(
+            &batch,
+            usize::MAX,
+            newest,
+            (before_ms != 0).then_some(before_ms),
+            excess,
+        );
+        let Some(last) = cut.last else {
+            return 0;
+        };
+        let n = last as usize + 1;
+        self.journal.drain(..n);
+        let gone: u64 = self.journal_at.drain(..n).map(|a| a.1).sum();
+        self.journal_mem_bytes -= gone;
+        n
     }
 
     /// The owner the controller wants for an airbase, if it set one.
@@ -1148,6 +1540,18 @@ impl Store {
         while self.changes.len() > self.changes_keep {
             self.changes.pop_front();
         }
+        // The purges a watch may still read of: those whose change is kept.
+        let oldest = self.changes.front().map_or(u64::MAX, |c| c.0);
+        while self.purged_recent.first().is_some_and(|(r, _)| *r < oldest) {
+            self.purged_recent.pop_first();
+        }
+    }
+
+    /// Whether the group or static was purged at a revision the change ring
+    /// still holds: a watch resuming from before it is told it left the
+    /// store.
+    pub fn was_purged(&self, id: EntityId) -> bool {
+        self.purged_recent.iter().any(|(_, e)| *e == id)
     }
 
     /// Mark an entity's row as changed for the next write: a unit marks its
@@ -1155,6 +1559,8 @@ impl Store {
     fn mark(&mut self, id: EntityId) {
         let g = self.units.get(&id).map_or(id, |u| u.group);
         self.dirty.insert(g);
+        self.since_checkpoint.insert(g);
+        self.touched.insert(g);
     }
 
     /// Append an entry to the journal. The driver writes it with the rest
@@ -1170,7 +1576,14 @@ impl Store {
             }
             _ => {}
         }
+        let bytes = if self.disk.0.is_some() {
+            0
+        } else {
+            disk::entry_bytes(&e)
+        };
         self.journal.push(e);
+        self.journal_at.push((self.clock_ms(), bytes));
+        self.journal_mem_bytes += bytes;
     }
 
     /// The journal entries held in memory, oldest first: every entry of a
@@ -1307,6 +1720,9 @@ impl Store {
                 spec_rev: 1,
                 observed_coalition: None,
                 removed: false,
+                removed_at_ms: None,
+                expired: false,
+                dead_at_ms: None,
                 options: BTreeMap::new(),
                 order: None,
                 order_rev: 0,
@@ -1445,6 +1861,8 @@ impl Store {
     fn group_mut(&mut self, id: EntityId) -> Result<&mut Group, StoreError> {
         if self.groups.contains_key(&id) {
             self.dirty.insert(id);
+            self.since_checkpoint.insert(id);
+            self.touched.insert(id);
         }
         self.groups.get_mut(&id).ok_or(StoreError::NoSuchEntity(id))
     }
@@ -1613,11 +2031,18 @@ impl Store {
             to,
             spec_rev: None,
         });
+        let now = self.clock_ms();
         let g = self.group_mut(id)?;
         g.state = to;
         if to != State::Dematerializing {
             g.captured = false;
             g.destroy_failures = 0;
+        }
+        if to == State::Dead {
+            g.dead_at_ms = Some(now);
+            if g.kind == Kind::Group && !g.removed {
+                self.dead_ids.insert(id);
+            }
         }
         self.touch(id);
         Ok(to)
@@ -1856,7 +2281,8 @@ impl Store {
         let (gid, at) = (u.group, u.state.at);
         self.journal(Entry::Revived { unit, object });
         self.touch(unit);
-        if let Some(g) = self.groups.get(&gid) {
+        // A removed entity's units stay out of the grid.
+        if let Some(g) = self.groups.get(&gid).filter(|g| !g.removed) {
             self.grid.set(unit, &g.theater, at.x, at.z);
         }
         true
@@ -1884,6 +2310,8 @@ impl Store {
     pub fn new_generation(&mut self) {
         self.break_samples();
         self.dirty_all = true;
+        self.checkpoint_all = true;
+        self.touched_all = true;
         let mut cleared = Vec::new();
         for u in self.units.values_mut() {
             u.object = 0;
@@ -1962,8 +2390,17 @@ impl Store {
     /// Forget the last samples of every group's lead unit: no segment is made
     /// across a new mission, a `HELLO` or another break in the samples.
     pub fn break_samples(&mut self) {
-        for g in self.groups.values_mut() {
-            g.last_lead = None;
+        let held: Vec<EntityId> = self
+            .groups
+            .values()
+            .filter(|g| g.last_lead.is_some())
+            .map(|g| g.id)
+            .collect();
+        // A change of the row: the revision moves, so the next checkpoint
+        // writes it.
+        for id in held {
+            self.groups.get_mut(&id).expect("group").last_lead = None;
+            self.touch(id);
         }
     }
 
@@ -1988,7 +2425,9 @@ impl Store {
         let Some(g) = self.groups.get(&gid) else {
             return;
         };
-        self.grid.set(unit, &g.theater, at.x, at.z);
+        if !g.removed {
+            self.grid.set(unit, &g.theater, at.x, at.z);
+        }
         let lead = g
             .members
             .iter()
@@ -2113,8 +2552,11 @@ impl Store {
         {
             u.state = state;
             u.captured.life_percent = None;
-            let theater = self.groups[&u.group].theater.clone();
-            self.grid.set(unit, &theater, state.at.x, state.at.z);
+            let g = &self.groups[&u.group];
+            if !g.removed {
+                let theater = g.theater.clone();
+                self.grid.set(unit, &theater, state.at.x, state.at.z);
+            }
             self.touch(unit);
         }
     }
@@ -2201,6 +2643,96 @@ mod tests {
             label: String::new(),
             extra: Lv::Nil,
         }
+    }
+
+    #[test]
+    fn a_removed_groups_units_leave_the_grid_and_do_not_come_back() {
+        let mut s = Store::new(CampaignId(1), 10);
+        let g = s.create_group(spec(2)).expect("group");
+        let members = s.group(g).expect("g").members.clone();
+        let near = |s: &Store| {
+            s.grid()
+                .within("Caucasus", 0.0, 0.0, 1_000.0)
+                .into_iter()
+                .filter(|u| members.contains(u))
+                .count()
+        };
+        assert_eq!(near(&s), 2);
+        s.remove_entity(g).expect("remove");
+        assert_eq!(near(&s), 0, "removed");
+        let at = Point {
+            x: 5.0,
+            y: 0.0,
+            z: 5.0,
+        };
+        s.observe_position(members[0], at);
+        s.observe_capture(
+            members[1],
+            UnitState {
+                at,
+                ..UnitState::default()
+            },
+        );
+        s.death(members[0]).expect("death");
+        s.revive(members[0], 77);
+        assert_eq!(near(&s), 0, "no sample, capture or revival puts them back");
+    }
+
+    #[cfg(feature = "disk")]
+    #[test]
+    fn a_memory_journal_is_pruned_by_time_and_by_size_and_keeps_the_newest() {
+        let spec_entry = |i: u64| Entry::Spec {
+            entity: EntityId(i),
+            rev: i,
+        };
+        let fill = || {
+            let mut s = Store::new(CampaignId(1), 3);
+            for i in 1..=9u64 {
+                s.set_now(i * 1_000);
+                s.journal(spec_entry(i));
+            }
+            s
+        };
+        let one = disk::entry_bytes(&spec_entry(1));
+        assert!(one > 0);
+        // No limit: nothing.
+        assert_eq!(fill().prune_memory_journal(9_000, 0, 0), 0);
+        // Time only: entries stamped before 4,000.
+        let mut s = fill();
+        assert_eq!(s.prune_memory_journal(9_000, 5_000, 0), 3);
+        assert_eq!(s.entries().len(), 6);
+        // Size only: keep about three entries.
+        let mut s = fill();
+        assert_eq!(s.prune_memory_journal(9_000, 0, 3 * one), 6);
+        assert_eq!(s.entries().len(), 3);
+        // Both: the time rule takes 3, the size rule takes more.
+        let mut s = fill();
+        assert_eq!(s.prune_memory_journal(9_000, 5_000, 3 * one), 6);
+        // The newest stays however small the limit.
+        let mut s = fill();
+        assert_eq!(s.prune_memory_journal(9_000, 0, 1), 8);
+        assert_eq!(s.entries().len(), 1);
+        assert_eq!(s.prune_memory_journal(9_000, 0, 1), 0);
+    }
+
+    /// A clock behind the newest entry's time deletes nothing by time.
+    #[cfg(feature = "disk")]
+    #[test]
+    fn a_memory_journal_is_not_pruned_by_time_while_the_clock_is_behind_the_newest_entry() {
+        let mut s = Store::new(CampaignId(1), 3);
+        for i in 1..=5u64 {
+            s.set_now(i * 1_000);
+            s.journal(Entry::Spec {
+                entity: EntityId(i),
+                rev: i,
+            });
+        }
+        // The clock is behind the newest entry (5,000).
+        assert_eq!(s.prune_memory_journal(2_500, 1_000, 0), 0);
+        assert_eq!(s.entries().len(), 5);
+        // With the clock at the newest entry, the old ones go.
+        assert_eq!(s.prune_memory_journal(5_000, 1_000, 0), 3);
+        assert_eq!(s.entries().len(), 2);
     }
 
     #[test]

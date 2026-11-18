@@ -33,6 +33,7 @@ use crate::sim::wire::{Body, Command, Input, Object, ObjectGone, Seen, gone_reas
 use crate::sim::{RawRecord, SimAdapter};
 use crate::stock::{Item, Stock};
 mod adopt;
+mod bound;
 mod debris;
 mod players;
 mod ruins;
@@ -79,6 +80,12 @@ pub struct Config {
     /// sending them: a dematerializing entity goes `lost`. At least 1; a 0
     /// counts as 1.
     pub destroy_retries: u32,
+    /// `removed_keep_h`, in milliseconds: how long a removed entity's rows
+    /// stay before the purge may take them (spec/world.md, "Removal").
+    pub removed_keep_ms: u64,
+    /// `dead_keep_h`, in milliseconds: how long a dead group stays before it
+    /// expires; 0 never (spec/world.md, "Expiry").
+    pub dead_keep_ms: u64,
 }
 
 impl Default for Config {
@@ -87,6 +94,8 @@ impl Default for Config {
             materialize_per_frame: 1,
             on_lost: LostPolicy::Report,
             destroy_retries: 3,
+            removed_keep_ms: 3_600_000,
+            dead_keep_ms: 86_400_000,
         }
     }
 }
@@ -156,6 +165,11 @@ pub struct Counters {
     pub ruins_refused: u64,
     /// Destroys written for a live object bound to a dead static.
     pub ruins_revived: u64,
+    /// Death facts dropped because their unit was purged.
+    pub purged_deaths: u64,
+    /// Drift destroys written for objects whose names are of entities the
+    /// store does not hold (`bound.rs`).
+    pub orphan_destroys: u64,
 }
 
 impl Counters {
@@ -185,6 +199,8 @@ impl Counters {
         self.ruins_spawned += o.ruins_spawned;
         self.ruins_refused += o.ruins_refused;
         self.ruins_revived += o.ruins_revived;
+        self.purged_deaths += o.purged_deaths;
+        self.orphan_destroys += o.orphan_destroys;
     }
 }
 
@@ -244,12 +260,25 @@ struct EnumRun {
     /// `SEEN` IDs of the enumeration.
     seen: u32,
     gap: bool,
+    /// The step's wall-clock time when it began.
+    began_ms: u64,
 }
 
 /// The reconciler.
 #[derive(Debug)]
 pub struct Reconciler {
     cfg: Config,
+    /// The plan's work set and the campaign, agent boot, generation and
+    /// theater it was built for (`bound.rs`).
+    work: BTreeSet<EntityId>,
+    work_key: Option<(u64, u64, u32, String)>,
+    /// When the purge and the expiry next look, in the step's clock.
+    next_bound_ms: u64,
+    /// The step's wall-clock time when the last full enumeration used began.
+    enum_used_from_ms: Option<u64>,
+    /// Objects in DCS of entities the store does not hold, by the entity a
+    /// destroy names, in the loaded generation (`bound.rs`).
+    orphans: BTreeMap<EntityId, bound::Orphan>,
     /// The boot of the agent last attached, 0 for none since this start.
     agent_boot: u64,
     /// A `HELLO` was read and no write has failed since.
@@ -466,6 +495,11 @@ impl Reconciler {
         }
         Reconciler {
             cfg,
+            work: BTreeSet::new(),
+            work_key: None,
+            next_bound_ms: 0,
+            enum_used_from_ms: None,
+            orphans: BTreeMap::new(),
             agent_boot: store.loaded().map_or(0, |l| l.agent_boot),
             attached: false,
             epoch: 0,
@@ -715,8 +749,11 @@ impl Reconciler {
             Input::ObjectGone(g) => {
                 if self.current(store, r.agent_boot) {
                     self.base_gone(g.object);
+                    // An adopted unit has an ID and no row, as a purged one
+                    // has: its death is not a purged unit's.
+                    let adopted = self.adopted_object(g.object);
                     self.adopt_gone(g.object);
-                    self.gone(store, g);
+                    self.gone(store, g, adopted);
                 }
             }
             Input::Seen(s) => {
@@ -736,6 +773,7 @@ impl Reconciler {
                         // An enumeration made under another campaign says
                         // nothing of this campaign's objects.
                         gap: self.stamp.2 != store.campaign().0,
+                        began_ms: store.now_ms(),
                     });
                 }
             }
@@ -841,6 +879,7 @@ impl Reconciler {
         });
         self.binding.clear();
         self.unresolved.clear();
+        self.orphans.clear();
         self.order_held.clear();
         self.order_refused.clear();
         self.forget_generation(store);
@@ -1053,6 +1092,14 @@ impl Reconciler {
             _ => {}
         }
         let Some(g) = store.group(c.entity) else {
+            if matches!(c.opcode, opcode::GROUP_DESTROY | opcode::STATIC_DESTROY)
+                && store
+                    .loaded()
+                    .is_some_and(|l| l.agent_boot == c.agent_boot && l.mission_gen == c.mission_gen)
+            {
+                let not_bound = res.is_some_and(|r| u64::from(r.code) == rc::NOT_BOUND);
+                self.orphan_resolved(c.entity, outcome, not_bound);
+            }
             return;
         };
         let gen_now = store
@@ -1386,7 +1433,9 @@ impl Reconciler {
             return None;
         };
         let Some(u) = store.unit(unit) else {
-            self.unresolved.entry(o.object).or_insert((unit, false)).0 = unit;
+            if !self.orphan_seen(store, o) {
+                self.unresolved.entry(o.object).or_insert((unit, false)).0 = unit;
+            }
             return None;
         };
         Some(Binding {
@@ -1492,9 +1541,10 @@ impl Reconciler {
     /// group), else from the mirror.
     fn gone_identity(
         &mut self,
-        store: &Store,
+        store: &mut Store,
         g: &ObjectGone,
         row: Option<Binding>,
+        adopted: bool,
     ) -> Option<(EntityId, EntityId)> {
         if g.entity == 0 {
             return row.map(|b| (b.unit, b.group));
@@ -1508,13 +1558,29 @@ impl Reconciler {
         };
         if group == Some(want) {
             Some((unit, want))
+        } else if !adopted
+            // Before an enumeration is used, an adopted unit the agent still
+            // binds may not be known again yet: its death is not counted
+            // as a purged unit's.
+            && self.enumerated
+            && group.is_none()
+            && unit.0 < store.next_entity()
+            && store.group(want).is_none()
+        {
+            // A unit the store purged (spec/world.md, "Removal"): a late
+            // death of it is dropped and counted.
+            if g.reason == gone_reason::DEAD {
+                self.counters.purged_deaths += 1;
+                store.count_purged_death();
+            }
+            None
         } else {
             self.counters.bad_binding += 1;
             None
         }
     }
 
-    fn gone(&mut self, store: &mut Store, g: ObjectGone) {
+    fn gone(&mut self, store: &mut Store, g: ObjectGone, adopted: bool) {
         let row = self.binding.remove(&g.object);
         self.unresolved.remove(&g.object);
         // The agent reported the row gone: ENUM_END does not count it
@@ -1529,10 +1595,19 @@ impl Reconciler {
             }
             return;
         }
-        let Some((unit, group)) = self.gone_identity(store, &g, row) else {
+        self.orphan_gone(g.object);
+        let Some((unit, group)) = self.gone_identity(store, &g, row, adopted) else {
             return;
         };
-        let state = store.group(group).expect("group").state;
+        let Some(state) = store.group(group).map(|x| x.state) else {
+            // Its rows were purged after the binding was read: nothing of
+            // the entity is kept, so its death changes nothing.
+            if g.reason == gone_reason::DEAD {
+                self.counters.purged_deaths += 1;
+                store.count_purged_death();
+            }
+            return;
+        };
         // The member's object ID when it left: a record for an older object,
         // from before a respawn, is about no member that DCS holds now.
         let known = store.unit(unit).map_or(0, |u| u.object);
@@ -1643,6 +1718,7 @@ impl Reconciler {
         }
         self.counters.enumerations += 1;
         self.enumerated = true;
+        self.enum_used_from_ms = Some(run.began_ms);
         if seen == 0 {
             self.adopt_orphans(store);
         }
@@ -1897,10 +1973,14 @@ impl Reconciler {
         store: &mut Store,
         sim: &mut dyn SimAdapter,
         loaded: &Loaded,
+        walk: &[EntityId],
     ) -> bool {
         let paused = u64::from(self.lifecycle) == lc::PAUSED;
-        let waiting = store
-            .groups()
+        // A group waiting to materialize, and a ruin owed a spawn, are in
+        // the plan's work set.
+        let waiting = walk
+            .iter()
+            .filter_map(|id| store.group(*id))
             .filter(|g| {
                 (g.state == State::Materializing
                     && g.theater == loaded.theater
@@ -1964,8 +2044,11 @@ impl Reconciler {
                 *e = row.dcs_group;
             }
         }
+        self.bound_pass(store);
+        let bound_ids: Vec<EntityId> = bound.keys().copied().collect();
+        let ids = self.work_walk(store, &bound_ids);
         // A hold stops spawning only: the rest of the plan goes on.
-        if !self.hold && !self.restore_burst(store, sim, &loaded) {
+        if !self.hold && !self.restore_burst(store, sim, &loaded, &ids) {
             return;
         }
         // Outside the burst, unanswered spawns count against the budget:
@@ -1980,7 +2063,6 @@ impl Reconciler {
                 .materialize_per_frame
                 .saturating_sub(self.spawns_inflight(&loaded))
         };
-        let ids: Vec<EntityId> = store.groups().map(|g| g.id).collect();
         for id in ids {
             if !self.attached {
                 return;
@@ -2127,7 +2209,7 @@ impl Reconciler {
         {
             return;
         }
-        if !self.pins_plan(store, sim) {
+        if !self.pins_plan(store, sim) || !self.orphans_plan(store, sim) {
             return;
         }
         self.bases_plan(store, sim);

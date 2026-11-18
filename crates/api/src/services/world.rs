@@ -145,12 +145,28 @@ impl Watch {
         })
     }
 
-    /// The last state of an entity that left the filter. Its shape is
-    /// forgotten, so it is sent in full if it comes back.
-    fn leave(&mut self, store: &Store, grp: &Group) -> WorldChange {
+    /// The last state of an entity that left the filter, and for a removed
+    /// one its removal. Its shape and its units' positions are forgotten,
+    /// so it is sent in full if it comes back.
+    fn leave(&mut self, store: &Store, grp: &Group, out: &mut Vec<WorldChange>) {
         self.shapes.remove(&grp.id);
-        WorldChange {
+        for m in &grp.members {
+            self.sent.remove(m);
+        }
+        out.push(WorldChange {
             change: Some(world_change::Change::Upsert(entity(store, grp))),
+        });
+        if grp.removed {
+            out.push(WorldChange {
+                change: Some(world_change::Change::Removal(pb::Removal {
+                    id: grp.id.0,
+                    cause: if grp.expired {
+                        pb::RemovalCause::Expired
+                    } else {
+                        pb::RemovalCause::Controller
+                    } as i32,
+                })),
+            });
         }
     }
 
@@ -193,6 +209,15 @@ impl Watch {
                     continue;
                 }
                 let Some(grp) = store.group(gid) else {
+                    // Purged: a watcher that held it, or one that resumed
+                    // from before it may have, is told it left the store.
+                    if store.was_purged(gid) && (self.held.remove(&gid) || !self.caught_up) {
+                        changes.push(WorldChange {
+                            change: Some(world_change::Change::RemovedId(gid.0)),
+                        });
+                        self.shapes.remove(&gid);
+                        self.sent.retain(|u, _| store.unit(*u).is_some());
+                    }
                     continue;
                 };
                 if self.filter.passes(store, grp) {
@@ -205,7 +230,7 @@ impl Watch {
                     // It left the filter, by dying or moving out of the
                     // area, possibly between the list and this watch: the
                     // watcher gets its last state.
-                    changes.push(self.leave(store, grp));
+                    self.leave(store, grp, &mut changes);
                 }
             }
             self.revision = store.revision();
@@ -224,11 +249,23 @@ impl Watch {
                         .is_none_or(|grp| !self.filter.passes(store, grp))
                 })
                 .collect();
+            let mut purged = false;
             for id in gone {
                 self.held.remove(&id);
-                if let Some(grp) = store.group(id) {
-                    changes.push(self.leave(store, grp));
+                match store.group(id) {
+                    Some(grp) => self.leave(store, grp, &mut changes),
+                    None => {
+                        // Purged before the watch read its removal.
+                        purged = true;
+                        self.shapes.remove(&id);
+                        changes.push(WorldChange {
+                            change: Some(world_change::Change::RemovedId(id.0)),
+                        });
+                    }
                 }
+            }
+            if purged {
+                self.sent.retain(|u, _| store.unit(*u).is_some());
             }
             for gid in self.filter.candidates(store) {
                 if let Some(grp) = store.group(gid)
@@ -436,5 +473,176 @@ impl WorldService for World {
             entities,
             campaign_id: campaign,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::hub::Backend;
+    use nanoprobe_sidecar::sim::{Detached, RawRecord, SimAdapter};
+    use nanoprobe_sidecar::store::{Authority, NewGroup, NewUnit, UnitState};
+
+    /// A DCS that never answers: the store is the test's.
+    struct Silent;
+
+    impl SimAdapter for Silent {
+        fn position_after(&self, _opcode: u16, _payload: &[u8]) -> u64 {
+            0
+        }
+        fn send(&mut self, _opcode: u16, _payload: &[u8]) -> Result<u64, Detached> {
+            Err(Detached)
+        }
+        fn read(&mut self) -> Vec<RawRecord> {
+            Vec::new()
+        }
+        fn flush(&mut self) {}
+    }
+
+    impl Backend for Silent {
+        fn sim(&mut self) -> &mut dyn SimAdapter {
+            self
+        }
+        fn frame(&mut self) {}
+        fn attach(&mut self, _sidecar_boot: u64) {}
+        fn detach(&mut self) {}
+        fn load_mission(&mut self, _theater: &str) {}
+        fn health(&self) -> pb::Health {
+            pb::Health::Gone
+        }
+        fn heartbeat_age(&self) -> Option<Duration> {
+            None
+        }
+        fn attach_error(&self) -> String {
+            String::new()
+        }
+    }
+
+    fn new_group() -> NewGroup {
+        NewGroup {
+            theater: "Caucasus".into(),
+            country: 2,
+            category: 2,
+            coalition: 2,
+            units: (0..2)
+                .map(|_| NewUnit::new("M-113", UnitState::default()))
+                .collect(),
+            authority: Authority::Campaign,
+            label: String::new(),
+            extra: nanoprobe_transport::codec::Lv::Nil,
+        }
+    }
+
+    fn watch_from(revision: u64, caught_up: bool) -> Watch {
+        Watch {
+            campaign: 1,
+            follows_active: false,
+            filter: Filter::new(None, false).expect("filter"),
+            revision,
+            sent: HashMap::new(),
+            held: HashSet::new(),
+            shapes: HashMap::new(),
+            caught_up,
+        }
+    }
+
+    fn removed_ids(m: &WatchWorldResponse) -> Vec<u64> {
+        m.changes
+            .iter()
+            .filter_map(|c| match c.change {
+                Some(world_change::Change::RemovedId(id)) => Some(id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A hub holding an in-memory campaign 1, active.
+    fn hub() -> Arc<Hub> {
+        let hub = Hub::new(Config::default(), Box::new(Silent));
+        {
+            let mut g = hub.lock();
+            let meta = pb::Campaign {
+                id: 1,
+                name: "c1".into(),
+                ..pb::Campaign::default()
+            };
+            g.add_campaign(&Config::default(), meta, "Caucasus".into())
+                .expect("add");
+            g.active = Some(1);
+        }
+        hub
+    }
+
+    /// A watch that holds a group, then sees it removed and purged, is told
+    /// by `removed_id`, and keeps no position of its members.
+    #[test]
+    fn a_purged_group_leaves_held_and_sent() {
+        let hub = hub();
+        let mut g = hub.lock();
+        let store = &mut g.campaigns.get_mut(&1).expect("slot").store;
+        store.set_now(1_000);
+        let id = store.create_group(new_group()).expect("group");
+        let members = store.group(id).expect("group").members.clone();
+        let mut w = watch_from(0, false);
+        let m = w.next(&g, true).expect("next").expect("a message");
+        assert!(w.held.contains(&id));
+        assert_eq!(w.sent.len(), members.len(), "positions sent");
+        assert!(removed_ids(&m).is_empty());
+        let store = &mut g.campaigns.get_mut(&1).expect("slot").store;
+        store.remove_entity(id).expect("remove");
+        assert!(store.purge(id).is_some(), "purged");
+        let m = w.next(&g, false).expect("next").expect("a message");
+        assert_eq!(removed_ids(&m), vec![id.0]);
+        assert!(!w.held.contains(&id));
+        assert!(
+            members.iter().all(|u| !w.sent.contains_key(u)),
+            "sent holds a purged member"
+        );
+        // Told once.
+        assert!(
+            w.next(&g, true)
+                .expect("next")
+                .is_none_or(|m| removed_ids(&m).is_empty())
+        );
+    }
+
+    /// A watch that resumes from a revision at which the group was listed,
+    /// after it was removed and purged with no watch running, gets
+    /// `removed_id` for it.
+    #[test]
+    fn a_resume_from_before_a_purge_gets_removed_id() {
+        let hub = hub();
+        let mut g = hub.lock();
+        let store = &mut g.campaigns.get_mut(&1).expect("slot").store;
+        store.set_now(1_000);
+        let id = store.create_group(new_group()).expect("group");
+        let listed_at = store.revision();
+        store.remove_entity(id).expect("remove");
+        assert!(store.purge(id).is_some(), "purged");
+        // Nothing is held: the group is not in the store when the watch
+        // starts, as `watch_world` builds it.
+        let mut w = watch_from(listed_at, false);
+        let m = w.next(&g, false).expect("next").expect("a message");
+        assert_eq!(removed_ids(&m), vec![id.0]);
+        assert_eq!(w.revision, g.campaigns[&1].store.revision());
+    }
+
+    /// A purged group's shape digest leaves the watch too.
+    #[test]
+    fn a_purged_group_leaves_shapes() {
+        let hub = hub();
+        let mut g = hub.lock();
+        let store = &mut g.campaigns.get_mut(&1).expect("slot").store;
+        store.set_now(1_000);
+        let id = store.create_group(new_group()).expect("group");
+        let mut w = watch_from(0, false);
+        w.next(&g, true).expect("next");
+        assert!(w.shapes.contains_key(&id));
+        let store = &mut g.campaigns.get_mut(&1).expect("slot").store;
+        store.remove_entity(id).expect("remove");
+        assert!(store.purge(id).is_some(), "purged");
+        w.next(&g, true).expect("next");
+        assert!(!w.shapes.contains_key(&id), "shapes holds a purged group");
     }
 }

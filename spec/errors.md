@@ -64,7 +64,7 @@ Every failed call returns a gRPC status whose details hold one `ErrorDetail`: a
 |---|---|---|
 | `INVALID_ARGUMENT` | `INVALID_FIELD` | A field is missing, out of range or malformed |
 | `INVALID_ARGUMENT` | `IDEMPOTENCY_MISMATCH` | An idempotency key was used before with a different request |
-| `NOT_FOUND` | `ENTITY_NOT_FOUND`, `CAMPAIGN_NOT_FOUND`, `EXTENSION_NOT_FOUND`, `PLAYER_NOT_FOUND` | The named thing does not exist |
+| `NOT_FOUND` | `ENTITY_NOT_FOUND`, `CAMPAIGN_NOT_FOUND`, `EXTENSION_NOT_FOUND`, `PLAYER_NOT_FOUND` | The named thing does not exist, or was removed and purged (spec/world.md, "Removal") |
 | `NOT_FOUND` | `OUTCOME_NOT_FOUND` | `GetOutcome` names an idempotency key that is unknown or no longer remembered |
 | `ALREADY_EXISTS` | `CAMPAIGN_EXISTS` | A campaign with that name exists |
 | `FAILED_PRECONDITION` | `NO_ACTIVE_CAMPAIGN` | The call needs a campaign, names campaign 0, and no campaign is active |

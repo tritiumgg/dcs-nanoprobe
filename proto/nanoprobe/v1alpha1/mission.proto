@@ -73,6 +73,55 @@ message ServerStatus {
   // Free space is below the active store, its WAL and its events file:
   // backups are refused. Not part of health.
   bool store_space_low = 19;
+  // How big the active campaign's store is; unset with no active campaign.
+  StoreSize store_size = 20;
+}
+
+// What the active campaign's store holds and how fast it is bounded
+// (spec/persistence.md, "Size"). The counters count since the campaign's
+// store was opened: its activation, or the sidecar's start with it active;
+// with the store off, since the campaign was made.
+message StoreSize {
+  // Groups and statics held that are neither dead nor removed.
+  uint64 groups_live = 1;
+  // Dead groups, not statics, not removed: they expire after `dead_keep_h`.
+  uint64 groups_dead = 2;
+  // Dead statics, not removed.
+  uint64 ruins = 3;
+  // Removed groups and statics whose rows are still kept.
+  uint64 awaiting_purge = 4;
+  // Unit rows held.
+  uint64 units = 5;
+  // The removal time of the oldest entity awaiting purge; unset for none.
+  google.protobuf.Timestamp oldest_removal = 6;
+  // Journal rows held.
+  uint64 journal_rows = 7;
+  // The time of the oldest journal entry; unset for none.
+  google.protobuf.Timestamp oldest_journal_entry = 8;
+  // Event rows held.
+  uint64 event_rows = 9;
+  // The time of the oldest event; unset for none.
+  google.protobuf.Timestamp oldest_event = 10;
+  // Size of store.sqlite and its WAL; 0 with the store off.
+  uint64 store_file_bytes = 11;
+  // Size of events.sqlite and its WAL; 0 with the store off.
+  uint64 events_file_bytes = 12;
+  // Removed entities purged.
+  uint64 purged = 13;
+  // Dead groups expired.
+  uint64 expired = 14;
+  // Late deaths dropped because their unit was purged.
+  uint64 purged_deaths = 15;
+  // Drift destroys sent for objects named for entities the store does not
+  // hold.
+  uint64 orphan_destroys = 16;
+  // The groups in the reconciler's work set: those the plan has something to
+  // do for. The plan also visits every group with an object bound.
+  uint64 work_set = 17;
+  // The bytes of the journal's entries kept, as journal_max_mb counts them.
+  uint64 journal_bytes = 18;
+  // The bytes of the events kept, as events_max_mb counts them.
+  uint64 event_bytes = 19;
 }
 
 message GetServerStatusRequest {}

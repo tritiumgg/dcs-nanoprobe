@@ -341,7 +341,7 @@ pub const DEFS: &[Def] = &[
         limit: Limit::Shape,
         control: false,
         cap: None,
-        why: "Entity rows the export holds; the store keeps a removed entity for good (spec/world.md, Removal), so the rows grow with every removal by design, and the growth per hour is the figure.",
+        why: "Entity rows the export holds; the purge takes a removed entity's rows `removed_keep_h` after its removal and a dead group expires after `dead_keep_h` (spec/world.md, Removal and Expiry), so the rows level off once the churn has run past both.",
     },
     Def {
         key: "sidecar_cpu_percent",
@@ -351,7 +351,7 @@ pub const DEFS: &[Def] = &[
         limit: Limit::Shape,
         control: false,
         cap: Some(50.0),
-        why: "The sidecar's CPU; its driver is one thread whose step walks every group the store holds, removed ones included, so the 24-hour projection must leave it half a core.",
+        why: "The sidecar's CPU; its driver is one thread whose plan walks the work set and the groups with objects bound, not every group kept (spec/persistence.md, Size), so the 24-hour projection must leave it half a core.",
     },
 ];
 
