@@ -243,8 +243,8 @@ plus that enumeration's duration. While births wait, as in a fill of 2,000 objec
 37 µs a birth (LIVE, S11), the enumeration waits behind them.
 
 The shim resolves the oldest birth first. A unit's row therefore trails its birth by
-the births ahead of it, and never by those born after it. Births resolve at 28 to 33 a
-second on a server at 110 frames a second (LIVE,
+the births ahead of it, and never by those born after it. Births resolve at 26 to 34 a
+second, about 30, on a server at 96 to 113 frames a second (LIVE,
 docs/results/2026-11-17-bind-lag.md). When objects are born faster than that, the last
 of `N` born at `s` a second gets its row about `N` × (1 / 30 − 1 / `s`) seconds after
 its birth.
@@ -272,10 +272,18 @@ or takeoff, and only for a unit a player occupies:
   1,024 connections. A player takes the slot before the unit is born in it (LIVE,
   docs/results/2026-11-17-bind-lag.md: 47 s before, for a client slot). Whether a
   dynamic-spawn slot's ID equals its unit's mission ID is UNVERIFIED; where it does not,
-  the birth is not read.
+  the birth is not read. A birth that comes before its slot's `PLAYER` record is not
+  marked, and neither is that unit's takeoff; the sidecar's join of a player to a unit
+  takes either order (spec/world.md, "Seat occupancy"). The server's own connection writes no `PLAYER` record
+  (spec/records.md, "Layout: PLAYER"), so it holds no slot here: the aircraft of a
+  player who hosts the server from the client has no loadout read. The held slots are
+  not cleared on a mission load. Whether DCS reports a slot change for each connected
+  player then is UNVERIFIED; a slot left held marks the birth of a unit of the next
+  mission whose mission ID equals it, which costs that unit one `getPlayerName` call.
 - **A takeoff** (`S_EVENT_TAKEOFF`, the same category rule) is marked when the unit's
-  birth was marked. The agent keeps those units, at most 1,024, until their rows leave
-  or the mission generation changes.
+  birth was marked. The agent keeps those units, at most 1,024, each until its row
+  leaves, its birth's mark is dropped with no row, or the mission generation changes. A
+  marked birth past the 1,024 is still read; its unit's takeoff is not.
 
 Any other unit gets no mark: the birth or the takeoff of an AI unit costs the pump
 nothing, however many are born at once.
@@ -292,9 +300,10 @@ wait of 600 pumps counts only pumps in which it could have been handed out, thos
 birth pending, so a long spawn does not expire a player's mark. With no birth pending, a
 pump takes at most 8 marks, and at most as many as the budget left after the tiers pays
 for at the cost of a vitals row each, and at least one; the rest wait for the next pump.
-A read costs more than a vitals row, about 22 µs (LIVE,
-docs/results/2026-11-17-s19-spawn-state.md); marks come only for players' units, a few
-at a time, so the difference is the frame's debt. A pump with no birth pending and a mark
+A mark costs more than a vitals row: its `getPlayerName` call and bookkeeping take about
+22 µs (LIVE, docs/results/2026-11-17-s19-spawn-state.md, on AI units), and the `getAmmo`
+call of a player's unit adds a cost that is UNVERIFIED. Marks come only for players'
+units, a few at a time, so the difference is the frame's debt. A pump with no birth pending and a mark
 that has its row counts as having work ("The pump's worth"). The list holds at most 1,024
 marks; when it is full, a new mark drops the oldest and the drop is counted. For each
 mark the shim calls `Unit.getPlayerName` under `pcall`, in the pump and never in the event

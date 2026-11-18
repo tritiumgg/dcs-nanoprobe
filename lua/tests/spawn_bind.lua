@@ -144,6 +144,14 @@ local function main()
 
   -- The log of the agent calls that write records, in order.
   local log, frame, hostframe = {}, 0, 0
+  -- `wants` is the check a read starts with: true when the agent has no row
+  -- for the ID and takes one. Its answer is logged with the call.
+  local real_wants = agent.wants
+  rawset(agent, 'wants', function(id, ...)
+    local wanted, died = real_wants(id, ...)
+    log[#log + 1] = { ev = 'wants', id = id, wanted = wanted, frame = frame, host = hostframe }
+    return wanted, died
+  end)
   for _, name in ipairs({ 'pump_begin', 'object', 'command_done', 'event' }) do
     local real = agent[name]
     rawset(agent, name, function(...)
@@ -257,21 +265,21 @@ local function main()
     return r
   end
 
-  -- The log, split at each `done`: the calls of one command. Calls before a
-  -- command's first object call belong to no command's rows.
-  local commands, current = {}, { objects = {}, events = 0 }
+  -- The log, split at each `done`: the calls since the `done` before it. A
+  -- split can also hold a row the births tier wrote for another group's unit
+  -- (the unit whose read raised gets its row at its birth, in whichever frame
+  -- the pump resolves it), so `own` below keeps a command's own units.
+  local commands, current = {}, { objects = {}, calls = {} }
   for _, l in ipairs(log) do
     if l.ev == 'object' and l.name:find('^np%-') then
       current.objects[#current.objects + 1] = l
+      current.calls[#current.calls + 1] = l
     elseif l.ev == 'event' then
-      -- An event between the command's first row and its RESULT.
-      if #current.objects > 0 then
-        current.events = current.events + 1
-      end
+      current.calls[#current.calls + 1] = l
     elseif l.ev == 'done' then
       current.done = l
       commands[#commands + 1] = current
-      current = { objects = {}, events = 0 }
+      current = { objects = {}, calls = {} }
     end
   end
   -- The `done` calls of the spawns, in order: the script's five commands are
@@ -284,9 +292,6 @@ local function main()
   end
   assert(#spawns >= 5, 'the log holds ' .. #spawns .. ' commands, not 5')
   local first = #spawns - 4
-  local function command(n)
-    return spawns[first + n - 1]
-  end
 
   local function names(list)
     local set = {}
@@ -294,6 +299,25 @@ local function main()
       set[n] = true
     end
     return set
+  end
+  -- Command `n` of the script with the rows of its own `units`, and the
+  -- events that reached the agent between the first of those rows and the
+  -- RESULT. A row of another unit in the split fails the test, unless it is
+  -- `late`, the unit a birth may give its row at any time.
+  local function command(n, units, late)
+    local c, set = spawns[first + n - 1], names(units)
+    local objects, between = {}, 0
+    for _, l in ipairs(c.calls) do
+      if l.ev == 'object' and set[l.name] then
+        objects[#objects + 1] = l
+      elseif l.ev == 'object' then
+        assert(l.name == late, 'command ' .. n .. ' wrote an OBJECT for ' .. l.name)
+      elseif l.ev == 'event' and #objects > 0 then
+        between = between + 1
+      end
+    end
+    c.objects, c.events = objects, between
+    return c
   end
   local function count(list, set)
     local n = {}
@@ -306,7 +330,7 @@ local function main()
   end
 
   -- 1. Order: every new unit's OBJECT before the RESULT, in its frame.
-  local c1 = command(1)
+  local c1 = command(1, U1)
   expect_applied(1, 'the first spawn')
   assert(#c1.objects == #U1, #c1.objects .. ' OBJECT records before the RESULT, not ' .. #U1)
   local set1 = names(U1)
@@ -318,8 +342,8 @@ local function main()
   S.ok('a spawn of ' .. #U1 .. ' units writes ' .. #c1.objects
     .. ' OBJECT records before its RESULT (APPLIED), in the RESULT\'s frame')
 
-  -- 2. No second OBJECT: before the replace (about 150 frames later) and at
-  -- the end, each unit has exactly one.
+  -- 2. No second OBJECT: over the whole run, each unit of the first spawn has
+  -- exactly one.
   local set2, set3 = names(U2), names(U3)
   local all = {}
   for _, l in ipairs(log) do
@@ -331,11 +355,38 @@ local function main()
   for _, u in ipairs(U1) do
     assert(n1[u] == 1, u .. ' has ' .. tostring(n1[u]) .. ' OBJECT records, not 1')
   end
-  local c2 = command(2)
-  assert(c2.done.host - c1.done.host >= 100, 'only ' .. (c2.done.host - c1.done.host)
-    .. ' frames between the spawns')
-  S.ok('each of the ' .. #U1 .. ' units has exactly one OBJECT record '
-    .. (c2.done.host - c1.done.host) .. ' frames after its spawn and its birth')
+  local c2 = command(2, U2)
+  -- The births were resolved, and each cost one `wants` check: after a
+  -- spawn's RESULT the agent is asked about each of its units again, by the
+  -- births tier, and answers that it wants no row. The frames between the
+  -- spawns are not counted: their number depends on the machine's load.
+  local function checked_after(c, what)
+    local at
+    for i, l in ipairs(log) do
+      if l == c.done then
+        at = i
+      end
+    end
+    local asked = {}
+    for i = at + 1, #log do
+      local l = log[i]
+      if l.ev == 'wants' then
+        asked[l.id] = asked[l.id] or {}
+        asked[l.id][#asked[l.id] + 1] = l.wanted
+      end
+    end
+    for _, o in ipairs(c.objects) do
+      local answers = asked[o.id]
+      assert(answers, what .. ': the birth of ' .. o.name .. ' never reached the births tier')
+      -- One birth event for each unit, and no enumeration in the test (it
+      -- asks with `seen`, not `wants`): one check.
+      assert(#answers == 1, what .. ': ' .. o.name .. ' cost ' .. #answers .. ' wants checks, not 1')
+      assert(answers[1] == false, what .. ': the agent wanted a second row for ' .. o.name)
+    end
+  end
+  checked_after(c1, 'the first spawn')
+  S.ok('each of the ' .. #U1 .. ' units has exactly one OBJECT record, and its birth cost the births tier '
+    .. 'one wants check that took no row')
 
   -- 3. Replace: new OBJECTs, then one OBJECT_GONE (DESTROYED) per old unit,
   -- then the RESULT.
@@ -347,6 +398,17 @@ local function main()
   local old_ids = {}
   for _, o in ipairs(c1.objects) do
     old_ids[o.id] = o.name
+  end
+  -- The agent writes the old rows' OBJECT_GONE inside `command_done`, from
+  -- the IDs the handler hands it. That call is logged after the replace's
+  -- `object` calls (they are in `c2.objects`), so the IDs it carries fix the
+  -- order: the new OBJECTs, then the old units' OBJECT_GONE, then the RESULT.
+  assert(c1.done.destroyed == nil or #c1.done.destroyed == 0, 'the first spawn destroyed something')
+  local handed = c2.done.destroyed
+  assert(type(handed) == 'table' and #handed == #U1,
+    'the replace handed command_done ' .. (type(handed) == 'table' and #handed or 0) .. ' destroyed IDs, not ' .. #U1)
+  for _, id in ipairs(handed) do
+    assert(old_ids[id], 'the replace handed command_done the ID ' .. tostring(id) .. ', which is no old unit')
   end
   -- The records command-script read, in order: the gone rows of the old
   -- units come before the RESULT of seq 2 and after the RESULT of seq 1.
@@ -375,11 +437,13 @@ local function main()
   for _, u in ipairs(U1) do
     assert(count(all, set1)[u] == 1, u .. ' has more than one OBJECT record at the end')
   end
-  S.ok('after ' .. hostframe .. ' frames every unit of both spawns still has exactly one OBJECT record')
+  checked_after(c2, 'the replacing spawn')
+  S.ok('after ' .. hostframe .. ' frames every unit of both spawns still has exactly one OBJECT record, and '
+    .. 'the births of the replacing units took no row')
 
   -- 4. A unit whose read raises is left out of the command and still gets one
   -- row later; the spawn is applied.
-  local c3 = command(3)
+  local c3 = command(3, U3)
   expect_applied(3, 'the spawn with a raising read')
   assert(#c3.objects == #U3 - 1, #c3.objects .. ' OBJECT records before the RESULT, not ' .. (#U3 - 1))
   for _, o in ipairs(c3.objects) do
@@ -400,7 +464,9 @@ local function main()
     .. late.frame .. ' after the RESULT\'s ' .. c3.done.frame)
 
   -- 5. Cost: the reads are inside the command.
-  local c4, r4 = command(4), expect_applied(4, 'the slow spawn')
+  -- The unit whose read raised in spawn 3 gets its row at its birth, which
+  -- the pump may resolve before or after this spawn.
+  local c4, r4 = command(4, U4, 'np-r-2'), expect_applied(4, 'the slow spawn')
   assert(#c4.objects == #U4, #c4.objects .. ' OBJECT records in the slow spawn')
   assert(r4.cost_us >= SLOW_MS * 1000 * 0.9, 'cost_us is ' .. r4.cost_us .. ' for a read of '
     .. SLOW_MS .. ' ms: the reads are not in the command')

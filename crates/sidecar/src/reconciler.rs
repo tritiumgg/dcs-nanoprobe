@@ -532,7 +532,9 @@ impl Reconciler {
     /// The bind lags measured since the last call, ms, in the order the
     /// units were bound; the units of applied spawns still unbound; and, of
     /// the lags, how many are of a unit whose `OBJECT` came after its
-    /// spawn's result. Empty when the diagnostic is off.
+    /// spawn's result. Empty when the diagnostic is off. A unit that left
+    /// DCS before its `OBJECT` came (its group destroyed, dematerialized or
+    /// dead) stays in the unbound count: the count is an upper bound.
     pub fn take_bind_lags(&mut self) -> (Vec<u64>, usize, u64) {
         self.bind_lags.as_mut().map_or((Vec::new(), 0, 0), |b| {
             (

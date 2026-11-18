@@ -256,6 +256,47 @@ fn a_mark_with_no_row_is_dropped_after_its_wait() {
 }
 
 #[test]
+fn a_players_birth_that_never_gets_a_row_is_forgotten_with_its_mark() {
+    let (mut s, mut rec) = table(1);
+    let mut out = Vec::new();
+    // The player left before the births tier read the unit: the mark waits
+    // out its pumps and the unit is no player's any more.
+    s.mark_loadout(Some(99.0), Ammo::BIRTH, true);
+    assert!(s.occupied.contains(&99));
+    for _ in 0..=LOADOUT_WAIT_PUMPS {
+        assert_eq!(s.loadouts(&mut out), 0);
+    }
+    assert_eq!(s.loadouts_waiting(), 0);
+    assert!(s.occupied.is_empty(), "the entry outlived its mark");
+    // An AI unit that takes the object ID later is not read at its takeoff.
+    s.add(&mut rec, found(99, object_kind::UNIT), false);
+    s.mark_loadout(Some(99.0), Ammo::TAKEOFF, false);
+    assert_eq!(s.loadouts_waiting(), 0);
+    // A birth that names a static's row leaves no entry.
+    s.add(&mut rec, found(20, object_kind::STATIC), false);
+    s.mark_loadout(Some(20.0), Ammo::BIRTH, true);
+    assert!(
+        s.occupied.is_empty(),
+        "a static was kept as a player's unit"
+    );
+    // A mark dropped from a full list takes its entry with it; a unit that
+    // has its row keeps its entry, so its takeoff is still read.
+    s.add(&mut rec, found(7, object_kind::UNIT), false);
+    s.mark_loadout(Some(7.0), Ammo::BIRTH, true);
+    for id in 0..LOADOUT_MARKS_MAX as u64 {
+        s.mark_loadout(Some(10_000.0 + id as f64), Ammo::BIRTH, true);
+    }
+    assert_eq!(s.loadouts_waiting(), LOADOUT_MARKS_MAX);
+    assert!(s.occupied.contains(&7), "a unit with a row lost its entry");
+    assert!(s.occupied.contains(&10_000));
+    s.mark_loadout(Some(20_000.0), Ammo::BIRTH, true);
+    assert!(
+        !s.occupied.contains(&10_000),
+        "a dropped mark with no row kept its entry"
+    );
+}
+
+#[test]
 fn bad_objects_mark_nothing_and_a_removed_row_loses_its_mark() {
     let (mut s, mut rec) = table(2);
     s.mark_loadout(None, Ammo::BIRTH, true);

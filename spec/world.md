@@ -444,13 +444,16 @@ every unit is bound. The agent writes the `OBJECT` record of each unit of a spaw
 group that it can read before the spawn's `RESULT` (spec/commands.md, "Layout:
 GROUP_SPAWN"), so those units are bound when the group turns `live`. A unit it could not
 read then binds when its birth resolves (spec/sampling.md, "Tiers") or at the next full
-enumeration. A static binds when its birth resolves. What a call on a unit that is not
-bound does:
+enumeration, and so does a unit whose `OBJECT` the agent's event queue dropped: the
+`GAP` forces that enumeration (spec/records.md, "Delivery classes"). A static binds when
+its birth resolves. What a call on a unit that is not bound does:
 
 | Call | On an entity DCS holds no object of |
 |---|---|
 | `DoEffect` with a unit or a group as its scope, a damage effect, `Capture` | Refused: `FAILED_PRECONDITION`, reason `ENTITY_NOT_FOUND`. A group counts as bound when one of its units is |
 | An attack order whose target is not bound | Kept: the order is compiled and sent when the target binds |
+| A mark, a drawing or a menu item whose scope is a group with no bound unit | Kept: it is sent when one of the group's units binds |
+| The capture of every group that a campaign operation makes (spec/persistence.md, "Campaign operations") | Leaves out a group with no bound unit: the store keeps the state it holds for it |
 | Any other order or option of the group | Sent: the agent finds the group by its name |
 
 The sidecar queues none of the refused calls; the controller sends them again.
@@ -501,7 +504,9 @@ carries the stamps of the read. Rows with the same type name add up. The newest 
 replaces the one before. A controller reads it for a loadout check.
 
 An AI unit has no ammunition read: its `ammo` is empty and it has no `ammo_read`. So has
-a player unit before its first read. A player unit read with no ammunition rows has an
+a player unit before its first read, and a player unit the agent does not mark: the
+aircraft of a player who hosts the server from the client, and the other cases that
+spec/sampling.md, "Loadout reads", lists. A player unit read with no ammunition rows has an
 empty `ammo` and an `ammo_read`. Nothing sees a
 rearm. No event named an AI M-1 rearmed by a truck (LIVE, E38,
 docs/results/2026-11-14-e38-life-and-ammunition.md); whether DCS sends one for a player

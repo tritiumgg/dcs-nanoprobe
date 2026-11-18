@@ -12,6 +12,8 @@ struct BindRun {
     lags: Vec<f64>,
     /// Streamed units with no row at the end.
     unbound: usize,
+    /// Streamed units whose `OBJECT` record was not written exactly once.
+    not_once: usize,
     /// Seconds from the stream's start until no birth waited.
     drained_s: Option<f64>,
     /// Vitals rows due and read by the cursor in the 60 s after the births
@@ -60,6 +62,9 @@ struct Case {
     handler: bool,
 }
 
+/// The object ID of the first streamed unit, above every ID of the table.
+const FIRST_STREAMED: u64 = 500_000;
+
 /// The case's units in the table, then its births at one every second frame,
 /// and `secs` seconds from the stream's start.
 fn bind_run(c: &Case, secs: usize) -> BindRun {
@@ -93,7 +98,7 @@ fn bind_run(c: &Case, secs: usize) -> BindRun {
     rec.began += Duration::from_secs_f64(1.0 / fps);
     assert!(w.births.is_empty(), "the table filled before the stream");
     w.stream = Some(Stream {
-        next: 500_000,
+        next: FIRST_STREAMED,
         left: c.spawns,
         every: 2,
         frame: 0,
@@ -104,6 +109,7 @@ fn bind_run(c: &Case, secs: usize) -> BindRun {
     let mut r = BindRun {
         lags: Vec::new(),
         unbound: 0,
+        not_once: 0,
         drained_s: None,
         due: 0.0,
         swept: 0,
@@ -131,6 +137,24 @@ fn bind_run(c: &Case, secs: usize) -> BindRun {
     r.lags = std::mem::take(&mut w.lags);
     r.lags.sort_by(f64::total_cmp);
     r.unbound = w.born.len();
+    // The `OBJECT` records a spawn or a birth gave the streamed units, those
+    // with `enumeration` 0: an enumeration writes each row it finds again.
+    // The object ID is the record's first field and `enumeration` its fifth
+    // (spec/records.md, "Layout: OBJECT").
+    let field =
+        |p: &[u8], at: usize| u64::from_le_bytes(p[at..at + 8].try_into().expect("a u64 field"));
+    let mut written: HashMap<u64, usize> = HashMap::new();
+    for (k, p) in &rec.records {
+        if *k == kind::OBJECT && field(p, 0x20) == 0 {
+            let object = field(p, 0);
+            if object >= FIRST_STREAMED {
+                *written.entry(object).or_default() += 1;
+            }
+        }
+    }
+    r.not_once = (FIRST_STREAMED..FIRST_STREAMED + c.spawns as u64)
+        .filter(|object| written.get(object) != Some(&1))
+        .count();
     r.marks_read = w.marks_read;
     r.marks_waiting = s.loadouts_waiting();
     r
@@ -171,9 +195,12 @@ const S20: Case = Case {
 /// The same spawns through `GROUP_SPAWN`: the handler reads each unit and
 /// the agent adds its row in the spawn's frame, as commanded work
 /// (spec/commands.md, "Layout: GROUP_SPAWN"). No row of a spawned unit
-/// comes after its spawn; the later births cost the tier a `wants` check
-/// each and add no row; and the agent's own time does not rise: the reads
-/// left the sampling budget.
+/// comes after its spawn, and each unit's `OBJECT` is written once: the
+/// later births cost the tier a `wants` check each and add no row. The
+/// model's clock holds the agent's own time and leaves the handler's reads
+/// out, as commanded work. What the share comparison shows is that the
+/// births the tier still receives, each a pump's call and a `wants` check,
+/// cost no more than the reads they replace.
 #[test]
 fn a_spawned_unit_has_its_row_in_the_spawns_frame() {
     let born = bind_run(&S20, 60);
@@ -189,6 +216,8 @@ fn a_spawned_unit_has_its_row_in_the_spawns_frame() {
     assert_eq!(spawned.lags.len(), S20.spawns);
     assert_eq!(spawned.largest(), 0.0, "a row after its spawn's frame");
     assert_eq!(spawned.unbound, 0);
+    assert_eq!(spawned.not_once, 0, "units with no OBJECT or a second one");
+    assert_eq!(born.not_once, 0, "units with no OBJECT or a second one");
     // Every later birth was counted and dropped: none waits at the end.
     assert!(spawned.drained_s.is_some(), "births still wait");
     assert_eq!(spawned.over_250, 0, "frames over 250 µs");
@@ -205,11 +234,11 @@ fn a_spawned_unit_has_its_row_in_the_spawns_frame() {
 /// "Unbound units"): births arrive at about 56 a second and resolve at
 /// about 43 in this model, so a backlog builds. Resolved newest first, as
 /// the shim did, the first units of the stream wait until the whole backlog
-/// is gone: 12.1 s here. Resolved oldest first, a unit waits only for the
+/// is gone: 12.3 s here. Resolved oldest first, a unit waits only for the
 /// births ahead of it: 3.4 s at most, 1.4 s at the median.
 ///
 /// The limits are this test's own, set from the model's figures with room
-/// for a change of cost: 5 s for oldest first, against 12.1 s newest first.
+/// for a change of cost: 5 s for oldest first, against 12.3 s newest first.
 #[test]
 fn oldest_first_a_units_row_trails_its_birth_by_the_births_ahead_of_it() {
     let oldest = bind_run(&S20, 60);

@@ -513,8 +513,10 @@ of the new group that exists, as the births tier reads a born object (spec/sampl
 "Tiers": the same reads, each unit under `pcall`), and the agent writes an `OBJECT`
 record for each, with `enumeration` 0, in the spawn's frame and before its `RESULT`. On
 a replacing spawn they also come before the old rows' `OBJECT_GONE`. A sidecar that
-reads the `RESULT` has therefore read the `OBJECT` of every unit the handler could read.
-A unit whose read raises, or that does not exist yet, gets no record here and the result
+reads the `RESULT` has therefore read the `OBJECT` of every unit the handler could read,
+unless the agent's event queue dropped the record: the `GAP` it writes then makes the
+sidecar force a full enumeration, which writes the unit's `OBJECT` (spec/records.md,
+"Delivery classes"). A unit whose read raises, or that does not exist yet, gets no record here and the result
 stays `APPLIED`: its birth or the next full enumeration adds it. The reads are part of
 the command: their time is in its `cost_us` and counts as commanded work, not as the
 agent's overhead. The later `S_EVENT_BIRTH` of a unit the handler added costs the births

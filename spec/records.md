@@ -841,7 +841,10 @@ subscribed object, and once when an object stops.
 
 The agent writes `AMMO` only for a unit a player occupies, and only after one of two
 events names the unit as initiator: `S_EVENT_BIRTH`, which a player taking a slot
-causes, and `S_EVENT_TAKEOFF`. The next pump checks `Unit.getPlayerName` for the unit;
+causes, and `S_EVENT_TAKEOFF`. The agent marks a birth only when a connected player
+holds the slot its mission ID names, and a takeoff only when that unit's birth was
+marked (spec/sampling.md, "Loadout reads"). The next pump checks `Unit.getPlayerName`
+for a marked unit;
 a unit with no player name gets no read and no record, so an AI unit never has an
 `AMMO` record. If both events name a unit before a pump reads it, one record is written
 with the later cause. A pump reads at most a few marked units (spec/sampling.md,

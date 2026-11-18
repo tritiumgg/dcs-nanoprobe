@@ -18,6 +18,8 @@ local TOKEN = string.rep('0123456789abcdef', 4)
 local OBJECT = 16
 -- Units born in each of the waves, one group each.
 local WAVE = 40
+-- The births the shim's queue holds at most (spec/sampling.md, "The frame").
+local MAX_BIRTHS = 4096
 
 local profile = S.scratch()
 local version = profile .. 'nanoprobe/versions/' .. BUILD .. '/'
@@ -142,6 +144,51 @@ local function main()
       i, list[i], id))
   end
   S.ok(#want .. ' births in two waves resolve in the order they came, oldest first')
+
+  -- The queue's bound and its restart. More births than the queue holds
+  -- arrive in one frame: the mock delivers a frame's events together, before
+  -- any pump can take one. Each names a unit that has its row, so resolving it
+  -- costs one `wants` check and writes nothing. The count the shim hands
+  -- `pump_begin` is the queue's length when a pump starts.
+  local shim = host.states.server.__nanoprobe_shim
+  local T, agent = shim.T, shim.agent
+  local peak = 0
+  local pump_begin = agent.pump_begin
+  rawset(agent, 'pump_begin', function(births, ...)
+    peak = math.max(peak, births)
+    return pump_begin(births, ...)
+  end)
+  local known = sim.by_name['np-b-a-01-1']
+  for _ = 1, MAX_BIRTHS + 104 do
+    sim.queue[#sim.queue + 1] = { event = 'S_EVENT_BIRTH', initiator = known }
+  end
+  host:frame(0.01)
+  local function waiting()
+    return T.birth_tail - T.birth_head + 1
+  end
+  assert(waiting() <= MAX_BIRTHS, 'the queue holds ' .. waiting() .. ' births, over its bound of ' .. MAX_BIRTHS)
+  assert(run(120, function()
+    return waiting() == 0
+  end), waiting() .. ' births still wait after 120 s')
+  assert(peak == MAX_BIRTHS, 'the queue held ' .. peak .. ' births at most, not its bound of ' .. MAX_BIRTHS)
+  assert(T.birth_head == 1 and T.birth_tail == 0,
+    'an empty queue did not start over: head ' .. T.birth_head .. ', tail ' .. T.birth_tail)
+  assert(next(T.births) == nil, 'an empty queue still holds an entry')
+  -- A wave after the restart resolves in order, and the births of the unit
+  -- that has its row wrote no second OBJECT.
+  local before = #want
+  wave('c')
+  assert(run(30, function()
+    return #got() >= #want
+  end), 'only ' .. #got() .. ' of ' .. #want .. ' births have an OBJECT record after the queue emptied')
+  list = got()
+  assert(#list == #want, #list .. ' OBJECT records for ' .. #want .. ' births')
+  for i = before + 1, #want do
+    assert(list[i] == want[i], string.format('OBJECT %d is object %d, wanted %d: births after an empty queue',
+      i, list[i], want[i]))
+  end
+  S.ok('the queue holds at most ' .. MAX_BIRTHS .. ' births, starts over when it empties, and resolves the '
+    .. 'next wave in order')
 end
 
 local ok, err = pcall(main)

@@ -280,12 +280,11 @@ impl World {
         let speed = if moves { 5.0 } else { 0.0 };
         st.next += 1;
         self.spawn(object, object_kind::UNIT, format!("n{object}"), speed);
-        if handler_adds {
-            // Commanded work: the clock of the agent's own time does not
-            // move. The row is there in the spawn's frame.
-            if let Some(f) = self.found(object) {
-                assert!(s.add(rec, f, false) > 0, "the handler's row");
-            }
+        // The handler's read is commanded work: the model's clock holds the
+        // agent's own time only, so it does not move here. A unit whose row
+        // the handler added has no lag; any other waits for the births tier.
+        let added = handler_adds && self.found(object).is_some_and(|f| s.add(rec, f, false) > 0);
+        if added {
             self.lags.push(0.0);
         } else {
             self.born.insert(object, now);
@@ -382,7 +381,7 @@ fn pump(s: &mut Sampler, rec: &mut Rec, w: &mut World, clock: &mut Clock) {
                     // A birth the table already has costs the shim one
                     // `wants` check.
                     let wanted = s.wants(object);
-                    if let Some(f) = w.found(object) {
+                    if wanted && let Some(f) = w.found(object) {
                         s.add(rec, f, false);
                         w.spot(s, object);
                     }
