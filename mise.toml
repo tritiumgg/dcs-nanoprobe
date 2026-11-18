@@ -79,7 +79,8 @@ run = "sh tools/luatest.sh"
 # Visual Studio Build Tools, so plain cargo builds the same target there.
 [tasks.windows]
 description = "Cross-build the agent DLL, linking DCS's Lua"
-run = "cargo xwin build --release -p nanoprobe-agent --target x86_64-pc-windows-msvc"
+# tools/remap.sh keeps the build machine's paths out of the DLL and its PDB.
+run = "cargo xwin build --release -p nanoprobe-agent --target x86_64-pc-windows-msvc --config \"$(sh tools/remap.sh x86_64-pc-windows-msvc)\""
 run_windows = "cargo build --release -p nanoprobe-agent --target x86_64-pc-windows-msvc"
 
 [tasks.dll]

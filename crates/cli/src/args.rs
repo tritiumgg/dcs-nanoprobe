@@ -9,7 +9,8 @@ Usage:
   nanoprobe top <map-file> [--interval-ms MS] [--once]
   nanoprobe watch world|events [--addr URL] [--campaign ID] [--since N]
   nanoprobe doctor [--profile DIR | --wine-prefix DIR] [--missions DIR]
-                   [--theater NAME]...
+                   [--theater NAME]... [--sidecar-config FILE]
+                   [--template-dir DIR]...
   nanoprobe install [--profile DIR | --wine-prefix DIR] [--payload DIR]
   nanoprobe uninstall [--profile DIR | --wine-prefix DIR]
   nanoprobe restore --store DIR --campaign ID --backup N
@@ -37,8 +38,18 @@ doctor     Check an install from outside DCS: the files, the token and
            WINEPREFIX, or ~/.wine). It also checks the per-map templates
            in the mission folder: --missions DIR names the sidecar's
            [missions] dir (default: nanoprobe/missions in the profile), and
-           each --theater NAME must have a NAME.miz there. Exit 1 when a
-           check fails, 2 when no installed profile is found.
+           each --theater NAME must have a NAME.miz there.
+           --sidecar-config FILE names the sidecar's sidecar.toml, where
+           this machine sees the paths in it as the sidecar does: doctor
+           checks that the sidecar accepts the file and that its token is
+           the profile's, and takes [missions] dir and template_dirs from
+           it; with more than one installed profile, name the sidecar's
+           with --profile. Each --template-dir DIR names a folder
+           template_dirs lists, as this machine sees it (for a sidecar in
+           a container): it must be a folder, and on Linux and macOS one
+           that not every user can write in. Exit 1 when a check fails, 2
+           when no installed profile is found or, with --sidecar-config,
+           more than one.
 install    Install the release into one DCS Saved Games profile: the loader,
            the agent and its Lua, a handshake token, and a block in
            Config/autoexec.cfg that lets the hook reach the server state.

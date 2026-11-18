@@ -33,8 +33,10 @@ of `A`-`Z`, `a`-`z`, `0`-`9`, `_` and `-`.
 
 Each campaign's mission is a copy of the template with only these values changed: the
 date and start time, the weather, and each named airport's dynamic spawn and hot start
-(spec/persistence.md, "Mission shells"). Airbase owners and warehouse stocks are set
-after the mission starts. Every other part of the template is kept.
+(spec/persistence.md, "Mission shells"). An airport with dynamic spawn turned on gets a
+limited aircraft stock, which the controller sets with `SetWarehouseStock`. Airbase
+owners and warehouse stocks are set after the mission starts. Every other part of the
+template is kept.
 
 ## A campaign's own template
 
