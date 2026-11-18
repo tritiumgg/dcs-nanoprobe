@@ -290,6 +290,11 @@ pub struct Ledger {
     /// `OBJECT_GONE` `DEAD` records with a binding written to the ring: agent
     /// boot, and the generation, campaign and unit entity of their stamps.
     pub reported_deaths: BTreeSet<(u64, u32, u64, u64)>,
+    /// Of those, the ones a sidecar read and acknowledged with a flush, keyed
+    /// as [`Ledger::reported_deaths`], each with the link clock at its first
+    /// such read. The link clock counts the sidecar's reads and command
+    /// writes, so a command written later has a larger clock.
+    pub deaths_read: BTreeMap<(u64, u32, u64, u64), u64>,
     /// Destroys of an entity that DCS refused or whose result was lost, by
     /// agent boot, generation, campaign and entity: one count per destroy,
     /// cleared whenever DCS removes the entity's group.
@@ -358,12 +363,18 @@ pub struct Ledger {
     /// boot, generation, entity and spec revision.
     pub ruin_spawns: Vec<(u64, u32, u64, u64)>,
     /// Of those, the ones that found a dead static under the name already:
-    /// agent boot, generation, campaign, entity, and whether the dead static
-    /// was itself spawned dead (false for a static that died there).
-    pub ruins_replaced: Vec<(u64, u32, u64, u64, bool)>,
+    /// agent boot, generation, campaign, entity, whether the dead static was
+    /// itself spawned dead (false for a static that died there), and whether
+    /// a sidecar had read its death ([`Ledger::deaths_read`]) before the
+    /// spawn was written.
+    pub ruins_replaced: Vec<(u64, u32, u64, u64, bool, bool)>,
     /// Spawns of a live static under the name of a dead one.
     pub ruins_replaced_alive: u64,
 }
+
+/// A death's key in [`Ledger::reported_deaths`]: agent boot, generation,
+/// campaign and unit entity.
+type DeathKey = (u64, u32, u64, u64);
 
 /// A dead static DCS holds ([`FakeSim::ruins`]).
 #[derive(Clone, Debug, PartialEq)]
@@ -503,6 +514,19 @@ pub struct FakeSim {
     /// Records read and not yet acknowledged by the sidecar's flush: a
     /// sidecar that attaches again to this agent boot reads them again.
     unacked: Vec<RawRecord>,
+    /// The link clock ([`Ledger::deaths_read`]).
+    link_clock: u64,
+    /// `OBJECT_GONE` `DEAD` records with a binding, by agent boot and record
+    /// number: the key of [`Ledger::reported_deaths`] each reports.
+    death_records: HashMap<(u64, u64), DeathKey>,
+    /// Deaths read and not yet acknowledged: the record, its key, and the
+    /// link clock of the read.
+    deaths_unacked: Vec<((u64, u64), DeathKey, u64)>,
+    /// The link clock at which each command in the ring was written, by its
+    /// position.
+    written_at: HashMap<u64, u64>,
+    /// The link clock at which the command being handled was written.
+    handling_written_at: Option<u64>,
     queue: VecDeque<(Stamp, Input)>,
     gap: Option<Gap>,
     // The world.
@@ -653,6 +677,11 @@ impl FakeSim {
             in_head: 0,
             out: Vec::new(),
             unacked: Vec::new(),
+            link_clock: 0,
+            death_records: HashMap::new(),
+            deaths_unacked: Vec::new(),
+            written_at: HashMap::new(),
+            handling_written_at: None,
             queue: VecDeque::new(),
             gap: None,
             groups: BTreeMap::new(),
@@ -1378,12 +1407,10 @@ impl FakeSim {
             }
             Input::ObjectGone(g) if g.reason == gone_reason::DEAD && g.entity != 0 => {
                 let (mission_gen, campaign) = self.written_stamp;
-                self.ledger.reported_deaths.insert((
-                    self.agent_boot,
-                    mission_gen,
-                    campaign,
-                    g.entity,
-                ));
+                let key = (self.agent_boot, mission_gen, campaign, g.entity);
+                self.ledger.reported_deaths.insert(key);
+                self.death_records
+                    .insert((self.agent_boot, self.number + 1), key);
             }
             _ => {}
         }
@@ -1833,23 +1860,6 @@ impl FakeSim {
         self.life0_of.insert(entity, life0);
     }
 
-    /// The `OBJECT_GONE` `DEAD` records written and not yet read, as
-    /// [`Ledger::reported_deaths`] keys them.
-    pub fn unread_deaths(&self) -> BTreeSet<(u64, u32, u64, u64)> {
-        let mut stamp = (0, 0);
-        let mut out = BTreeSet::new();
-        for r in &self.out {
-            match Input::decode(r.kind, &r.payload) {
-                Ok(Input::Frame(f)) => stamp = (f.mission_gen, f.campaign),
-                Ok(Input::ObjectGone(g)) if g.reason == gone_reason::DEAD && g.entity != 0 => {
-                    out.insert((r.agent_boot, stamp.0, stamp.1, g.entity));
-                }
-                _ => {}
-            }
-        }
-        out
-    }
-
     /// The link drops: the agent detaches and queues its records. Commands
     /// the sidecar held back never reach it.
     pub fn detach(&mut self) {
@@ -1868,6 +1878,9 @@ impl FakeSim {
         self.sidecar_boot = sidecar_boot;
         self.inbound.clear();
         self.held.clear();
+        self.written_at.clear();
+        // A death read and never acknowledged is read again.
+        self.deaths_unacked.clear();
         // Records the last sidecar read and never acknowledged come first:
         // they are older than anything still in the ring. Those of an agent
         // boot that is gone went with it.
@@ -2426,6 +2439,7 @@ impl FakeSim {
                 };
                 taken += 1;
                 self.in_head = pos;
+                self.handling_written_at = self.written_at.remove(&pos);
                 if let Ok(Some(c)) = Command::decode(op, &payload)
                     && !c.body.is_control()
                 {
@@ -2435,6 +2449,7 @@ impl FakeSim {
                     );
                 }
                 self.handle(op, &payload);
+                self.handling_written_at = None;
             }
             self.ledger.most_per_frame = self.ledger.most_per_frame.max(taken);
         }
@@ -3384,12 +3399,21 @@ impl FakeSim {
             self.destroy_group(old);
         }
         if let Some(old) = self.ruins.remove(name) {
+            let key = (self.agent_boot, self.mission_gen_, old.campaign, old.entity);
+            // A command handled outside a frame counts as written now.
+            let written = self.handling_written_at.unwrap_or(self.link_clock);
+            let known = self
+                .ledger
+                .deaths_read
+                .get(&key)
+                .is_some_and(|read| *read < written);
             self.ledger.ruins_replaced.push((
                 self.agent_boot,
                 self.mission_gen_,
                 old.campaign,
                 old.entity,
                 old.spawned,
+                known,
             ));
         }
         let object = self.next_object;
@@ -3497,12 +3521,21 @@ impl SimAdapter for FakeSim {
             return Err(Detached);
         }
         self.in_tail += 1;
+        self.link_clock += 1;
+        self.written_at.insert(self.in_tail, self.link_clock);
         self.held.push_back((self.in_tail, op, payload.to_vec()));
         Ok(self.in_tail)
     }
 
     fn read(&mut self) -> Vec<RawRecord> {
         let v = std::mem::take(&mut self.out);
+        self.link_clock += 1;
+        for r in &v {
+            let record = (r.agent_boot, r.number);
+            if let Some(key) = self.death_records.get(&record) {
+                self.deaths_unacked.push((record, *key, self.link_clock));
+            }
+        }
         self.unacked.extend(v.iter().cloned());
         v
     }
@@ -3510,6 +3543,11 @@ impl SimAdapter for FakeSim {
     fn flush(&mut self) {
         self.inbound.extend(self.held.drain(..));
         self.unacked.clear();
+        // An acknowledged record is never read again.
+        for (record, key, clock) in std::mem::take(&mut self.deaths_unacked) {
+            self.death_records.remove(&record);
+            self.ledger.deaths_read.entry(key).or_insert(clock);
+        }
     }
 }
 

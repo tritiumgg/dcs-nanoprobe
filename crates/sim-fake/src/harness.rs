@@ -783,15 +783,9 @@ impl World {
         self.store.keep_journal(true);
         self.scan = Scan {
             before: self.sim.ledger().taken.keys().copied().collect(),
-            // Deaths the earlier store read; those still unread are this
-            // store's to read.
-            deaths_before: self
-                .sim
-                .ledger()
-                .reported_deaths
-                .difference(&self.sim.unread_deaths())
-                .copied()
-                .collect(),
+            // Deaths the earlier store read and acknowledged. Those unread,
+            // or read and not acknowledged, are this store's to read.
+            deaths_before: self.sim.ledger().deaths_read.keys().copied().collect(),
             // The commands in flight: their outcomes may come after this.
             commands: self
                 .store
@@ -840,13 +834,19 @@ impl World {
                 l.replacements - l.in_place
             )));
         }
-        // The object of a static whose death was reported is never spawned
-        // over in its generation: the store knows DCS holds it. A death no
-        // record reported leaves the sidecar nothing to know it by.
-        if let Some((_, _, _, e, _)) = l.ruins_replaced.iter().find(|(b, g, c, e, spawned)| {
-            let k = (*b, *g, *c, *e);
-            !spawned && l.reported_deaths.contains(&k) && !self.scan.deaths_before.contains(&k)
-        }) {
+        // The object of a static whose death the sidecar had read is never
+        // spawned over in its generation: the store knows DCS holds it. A
+        // death the sidecar had not read when it wrote the spawn leaves it
+        // nothing to know it by, even if its record arrives before the spawn
+        // runs or later.
+        if let Some((_, _, _, e, _, _)) =
+            l.ruins_replaced
+                .iter()
+                .find(|(b, g, c, e, spawned, known)| {
+                    let k = (*b, *g, *c, *e);
+                    !spawned && *known && !self.scan.deaths_before.contains(&k)
+                })
+        {
             return Err(Violation(format!(
                 "a ruin was spawned over static {e}, which died in that generation"
             )));
