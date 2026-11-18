@@ -505,7 +505,7 @@ const DEAD_STATICS: [(&str, &str, f64); 6] = [
 /// `getLife`, and how often `world.searchObjects` lists it in a 30 m sphere.
 fn static_read(name: &str, x: f64, z: f64) -> String {
     format!(
-        "local out = {{}}\nlocal f = StaticObject.getByName({name:?})\nout.found = f ~= nil\nif f then local oke, e = pcall(f.isExist, f) out.exists = oke and e or 'raised' local okl, l = pcall(f.getLife, f) out.life = okl and l or 'raised' end\nout.listed = 0\npcall(world.searchObjects, Object.Category.STATIC, {{ id = world.VolumeType.SPHERE, params = {{ point = {{ x = {x}, y = land.getHeight({{ x = {x}, y = {z} }}), z = {z} }}, radius = 30 }} }}, function(o) local okn, n = pcall(o.getName, o) if okn and n == {name:?} then out.listed = out.listed + 1 end return true end)\nreturn out\n"
+        "local out = {{}}\nlocal f = StaticObject.getByName({name:?})\nout.found = f ~= nil\nif f then local oke, e = pcall(f.isExist, f) if oke then out.exists = e else out.exists = 'raised' end local okl, l = pcall(f.getLife, f) out.life = okl and l or 'raised' end\nout.listed = 0\npcall(world.searchObjects, Object.Category.STATIC, {{ id = world.VolumeType.SPHERE, params = {{ point = {{ x = {x}, y = land.getHeight({{ x = {x}, y = {z} }}), z = {z} }}, radius = 30 }} }}, function(o) local okn, n = pcall(o.getName, o) if okn and n == {name:?} then out.listed = out.listed + 1 end return true end)\nreturn out\n"
     )
 }
 
@@ -573,7 +573,7 @@ fn dead_static_clear(
                             theater: theater.to_string(),
                             north: x,
                             east: z,
-                            ..pb::Position::default()
+                            alt: ground(run, x, z)?,
                         }),
                         radius: 30.0,
                     })),
@@ -734,6 +734,19 @@ fn owned_and_stocked(
     Ok(farp)
 }
 
+/// The ground's height in metres above sea level at `x`, `z`: a sphere's
+/// `alt` is above sea level, so one centered at 0 sits under high ground.
+fn ground(run: &Run, x: f64, z: f64) -> Result<f64, String> {
+    run.eval(
+        "server",
+        "s19-person-ground",
+        &format!("return land.getHeight({{ x = {x}, y = {z} }})\n"),
+        60,
+    )?
+    .as_f64()
+    .ok_or_else(|| "no ground height".to_string())
+}
+
 /// A dead static's ruin through `DoEffect` `ClearDebris` (spec/commands.md,
 /// "Layout: CLEAR_DEBRIS"): a `FARP Fuel Depot` added by script 300 m east of
 /// the FARP, so unmanaged, killed with a scripted explosion of power 1,000, then a
@@ -774,7 +787,7 @@ fn ruin_check(
         return Err(format!("the ruin static was not added: {added}"));
     }
     let read = format!(
-        "local out = {{}}\nlocal s = StaticObject.getByName({name:?})\nout.found = s ~= nil\nif s then local ok, e = pcall(s.isExist, s) out.exists = ok and e or 'raised' local okl, l = pcall(s.getLife, s) out.life = okl and l or 'raised' end\nout.listed = 0\nworld.searchObjects(Object.Category.STATIC, {{ id = world.VolumeType.SPHERE, params = {{ point = {{ x = {x}, y = land.getHeight({{ x = {x}, y = {z} }}), z = {z} }}, radius = 30 }} }}, function(o) local ok, n = pcall(o.getName, o) if ok and n == {name:?} then out.listed = out.listed + 1 end return true end)\nreturn out\n"
+        "local out = {{}}\nlocal s = StaticObject.getByName({name:?})\nout.found = s ~= nil\nif s then local ok, e = pcall(s.isExist, s) if ok then out.exists = e else out.exists = 'raised' end local okl, l = pcall(s.getLife, s) out.life = okl and l or 'raised' end\nout.listed = 0\nworld.searchObjects(Object.Category.STATIC, {{ id = world.VolumeType.SPHERE, params = {{ point = {{ x = {x}, y = land.getHeight({{ x = {x}, y = {z} }}), z = {z} }}, radius = 30 }} }}, function(o) local ok, n = pcall(o.getName, o) if ok and n == {name:?} then out.listed = out.listed + 1 end return true end)\nreturn out\n"
     );
     run.eval(
         "server",
@@ -804,7 +817,7 @@ fn ruin_check(
                         theater: theater.to_string(),
                         north: x,
                         east: z,
-                        ..pb::Position::default()
+                        alt: ground(run, x, z)?,
                     }),
                     radius: 30.0,
                 })),

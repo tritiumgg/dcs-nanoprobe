@@ -2021,11 +2021,13 @@ local HANDLERS = {
     local dead = {}
     T.cleared = T.cleared or {}
     pcall(world.searchObjects, Object.Category.STATIC, volume, function(s)
-      local got, life, exists, name = pcall(function()
-        return s:getLife(), s:isExist(), s:getName()
-      end)
-      if got and type(life) == 'number' and life <= 0 and exists == false
-        and type(name) == 'string' and name:sub(1, 3) ~= 'np#' then
+      -- A dead static's `isExist` reads false (LIVE); one that raises is
+      -- taken as no longer existing too.
+      local got, life = pcall(s.getLife, s)
+      local known, exists = pcall(s.isExist, s)
+      local named, name = pcall(s.getName, s)
+      if got and type(life) == 'number' and life <= 0 and (not known or exists == false)
+        and named and type(name) == 'string' and name:sub(1, 3) ~= 'np#' then
         dead[#dead + 1] = s
       end
       return true

@@ -897,7 +897,7 @@ and unit values are UNVERIFIED.
 The handler calls `world.removeJunk` with a DCS volume of the code's shape. It then
 lists the statics in the same volume with `world.searchObjects` and collects each whose
 `getLife()` reads 0 or less and whose `isExist()` reads false, as a dead static's do
-(LIVE), and whose name does not start with `np#` (spec/world.md, "Names"). After the
+(LIVE), or raises, and whose name does not start with `np#` (spec/world.md, "Names"). After the
 search returns it calls `destroy` on each, under `pcall`: `world.removeJunk` leaves a
 destroyed static, and a client keeps showing its ruin until `Object.destroy` removes it
 (LIVE, docs/results/2026-11-16-person-tests-2.md). A destroy that raises is skipped and

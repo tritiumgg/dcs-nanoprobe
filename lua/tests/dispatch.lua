@@ -1545,6 +1545,14 @@ scenario('clear-debris', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   expect(r[1], APPLIED, 'CLEAR_DEBRIS on a managed and an unmanaged dead static')
   assert(sim.dead_statics[kept.id] == kept, 'a clear destroyed a dead static the platform manages')
   assert(sim.gone_statics[loose.id] == loose, 'a clear left an unmanaged dead static beside a managed one')
+  -- A dead static whose isExist raises is destroyed too.
+  local raises = sim:add_static(2, { name = 'raises', type = 'FARP Fuel Depot', x = 90000, y = 0 })
+  sim:doom_static(raises)
+  sim.exist_raises = { [raises.id] = true }
+  r = run({ sphere(raises, 50) }, 'clear debris on a dead static whose isExist raises')
+  sim.exist_raises = nil
+  expect(r[1], APPLIED, 'CLEAR_DEBRIS on a dead static whose isExist raises')
+  assert(sim.gone_statics[raises.id] == raises, 'a clear left a dead static whose isExist raises')
   -- A destroy that raises is skipped and not counted; the clear still
   -- applies.
   sim.destroy_raises = true
