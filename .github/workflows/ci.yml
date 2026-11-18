@@ -1,8 +1,13 @@
-# Build, lint and host tests on Linux, macOS and Windows, the agent DLL
-# cross-built on Linux and macOS, and the release DLL built on Windows.
+# Build, lint and host tests on Linux, macOS and Windows, and the agent DLL
+# cross-built on Linux and macOS and built natively on Windows. The Windows
+# build checks that the code builds and passes its checks there; no file it
+# makes is released. The release's files are built on a Linux runner by
+# release.yml.
 #
-# Every tool comes from mise.toml through mise-action, so CI runs the versions a
-# developer runs. Actions are pinned to commit SHAs; the comment names the tag.
+# On Linux and macOS, CI runs `mise run check` itself, so the two cannot list
+# different checks. Every tool comes from mise.toml through mise-action, so CI
+# runs the versions a developer runs. Actions are pinned to commit SHAs; the
+# comment names the tag.
 
 name: CI
 
@@ -21,11 +26,14 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # The mise that runs the tasks, the one the developers' check passes with.
+  MISE_VERSION: 2026.8.2
 
 jobs:
   unix:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -34,29 +42,81 @@ jobs:
             os: ubuntu-latest
           - name: macOS
             os: macos-latest
+    env:
+      # tools/protobreak.sh compares the schema at its merge base with this
+      # commit: the base of a pull request, or the commit before a push. Empty
+      # on a manual run, where the script picks origin/main.
+      PROTOBREAK_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
     steps:
+      # One cargo-xwin cache path on both systems, so one cache step serves
+      # both. The home folder is known only on the runner.
+      - name: Name the cargo-xwin cache
+        run: printf 'XWIN_CACHE_DIR=%s/.cache/cargo-xwin-ci\n' "$HOME" >>"$GITHUB_ENV"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # The secret scan reads the whole history.
+          # The secret scan reads the whole history, and the breaking-change
+          # check needs the base commit.
           fetch-depth: 0
+          persist-credentials: false
 
       - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
         with:
+          version: ${{ env.MISE_VERSION }}
           cache: true
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # Pull requests read main's cache and write none.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # cargo-xwin downloads the MSVC CRT and Windows SDK once per cache.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.cache/cargo-xwin
+          path: ~/.cache/cargo-xwin-ci
           key: xwin-${{ runner.os }}-${{ hashFiles('mise.toml') }}
+
+      - name: The developers' check (mise run check)
+        run: mise run check
+
+      - name: The agent DLL, its imports and exports, and that no entry point owns a value (mise run dll)
+        run: mise run dll
+
+      - name: Secret scan of the history
+        if: runner.os == 'Linux'
+        run: gitleaks git --redact --no-banner .
+
+  # The Rust builds and tests of `mise run check`, and the DLL's checks. The
+  # rest of the check task runs on Linux and macOS only: tools/tmpleak.sh needs
+  # pgrep, the host Lua 5.1 is built with make, the hello campaigns' scripts
+  # manage processes with pkill, and the schema, secret-hook, release-script
+  # and workflow lints check files that are the same on every system.
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+        with:
+          version: ${{ env.MISE_VERSION }}
+          cache: true
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # build.rs makes the lua.dll import library with llvm-dlltool or llvm-lib,
+      # from the LLVM the runner image ships.
+      - name: Put LLVM on PATH
+        shell: bash
+        run: printf '%s\n' 'C:\Program Files\LLVM\bin' >>"$GITHUB_PATH"
 
       - name: Format
         run: cargo fmt --all --check
-
-      - name: Check each crate for Windows
-        run: sh tools/windowscheck.sh
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
@@ -64,83 +124,15 @@ jobs:
       - name: Clippy on the agent with fault injection
         run: cargo clippy -p nanoprobe-agent --all-targets --no-default-features --features faults -- -D warnings
 
+      # tools/tmpleak.sh needs pgrep, which Windows lacks; the tests run plainly.
       - name: Test
         run: cargo test --workspace --no-default-features
 
       - name: Virtualization at full size, in release
         run: cargo test -p nanoprobe-sim-fake --release --test virtualization -- --ignored
 
-      - name: Open the host build with Lua 5.1
-        run: sh tools/luatest.sh
-
-      - name: Lint the API schema
-        run: buf lint
-
-      - name: Check the API schema for breaking changes
-        # The base of a pull request, or the commit before a push.
-        run: sh tools/protobreak.sh "${{ github.event.pull_request.base.sha || github.event.before }}"
-
-      - name: Check how the breaking check picks its base
-        run: sh tools/protobreak-test.sh
-
       - name: Check the generated API code is current
         run: cargo xtask proto --check
-
-      - name: Check the release's schema archive and descriptor set
-        run: sh tools/stage-schema-test.sh
-
-      - name: Cross-build the agent DLL
-        run: cargo xwin build --release -p nanoprobe-agent --target x86_64-pc-windows-msvc
-
-      - name: Check the DLL
-        run: sh tools/checkdll.sh
-
-      - name: Check that no entry point owns a value
-        if: runner.os == 'Linux'
-        run: sh tools/raiseshape.sh
-
-      - name: Check that no entry point owns a value, with fault injection
-        if: runner.os == 'Linux'
-        run: FEATURES=faults sh tools/raiseshape.sh
-
-      - name: Check that the DLL check refuses the fault-injection build
-        if: runner.os == 'Linux'
-        run: sh tools/checkdll.sh target/faults/x86_64-pc-windows-msvc/release/nanoprobe.dll 2>&1 | grep -q 'has fault injection'
-
-      - name: Secret scan of the history
-        if: runner.os == 'Linux'
-        run: gitleaks git --redact --no-banner .
-
-      - name: Secret hook blocks a planted token
-        if: runner.os == 'Linux'
-        run: sh tools/secretscan-test.sh
-
-  windows:
-    name: Windows
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
-        with:
-          cache: true
-
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
-
-      - name: Clippy on the agent with fault injection
-        run: cargo clippy -p nanoprobe-agent --all-targets --no-default-features --features faults -- -D warnings
-
-      - name: Test
-        run: cargo test --workspace --no-default-features
-
-      # build.rs makes the lua.dll import library with llvm-dlltool or llvm-lib,
-      # from the LLVM the runner image ships.
-      - name: Put LLVM on PATH
-        shell: bash
-        run: echo 'C:\Program Files\LLVM\bin' >> "$GITHUB_PATH"
 
       - name: Check each crate for Windows
         shell: bash
@@ -153,10 +145,21 @@ jobs:
         shell: bash
         run: sh tools/checkdll.sh
 
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: agent-windows
-          path: |
-            target/x86_64-pc-windows-msvc/release/nanoprobe.dll
-            target/x86_64-pc-windows-msvc/release/nanoprobe.pdb
-          if-no-files-found: error
+      - name: Check that no entry point owns a value
+        shell: bash
+        run: sh tools/raiseshape.sh
+
+      - name: Check that no entry point owns a value, with fault injection
+        shell: bash
+        run: FEATURES=faults sh tools/raiseshape.sh
+
+      - name: Check that the DLL check refuses the fault-injection build
+        shell: bash
+        # GitHub runs bash with pipefail, and checkdll.sh exits 1 on this
+        # DLL, so its output is captured before it is matched.
+        run: |
+          if out=$(sh tools/checkdll.sh target/faults/x86_64-pc-windows-msvc/release/nanoprobe.dll 2>&1); then
+            printf 'checkdll.sh accepted the fault-injection build\n' >&2
+            exit 1
+          fi
+          printf '%s\n' "$out" | grep -q 'has fault injection'

@@ -1,0 +1,273 @@
+# Turning on CI and cutting a release
+
+For a maintainer with admin rights on the GitHub repository. Run the commands from a
+checkout of the repository; `gh` fills in `{owner}/{repo}` from it. The steps go in
+order.
+
+Two workflows take part:
+
+| Workflow | Started by | Does |
+|---|---|---|
+| `ci.yml` | a push to main, a pull request, or by hand | `mise run check` and `mise run dll` on Linux and macOS; a build and the checks on Windows |
+| `release.yml` | a pushed tag `v<version>`, or by hand as a dry run | builds every released file on one Linux runner with `mise run package` and publishes them as the release; a dry run keeps the files as workflow artifacts and makes no release |
+
+Pushing commits and tags and starting a workflow by hand (`gh workflow run` is a write
+to the repository) are the maintainer's. A development agent reads with `gh`, which
+includes downloading a run's artifacts, and starts a workflow only on the maintainer's
+word.
+
+| Step | Who |
+|---|---|
+| 1. Turn on Actions (once), 2. push main, 3. the dry run (required before 0.1, optional later), 4. the signed tag | the maintainer |
+| 5. Keep the released DLL's PDB | the maintainer or an agent |
+
+## 1. Turn on GitHub Actions
+
+```bash
+gh api -X PUT 'repos/{owner}/{repo}/actions/permissions' -F enabled=true -f allowed_actions=all
+```
+
+The workflows use actions from outside GitHub's own (`jdx/mise-action`,
+`Swatinem/rust-cache`), each pinned to a commit, so the policy must allow them. Check
+the result:
+
+```bash
+gh api 'repos/{owner}/{repo}/actions/permissions'
+```
+
+It shows `"enabled": true` and `"allowed_actions": "all"`. The repository's default
+token permission can stay read-only: each workflow names the permissions it needs.
+
+## 2. Push main
+
+A push publishes every commit not yet on GitHub. CI scans the history for secrets
+only after the push, so scan it first and push only when it reports no leaks:
+
+```bash
+mise exec -- gitleaks git --redact --no-banner .
+```
+
+```bash
+git push origin main
+```
+
+The push starts the CI workflow (`.github/workflows/ci.yml`): the jobs Linux, macOS and
+Windows. A few seconds after the push, watch the run for the pushed commit; the command
+exits nonzero when a job fails:
+
+```bash
+gh run watch --exit-status "$(gh run list --workflow ci.yml --commit "$(git rev-parse main)" --limit 1 --json databaseId --jq '.[0].databaseId')"
+```
+
+What to expect on the first run:
+
+- Linux and macOS run `mise run check` and then `mise run dll`, as a developer does.
+  The first run installs every tool in `mise.toml` and builds from nothing; later runs
+  restore caches that pushes to main save.
+- The breaking-change check compares the schema with the commit before the push. When
+  that commit holds no schema, as on the first push of the schema, it reports "nothing
+  to compare" and passes.
+- Windows runs format, clippy, the tests, the virtualization test, the generated-code
+  check, the per-crate Windows check, and the agent DLL with its checks, built
+  natively. No file it builds is released.
+
+## When a CI job fails
+
+Open the failed step's log:
+
+```bash
+gh run view --log-failed
+```
+
+Reproduce it on a development machine with the same command: `mise run check` or
+`mise run dll` on Linux or macOS. The tools are the same versions as CI's.
+
+- A test that fails only on the runner and passes locally is often a timing limit
+  under the runner's fewer cores. Rerun the failed jobs once
+  (`gh run rerun --failed`); if it fails again, it is a real failure on that machine.
+- A failure in installing a tool (a download error from mise) is usually transient:
+  rerun the job.
+- A failure on Windows only cannot be reproduced on Linux or macOS. The log names the
+  step; the build, clippy and test steps run there as on any Windows machine with the
+  Visual Studio Build Tools and LLVM.
+- The breaking-change check compares against the base the event gives, which a local
+  `mise run check` does not know. Search the log of the step that runs
+  `mise run check` for "comparing the schema against" or "no schema at": the line
+  names the base and its merge base. Reproduce it with
+  `mise exec -- sh tools/protobreak.sh <commit>`.
+- The secret scan of the history: reproduce it with
+  `mise exec -- gitleaks git --redact --no-banner .`. A secret it finds is already on
+  GitHub: treat it as exposed and rotate it before anything else.
+
+Fix the cause on a branch, merge it to main, and push again. Do not cut a release from
+a commit whose CI failed.
+
+## 3. Dry run of the release build
+
+```bash
+gh workflow run release.yml --ref main
+```
+
+It runs the job Build: `mise run package` on an `ubuntu-24.04` runner, from nothing,
+with no cache, and the archive test `tools/stage-release-test.sh`. That test fails when
+an archive holds other files than spec/install.md lists, when a program is not static,
+when a file names the runner's home folder or checkout, or when a PDB is among the
+release's files. The files are kept as the workflow artifact `release-files-<commit>`
+and the PDB folder as `agent-symbols-<commit>`, each for 14 days, where `<commit>` is
+the first 12 characters of the commit they were built from. No release is made.
+
+A few seconds after starting it, watch the run; the command exits nonzero when it
+fails. Then print the full commit it built, and download its files and PDB folder into
+a folder no task writes, named after that commit:
+
+```bash
+run=$(gh run list --workflow release.yml --event workflow_dispatch --branch main --limit 1 --json databaseId --jq '.[0].databaseId')
+gh run watch --exit-status "$run"
+gh run view "$run" --json headSha --jq .headSha
+commit=$(gh run view "$run" --json headSha --jq .headSha | cut -c1-12)
+gh run download "$run" -n "release-files-$commit" -D "dist/runner-$commit"
+gh run download "$run" -n "agent-symbols-$commit" -D "dist/runner-$commit/private"
+```
+
+`mise run package` rewrites the release files at the top of `dist/` but never this
+folder. Keep the full commit with any test of the files. A dry run is optional for a
+later release. Before 0.1 it is required: the 0.1 acceptance run, which runs once,
+tests a dry run's files (docs/acceptance.md). Before the tag, finish the version's
+section of `docs/release-notes.md`. The section is final
+when its heading is the version with optional words after it, such as
+`## 0.1.0, the first release`, without "Draft", and no line in it says "To be
+completed", "not yet run", "TBD" or "TODO".
+
+The first dry run is also the first time `mise run package` runs on a Linux host. If it
+fails, the log names the step. The tools come from `mise.toml`: zig as the C compiler
+for the static programs, cargo-xwin and LLVM for the Windows files, buf for the schema.
+The runner supplies rustup, which installs the toolchain `rust-toolchain.toml` names,
+the C compiler and linker for programs built for the runner itself and for the `cargo:`
+tools mise installs, `zip`, `unzip`, git, `gh` and the shell tools.
+
+## 4. Tag the version
+
+The tag is `v` and the workspace version in `Cargo.toml` (`0.1.0` for the first
+release), on a commit on main whose CI passed.
+
+When a dry run's files were tested, the commit to tag must differ from that run's
+commit only in files the release build does not read: the documents, the test results
+and their scripts, and the test tooling (`crates/xtask`, the fake agent and sidecar,
+`examples/`, and every `lua/` folder but `lua/hook` and `lua/agent`). This prints
+nothing when that holds:
+
+```bash
+git diff --stat <dry-run commit> main -- . ':(exclude)docs' ':(exclude)README.md' \
+    ':(exclude)crates/xtask' ':(exclude)crates/fake-agent' ':(exclude)crates/fake-sidecar' \
+    ':(exclude)examples' ':(exclude,glob)lua/[!ah]*/**'
+```
+
+If it lists a file, the tested files are not the source being tagged: run a dry run of
+main and test again. Then push main with the final notes, wait for its CI to pass (the
+watch command in step 2), and tag the same commit:
+
+```bash
+git push origin main
+```
+
+```bash
+git tag -s v0.1.0 -m 'nanoprobe 0.1.0' main
+git push origin v0.1.0
+```
+
+The tag push starts `release.yml`. A few seconds later, watch it:
+
+```bash
+gh run watch --exit-status "$(gh run list --workflow release.yml --branch v0.1.0 --limit 1 --json databaseId --jq '.[0].databaseId')"
+```
+
+The commit in the tag run's artifact names is `git rev-parse 'v0.1.0^{commit}' | cut -c1-12`. The workflow that runs is the one in the tagged
+commit, so tag a commit that holds `.github/workflows/release.yml`. Before it builds,
+the job Build checks that the tag is `v` plus the workspace version, that its commit is
+on main, that the version's section of `docs/release-notes.md` in that commit is final
+(`tools/release-notes.sh`), and that no release has the tag. Then it builds as in the
+dry run. The job Publish checks the files against their `SHA256SUMS`, refuses if any
+release or draft has the tag, and publishes the release: the two archives, the schema's
+two files and `SHA256SUMS`, with the notes from the tagged commit, relative links made
+absolute to the tag. It is marked the latest release. Check it:
+
+```bash
+gh release view v0.1.0 --json isDraft,assets --jq '{isDraft, assets: [.assets[].name]}'
+```
+
+A correct release shows `"isDraft": false` and exactly five assets:
+`nanoprobe-0.1.0-windows-x86_64.zip`, `nanoprobe-0.1.0-linux-x86_64.tar.gz`,
+`nanoprobe-0.1.0-schema.tar.gz`, `nanoprobe-0.1.0-schema.binpb` and `SHA256SUMS`. On
+the release page, the notes' links open files under `blob/v0.1.0`. If any of this is
+wrong, delete the release and the tag ("When a release step fails") and fix the cause
+before tagging again.
+
+A dry run never runs these parts, so the first tag is their first run: the tag check
+against the runner's origin/main, the notes check, the release lookups through the
+GitHub API, the checksum check of the downloaded files, `gh release create`, and the
+notes' links on a real release page.
+
+The tag's build is a rebuild. Its bytes differ from a dry run's: the archives keep file
+times, the builds are not reproducible, and cargo-xwin downloads Microsoft's current
+MSVC CRT and Windows SDK for each build, so the two builds may link different versions
+of them.
+
+## 5. Keep the released DLL's PDB
+
+The PDB of the released DLL is the tag run's `agent-symbols-<commit>` artifact, kept
+14 days. Copy it to the development machine before it expires, beside the folders
+`mise run package` keeps:
+
+```bash
+run=$(gh run list --workflow release.yml --branch v0.1.0 --limit 1 --json databaseId --jq '.[0].databaseId')
+gh run download "$run" -n "agent-symbols-$(git rev-parse 'v0.1.0^{commit}' | cut -c1-12)" -D dist/private
+```
+
+`dist/private/<signature>/` then holds `nanoprobe.dll` and `nanoprobe.pdb`. Copied into
+`target/symbols/`, the folder lets `cargo xtask symbolize` turn a crash record of the
+released DLL into function names (spec/install.md, "Release").
+
+## When a release step fails
+
+Nothing is public until the job Publish succeeds.
+
+- **The dry run fails.** Fix the cause on main, push, and run it again.
+- **The tag check fails.** The message says why: another version, or a commit off
+  main. Delete the tag and tag the right commit:
+  `git push origin :refs/tags/v0.1.0 && git tag -d v0.1.0`, then step 4.
+- **The notes check fails.** The message names the placeholder or the heading. Finish
+  the notes on main, push, delete the tag as above, and tag the new commit.
+- **The build fails.** No release is made. Fix the cause on main, push, delete the tag
+  as above, and go back to step 4: after a tested dry run, a fix in a file the release
+  build reads needs a new dry run and a new test before the tag.
+- **A release for the tag exists.** The build refuses, so a second run cannot replace
+  published files. A published version is not built again: raise the workspace version
+  for the next release. Only a release that should not exist, such as one left by a
+  failed run, is deleted (`gh release delete v0.1.0 --yes`); then delete the tag as
+  above and go back to step 4.
+- **The job Publish fails after Build passed.** Read the log. If `gh release create`
+  left a partial release or draft, delete it as above. Within a day, while the run's
+  `release-notes-<commit>` artifact exists, rerun only the failed job:
+  `gh run rerun <run id> --failed`. Later, or when the fix is in a workflow or a
+  script, delete the tag and go back to step 4.
+
+## Before the repository goes public
+
+Workflow artifacts of a public repository can be downloaded by any signed-in GitHub
+user until they expire: the release workflow's `release-files-<commit>` and
+`agent-symbols-<commit>`, which holds the agent's PDB (14 days each), and
+`release-notes-<commit>` (1 day). CI keeps no
+artifact. List the unexpired ones:
+
+```bash
+gh api --paginate 'repos/{owner}/{repo}/actions/artifacts' --jq '.artifacts[] | select(.expired | not) | [.id, .name, .expires_at] | @tsv'
+```
+
+Delete any that should not become public, by its ID:
+
+```bash
+gh api -X DELETE 'repos/{owner}/{repo}/actions/artifacts/<id>'
+```
+
+Run logs become public too. They hold the runner's paths and the tools' output, and no
+secret: the workflows use only the token GitHub gives each run.

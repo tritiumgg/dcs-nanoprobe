@@ -39,7 +39,8 @@
 #
 # Run it through `mise run package`, which first builds the DLL and checks it
 # with tools/checkdll.sh. This script builds the two programs for both
-# platforms.
+# platforms. .github/workflows/release.yml runs the same task on a Linux
+# runner to build a release.
 #
 # Runs on macOS and Linux. A Windows host can build the DLL (`mise run dll`)
 # but not stage a release: the Linux programs need a C compiler for musl, and

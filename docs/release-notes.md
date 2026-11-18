@@ -1,6 +1,6 @@
 # Release notes
 
-## Draft: 0.1, the first release
+## Draft: 0.1.0, the first release
 
 The first release of nanoprobe, 0.1: an agent inside DCS World, a sidecar that owns a
 persistent campaign world, and a gRPC API for a controller in any language. The
@@ -22,13 +22,16 @@ version, `0.1.0`: `nanoprobe-0.1.0-windows-x86_64.zip`, for example.
 
 ### How the files were built
 
-The files are cross-built on a development machine with `mise run package`: the Windows
-programs and the agent DLL with `cargo-xwin`, the Linux programs as static musl
-binaries. These cross-built files are the release: the acceptance run tested exactly
-the files `SHA256SUMS` lists. A later release is built on a Windows CI runner.
+The files are built on one Linux runner of GitHub Actions with `mise run package`: the
+Windows programs and the agent DLL cross-built with `cargo-xwin`, the Linux programs as
+static musl binaries. The acceptance run tested files the same workflow built without
+releasing them, from a commit that differs from the tagged one only in files the build
+does not read. The published files are that build repeated for the tag, so their bytes,
+and the checksums in `SHA256SUMS`, differ from the tested ones; the MSVC CRT and
+Windows SDK that `cargo-xwin` downloads for each build may differ too.
 
-The agent's PDB is not published. It names the folders of the machine that built it,
-and the builder keeps it to turn the agent's crash records into function names.
+The agent's PDB is not published. The project keeps it to turn the agent's crash
+records into function names.
 
 ### Where it is verified
 
@@ -76,7 +79,7 @@ happens when one is absent).
 
 ### Open items
 
-To be completed when the release is cut.
+To be completed before the tag is pushed (docs/releasing.md, step 4).
 
 - The conformance suite has no table from each check to the DCS names it needs. When
   `doctor` reports a name absent, a person reads the suite's result.
