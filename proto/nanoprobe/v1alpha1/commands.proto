@@ -396,8 +396,9 @@ message WholeMap {}
 
 // Remove wrecks, craters and debris. DCS removes the wrecks of ground units
 // that have stopped burning; craters count as junk too (inferred from the
-// count). It also destroys every dead static in the volume, so its ruin
-// leaves the clients' screens; a managed static that died keeps its record.
+// count). It also destroys every dead static in the volume that the
+// platform does not manage, so its ruin leaves the clients' screens. A
+// managed static, dead or alive, stays, with its record.
 // It leaves every live unit and static, a wreck that is still burning and
 // destroyed scenery. Around a dead aircraft it removes something; what is
 // UNVERIFIED. A burning wreck it leaves still explodes and sends its death

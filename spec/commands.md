@@ -890,17 +890,20 @@ and unit values are UNVERIFIED.
 The handler calls `world.removeJunk` with a DCS volume of the code's shape. It then
 lists the statics in the same volume with `world.searchObjects` and collects each whose
 `getLife()` reads 0 or less and whose `isExist()` reads false, as a dead static's do
-(LIVE). After the search returns it calls `destroy` on each, under `pcall`:
-`world.removeJunk` leaves a destroyed static, and a client keeps showing its ruin until
-`Object.destroy` removes it (LIVE, docs/results/2026-11-16-person-tests-2.md). A destroy
-that raises is skipped and not counted. The value is the number `world.removeJunk`
-returns, how many junk objects it removed (craters and debris as well as wrecks), plus
-the statics destroyed. A static a destroy left where it was is destroyed again by each
-later clear and counted once a mission generation. The agent sends it as the `RESULT`'s value. A
-`world.removeJunk` call that raises is `DCS_REFUSED` with its text; otherwise `APPLIED`.
-A destroyed static is not a removal: a platform static that died keeps its death fact,
-its record is unchanged, and the sidecar sends no `STATIC_DESTROY` for it. A mission's
-own dead statics in the volume go too.
+(LIVE), and whose name does not start with `np#` (spec/world.md, "Names"). After the
+search returns it calls `destroy` on each, under `pcall`: `world.removeJunk` leaves a
+destroyed static, and a client keeps showing its ruin until `Object.destroy` removes it
+(LIVE, docs/results/2026-11-16-person-tests-2.md). A destroy that raises is skipped and
+not counted. A static the platform manages, dead or alive, is never destroyed, so a
+controller can keep its wreck or ruin on purpose: its record and death fact are
+unchanged. Only the dead statics nobody manages, placed by the mission or by a script,
+go.
+
+The value is the number `world.removeJunk` returns, how many junk objects it removed
+(craters and debris as well as wrecks), plus the statics destroyed. A static a destroy
+left where it was is destroyed again by each later clear and counted once a mission
+generation. The agent sends it as the `RESULT`'s value. A `world.removeJunk` call that
+raises is `DCS_REFUSED` with its text; otherwise `APPLIED`.
 
 The agent checks the payload, else `BAD_PAYLOAD`: a known `volume`, every number
 finite and within 10,000 km of 0, a sphere's `radius` above 0, and a box's `x`, `y`, `z`

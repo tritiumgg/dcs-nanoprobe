@@ -1535,6 +1535,16 @@ scenario('clear-debris', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   assert(sim.gone_statics[ruin.id] == ruin and not sim.dead_statics[ruin.id], 'the dead static was not destroyed')
   assert(beside.alive and sim.statics.beside == beside, 'a clear removed a live static')
   assert(sim.dead_statics[far.id] == far, 'a clear removed a dead static outside its volume')
+  -- A dead static the platform manages stays; an unmanaged one beside it is
+  -- destroyed.
+  local kept = sim:add_static(2, { name = 'np#hGxK', type = 'FARP Fuel Depot', x = 80000, y = 0 })
+  local loose = sim:add_static(2, { name = 'loose', type = 'FARP Fuel Depot', x = 80010, y = 0 })
+  sim:doom_static(kept)
+  sim:doom_static(loose)
+  r = run({ sphere(kept, 50) }, 'clear debris on a managed and an unmanaged dead static')
+  expect(r[1], APPLIED, 'CLEAR_DEBRIS on a managed and an unmanaged dead static')
+  assert(sim.dead_statics[kept.id] == kept, 'a clear destroyed a dead static the platform manages')
+  assert(sim.gone_statics[loose.id] == loose, 'a clear left an unmanaged dead static beside a managed one')
   -- A destroy that raises is skipped and not counted; the clear still
   -- applies.
   sim.destroy_raises = true
@@ -1561,7 +1571,7 @@ scenario('clear-debris', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   assert((sim.destroyed_in_search or 0) == 0, 'a static was destroyed inside the search')
   S.ok('CLEAR_DEBRIS: a sphere or a box removes the wrecks inside and returns the count, a bad volume is BAD_PAYLOAD,'
     .. ' a dead static inside is destroyed after the search and counted once, a destroy that raises is skipped,'
-    .. ' a live static of life 0 stays')
+    .. ' a live static of life 0 and a dead static the platform manages stay')
 end)
 
 scenario('picture', nil, function(ctx)

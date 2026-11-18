@@ -2015,14 +2015,17 @@ local HANDLERS = {
     -- that reads life 0 and no longer exists, as a dead static does (LIVE,
     -- same document), is collected during the search and destroyed after
     -- it returns, each call under pcall. A static a destroy left is
-    -- destroyed again by a later clear, and counted once a generation.
+    -- destroyed again by a later clear, and counted once a generation. A
+    -- static the platform manages, named `np#` (spec/world.md), is never
+    -- destroyed: a controller may keep its ruin.
     local dead = {}
     T.cleared = T.cleared or {}
     pcall(world.searchObjects, Object.Category.STATIC, volume, function(s)
-      local got, life, exists = pcall(function()
-        return s:getLife(), s:isExist()
+      local got, life, exists, name = pcall(function()
+        return s:getLife(), s:isExist(), s:getName()
       end)
-      if got and type(life) == 'number' and life <= 0 and exists == false then
+      if got and type(life) == 'number' and life <= 0 and exists == false
+        and type(name) == 'string' and name:sub(1, 3) ~= 'np#' then
         dead[#dead + 1] = s
       end
       return true
