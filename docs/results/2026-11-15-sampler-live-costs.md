@@ -49,7 +49,7 @@ the 2,000-object enumeration's window nearest the bound is 13.60 pumps a second 
 
 ## Live run
 
-`cargo xtask sampling gameserver`, both parts, bundle `sampling-gameserver-20261115T214608Z`.
+`cargo xtask sampling <target>`, both parts, bundle `sampling-<target>-20261115T214608Z`.
 
 | Check | Mirror part (2,000) | Tenth part |
 |---|---|---|
