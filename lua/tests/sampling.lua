@@ -968,10 +968,6 @@ local function main()
   else
     -- The same run at k = 1 and at k = 0.1 (spec/faults.md, `sampling`).
     local spawned = scenario.spawn_mixed(2000, { label = 'a' })
-    -- Past the second enumeration, which finds the statics.
-    run(24)
-    local _, m1 = compare('k = 1')
-    assert(#m1.subscribed == 20, 'subscribed ' .. #m1.subscribed)
     -- The `sampling` reports at `scale` in the probe's output lines after
     -- `from`, up to `to`.
     local function reports_of(scale, from, to)
@@ -1017,6 +1013,16 @@ local function main()
         return enough(reports_of(scale, from, math.huge))
       end)
     end
+    -- Past the second enumeration, which finds the statics.
+    run(24)
+    -- The probe subscribes its 20 units once an enumeration has given it
+    -- them, which a starved start puts off: the compare waits for a report
+    -- in which the agent read subscribed rows.
+    assert(until_reports(120, 1, 0, function(r)
+      return #r >= 1 and r[#r].rows_subscribed > 0
+    end), 'k = 1: the agent read no subscribed row')
+    local _, m1 = compare('k = 1')
+    assert(#m1.subscribed == 20, 'subscribed ' .. #m1.subscribed)
     -- The rates at k = 1 are those of the last two reports before the
     -- change: the change waits for two clean ones.
     assert(until_reports(180, 1, 0, function(r)
