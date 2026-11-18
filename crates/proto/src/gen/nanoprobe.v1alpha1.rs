@@ -1259,7 +1259,10 @@ pub struct Airbase {
     pub name: ::prost::alloc::string::String,
     #[prost(enumeration = "Coalition", tag = "3")]
     pub owner: i32,
-    /// Stock by item name. Absent until sampled.
+    /// Stock by item name, as DCS's getInventory lists it. Absent until
+    /// sampled. An unlimited warehouse lists no item of an unlimited kind and
+    /// each liquid of unlimited fuel at 100,000 (spec/commands.md,
+    /// "Layout: WAREHOUSE_SET").
     #[prost(btree_map = "string, double", tag = "4")]
     pub stock: ::prost::alloc::collections::BTreeMap<
         ::prost::alloc::string::String,

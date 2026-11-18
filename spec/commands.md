@@ -632,10 +632,17 @@ number (0 jet fuel, 1 gasoline, 2 MW-50, 3 diesel) to an amount, set with
 `NOT_BOUND`. A call that raises is `DCS_REFUSED`.
 
 On a limited warehouse each set reads back as set, for items and liquids (LIVE, E6,
-step S15). An unlimited warehouse ignores a set without an error and keeps reading its
-full count (LIVE, E6), so `APPLIED` says only that DCS took the call. The reconciler
-then sees a sample that differs from the desired count; it sends the set once per
-revision and mission generation, and never again for that difference.
+step S15). An unlimited warehouse ignores a set without an error (LIVE, E6), so `APPLIED`
+says only that DCS took the call. What it reads depends on the call (LIVE,
+docs/results/2026-11-17-person-fixes.md): `getItemCount` and `getLiquidAmount` read
+1,000,000 for every item and liquid of a kind the mission marks unlimited, while
+`getInventory`, which the sampler reads, lists no weapon or aircraft of an unlimited
+kind and each liquid of unlimited fuel at 100,000. An `addItem` on an unlimited warehouse
+adds an entry of its count to `getInventory` that a `removeItem` of the same count does
+not take away; `getItemCount` stays at 1,000,000. Whether a `setItem` does the same is
+UNVERIFIED. The reconciler then sees a sample that differs from the desired count; it
+sends the set once per revision and mission generation, and never again for that
+difference.
 
 ### Layout: WAREHOUSE_ADJUST
 
