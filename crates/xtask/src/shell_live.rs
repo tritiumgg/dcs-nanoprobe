@@ -421,6 +421,7 @@ fn person(
     );
     let stocks = run.eval("server", "s19-person-stock", &stock_read, 60)?;
     println!("   stock: {stocks}");
+    let dead = dead_static(run, &farp)?;
     let start = run.eval("hook", "s19-person-start", &read, 60)?;
     println!("   held: {start}");
     // A stop file left from an earlier hold would end this one at once.
@@ -450,6 +451,7 @@ fn person(
     if ruin.is_null() {
         ruin = ruin_check(run, api, c, &theater, &farp)?;
     }
+    let dead = dead_static_clear(run, api, c, &theater, dead)?;
     let ended = if stop.exists() {
         "stop_file"
     } else {
@@ -469,9 +471,132 @@ fn person(
         "farp": farp,
         "stock": stocks,
         "ruin": ruin,
+        "dead_statics": dead,
     });
     println!("== HELD ({ended}); the verdict is the person's, recorded by hand");
     Ok(())
+}
+
+/// The statics `dead_static` adds with `dead = true`: name, type, and the
+/// offset east of the FARP in metres.
+/// The types: a structure with a destroyed shape, a vehicle, a ship (on
+/// land here), an aircraft, a helicopter, and a structure that may have no
+/// destroyed shape (UNVERIFIED for the windsock). 60 m apart, so each
+/// clear's 30 m sphere holds one.
+const DEAD_STATICS: [(&str, &str, f64); 6] = [
+    ("person-fixes dead depot", "FARP Fuel Depot", -300.0),
+    ("person-fixes dead brdm", "BRDM-2", -360.0),
+    ("person-fixes dead boat", "speedboat", -420.0),
+    ("person-fixes dead f15", "F-15C", -480.0),
+    ("person-fixes dead huey", "UH-1H", -540.0),
+    ("person-fixes dead sock", "Windsock", -600.0),
+];
+
+/// A read of a static by name at `x`, `z`: found by name, `isExist`,
+/// `getLife`, and how often `world.searchObjects` lists it in a 30 m sphere.
+fn static_read(name: &str, x: f64, z: f64) -> String {
+    format!(
+        "local out = {{}}\nlocal f = StaticObject.getByName({name:?})\nout.found = f ~= nil\nif f then local oke, e = pcall(f.isExist, f) out.exists = oke and e or 'raised' local okl, l = pcall(f.getLife, f) out.life = okl and l or 'raised' end\nout.listed = 0\npcall(world.searchObjects, Object.Category.STATIC, {{ id = world.VolumeType.SPHERE, params = {{ point = {{ x = {x}, y = land.getHeight({{ x = {x}, y = {z} }}), z = {z} }}, radius = 30 }} }}, function(o) local okn, n = pcall(o.getName, o) if okn and n == {name:?} then out.listed = out.listed + 1 end return true end)\nreturn out\n"
+    )
+}
+
+/// Statics added by script near the FARP with `dead = true`, for the
+/// owner's question whether a static added dead shows its destroyed model on
+/// a client and reads as dead, for a structure and for a vehicle type.
+/// Records what the server state reads of each. What a client shows is
+/// recorded by hand.
+/// Returns each static's name, point and read.
+fn dead_static(run: &Run, farp: &str) -> Result<Vec<(String, f64, f64, Value)>, String> {
+    let at = run.eval(
+        "server",
+        "s19-person-dead-at",
+        &format!(
+            "local p = Airbase.getByName({farp:?}):getPoint() return {{ x = p.x, z = p.z }}\n"
+        ),
+        60,
+    )?;
+    let (fx, fz) = (
+        at["x"].as_f64().ok_or("no FARP point")?,
+        at["z"].as_f64().ok_or("no FARP point")?,
+    );
+    let mut out = Vec::new();
+    for (name, kind, east) in DEAD_STATICS {
+        let (x, z) = (fx, fz + east);
+        let added = run.eval(
+            "server",
+            "s19-person-dead-add",
+            &format!(
+                "local ok, s = pcall(coalition.addStaticObject, country.id.USA, {{ name = {name:?}, type = {kind:?}, x = {x}, y = {z}, heading = 0, dead = true, hidden = false }})\nreturn {{ ok = ok and s ~= nil, error = not ok and tostring(s) or nil }}\n"
+            ),
+            60,
+        )?;
+        let read = run.eval(
+            "server",
+            "s19-person-dead-read",
+            &static_read(name, x, z),
+            60,
+        )?;
+        let v = json!({ "type": kind, "added": added, "read": read });
+        println!("   dead {kind} ({name}, {} m east of the FARP): {v}", east);
+        out.push((name.to_string(), x, z, v));
+    }
+    Ok(out)
+}
+
+/// After the hold: a `ClearDebris` 30 m sphere over each static
+/// `dead_static` added, the reads after it, then a destroy of whatever is
+/// left, so the mission is as before.
+fn dead_static_clear(
+    run: &Run,
+    api: &mut Api,
+    campaign: u64,
+    theater: &str,
+    added: Vec<(String, f64, f64, Value)>,
+) -> Result<Value, String> {
+    let mut out = Vec::new();
+    for (name, x, z, mut v) in added {
+        let req = pb::DoEffectRequest {
+            write: api.write("clear-dead", campaign),
+            effect: Some(pb::Effect {
+                effect: Some(pb::effect::Effect::ClearDebris(pb::ClearDebris {
+                    volume: Some(pb::clear_debris::Volume::Sphere(pb::Sphere {
+                        center: Some(pb::Position {
+                            theater: theater.to_string(),
+                            north: x,
+                            east: z,
+                            ..pb::Position::default()
+                        }),
+                        radius: 30.0,
+                    })),
+                })),
+            }),
+        };
+        let r = api
+            .rt
+            .block_on(api.commands.do_effect(req))
+            .map_err(status_text("DoEffect"))?
+            .into_inner();
+        let after = run.eval(
+            "server",
+            "s19-person-dead-after",
+            &static_read(&name, x, z),
+            60,
+        )?;
+        let removed = run.eval(
+            "server",
+            "s19-person-dead-remove",
+            &format!(
+                "local s = StaticObject.getByName({name:?}) if s then pcall(s.destroy, s) end\nreturn StaticObject.getByName({name:?}) == nil\n"
+            ),
+            60,
+        )?;
+        v["clear_outcome"] = json!(r.result.as_ref().map(|c| c.outcome));
+        v["clear_removed"] = json!(r.debris_removed);
+        v["after_clear"] = after;
+        v["removed_at_end"] = removed;
+        out.push(v);
+    }
+    Ok(Value::Array(out))
 }
 
 /// The aircraft the hold stocks: `NP_SHELL_AIRCRAFT`, a comma-separated
