@@ -8,10 +8,18 @@
 #
 #   dist/nanoprobe-<v>-windows-x86_64.zip
 #   dist/nanoprobe-<v>-linux-x86_64.tar.gz
-#   dist/nanoprobe-<v>-agent.pdb     symbols for crash records; not in an archive
 #   dist/nanoprobe-<v>-schema.tar.gz the API schema, and its descriptor set
 #   dist/nanoprobe-<v>-schema.binpb  (tools/stage-schema.sh)
-#   dist/SHA256SUMS                  over the five files above
+#   dist/SHA256SUMS                  over the four files above
+#
+# The release is those five files. The agent's PDB is not one of them: it
+# names the build machine's folders, and the builder keeps it with the DLL to
+# turn a crash record into function names (spec/install.md, "Release"). The
+# folder is named by the signature a crash record's `pdb` carries
+# (tools/pdbsig.sh), in the layout `cargo xtask symbolize` reads under
+# target/symbols/. A later run adds its own folder and leaves the others:
+#
+#   dist/private/<signature>/nanoprobe.dll, nanoprobe.pdb
 #
 # Each archive holds one folder, nanoprobe-<v>-<platform>/, with:
 #
@@ -31,7 +39,8 @@
 #
 # Run it through `mise run package`, which first builds the DLL and checks it
 # with tools/checkdll.sh. This script builds the two programs for both
-# platforms.
+# platforms. .github/workflows/release.yml runs the same task on a Linux
+# runner to build a release.
 #
 # Runs on macOS and Linux. A Windows host can build the DLL (`mise run dll`)
 # but not stage a release: the Linux programs need a C compiler for musl, and
@@ -112,8 +121,8 @@ sha() {
 mkdir -p "$OUT"
 rm -rf "$OUT/stage"
 rm -f "$OUT"/nanoprobe-*-windows-x86_64.zip "$OUT"/nanoprobe-*-linux-x86_64.tar.gz \
-    "$OUT"/nanoprobe-*-agent.pdb "$OUT"/nanoprobe-*-schema.tar.gz \
-    "$OUT"/nanoprobe-*-schema.binpb "$OUT/SHA256SUMS"
+    "$OUT"/nanoprobe-*-agent.pdb \
+    "$OUT"/nanoprobe-*-schema.tar.gz "$OUT"/nanoprobe-*-schema.binpb "$OUT/SHA256SUMS"
 
 # stage <platform> <program> <sidecar>
 stage() {
@@ -173,7 +182,10 @@ chmod 0644 "$LINUXDIR/README.txt"
 )
 rm -rf "$OUT/stage"
 
-cp "$PDB" "$OUT/nanoprobe-$VERSION-agent.pdb"
+SIG=$(sh tools/pdbsig.sh "$DLL")
+mkdir -p "$OUT/private/$SIG"
+cp "$DLL" "$OUT/private/$SIG/nanoprobe.dll"
+cp "$PDB" "$OUT/private/$SIG/nanoprobe.pdb"
 sh tools/stage-schema.sh "$OUT" "$VERSION" >/dev/null
 
 (
@@ -182,3 +194,4 @@ sh tools/stage-schema.sh "$OUT" "$VERSION" >/dev/null
 )
 printf 'staged in %s:\n' "$OUT"
 cat "$OUT/SHA256SUMS"
+printf 'kept, not released: %s\n' "$OUT/private/$SIG/"

@@ -489,7 +489,7 @@ fn payload(dll: Option<PathBuf>, dev: bool, faults: bool) -> Result<install::Pay
         if !pdb.is_file() {
             println!(
                 "no PDB kept for this build: to symbolize its crash records, copy its PDB \
-                 (a release's dist/nanoprobe-<version>-agent.pdb) to {}",
+                 (a release's dist/private/<signature>/nanoprobe.pdb) to {}",
                 pdb.display()
             );
         }

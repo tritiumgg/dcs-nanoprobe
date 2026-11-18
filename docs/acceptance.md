@@ -1,9 +1,11 @@
 # Acceptance checklist
 
-A release is accepted when the six criteria below hold on a DCS dedicated server under
-Wine and on a Windows machine that hosts a session from the DCS client, each from a
-clean install of the staged release. This page maps each criterion to the evidence the
-repository holds and lists what the acceptance run must still show.
+The record of the 0.1 acceptance, which runs once, before the 0.1 tag; later releases
+are not run through it (docs/releasing.md). 0.1 is accepted when the six criteria
+below hold on a DCS dedicated server under Wine and on a Windows machine that hosts a
+session from the DCS client, each from a clean install of the staged release. This
+page maps each criterion to the evidence the repository holds and lists what the
+acceptance run must still show.
 
 A DCS dedicated server on Windows is unverified: no test has run on one. The release
 notes say so.
@@ -13,15 +15,26 @@ notes say so.
 Both platforms follow the same steps. Every result is committed to `docs/results/` with
 its script, the DCS build, the platform and the date.
 
-1. **Stage.** `mise run package` stages the release in `dist/` and checks it. The run
-   tests those files and no others: record `SHA256SUMS`.
+1. **Stage.** A manual run of the release workflow builds the release's files on its
+   runner without releasing them. Download them and the PDB folder into
+   `dist/runner-<commit>/` and `dist/runner-<commit>/private/` with the commands of
+   docs/releasing.md, step 3, where `<commit>` is the first 12 characters of the commit
+   the run built; `mise run package` never writes that folder. The run tests these files
+   and no others, and records the run's ID, its full commit
+   (`gh run view <run> --json headSha`) and its `SHA256SUMS` with the results: on
+   each machine check the copied archive against its line before unpacking it. The
+   release the tag publishes is that build repeated, not the same bytes, on a commit
+   that differs from the run's only in files the release build does not read
+   (spec/install.md, "Release"; docs/releasing.md, step 4): the results and their
+   scripts go in documents or test tooling. Files that `mise run package` stages on a
+   development machine are a rehearsal.
 2. **Baseline.** With DCS stopped and no nanoprobe file in the profile, record the
    profile's file list with sizes and checksums, `Config/autoexec.cfg` byte for byte,
    and the DCS install's file list with sizes and modification times.
 3. **Install.** One installer run from the unpacked archive, on the machine that holds
    the profile. "How the staged files reach each platform" below says where and as
    whom. Record the name of the version folder it made, `nanoprobe/versions/<build>`:
-   it is the build ID that step 8 and the Windows deploy route compare against.
+   it is the build ID that step 8 compares against.
 4. **Check.** Start DCS and a mission. `nanoprobe doctor` exits 0 and reports every DCS
    name present in the hook state and in the server state.
 5. **Sidecar.** Run the archive's `nanoprobe-sidecar`: on Linux in the image built from
@@ -36,7 +49,8 @@ its script, the DCS build, the platform and the date.
 8. **Criteria that need the test tooling.** Criterion 1, the DCS kill of 3 and the
    conformance suite of 6, each on its own development deploy of the staged DLL, as
    "What the tools can drive" below describes. To symbolize a crash record from such a
-   deploy, copy `dist/nanoprobe-<version>-agent.pdb` to the folder the deploy names.
+   deploy, copy `dist/runner-<commit>/private/<signature>/nanoprobe.pdb` to the
+   `nanoprobe.pdb` path the deploy prints.
    Afterward the profile is checked against the baseline again.
 
 ### How the staged files reach each platform
@@ -54,16 +68,28 @@ other user. With DCS in a container that is one of:
 The project's deploy tooling is not used for this step: the step tests the archive's
 installer.
 
-**Windows.** One of two routes, chosen before the run and named in the results:
+**Windows.** The run copies the staged Windows archive to the machine over SSH, into a
+folder outside the profile and outside the DCS install, checks it against its line in
+`SHA256SUMS`, and unpacks it there. It runs `install.cmd` from the unpacked folder as
+the user who owns the profile, with standard input empty so that its closing `pause`
+returns. The script's exit code is not the program's: the run keeps the script's
+output with the result and judges the install by these checks of the profile:
 
-- A person at the machine unpacks the Windows archive and runs `install.cmd`. This
-  shows criterion 5 on Windows.
-- The project's deploy tooling places the staged files over its own connection:
-  `cargo xtask deploy <target> --dll <the archive's payload/nanoprobe_agent.dll>`. The
-  run then makes the three compares of "What the tools can drive", with the build ID
-  that step 3 recorded on the Wine server. This route runs no installer and makes no
-  `autoexec.cfg` merge of the release's form, so **criterion 5 is not shown on
-  Windows**, and the results and the release notes say so.
+- `Scripts/Hooks/nanoprobe-hook.lua` equals the archive's `payload/nanoprobe-hook.lua`;
+- `nanoprobe/versions/<build>/nanoprobe_agent_<build>.dll` and the folder's
+  `lua/hook.lua`, `log.lua` and `shim.lua` equal the payload's files, and the folder's
+  `SHA256SUMS` matches them;
+- `nanoprobe/manifest.txt` names `<build>` as active, `nanoprobe/token` exists and is
+  not empty, and `nanoprobe/install.txt` lists the folders the install created, set
+  against the baseline (the results say whether it lists none);
+- `Config/autoexec.cfg` holds the install block in the form spec/install.md gives
+  ("autoexec.cfg"), and the rest of the file is as it was.
+
+Steps 4 to 6 follow with the archive's `nanoprobe.exe` and `nanoprobe-sidecar.exe`.
+Step 7 runs `uninstall.cmd` the same way, and the copied archive and folder are removed
+afterward. This shows criterion 5 on Windows. Only when the installer cannot be run
+over SSH does a person at the machine run `install.cmd` and `uninstall.cmd`, and the
+results say which route ran.
 
 ### What the tools can drive
 
@@ -216,13 +242,13 @@ platforms.
 | Evidence | Platform | Shows |
 |---|---|---|
 | [2026-11-18-s22-release-host.md](results/2026-11-18-s22-release-host.md) (`mise run package`) | host | the unpacked Linux payload installs into a made-up Wine profile, passes `doctor`, and uninstalls; the profile, its `autoexec.cfg` and a sidecar folder beside it are then as before |
+| [2026-11-18-s22-release-without-pdb.md](results/2026-11-18-s22-release-without-pdb.md) (`mise run package`) | host | the release is the two archives and the schema's two files; the agent's PDB is kept beside its DLL in `dist/private/` and is in no release file |
 | `crates/install/tests/install.rs`, `crates/cli/tests/setup.rs` | host | install, the `autoexec.cfg` merge and its removal, byte for byte |
 | [2026-11-10-deploy-roundtrip.md](results/2026-11-10-deploy-roundtrip.md) | Wine server | the development deploy and undeploy leave an identical profile tree |
 | [2026-11-11-first-dll-and-spikes.md](results/2026-11-11-first-dll-and-spikes.md) | Wine server | with the two `net.*` keys set as plain lists, the hook reaches the server state |
 
 Still to show: steps 2, 3 and 7 of the run with the staged archive, on the Wine server
-and, when a person runs `install.cmd`, on Windows ("How the staged files reach each
-platform").
+and on Windows ("How the staged files reach each platform").
 No result yet holds a release install on a running DCS. The install block in
 `autoexec.cfg` adds to the two keys with a function; that this form has the same effect
 as the plain lists is unverified until step 4 passes (spec/install.md, "autoexec.cfg").
@@ -271,4 +297,3 @@ Limits:
 - Criterion 1, the DCS kill of criterion 3 and the conformance suite against the archive
   as its installer installs it: they run on the released DLL, loader and Lua with the
   development files beside them.
-- Criterion 5 on Windows, when the deploy tooling stands in for `install.cmd`.

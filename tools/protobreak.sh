@@ -1,10 +1,19 @@
 #!/bin/sh
-# Checks the public API schema for breaking changes against a git ref
-# (CLAUDE.md, "Conventions"). With no argument, or the all-zero commit a push
-# event gives for a new branch, the base is the first of origin/main, main
-# and HEAD that holds a schema, and the check says which. When none does,
-# there is nothing to compare and it passes. A named ref that does not
-# resolve is an error.
+# Checks the public API schema for breaking changes (CLAUDE.md, "Conventions").
+#
+# The base is a git ref: the first argument, else PROTOBREAK_BASE, else the
+# first of origin/main, main and HEAD whose merge base with HEAD holds a
+# schema; the check says which. The all-zero commit a push event gives for a
+# new branch counts as no ref. CI names the base: the base commit of a pull
+# request, or the commit before a push.
+#
+# The schema is compared at the merge base of HEAD and that ref, never at the
+# ref's tip. A branch is checked for what it changes: a field that main gained
+# after the branch was cut is not a field the branch removed. On main itself,
+# with origin/main behind it, the merge base is origin/main, the published
+# schema. When no base holds a schema there is nothing to compare and the
+# check passes. A named ref that does not resolve, or that shares no history
+# with HEAD, is an error.
 set -eu
 
 resolves() {
@@ -12,34 +21,42 @@ resolves() {
 }
 
 has_schema() {
-    resolves "$1" && git cat-file -e "$1:buf.yaml" 2>/dev/null
+    git cat-file -e "$1:buf.yaml" 2>/dev/null
 }
 
-ref="${1:-}"
+ref="${1:-${PROTOBREAK_BASE:-}}"
 case "$ref" in
     *[!0]*) ;;
     *) ref= ;;
 esac
 
+base=
 if [ -z "$ref" ]; then
     for candidate in origin/main main HEAD; do
-        if has_schema "$candidate"; then
+        resolves "$candidate" || continue
+        mb=$(git merge-base HEAD "$candidate" 2>/dev/null) || continue
+        if has_schema "$mb"; then
             ref=$candidate
+            base=$mb
             break
         fi
     done
     if [ -z "$ref" ]; then
-        echo "ok  no schema at origin/main, main or HEAD, nothing to compare"
+        echo "ok  no schema at the merge base of HEAD with origin/main, main or HEAD, nothing to compare"
         exit 0
     fi
 elif ! resolves "$ref"; then
     echo "error: $ref is not a commit in this repository" >&2
     exit 1
-elif ! has_schema "$ref"; then
-    echo "ok  no schema at $ref, nothing to compare"
+elif ! base=$(git merge-base HEAD "$ref"); then
+    echo "error: $ref shares no history with HEAD" >&2
+    exit 1
+elif ! has_schema "$base"; then
+    echo "ok  no schema at $ref (merge base $(git rev-parse --short "$base")), nothing to compare"
     exit 0
 fi
 
-echo "comparing the schema against $ref"
-buf breaking --against ".git#ref=$ref"
-echo "ok  no breaking change against $ref"
+short=$(git rev-parse --short "$base")
+echo "comparing the schema against $ref (merge base $short)"
+buf breaking --against ".git#ref=$base"
+echo "ok  no breaking change against $ref (merge base $short)"

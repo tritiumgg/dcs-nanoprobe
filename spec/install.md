@@ -51,7 +51,13 @@ previous=<build>
   folder, and each folder listed in `install.txt`, deepest first, if it is empty.
   `install.txt` lists, one per line and relative to `<profile>`, the folders on the
   loader's path that did not exist before the first deploy, and `Config` when install
-  created it. After undeploy the profile is as it was before the first deploy.
+  created it. The `nanoprobe` folder is the platform's: it goes whole, whenever it was
+  made and with what an administrator put in it, the mission folder
+  `nanoprobe/missions/` and its templates included. Apart from that folder, the profile
+  after undeploy is as it was before the first deploy. Per-map templates kept through
+  an uninstall need a mission folder (`[missions] dir`) in the profile outside
+  `nanoprobe/`; other template files go in a folder that `template_dirs` lists
+  (spec/config.md).
 - **Install**, the release's `nanoprobe install`, is deploy, then the token (as
   "Development only" describes for deploy), then the `autoexec.cfg` merge. Running it
   again with the same release changes nothing. **Uninstall** is undeploy.
@@ -96,10 +102,18 @@ needs or that it cannot read, by line number and key, and nothing else from the 
 
 ## Release
 
-A release is two archives, the agent's PDB (`nanoprobe-<version>-agent.pdb`, which
-symbolizes its crash records and is not installed), the API schema, and `SHA256SUMS`
-over the five files, built by `mise run package` (`tools/stage-release.sh`) on macOS or
-Linux. The schema
+A release is two archives, the API schema, and `SHA256SUMS` over the four files. A
+pushed tag `v<version>` builds them on one Linux runner of GitHub Actions with
+`mise run package` (`tools/stage-release.sh`, cross-building the Windows files with
+`cargo-xwin`), which a developer also runs on macOS or Linux, and publishes them as the
+release with the version's section of `docs/release-notes.md` in the tagged commit
+(`.github/workflows/release.yml`). A manual run of the workflow builds the same files
+without releasing them; the 0.1 acceptance run, once before the 0.1 tag, tests those
+(docs/acceptance.md). The tag's build is a rebuild, not the same bytes: the archives
+keep file times, and cargo-xwin downloads Microsoft's current MSVC CRT and Windows SDK
+when it builds, so two builds can link different versions of them. docs/releasing.md
+says how to check that the tagged commit differs from a tested dry run's only in files
+the release build does not read. The schema
 is `nanoprobe-<version>-schema.tar.gz`, one folder `nanoprobe-<version>-schema/` with
 `buf.yaml`, `LICENSE` and `proto/`, and `nanoprobe-<version>-schema.binpb`, the file
 descriptor set `buf build` makes of it, with its imports and comments. Users generate
@@ -131,9 +145,19 @@ is one the sidecar accepts once its placeholders are replaced. The Windows archi
 
 No file in an archive holds a path of the machine that built it: the builds map the
 checkout, cargo's registry and the toolchain to `nanoprobe`, `cargo` and `rust`
-(`tools/remap.sh`), and the archive test fails on the builder's home folder. The PDB is
-not covered: the linker writes into it the absolute path of every object file and
-library it read.
+(`tools/remap.sh`), and the archive test fails on the builder's home folder.
+
+The agent's PDB is not released: the linker writes into it the absolute path of every
+object file and library it read. `mise run package` keeps it with the DLL it belongs
+to in `dist/private/<signature>/` as `nanoprobe.dll` and `nanoprobe.pdb`, outside
+`SHA256SUMS`, where `<signature>` is the GUID and age a crash record's `pdb` names
+("Agent"). The archive test fails when a PDB is among the release's files, or when the
+kept PDB is not the released DLL's. A later run adds its own folder. The release
+workflow keeps the folder as the workflow artifact `agent-symbols-<commit>` for 14 days,
+never as a release file; the maintainer copies it into `dist/private/`
+(docs/releasing.md). The maintainer keeps these folders to turn the agent's crash
+records into function names: copied into `target/symbols/`, a folder is where
+`cargo xtask symbolize` looks for the record's build.
 
 The sidecar is not installed: the user runs it from the unpacked folder or from the
 image, with a `sidecar.toml` of their own. `nanoprobe install` and `uninstall` write no
