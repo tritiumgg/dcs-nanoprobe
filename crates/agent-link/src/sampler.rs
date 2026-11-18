@@ -4346,9 +4346,11 @@ impl Sampler {
         (self.batch.versions.get(i) == Some(&row.version)).then_some(row.found.object)
     }
 
-    /// Leave out of the vitals batch every object the sidecar does not hold:
-    /// one with no row, or whose row's `Row::sent` is at most `from`
-    /// ([`Sampler::known_from`]).
+    /// Leave out of the vitals batch every object the agent counts as not
+    /// held by the sidecar: one with no row, or whose row's `Row::sent` is
+    /// at most `from` ([`Sampler::known_from`]). The close calls it only
+    /// when a row it read is not held, so a batch whose one such entry is a
+    /// row that left during the batch is written whole.
     fn drop_early_vitals(&mut self, from: u64) {
         let (rows, by_object) = (&self.rows, &self.by_object);
         let v = &mut self.batch.vitals;

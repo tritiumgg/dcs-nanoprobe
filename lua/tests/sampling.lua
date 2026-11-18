@@ -338,9 +338,10 @@ local function main()
   -- The recording since the HELLO (kind 2) after its last attach line: no
   -- VITALS (kind 33) names an object before that object's OBJECT (kind 16).
   -- The probe is a sidecar of a new boot: the agent counts a row as held
-  -- only from its first OBJECT after the HELLO (spec/records.md, "Samples"). The ID is an OBJECT's first field, and a
-  -- VITALS holds a count and then that many IDs ("Layout: OBJECT" and
-  -- "Layout: VITALS"). Returns how many VITALS rows it checked.
+  -- only from its first OBJECT after the HELLO (spec/records.md, "Samples").
+  -- The ID is an OBJECT's first field, and a VITALS holds a count and then
+  -- that many IDs ("Layout: OBJECT" and "Layout: VITALS"). Returns how many
+  -- VITALS rows it checked.
   local function vitals_after_object(label)
     local lines = S.lines(recording)
     local attach = 0
