@@ -48,9 +48,11 @@
 //!
 //! An `lv` value is JSON: an object is a table with string keys (a key
 //! `#<number>` is that number), an array a
-//! table with keys 1 to n, `null` is nil. Two optional fields pace a command:
-//! `wait_ms` waits that long before it is sent, and `wait_result` waits until
-//! every command sent before it has its `RESULT`.
+//! table with keys 1 to n, `null` is nil. Three optional fields pace a command:
+//! `wait_ms` waits that long before it is sent, `wait_result` waits until
+//! every command sent before it has its `RESULT`, and `wait_file` waits until
+//! the file it names exists. A test that must see a state before the command
+//! goes creates the file then; `wait_ms` counts from there.
 //!
 //! Output is one JSON object per line, in the order the agent wrote the records:
 //! one for each `RESULT`,
@@ -71,6 +73,7 @@
 //! Test tooling only: built from source, never released.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
@@ -96,6 +99,8 @@ struct Step {
     body: Vec<u8>,
     wait: Duration,
     wait_result: bool,
+    /// The command is held until this file exists.
+    wait_file: Option<PathBuf>,
 }
 
 fn name_of(table: &[(&str, u64)], code: u64) -> String {
@@ -299,6 +304,11 @@ fn parse_step(step: &Value, campaign: u64) -> Result<Step, String> {
             .get("wait_result")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        wait_file: match step.get("wait_file") {
+            None => None,
+            Some(Value::String(f)) => Some(PathBuf::from(f)),
+            Some(_) => return Err("wait_file takes a path".into()),
+        },
     })
 }
 
@@ -519,6 +529,9 @@ fn run(args: &[String]) -> Result<bool, String> {
         if let (true, Some(epoch)) = (sim.ready(), epoch) {
             while let Some(step) = steps.peek() {
                 if step.wait_result && outstanding(&sends, &got) > 0 {
+                    break;
+                }
+                if step.wait_file.as_ref().is_some_and(|f| !f.exists()) {
                     break;
                 }
                 let at = *due.get_or_insert_with(|| Instant::now() + step.wait);

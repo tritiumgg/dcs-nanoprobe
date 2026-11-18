@@ -40,6 +40,28 @@ function S.scratch()
   return path .. '/'
 end
 
+-- A loopback TCP port for the agent to listen on, which the system found
+-- free a moment ago (`link-probe --free-port`). A port derived from the
+-- clock is shared, now and then, by two test processes that run at the same
+-- time, as two checkouts' checks do; the agent whose port is taken does not
+-- listen, and its sidecar never attaches. Another process can still take
+-- this port before the agent listens, which is far rarer.
+function S.port(probe)
+  local p = assert(io.popen(quote(probe) .. ' --free-port'))
+  local text = p:read('*a')
+  p:close()
+  return assert(tonumber(text), 'link-probe --free-port printed no port: ' .. text)
+end
+
+-- Run a helper program once to its end, with no arguments, which it refuses.
+-- The first start of a newly built program can take most of a minute where
+-- the system checks new programs (macOS); a test that then starts the
+-- program in the background does not spend its own wait on that. `S.port`
+-- does the same for link-probe.
+function S.started(program)
+  os.execute(quote(program) .. ' > /dev/null 2>&1')
+end
+
 function S.remove(path)
   os.execute('rm -rf ' .. quote(path))
 end
