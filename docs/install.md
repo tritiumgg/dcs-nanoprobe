@@ -11,7 +11,6 @@ A release is on the project's GitHub releases page:
 | `nanoprobe-<version>-windows-x86_64.zip` | DCS on Windows |
 | `nanoprobe-<version>-linux-x86_64.tar.gz` | DCS under Wine on Linux |
 | `nanoprobe-<version>-schema.tar.gz`, `-schema.binpb` | API clients ([api-clients.md](api-clients.md)) |
-| `nanoprobe-<version>-agent.pdb` | reading the agent's crash records; not installed |
 | `SHA256SUMS` | checking the files above |
 
 Check the files you downloaded with `sha256sum -c --ignore-missing SHA256SUMS` (Linux)
@@ -213,9 +212,14 @@ turn the agent back on.
 
 ## Uninstall
 
-> **Uninstall deletes the profile's `nanoprobe` folder and everything in it.** If your
-> mission folder is there, as the examples suggest, the templates you saved in the
-> Mission Editor and the campaigns' missions are deleted with it. Copy them out first.
+> **Uninstall deletes the profile's `nanoprobe` folder and everything in it,
+> `nanoprobe/missions/` included.** If your mission folder is there, as the examples
+> suggest, the templates you saved in the Mission Editor and the campaigns' missions are
+> deleted with it. The per-map templates (`<theater>.miz`) must be in the mission
+> folder: to keep them through an uninstall, make the mission folder (`[missions] dir`
+> and `dcs_dir`) a folder in the profile outside `nanoprobe/`, or copy them out first.
+> Keep a campaign's own templates and group template files in a folder outside the
+> profile, listed in the sidecar's `[missions] template_dirs`.
 
 Quit DCS, then double-click `uninstall.cmd` on Windows, or on Linux run:
 

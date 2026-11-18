@@ -3,7 +3,8 @@
 # files spec/install.md lists, the programs are Windows executables and static
 # Linux ones, both carry the same payload, the texts are the repository's, the
 # Linux scripts pass on their arguments and the program's exit code, the
-# schema is staged (tools/stage-schema-test.sh), and SHA256SUMS matches.
+# schema is staged (tools/stage-schema-test.sh), no PDB is in the release
+# while the released DLL's is kept in dist/private/, and SHA256SUMS matches.
 #
 # Usage: sh tools/stage-release-test.sh [out-dir]
 # POSIX sh. Needs unzip, tar, and sha256sum or shasum.
@@ -148,13 +149,26 @@ cmp -s "$DLL" "$PAYLOAD_DLL" && pass "the payload DLL is the checked build" ||
 sh "$ROOT/tools/checkdll.sh" "$PAYLOAD_DLL" >/dev/null && pass "the payload DLL passes tools/checkdll.sh" ||
     fail "the payload DLL fails tools/checkdll.sh"
 
-# The PDB beside the archives symbolizes the agent's crash records, so it must
-# be the agent's: it names the opener the agent exports.
-PDB=$OUT/nanoprobe-$VERSION-agent.pdb
-if [ -f "$PDB" ] && LC_ALL=C grep -qa luaopen_nanoprobe "$PDB"; then
-    pass "the staged PDB is the agent's"
+# The PDB the builder keeps symbolizes the released DLL's crash records, so
+# it is kept beside that DLL under the signature its crash records carry, it
+# names the opener the agent exports, and it holds the DLL's PDB GUID. It is
+# not released.
+SIG=$(sh "$ROOT/tools/pdbsig.sh" "$PAYLOAD_DLL") || fail "the payload DLL has no CodeView record"
+KEPT=$OUT/private/$SIG
+GUID=$(sh "$ROOT/tools/pdbsig.sh" --guid "$PAYLOAD_DLL" || true)
+if cmp -s "$PAYLOAD_DLL" "$KEPT/nanoprobe.dll" &&
+    LC_ALL=C grep -qa luaopen_nanoprobe "$KEPT/nanoprobe.pdb" &&
+    [ -n "$GUID" ] && od -An -tx1 -v "$KEPT/nanoprobe.pdb" | tr -d ' \n' | grep -q "$GUID"; then
+    pass "the kept PDB is the released DLL's, under its signature $SIG"
 else
-    fail "no agent PDB at $PDB"
+    fail "no PDB of the released DLL at $KEPT"
+fi
+# No PDB in the release: none beside the archives and none in an archive.
+PDBS=$( (find "$OUT" -maxdepth 1 -type f -iname '*.pdb'; find "$TMP/win" "$TMP/linux" -type f -iname '*.pdb') | LC_ALL=C sort)
+if [ -z "$PDBS" ]; then
+    pass "no PDB is in the release"
+else
+    fail "a PDB is in the release: $PDBS"
 fi
 
 # A release is public: no staged file may name the machine that built it. The
@@ -172,13 +186,9 @@ for f in $(find "$TMP/win" "$TMP/linux" -type f | LC_ALL=C sort); do
     done
 done
 [ "$LEAKS" = 0 ] && pass "no file in an archive names this machine's home folder or checkout"
-# The PDB is the exception, and the test says so on every run: the linker
-# writes the absolute path of each object file and library it read, and of
-# its own command line, and rustc's remapping does not reach those. A PDB
-# built under a person's home folder names that folder.
-n=$(LC_ALL=C grep -acF -- "$HOME" "$PDB" || true)
-[ "$n" = 0 ] && pass "the staged PDB does not name this machine's home folder" ||
-    printf 'note  the staged PDB names the home folder of this machine on %s lines: the object and library paths the linker wrote. Build the release where those paths may be public, or do not publish the PDB.\n' "$n"
+# The kept PDB may name them: the linker writes the absolute path of each
+# object file and library it read, and of its own command line, and rustc's
+# remapping does not reach those. That is why it is not released.
 
 cmp -s "$ROOT/lua/hook/nanoprobe-hook.lua" "$TMP/linux/$LINUX/payload/nanoprobe-hook.lua" ||
     fail "payload/nanoprobe-hook.lua is not lua/hook/nanoprobe-hook.lua"
@@ -217,11 +227,11 @@ else
 fi
 
 sh "$ROOT/tools/stage-schema-test.sh" "$OUT" "$VERSION" || FAILED=1
-printf '%s\n' "$WIN.zip" "$LINUX.tar.gz" "nanoprobe-$VERSION-agent.pdb" \
+printf '%s\n' "$WIN.zip" "$LINUX.tar.gz" \
     "nanoprobe-$VERSION-schema.tar.gz" "nanoprobe-$VERSION-schema.binpb" | LC_ALL=C sort >"$TMP/sums.want"
 awk '{ print $2 }' "$OUT/SHA256SUMS" | LC_ALL=C sort >"$TMP/sums.got"
 if cmp -s "$TMP/sums.want" "$TMP/sums.got"; then
-    pass "SHA256SUMS lists the two archives, the PDB and the schema's two files"
+    pass "SHA256SUMS lists the two archives and the schema's two files"
 else
     fail "SHA256SUMS lists other files (- expected, + found):"
     diff "$TMP/sums.want" "$TMP/sums.got" >&2 || true
