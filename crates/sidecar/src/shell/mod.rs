@@ -8,7 +8,8 @@
 //! keys it edits are the ones the Mission Editor saves (ED-CODE: the
 //! committed templates): `mission.date` (`Day`, `Month`, `Year`),
 //! `mission.start_time` (seconds after midnight), `mission.weather`, and
-//! `warehouses.airports[<id>]` `dynamicSpawn` and `allowHotStart`.
+//! `warehouses.airports[<id>]` `dynamicSpawn` and `allowHotStart`, and
+//! `unlimitedAircrafts` false for an airport whose dynamic spawn is on.
 
 pub mod lua;
 
@@ -100,7 +101,8 @@ pub struct DynamicSpawn {
     /// The airport's key in the `warehouses` member's `airports` (that it
     /// equals DCS `Airbase:getID()` is UNVERIFIED).
     pub airbase: u64,
-    /// `dynamicSpawn`.
+    /// `dynamicSpawn`. When true the shell also writes `unlimitedAircrafts`
+    /// false.
     pub enabled: bool,
     /// `allowHotStart`.
     pub hot_start: bool,
@@ -329,7 +331,16 @@ fn edit_warehouses(src: &[u8], dynamic: &[DynamicSpawn]) -> Result<Vec<u8>, Stri
             .take_while(|&&b| b == b'\t' || b == b' ')
             .map(|&b| b as char)
             .collect();
-        for (key, v) in [("dynamicSpawn", f.enabled), ("allowHotStart", f.hot_start)] {
+        // An enabled airport's aircraft are limited, so the stock the
+        // controller sets is what dynamic spawn offers: an unlimited airport
+        // lists no aircraft in the file (ED-CODE, me_mission.lua
+        // `unloadAirportsEquipment`) and ignores a set (LIVE, E6). A disabled
+        // airport keeps the template's flag.
+        let mut keys = vec![("dynamicSpawn", f.enabled), ("allowHotStart", f.hot_start)];
+        if f.enabled {
+            keys.push(("unlimitedAircrafts", false));
+        }
+        for (key, v) in keys {
             let text = if v { "true" } else { "false" };
             match a.get(&Key::s(key)) {
                 Some(n) if !n.table => edits.push(Edit {
@@ -342,6 +353,15 @@ fn edit_warehouses(src: &[u8], dynamic: &[DynamicSpawn]) -> Result<Vec<u8>, Stri
                     text: format!("\n{indent}\t[\"{key}\"] = {text},").into_bytes(),
                 }),
             }
+        }
+        // A limited airport needs an aircraft table to hold the stock: one
+        // without it gets an empty table, and an existing table is kept as
+        // it is.
+        if f.enabled && a.get(&Key::s("aircrafts")).is_none() {
+            edits.push(Edit {
+                span: a.span.start + 1..a.span.start + 1,
+                text: format!("\n{indent}\t[\"aircrafts\"] = {{}},").into_bytes(),
+            });
         }
     }
     lua::apply(src, edits)

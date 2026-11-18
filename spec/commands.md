@@ -588,6 +588,22 @@ does not exist is `NOT_BOUND`. The sidecar keeps each group's options with the g
 
 The exists-guard applies as for a group.
 
+A FARP static (`category` `Heliports`) also makes an airbase of its name with its own
+warehouse, which the shim samples (spec/sampling.md; spec/world.md, "Kinds"). The table
+takes these keys from `StaticSpec.extra`; the sidecar adds none of them:
+
+| Key | Effect |
+|---|---|
+| `category` | `"Heliports"`, which makes the static a FARP. `StaticSpec` has no category field, so it comes from `extra`. Whether DCS makes the airbase without it is UNVERIFIED |
+| `dynamicSpawn` | `true`: players may spawn aircraft at the FARP from its warehouse. Read only at spawn time; setting it later changes nothing (LIVE) |
+| `allowHotStart` | `true`: those spawns may start hot. Whether dynamic spawn needs it is UNVERIFIED; the LIVE run set it |
+| `dynamicCargo` | `true`: dynamic cargo at the FARP. Set in the LIVE run that offered a spawn; whether dynamic spawn needs it is UNVERIFIED |
+| `hidden` | `false`: the static shows on the clients' F10 map. A static added by script without it is hidden there (LIVE) |
+
+A dynamic spawn there takes an aircraft and fuel from the FARP's warehouse, which starts
+empty: the controller stocks it with `SetWarehouseStock` under the static's name (LIVE,
+a stocked FARP was offered and a spawn worked).
+
 ### Layout: AIRBASE_OWNER
 
 | Offset | Type | Field | Meaning |
@@ -616,10 +632,18 @@ number (0 jet fuel, 1 gasoline, 2 MW-50, 3 diesel) to an amount, set with
 `NOT_BOUND`. A call that raises is `DCS_REFUSED`.
 
 On a limited warehouse each set reads back as set, for items and liquids (LIVE, E6,
-step S15). An unlimited warehouse ignores a set without an error and keeps reading its
-full count (LIVE, E6), so `APPLIED` says only that DCS took the call. The reconciler
-then sees a sample that differs from the desired count; it sends the set once per
-revision and mission generation, and never again for that difference.
+step S15). An unlimited warehouse ignores a set without an error (LIVE, E6), so `APPLIED`
+says only that DCS took the call. What it reads depends on the call (LIVE,
+docs/results/2026-11-17-person-fixes.md, on the 26 airports the template file marks
+unlimited): `getItemCount` of `weapons.bombs.Mk_82` and of `F-15C`, and
+`getLiquidAmount` of liquids 0 to 3, read 1,000,000, while `getInventory`, which the
+sampler reads, lists no weapon or aircraft of an unlimited kind and each liquid of
+unlimited fuel at 100,000. Other items are UNVERIFIED. An `addItem` on an unlimited warehouse
+adds an entry of its count to `getInventory` that a `removeItem` of the same count does
+not take away; `getItemCount` stays at 1,000,000. Whether a `setItem` does the same is
+UNVERIFIED. The reconciler then sees a sample that differs from the desired count; it
+sends the set once per revision and mission generation, and never again for that
+difference.
 
 ### Layout: WAREHOUSE_ADJUST
 
@@ -809,8 +833,14 @@ scope, the target first for a scoped form, then `getValueResourceByKey(file)`, s
 clear view, a start delay of 0, horizontal, vertical, size and size units, the order of
 the Mission Editor's fields (ED-CODE, `me_trigrules.lua`). A key DCS does not know
 resolves to itself, and DCS raises nothing for a missing picture (LIVE), so `APPLIED`
-says only that DCS took the call. The alignment and unit values, the form of a
-coalition target, and what a client shows are UNVERIFIED.
+says only that DCS took the call. A `COALITION` target goes as the Mission Editor's
+coalition name, `"neutrals"`, `"red"` or `"blue"` for 0, 1 and 2 (ED-CODE,
+`MissionEditor/modules/Mission/CoalitionData.lua`): `a_out_picture_s` shows nothing for a
+number and shows the picture for `"blue"` (LIVE, a client). The handler answers
+`DCS_REFUSED` for a coalition above 2, with no call. A `COUNTRY` target goes as the DCS
+country number, the value the Mission Editor's country list writes (ED-CODE,
+`me_trigrules.lua`, `countryLister`); a client showing it is UNVERIFIED. The alignment
+and unit values are UNVERIFIED.
 
 `PICTURE_STOP` has no payload after the header and calls `a_out_picture_stop()`.
 
@@ -865,10 +895,24 @@ coalition target, and what a client shows are UNVERIFIED.
 | 1 | SPHERE | `x`, `y`, `z` and `radius` |
 | 2 | BOX | From `x`, `y`, `z` to `x2`, `y2`, `z2`, aligned with the axes |
 
-The handler calls `world.removeJunk` with a DCS volume of the code's shape, and returns
-the number DCS returns: how many junk objects it removed, which counts craters and
-debris as well as wrecks. The agent sends it as the `RESULT`'s value. A call that raises
-is `DCS_REFUSED` with its text; otherwise `APPLIED`.
+The handler calls `world.removeJunk` with a DCS volume of the code's shape. It then
+lists the statics in the same volume with `world.searchObjects` and collects each whose
+`getLife()` reads 0 or less and whose `isExist()` reads false, as a dead static's do
+(LIVE), or raises (UNVERIFIED in DCS; host-tested), and whose name reads and does not
+start with `np#`; a static whose name cannot be read stays (spec/world.md, "Names"). After the
+search returns it calls `destroy` on each, under `pcall`: `world.removeJunk` leaves a
+destroyed static, and a client keeps showing its ruin until `Object.destroy` removes it
+(LIVE, docs/results/2026-11-16-person-tests-2.md). A destroy that raises is skipped and
+not counted. A static the platform manages, dead or alive, is never destroyed, so a
+controller can keep its wreck or ruin on purpose: its record and death fact are
+unchanged. Only the dead statics nobody manages, placed by the mission or by a script,
+go.
+
+The value is the number `world.removeJunk` returns, how many junk objects it removed
+(craters and debris as well as wrecks), plus the statics destroyed. A static a destroy
+left where it was is destroyed again by each later clear and counted once a mission
+generation. The agent sends it as the `RESULT`'s value. A `world.removeJunk` call that
+raises is `DCS_REFUSED` with its text; otherwise `APPLIED`.
 
 The agent checks the payload, else `BAD_PAYLOAD`: a known `volume`, every number
 finite and within 10,000 km of 0, a sphere's `radius` above 0, and a box's `x`, `y`, `z`
@@ -876,10 +920,10 @@ each at most its `x2`, `y2`, `z2`.
 
 What DCS removes (LIVE, docs/results/2026-11-16-clear-debris.md): the wrecks of ground
 units that have stopped burning. A clear on open ground where an explosion struck
-returns 1, so a crater counts as junk (inferred from the count). DCS leaves every live
-unit and static, a wreck that is still burning, a dead static's object, and destroyed
-scenery. A clear around a dead aircraft or a dead static returns a count above 0; what it
-removes there is UNVERIFIED. A burning wreck it leaves still explodes and sends its death
+returns 1, so a crater counts as junk (inferred from the count). `world.removeJunk`
+leaves every live unit and static, a wreck that is still burning, a dead static's object
+(which the handler then destroys), and destroyed scenery. A clear around a dead aircraft
+or a dead static returns a count above 0; what it removes there is UNVERIFIED. A burning wreck it leaves still explodes and sends its death
 events, so a clear changes nothing in spec/records.md. A wreck it removes reads as a
 removed object: `isDead`, `getLife` and `getPoint` raise. The volume's edge is not exact
 to an object's position. A 2,000 km sphere removed the wrecks of a whole run in one
@@ -890,7 +934,9 @@ The cost: the `world.removeJunk` call alone takes about 4 us per object it remov
 4 to 6 us when it removes nothing, at any size. A `CLEAR_DEBRIS` command's `cost_us`
 includes the pump around it: 20 us at the median for a box that removes little, 37 us
 at p99, 981 us at most, and 6.4 ms in all for a whole-map clear of 217 objects, spread
-over 4 frames (LIVE, run 3 of the results).
+over 4 frames (LIVE, run 3 of the results). These figures were measured before the
+handler searched the volume for dead statics. The search, a `getLife` and `isExist` on
+each static in the volume and a destroy of each dead one add a cost that is UNVERIFIED.
 
 A clear of the whole map is not one command, so that no single command removes the junk
 of the whole map at once. The sidecar sends it as boxes 250 km square that tile x and z
@@ -925,8 +971,10 @@ What the setter does (LIVE, E16, step S15): at 50 % an aircraft, a helicopter an
 ground unit read back half their initial life. At 0 they leave DCS; only an airborne
 aircraft logged an event (`UNIT_LOST`, `EJECTION`). The one ship type tried, a
 speedboat, left DCS at 50 % and stayed at 80 %; a PERRY frigate read back 80 % and 50 %
-(LIVE, E39). The setter does nothing to a static, which is why `DAMAGE` takes only a
-unit. The sidecar also queues a `DAMAGE` right after a `GROUP_SPAWN` to give a unit
+(LIVE, E39). At 50 % the setter did nothing to a static (LIVE, E16), which is why
+`DAMAGE` takes only a unit. At 0 it killed a `BRDM-2` static on the server, and a
+connected client kept showing it alive (LIVE, docs/results/2026-11-17-person-fixes.md);
+what it does to a static at other settings and for other types is UNVERIFIED. The sidecar also queues a `DAMAGE` right after a `GROUP_SPAWN` to give a unit
 its stored life (spec/world.md, "Spawn state"); E39 found it applies in the spawn's
 frame while paused, and later with the simulation running; the running same-frame case
 is UNVERIFIED. On a dedicated server a setting of 10 killed a ground unit and the

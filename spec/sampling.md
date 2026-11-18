@@ -120,7 +120,17 @@ what is left goes on:
 | 4 | Positions | every unit, and every static that can move | `position_s`; five times it for a row that has not moved | `DCS.getUnitPositionByObjectId` |
 | 5 | Attitude when stopped | units that stopped since their last attitude | each pump | `getPosition` |
 | 6 | Vitals | every row | `vitals_s` for a row `SUBSCRIBE` names; twelve times it for any other row, the slow sweep | `getLife`; `isExist` on each row the slow sweep visits |
-| 7 | Warehouses and airbases | every airbase of the mission | `warehouse_s` | `getCoalition`, `getWarehouse():getInventory()` |
+| 7 | Warehouses and airbases | every airbase of the mission, and of a FARP `STATIC_SPAWN` made in this generation | `warehouse_s` | `getCoalition`, `getWarehouse():getInventory()`; for an airbase a FARP static makes, `StaticObject.getByName` and `isExist` first |
+
+The shim reads the mission's airbases when a generation starts, and marks each one a
+static of the same name and ID makes: a mission FARP. It adds the airbase of a FARP
+static when its `STATIC_SPAWN` applies: the airbase `Airbase.getByName` finds under the
+static's name with the static's ID (spec/world.md, "Kinds"). A FARP spawned again under
+the name takes over its entry. When a FARP's static no longer exists, mission FARP or
+spawned, or a static of the name that is no FARP replaces a spawned one, the entry stays
+as a tombstone, so the airbases after it keep their index; the agent writes no record
+for it. Each `getCoalition` is under `pcall`; an airbase whose `getCoalition` raises
+writes no record in that pass, since coalition 0 would read as a capture.
 
 Which rows a sweep reads:
 

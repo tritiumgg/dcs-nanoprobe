@@ -821,16 +821,39 @@ local function stock(base)
   return n
 end
 
+-- Whether an airbase a static makes is gone: its static, the one with the
+-- airbase's ID, no longer exists, so it was destroyed, died or was replaced. Its entry then stays as a tombstone,
+-- so the rows after it keep their index.
+local function farp_gone(base)
+  if base.gone then
+    return true
+  end
+  local ok, alive = pcall(function()
+    local s = StaticObject.getByName(base.name)
+    return s ~= nil and rawget(s, 'id_') == base.id and s:isExist() == true
+  end)
+  base.gone = not (ok and alive)
+  return base.gone
+end
+M.farp_gone = farp_gone
+
 local function warehouses(rows)
   for i = 1, rows do
     local index = buf[i]
     local base = T.airbases[index]
     local stop
-    if base then
+    if base and base.static and farp_gone(base) then
+      -- A tombstone: the agent writes no record for an empty name.
+      stop = agent.airbase(index, 0, 0, '', false)
+    elseif base then
       current = nil
-      local coalition_of = base.object:getCoalition()
+      local got, coalition_of = pcall(base.object.getCoalition, base.object)
       local ok, n = pcall(stock, base.object)
-      if ok then
+      if not got or type(coalition_of) ~= 'number' then
+        -- An airbase whose coalition cannot be read writes nothing this pass:
+        -- coalition 0 would read as a capture.
+        stop = agent.airbase(index, 0, 0, '', false)
+      elseif ok then
         stop = agent.airbase(index, base.id, coalition_of, base.name, true, unpack(list, 1, n))
       else
         stop = agent.airbase(index, base.id, coalition_of, base.name, false)
@@ -842,6 +865,14 @@ local function warehouses(rows)
       return true
     end
   end
+end
+
+-- The warehouse tier over the given airbase indexes, for the host tests.
+function M.warehouse_rows(indexes)
+  for i, index in ipairs(indexes) do
+    buf[i] = index
+  end
+  return warehouses(#indexes)
 end
 
 local RUN = {
@@ -860,15 +891,28 @@ local function reset(gen)
   T.gen = gen
   T.ids, T.objs, T.unit, T.births, T.airbases, T.enum = {}, {}, {}, {}, {}, nil
   T.slot_of = {}
+  -- The statics CLEAR_DEBRIS destroyed this generation: one a later clear
+  -- finds again is not counted again.
+  T.cleared = {}
   -- A mission load removed every mark, drawing and menu item from DCS.
   M.marks, M.menus = {}, {}
+  M.read_airbases()
+end
+
+-- The mission's airbases, read when a generation starts.
+function M.read_airbases()
+  T.airbases = {}
   local ok, bases = pcall(world.getAirbases)
   if ok and type(bases) == 'table' then
     for _, base in ipairs(bases) do
       local got, name = pcall(base.getName, base)
       local id = rawget(base, 'id_')
       if got and type(name) == 'string' and type(id) == 'number' then
-        T.airbases[#T.airbases + 1] = { object = base, id = id, name = name }
+        -- An airbase a mission FARP static makes has the static's name and
+        -- ID; it goes when its static goes, as a spawned FARP's does.
+        local found, st = pcall(StaticObject.getByName, name)
+        local static = found and st ~= nil and rawget(st, 'id_') == id
+        T.airbases[#T.airbases + 1] = { object = base, id = id, name = name, static = static or nil }
       end
     end
   end
@@ -1676,6 +1720,28 @@ local HANDLERS = {
     if type(id) ~= 'number' then
       return DCS_REFUSED, nil, 'the new static has no ID'
     end
+    -- A FARP static makes an airbase of its name, with its own warehouse
+    -- (LIVE, docs/results/2026-11-16-person-tests-2.md). It joins the
+    -- airbases this generation samples; a static spawned again under the
+    -- name, or one spawned over a mission FARP of the name, takes over its
+    -- entry.
+    -- The airbase has the static's ID (LIVE); an airbase of the name with
+    -- another ID is not this static's. A static of the name that is no FARP
+    -- leaves a tombstone.
+    local found, ab = pcall(Airbase.getByName, a.name)
+    local ab_id = found and ab and rawget(ab, 'id_') or nil
+    local at
+    for i, base in ipairs(T.airbases) do
+      if base.static and base.name == a.name then
+        at = i
+        break
+      end
+    end
+    if ab_id == id then
+      T.airbases[at or #T.airbases + 1] = { object = ab, id = ab_id, name = a.name, spawned = true, static = true }
+    elseif at then
+      T.airbases[at].gone = true
+    end
     local ids = {}
     if type(old_id) == 'number' and old_id ~= id then
       ids[1] = old_id
@@ -1942,6 +2008,39 @@ local HANDLERS = {
     local ok, removed = pcall(world.removeJunk, volume)
     if not ok then
       return DCS_REFUSED, nil, tostring(removed)
+    end
+    -- removeJunk leaves a destroyed static, and a client keeps seeing its
+    -- ruin; Object.destroy on the dead static removes it (LIVE,
+    -- docs/results/2026-11-16-person-tests-2.md). Each static in the volume
+    -- that reads life 0 and no longer exists, as a dead static does (LIVE,
+    -- same document), is collected during the search and destroyed after
+    -- it returns, each call under pcall. A static a destroy left is
+    -- destroyed again by a later clear, and counted once a generation. A
+    -- static the platform manages, named `np#` (spec/world.md), is never
+    -- destroyed: a controller may keep its ruin.
+    local dead = {}
+    T.cleared = T.cleared or {}
+    pcall(world.searchObjects, Object.Category.STATIC, volume, function(s)
+      -- A dead static's `isExist` reads false (LIVE); one that raises is
+      -- taken as no longer existing too (UNVERIFIED in DCS). A static whose
+      -- name cannot be read stays.
+      local got, life = pcall(s.getLife, s)
+      local known, exists = pcall(s.isExist, s)
+      local named, name = pcall(s.getName, s)
+      if got and type(life) == 'number' and life <= 0 and (not known or exists == false)
+        and named and type(name) == 'string' and name:sub(1, 3) ~= 'np#' then
+        dead[#dead + 1] = s
+      end
+      return true
+    end)
+    for _, s in ipairs(dead) do
+      local id = rawget(s, 'id_')
+      if pcall(s.destroy, s) and not T.cleared[id] then
+        removed = (tonumber(removed) or 0) + 1
+        if id ~= nil then
+          T.cleared[id] = true
+        end
+      end
     end
     return APPLIED, removed
   end,

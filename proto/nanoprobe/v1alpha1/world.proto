@@ -162,7 +162,10 @@ message Airbase {
   // The DCS name.
   string name = 2;
   Coalition owner = 3;
-  // Stock by item name. Absent until sampled.
+  // Stock by item name, as DCS's getInventory lists it. Absent until
+  // sampled. An unlimited warehouse lists no item of an unlimited kind,
+  // unless a script or a WAREHOUSE_ADJUST added some, and each liquid of
+  // unlimited fuel at 100,000 (spec/commands.md, "Layout: WAREHOUSE_SET").
   map<string, double> stock = 4;
 }
 
