@@ -1666,11 +1666,26 @@ pub(crate) fn resolve_part(part: Part, windows: bool) -> Result<Part, String> {
     }
 }
 
+/// The tenth part deploys a build with fault injection, which it builds
+/// itself, so it cannot run on a DLL given with the top-level `--dll`. Refused
+/// before any part deploys, so a run never loses the parts it finished.
+pub(crate) fn refuse_given_dll(part: Part, given: bool) -> Result<(), String> {
+    if given && matches!(part, Part::Both | Part::Tenth) {
+        return Err(
+            "the tenth part builds its own DLL with fault injection and does not \
+                    take --dll; with --dll, run --part mirror (or another single part)"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 pub fn run(repository: &Path, name: &str, part: Part) -> Result<ExitCode, String> {
     let part = resolve_part(
         part,
         matches!(crate::target(name)?, Target::WindowsSsh { .. }),
     )?;
+    refuse_given_dll(part, crate::agent_dll::given().is_some())?;
     if part == Part::Windows {
         return super::win::run(repository, name);
     }
@@ -1758,6 +1773,16 @@ mod tests {
         assert!(resolve_part(Part::Windows, false).is_err());
         assert_eq!(resolve_part(Part::Both, false), Ok(Part::Both));
         assert_eq!(resolve_part(Part::Tenth, false), Ok(Part::Tenth));
+    }
+
+    #[test]
+    fn a_given_dll_refuses_the_parts_that_build_their_own() {
+        assert!(refuse_given_dll(Part::Both, true).is_err());
+        assert!(refuse_given_dll(Part::Tenth, true).is_err());
+        assert!(refuse_given_dll(Part::Mirror, true).is_ok());
+        assert!(refuse_given_dll(Part::Windows, true).is_ok());
+        assert!(refuse_given_dll(Part::Both, false).is_ok());
+        assert!(refuse_given_dll(Part::Tenth, false).is_ok());
     }
 
     #[test]

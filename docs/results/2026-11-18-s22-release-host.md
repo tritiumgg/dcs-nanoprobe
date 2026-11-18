@@ -78,10 +78,6 @@ No instruction line differs. The DLL is 1,110,016 bytes without the flags and
 change, the source paths in its panic messages and crash records, and its debug
 information. They do not change its code.
 
-`cargo xtask deploy` builds the agent into the same target folder without these flags.
-A DLL it deploys has the build machine's paths and another build ID than the staged one,
-and after it runs, `mise run dll` builds the staged DLL again.
-
 The comparison covers the agent crate. The crates it links, the standard library among
 them, were built with the same flags and their assembly was not compared.
 
