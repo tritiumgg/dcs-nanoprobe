@@ -162,7 +162,10 @@ Unanswered spawns now count against the budget outside the restore burst, so at 
 spec/config.md; quorum ruling of 2026-11-17). Destroys keep no sidecar limit; the
 agent's commanded-work budget spreads them. Host tests: with 300 capture-and-destroys
 written ahead of the spawns, no frame takes more than the budget at 1 and at 3, and at 3
-some frame takes 3; a paused restore still spawns more than the budget in a frame.
+some frame takes 3; a paused restore still spawns more than the budget in a frame. A
+reconciler test (`unanswered_spawns_hold_the_plan_to_the_budget`) holds N = 3 spawns
+unanswered and sees no further spawn written, one more after one result, and every
+waiting spawn written at once in a paused restore.
 
 The agent runs a frame's commands in its pump and publishes `out_tail` once, at the end
 of the frame (`finish`, `crates/agent/src/driver.rs`), so a spawn's `RESULT` reaches the
@@ -243,6 +246,9 @@ at least the 500 groups needed in one query each time (the count found is not re
 - The route-group heading check compares the capture with an earlier read; a unit
   turning at a waypoint in between can exceed it (run 4, one of 100).
 - Store checkpoint times before and after the dirty set, interleaved on an idle machine.
+- `lua/tests/sampling.lua` timing flake under host load, passes isolated: its rate
+  checks at a tenth of the budget failed three times while the Mac's load average was
+  13 to 46 from other work, each on a different check, and passed run alone.
 - The API reports a group's state, not its authority, so an API client cannot tell a
   `materializing` group the controller is withdrawing from one it asked for. The
   in-process test checks authority directly.

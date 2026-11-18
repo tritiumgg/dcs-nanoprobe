@@ -2160,3 +2160,97 @@ fn a_sample_of_the_old_spawn_keeps_a_putgroup_life() {
     w.settle().unwrap();
     assert_eq!(w.sim.life_percent_of(unit.0), Some(40.0));
 }
+
+/// Spawns written for the loaded mission, as journalled.
+fn spawns(w: &World) -> usize {
+    use nanoprobe_sidecar::sim::wire::opcode;
+    use nanoprobe_sidecar::store::Entry;
+    w.store
+        .entries()
+        .iter()
+        .filter(|e| matches!(e, Entry::Command(c) if c.opcode == opcode::GROUP_SPAWN))
+        .count()
+}
+
+/// The materialization budget (spec/world.md, "Authority"; the quorum ruling
+/// on `materialize_per_frame`): with N spawns unanswered for the loaded
+/// mission the plan writes no spawn; one result lets exactly one more go;
+/// with the restore burst on, paused, every waiting spawn goes at once.
+#[test]
+fn unanswered_spawns_hold_the_plan_to_the_budget() {
+    use nanoprobe_sidecar::reconciler::Config as RecConfig;
+    use nanoprobe_sidecar::store::Authority;
+    use nanoprobe_sim_fake::Config;
+    use nanoprobe_sim_fake::harness::new_store;
+
+    const N: usize = 3;
+    let mut store = new_store(10, 0);
+    let ids: Vec<_> = store.groups().map(|g| g.id).collect();
+    for g in &ids {
+        store.set_authority(*g, Authority::Campaign).expect("group");
+    }
+    let mut w = World::with_store(
+        store,
+        Config::default(),
+        RecConfig {
+            materialize_per_frame: N,
+            on_lost: LostPolicy::Report,
+            destroy_retries: 3,
+        },
+    );
+    for _ in 0..100 {
+        w.tick().expect("tick");
+    }
+    assert!(w.sim.running(), "the mission is loaded and running");
+    assert_eq!(spawns(&w), 0);
+
+    // The agent takes nothing: N spawns go and stay unanswered.
+    w.sim.set_commands_per_frame(0);
+    for g in &ids {
+        w.store.set_authority(*g, Authority::Sim).expect("group");
+    }
+    for _ in 0..20 {
+        w.tick().expect("tick");
+    }
+    assert_eq!(spawns(&w), N, "spawns written with {N} unanswered");
+
+    // One frame in which the agent takes one command: one result, one
+    // more spawn.
+    w.sim.set_commands_per_frame(1);
+    w.tick().expect("tick");
+    w.sim.set_commands_per_frame(0);
+    for _ in 0..20 {
+        w.tick().expect("tick");
+    }
+    assert_eq!(spawns(&w), N + 1, "one result lets exactly one spawn go");
+
+    // Every group live, then a mission load that starts paused: the burst
+    // writes every waiting spawn at once.
+    w.sim
+        .set_commands_per_frame(Config::default().commands_per_frame);
+    for _ in 0..400 {
+        w.tick().expect("tick");
+    }
+    assert!(
+        ids.iter()
+            .all(|g| w.store.group(*g).expect("group").state == State::Live)
+    );
+    w.sim.load_mission();
+    for _ in 0..10 {
+        if w.sim.running() {
+            break;
+        }
+        w.sim.frame();
+    }
+    w.sim.pause();
+    w.sim.set_commands_per_frame(0);
+    let before = spawns(&w);
+    for _ in 0..5 {
+        w.tick().expect("tick");
+    }
+    assert_eq!(
+        spawns(&w) - before,
+        ids.len(),
+        "the burst writes every waiting spawn"
+    );
+}
