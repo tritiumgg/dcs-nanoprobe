@@ -157,12 +157,21 @@ Which rows a sweep reads:
 - An event with no target, and an event naming an object the table
   lacks, marks nothing. Damage that sends no event, such as a scripted explosion's
   splash on a unit it does not kill (LIVE), shows at the row's next slow sweep of life.
-- **After a `HELLO`** the sidecar holds no samples. Every row returns to every position
-  sweep until it has again read unmoved three times, and every row that is not read on
-  every vitals sweep is marked for one read of its life.
+- **After a `HELLO`** the agent reads every row again. Every row returns to every
+  position sweep until it has again read unmoved three times. Each row that is not read on every
+  vitals sweep is marked for one read of its life when its first `OBJECT` after the
+  `HELLO` is queued, so the read follows that `OBJECT`. After the first `HELLO` to a
+  sidecar of a new boot, and after an agent process's first `HELLO`, a life read of a
+  row with no `OBJECT` queued since that `HELLO` is not written and does not count as
+  the row's read time; a mark the read used is spent, and the row's `OBJECT` marks it
+  again unless a subscription reads it on every vitals sweep (spec/records.md,
+  "Samples"). A cursor read left out this way counts in the
+  tier's credit and the window's `swept_vitals` as any cursor read does; a marked read
+  left out counts in neither, as any marked read.
 
-Rows that an event or an attach marked are read at the start of their tier's next
-batch, before the cursor's rows, and do not count against the tier's credit.
+Rows that an event, an addition or a row's first `OBJECT` after a `HELLO` marked are
+read at the start of their tier's next batch, before the cursor's rows, and do not
+count against the tier's credit.
 
 When the budget cannot meet every target, the tiers lower in the table get less, so the
 rates fall in the order of plan section 4.2: warehouses first, then

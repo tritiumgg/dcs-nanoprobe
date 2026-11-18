@@ -335,54 +335,13 @@ local function main()
     return v, m
   end
 
-  -- An object ID as the 16 hex digits a record's payload holds it in.
-  local function id_hex(id)
-    local bytes = {}
-    for i = 1, 8 do
-      bytes[i] = string.format('%02x', id % 256)
-      id = math.floor(id / 256)
-    end
-    return table.concat(bytes)
-  end
-
-  -- A FAULT OF THE AGENT, open, which this test reports and does not fail
-  -- on. After a new attach the agent marks every row for a life read, and
-  -- reads some before the enumeration has written the row's OBJECT of that
-  -- attach. The new sidecar's mirror holds no such row yet and drops the
-  -- VITALS. The row's next life read is the slow sweep's, up to a minute
-  -- later, past the time the compare gives a new row. On the mock, with no
-  -- load, 10 of 120 attaches showed it (2026-11-18, main ac84a53).
-  --
-  -- The recording tells this case from every other mismatch. It returns a
-  -- text only when the verdict fails on rows without vitals and on nothing
-  -- else, and every row the verdict counts so has, since the last attach, a
-  -- VITALS record (kind 33) that names it before the OBJECT record (kind 16)
-  -- of it, and none after (spec/records.md, "Layout: OBJECT" and "Layout:
-  -- VITALS": the ID is the OBJECT's first field, and a VITALS holds a count
-  -- and then that many IDs).
-  local function vitals_before_object(v, m)
-    for _, key in ipairs({ 'missing', 'extra', 'unpositioned', 'far', 'vitals', 'oracle_failed', 'old', 'old_vitals' }) do
-      if v[key] ~= 0 then
-        return nil
-      end
-    end
-    if #v.zero_periods > 0 or #v.interval_off > 0 or v.unvital == 0 then
-      return nil
-    end
-    -- The rows the compare leaves out of its count, by its own rules
-    -- (crates/xtask/src/sampling.rs): an object the oracle names as in
-    -- transit or did not read, and a row younger than the vitals grace.
-    local o = S.json(S.read(oracle))
-    local truth, transit = {}, {}
-    for _, chunk in ipairs(o.chunks or { o.rows }) do
-      for _, t in ipairs(chunk) do
-        truth[t.id or t[1]] = true
-      end
-    end
-    for _, id in ipairs(type(o.in_transit) == 'table' and o.in_transit or {}) do
-      transit[id] = true
-    end
-    local grace = math.max(m.periods[2], 5) * 1.5 + 2
+  -- The recording since the HELLO (kind 2) after its last attach line: no
+  -- VITALS (kind 33) names an object before that object's OBJECT (kind 16).
+  -- The probe is a sidecar of a new boot: the agent counts a row as held
+  -- only from its first OBJECT after the HELLO (spec/records.md, "Samples"). The ID is an OBJECT's first field, and a
+  -- VITALS holds a count and then that many IDs ("Layout: OBJECT" and
+  -- "Layout: VITALS"). Returns how many VITALS rows it checked.
+  local function vitals_after_object(label)
     local lines = S.lines(recording)
     local attach = 0
     for i, line in ipairs(lines) do
@@ -390,47 +349,28 @@ local function main()
         attach = i
       end
     end
-    local rows = 0
-    for _, row in ipairs(m.rows) do
-      local young = type(row.since_real) == 'number' and m.real - row.since_real < grace
-      if row.vit_model == S.null and truth[row.object] and not transit[row.object] and not young then
-        rows = rows + 1
-        local hex = id_hex(row.object)
-        local object_at, before, after = nil, 0, 0
-        for i = attach + 1, #lines do
-          local kind = tonumber(lines[i]:match('"kind":(%d+)'))
-          local payload = (kind == 16 or kind == 33) and lines[i]:match('"payload":"(%x*)"')
-          local names = false
-          if payload and kind == 16 then
-            names = payload:sub(1, 16) == hex
-          elseif payload and #payload >= 16 then
-            for k = 0, uint(payload, 1, 4) - 1 do
-              names = names or payload:sub(17 + 16 * k, 32 + 16 * k) == hex
-            end
-          end
-          if names and kind == 16 then
-            object_at = object_at or i
-          elseif names and object_at then
-            after = after + 1
-          elseif names then
-            before = before + 1
-          end
-        end
-        if not object_at or before == 0 or after > 0 then
-          return nil
+    local known, hello, rows = {}, false, 0
+    for i = attach + 1, #lines do
+      local kind = tonumber(lines[i]:match('"kind":(%d+)'))
+      local payload = lines[i]:match('"payload":"(%x*)"')
+      if kind == 2 then
+        hello = true
+      elseif hello and kind == 16 and payload then
+        known[payload:sub(1, 16)] = true
+      elseif hello and kind == 33 and payload and #payload >= 16 then
+        for k = 0, uint(payload, 1, 4) - 1 do
+          local hex = payload:sub(17 + 16 * k, 32 + 16 * k)
+          assert(known[hex], label .. ': a VITALS names object ' .. hex
+            .. ' before its OBJECT, at recording line ' .. i)
+          rows = rows + 1
         end
       end
     end
-    if rows ~= v.unvital then
-      return nil
-    end
-    return rows .. ' row(s) whose VITALS the agent wrote before their OBJECT after the attach'
+    assert(hello, label .. ': no HELLO after the last attach in the recording')
+    return rows
   end
 
-  -- `known`, when given, is asked about a mismatch. When it names a fault of
-  -- the agent that is recorded as open, the compare returns that text as its
-  -- third value and does not fail.
-  local function compare(label, known)
+  local function compare(label)
     local v, m
     -- The agent's periods are wall time. When the machine starved this
     -- process while it measured (a process second took over 1.5 wall
@@ -441,10 +381,6 @@ local function main()
       if v.matches or peak <= 1.5 then
         break
       end
-    end
-    local fault = not v.matches and known and known(v, m)
-    if fault then
-      return v, m, fault
     end
     -- The mirror's own counters and the starvation seen say why, when a row
     -- lacks a sample: a sample for an object the mirror did not yet hold.
@@ -541,12 +477,11 @@ local function main()
       return lines_with('"ev":"hello"') > hellos
     end), 'the probe did not attach again')
     run(10)
-    local _, _, fault = compare('attached again', vitals_before_object)
-    if fault then
-      print('known fault of the agent, not failed on: ' .. fault)
-    end
-    S.ok('no sweep while detached, and the mirror matches after the next attach'
-      .. (fault and ', but for the agent\'s known fault' or ''))
+    compare('attached again')
+    local checked = vitals_after_object('attached again')
+    assert(checked > 0, 'attached again: no VITALS after the HELLO to check')
+    S.ok('no sweep while detached, and the mirror matches after the next attach, with no'
+      .. ' VITALS before its OBJECT (' .. checked .. ' rows)')
 
     -- A mission change: the rows of the old mission are never read again.
     host:load_mission('second')
