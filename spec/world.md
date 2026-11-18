@@ -24,7 +24,7 @@ entities by `EntityId` within a campaign.
 |---|---|---|---|
 | Group | `EntityId` | yes | The spec: country, category and members; its controller options; and the order. The unit of spawn, order, materialize and destroy. |
 | Unit | `EntityId`, a member of one group | with its group | Observed state: position, attitude, life, and a player unit's ammunition at its last birth or takeoff. Dies alone. |
-| Static | `EntityId` | yes | A spec and observed state. Spawned and destroyed alone. |
+| Static | `EntityId` | yes | A spec and observed state. Spawned and destroyed alone. One that dies stays, as a ruin ("Ruins"). |
 | Airbase | theater and DCS name | no | Owner (coalition) |
 | Warehouse | theater and DCS name of its airbase | no | Stock |
 | Mark, drawing, menu item | `EntityId` | yes | Player-facing objects. Set again after every mission load. |
@@ -192,7 +192,8 @@ captured airbase. Facts are journalled when they arrive and change the desired s
 A *drift* is a difference the platform corrects: a managed group that should exist and
 does not, or an order DCS has not been given. The reconciler corrects drift only.
 
-A group with a death fact for a member is never respawned with that member.
+A group with a death fact for a member is never respawned with that member. A static
+with a death fact is never spawned alive again: DCS gets its ruin ("Ruins").
 
 ## Revisions
 
@@ -222,7 +223,8 @@ applied revision is behind.
 Removing a managed group or static takes it out of the campaign for good. The store
 keeps a removed entity, marked removed, under campaign authority: the API no longer
 reports it, its `EntityId` is never given again, and the reconciler destroys any object
-of it that DCS still holds, as drift.
+of it that DCS still holds, as drift. A removed static's ruin goes the same way
+("Ruins").
 
 ## Lifecycle
 
@@ -235,7 +237,7 @@ a group of one.
 | `materializing` | A spawn was sent and not yet acknowledged |
 | `live` | In DCS, at least one member alive |
 | `dematerializing` | Leaving DCS: a capture-and-destroy, or for a static a capture and then a destroy, was sent, and the destroy is not yet applied |
-| `dead` | Every member has a death fact. Final. |
+| `dead` | Every member has a death fact. Final. A dead static is kept in DCS as a ruin ("Ruins"). |
 | `lost` | Missing from DCS with no death fact, or held: every member without a death fact is held across a mission generation (see "Respawn gate") |
 | `unspawnable` | DCS refused the spawn. Not retried. |
 
@@ -285,7 +287,8 @@ a group of one.
   resolves them. The sidecar counts what it drops. An enumeration with a record
   stamped with another campaign is not used.
 - `dead` is final. A spawn or capture result, or an enumeration, that arrives for a
-  `dead` entity changes nothing and is counted. A destroy result for a `dead` entity
+  `dead` entity changes nothing and is counted; the result of a ruin's spawn is read
+  ("Ruins"). A destroy result for a `dead` entity
   whose objects DCS still holds counts toward `destroy_retries` like any destroy of an
   entity DCS should not hold (spec/config.md).
 - When the last death fact arrives while the group is `materializing`, the spawn
@@ -309,6 +312,93 @@ a group of one.
   alive. It holds nothing. A group that is already `dead` stays `dead`. A revival is
   not a spawn. A later death is a new death fact.
 - Every transition is journalled before the command that causes it is sent.
+
+## Ruins
+
+A managed static in state `dead` is a *ruin*. The store keeps it. The World service
+reports it with `alive` false, state `dead`, and the position and heading it had. An
+area query finds it where it stood. No cleanup removes it, and it is never spawned alive
+again. A death fact clears a `MISSING` or `REMOVED` mark, so a ruin is never reported as
+a removal (`Unit.left`).
+
+The reconciler keeps DCS holding the static's dead object wherever DCS would hold a live
+static: the static is not removed, its authority is DCS, and the loaded mission's
+theater is its own.
+
+| Case | The reconciler sends |
+|---|---|
+| The static died in the loaded generation | Nothing. Its own dead object stays in DCS and is the ruin. |
+| DCS should hold the ruin and does not: after a mission load, a DCS restart, an activation, or a `Materialize` | `STATIC_SPAWN` with the static's table and `dead = true` (spec/commands.md), at the static's spec revision |
+| DCS holds the dead object and should not: after a `Dematerialize` or a `RemoveEntity` | `STATIC_DESTROY` |
+| The binding holds a live object of the static: a script revived it, or a spawn of the live static was answered after its death | `STATIC_DESTROY`, then the ruin's `STATIC_SPAWN` |
+
+Only a `STATIC_DESTROY` the platform sends takes a ruin out of DCS. `CLEAR_DEBRIS` never
+destroys a managed static, and the `world.removeJunk` it calls leaves a dead static,
+one an explosion killed and one added dead (LIVE, spec/commands.md, "Layout:
+CLEAR_DEBRIS").
+
+- **What the sidecar knows.** The agent holds no row for a dead static: its `isExist`
+  reads false (LIVE, docs/results/2026-11-17-person-fixes.md), so no `OBJECT` reports
+  it and no enumeration finds it. The store keeps two marks for each dead static
+  instead: the agent boot and generation in which a ruin's spawn was written, and those
+  in which DCS holds the dead object. A death fact and an applied ruin spawn set the
+  second. An applied destroy clears both. They are written with the step, before its
+  commands reach DCS (spec/persistence.md, "Writes"). So a sidecar that restarts sends
+  nothing for a ruin the store marks as held, sends again a ruin's spawn that was
+  written and not answered ("One ruin a generation"), and still destroys a ruin whose
+  spawn it had written.
+- **One ruin a generation.** A ruin's spawn carries the static's spec revision. While
+  the agent holds that revision in the generation it answers `AT_REVISION`, which is
+  `applied`. So the object of a static that died in the generation is never replaced,
+  and a spawn sent again after a lost result makes no second ruin. A destroy sets the
+  agent's revision to 0, so the spawn that follows a `Materialize` runs.
+- **Budget.** A ruin's spawn counts against the materialization budget, and a ruin owed
+  a spawn counts as waiting for the restore burst ("Authority";
+  spec/persistence.md, "Restore burst").
+- **Outcomes.** `refused`: the error is kept as the static's last error until a spawn
+  of the ruin applies, and the spawn is not sent again at that revision in that
+  generation. The sidecar keeps that in memory: a restarted sidecar tries once more.
+  A rejection a resend cannot fix, such as `BAD_PAYLOAD` or a table over the size
+  limit, is kept and shown the same way. `NOT_READY` holds it as it holds any spawn. `unknown` and `not_sent`: the next plan
+  sends it again. The static stays `dead` whatever the outcome.
+- **A destroy whose result is lost** may have run. The store then says only that DCS
+  may hold the dead object: a static that should have its ruin gets the spawn again,
+  answered `AT_REVISION` if the destroy did not run, and one that should not is sent
+  the destroy again, up to `destroy_retries` (spec/config.md).
+- **Created destroyed.** `PutStatic` with `dead` creates a static with a death fact, in
+  state `dead` from the start: its spec, its death fact and the transition from
+  `virtual` to `dead` are journalled together. A controller that wants to keep a unit's
+  wreck puts such a static where the unit died. Only the store's state says whether a
+  static spawns destroyed: `PutStatic` refuses a `dead` key in `StaticSpec.extra`, and
+  a live static's spawn never carries one.
+- **`dead` without a death in DCS.** A static the lost policy marks dead is a ruin too,
+  and so is one a `ResolveMember` `DEAD` names, once the lifecycle makes it `dead`. In
+  the generation the static left in, the agent still holds its revision and DCS holds
+  no object, so the ruin's spawn is answered `AT_REVISION` and nothing is spawned. The
+  next generation spawns the ruin.
+- **A death the platform never reads.** A static that left as `MISSING` or `REMOVED`
+  and whose death event the mission's end cut off has no death fact. It is no ruin: it
+  is held like any such member ("Respawn gate").
+- **A ruin is not observed.** Nothing tells the sidecar that another script removed a
+  ruin. The ruin is spawned again in the next generation.
+
+What a ruin looks like is DCS's choice of model for a dead static of the type (LIVE,
+docs/results/2026-11-17-person-fixes.md, on a Windows client of the Wine server):
+
+| Type added with `dead = true` | A client sees |
+|---|---|
+| `FARP Fuel Depot`, `Shelter`, `FARP Ammo Dump Coating`, `F-15C`, `UH-1H` | Destroyed |
+| `Windsock` | Intact |
+| `BRDM-2` | Alive; nothing after the client rejoins |
+| `speedboat` | Not added: DCS refuses it |
+
+So the ruin of a type with no destroyed model looks intact after a restore, and a ground
+vehicle's wreck cannot be kept as a static spawned dead. Which other types behave as
+the Windsock or the BRDM-2 does is UNVERIFIED. In the generation a static dies in, a
+client sees the wreck DCS made of it: LIVE for a BRDM-2 killed by an explosion (the
+same results) and for a FARP Fuel Depot (docs/results/2026-11-16-person-tests-2.md),
+UNVERIFIED for other types. Whether a FARP added dead
+makes its airbase is UNVERIFIED.
 
 ## Respawn gate
 
@@ -419,7 +509,8 @@ controller's. The lifecycle above carries a change out.
 
 **Interest queries.** `QueryArea`, or a `WorldFilter` with a center and a radius, gives
 every group with a unit within the radius, and every static within it, virtual or not,
-from the store's grid. A virtual unit is where the store last held it.
+from the store's grid. A virtual unit is where the store last held it. A dead unit is
+left out; a dead static is a ruin and is found where it stood.
 
 **Handover.** A dematerialize captures each unit in the frame that destroys it
 (`GROUP_CAPTURE_DESTROY`; for a static, a `CAPTURE`, then a destroy), so the store holds

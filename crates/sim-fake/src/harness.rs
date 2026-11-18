@@ -46,6 +46,7 @@ use nanoprobe_sidecar::sim::{Detached, RawRecord, SimAdapter};
 use nanoprobe_sidecar::store::{
     Authority, Entry, Journalled, LostPolicy, NewGroup, NewUnit, Outcome, Point, Store, UnitState,
 };
+use nanoprobe_transport::codec::Lv;
 use nanoprobe_transport::layout::result as rc;
 
 use crate::{Config, FakeSim};
@@ -317,7 +318,14 @@ fn check_journal(store: &Store, scan: &Scan, sent: &[Command]) -> Result<(), Vio
                 h.seq
             )));
         }
-        let want = match cmd.body {
+        let want = match &cmd.body {
+            // A ruin is spawned only for a static in state `dead`, and a
+            // dead static is spawned only as a ruin (spec/world.md, "Ruins").
+            Body::StaticSpawn { table, .. }
+                if matches!(lv::get(table, "dead"), Some(Lv::Bool(true))) =>
+            {
+                Some(State::Dead)
+            }
             // A live entity whose spec changed is spawned again in place.
             Body::GroupSpawn { .. } | Body::StaticSpawn { .. } if *s == State::Live => None,
             Body::GroupSpawn { .. } | Body::StaticSpawn { .. } => Some(State::Materializing),
@@ -331,6 +339,22 @@ fn check_journal(store: &Store, scan: &Scan, sent: &[Command]) -> Result<(), Vio
                 cmd.body.opcode(),
                 h.entity,
                 s.name()
+            )));
+        }
+        // No ruin's spawn is written while the store says DCS holds the
+        // static's dead object in the loaded generation. The agent would
+        // answer it `AT_REVISION`, so only the write itself shows the fault.
+        // A step folds its records before it plans: the mark read here is
+        // the one the plan saw.
+        let held_now = store.loaded().is_some_and(|l| {
+            store
+                .group(EntityId(h.entity))
+                .is_some_and(|g| g.ruin_in == Some((l.agent_boot, l.mission_gen)))
+        });
+        if want == Some(State::Dead) && held_now {
+            return Err(Violation(format!(
+                "a ruin's spawn was written for static {}, whose dead object DCS holds",
+                h.entity
             )));
         }
         if let Some(u) = dead_units.iter().next() {
@@ -448,6 +472,9 @@ pub struct World {
     sidecar_boot: u64,
     /// Operations applied, for a failure report.
     pub trace: Vec<Op>,
+    /// Statics created destroyed ([`World::create_ruin`]): each has a death
+    /// fact and never died in DCS.
+    born_dead: BTreeSet<EntityId>,
 }
 
 /// The theater every group is on.
@@ -521,9 +548,23 @@ impl World {
             rec_cfg,
             sidecar_boot: 1,
             trace: Vec::new(),
+            born_dead: BTreeSet::new(),
         };
         w.sim.attach(w.sidecar_boot);
         w
+    }
+
+    /// Create a static destroyed, as `PutStatic` with `dead` does.
+    pub fn create_ruin(&mut self, spec: NewGroup) -> EntityId {
+        let id = self.store.create_ruin(spec).expect("ids");
+        self.born_dead.insert(id);
+        id
+    }
+
+    /// Tell the checks that a static of the store this world was made over
+    /// was created destroyed.
+    pub fn born_dead(&mut self, id: EntityId) {
+        self.born_dead.insert(id);
     }
 
     /// The units of this campaign alive in DCS: object ID and unit entity.
@@ -799,10 +840,24 @@ impl World {
                 l.replacements - l.in_place
             )));
         }
+        // The object of a static whose death was reported is never spawned
+        // over in its generation: the store knows DCS holds it. A death no
+        // record reported leaves the sidecar nothing to know it by.
+        if let Some((_, _, _, e, _)) = l.ruins_replaced.iter().find(|(b, g, c, e, spawned)| {
+            let k = (*b, *g, *c, *e);
+            !spawned && l.reported_deaths.contains(&k) && !self.scan.deaths_before.contains(&k)
+        }) {
+            return Err(Violation(format!(
+                "a ruin was spawned over static {e}, which died in that generation"
+            )));
+        }
         for g in self.store.groups() {
             for m in &g.members {
                 let u = self.store.unit(*m).expect("unit");
-                if u.dead && !l.deaths.contains(&(self.store.campaign().0, m.0)) {
+                if u.dead
+                    && !l.deaths.contains(&(self.store.campaign().0, m.0))
+                    && !self.born_dead.contains(m)
+                {
                     return Err(Violation(format!(
                         "unit {m} has a death fact and did not die"
                     )));
@@ -955,6 +1010,7 @@ impl World {
     fn check_converged(&self) -> Result<(), Violation> {
         let campaign = self.store.campaign().0;
         let held = self.sim.platform_groups(campaign);
+        let ruins = self.sim.ruins(campaign);
         let bad = |m: String| Err(Violation(m));
         let ledger = self.sim.ledger();
         let policy =
@@ -1062,9 +1118,12 @@ impl World {
                 State::Dead | State::Unspawnable | State::Lost | State::Virtual => {
                     let why = match g.state {
                         // Every member died, or it was lost and the policy is
-                        // to mark it dead.
+                        // to mark it dead, or it was created destroyed.
                         State::Dead => {
-                            g.members.iter().all(|m| ledger.deaths.contains(&(campaign, m.0)))
+                            g.members.iter().all(|m| {
+                                ledger.deaths.contains(&(campaign, m.0))
+                                    || self.born_dead.contains(m)
+                            })
                                 || (policy(g) == LostPolicy::Dead
                                     && self.journal().iter().any(|e| {
                                         matches!(e, Entry::Transition { entity, from: State::Lost, to: State::Dead, .. }
@@ -1111,6 +1170,46 @@ impl World {
                     }
                     if in_dcs.is_some() {
                         return bad(format!("{} is {} and in DCS", g.id, g.state.name()));
+                    }
+                    // A dead static's ruin is in DCS exactly where a live
+                    // static would be (spec/world.md, "Ruins").
+                    // A static whose death no record reported leaves a dead
+                    // object the sidecar cannot know of.
+                    let found = ruins.iter().find(|r| r.entity == g.id.0);
+                    let ruin = found.is_some();
+                    let known = found.is_some_and(|r| {
+                        let k = (boot, mission_gen, campaign, g.id.0);
+                        r.spawned
+                            || (ledger.reported_deaths.contains(&k)
+                                && !self.scan.deaths_before.contains(&k))
+                    });
+                    let is_ruin = self.store.is_ruin(g.id);
+                    if known && !(is_ruin && want_dcs) {
+                        return bad(format!(
+                            "DCS holds a dead static of {}, which is {} and should have none",
+                            g.id,
+                            g.state.name()
+                        ));
+                    }
+                    // Not checked for a static that left DCS with no death
+                    // in this generation and was then called dead (the lost
+                    // policy): the agent holds its revision and no object,
+                    // so its ruin waits for the next generation. Nor for a
+                    // type DCS refuses.
+                    let excused = g.members.iter().any(|m| {
+                        ledger.removed.contains(&(boot, mission_gen, campaign, m.0))
+                            || ledger
+                                .unreported
+                                .contains(&(boot, mission_gen, campaign, m.0))
+                            || self
+                                .store
+                                .unit(*m)
+                                .expect("unit")
+                                .type_name
+                                .starts_with("Unknown")
+                    });
+                    if is_ruin && want_dcs && !ruin && !excused {
+                        return bad(format!("{} is dead and DCS holds no ruin of it", g.id));
                     }
                     if g.state == State::Virtual && want_dcs {
                         return bad(format!(

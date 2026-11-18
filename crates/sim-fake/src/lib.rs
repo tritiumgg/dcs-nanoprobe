@@ -329,6 +329,36 @@ pub struct Ledger {
     pub players_asked: u32,
     /// `BANS` queries the agent answered.
     pub bans_asked: u32,
+    /// `STATIC_SPAWN`s with `dead = true` that reached the handler: agent
+    /// boot, generation, entity and spec revision.
+    pub ruin_spawns: Vec<(u64, u32, u64, u64)>,
+    /// Of those, the ones that found a dead static under the name already:
+    /// agent boot, generation, campaign, entity, and whether the dead static
+    /// was itself spawned dead (false for a static that died there).
+    pub ruins_replaced: Vec<(u64, u32, u64, u64, bool)>,
+    /// Spawns of a live static under the name of a dead one.
+    pub ruins_replaced_alive: u64,
+}
+
+/// A dead static DCS holds ([`FakeSim::ruins`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ruin {
+    /// Its DCS object ID.
+    pub object: u64,
+    /// The entity its name gives.
+    pub entity: u64,
+    /// The campaign its name gives.
+    pub campaign: u64,
+    /// Its DCS type.
+    pub type_name: String,
+    /// DCS `x` (north), meters.
+    pub x: f64,
+    /// DCS `z` (east), meters.
+    pub z: f64,
+    /// Heading, radians.
+    pub heading: f64,
+    /// Spawned with `dead = true`; false for a static that was killed.
+    pub spawned: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -460,6 +490,10 @@ pub struct FakeSim {
     late: Vec<Late>,
     /// Objects that left DCS, with their group as it was, for a revival.
     graves: BTreeMap<u64, (FObject, FGroup)>,
+    /// The dead statics DCS holds, by name: a static that was killed, or one
+    /// spawned with `dead = true`. The agent's table has no row for one: its
+    /// `isExist` reads false (LIVE, docs/results/2026-11-17-person-fixes.md).
+    ruins: BTreeMap<String, Ruin>,
     /// The state of the death delays' generator.
     rng: u64,
     /// The loaded mission's theater.
@@ -472,6 +506,8 @@ pub struct FakeSim {
     refuse_destroys: u32,
     /// `DAMAGE` commands to answer `DCS_REFUSED`.
     refuse_damages: u32,
+    refuse_ruins: u32,
+    reject_ruins: u32,
     /// The initial life an `OBJECT` record carries, by unit entity; 1 when
     /// absent.
     life0_of: HashMap<u64, f32>,
@@ -598,12 +634,15 @@ impl FakeSim {
             run: None,
             late: Vec::new(),
             graves: BTreeMap::new(),
+            ruins: BTreeMap::new(),
             rng: cfg_seed,
             theater: String::new(),
             lose_result: false,
             written_stamp: (0, 0),
             refuse_destroys: 0,
             refuse_damages: 0,
+            refuse_ruins: 0,
+            reject_ruins: 0,
             life0_of: HashMap::new(),
             refuse_loads: 0,
             orphans: BTreeSet::new(),
@@ -1205,6 +1244,14 @@ impl FakeSim {
             .collect()
     }
 
+    /// The dead statics of a campaign's platform names that DCS holds.
+    pub fn ruins(&self, campaign: u64) -> Vec<&Ruin> {
+        self.ruins
+            .values()
+            .filter(|r| r.entity != 0 && r.campaign == campaign)
+            .collect()
+    }
+
     /// The loaded mission's theater.
     pub fn theater(&self) -> &str {
         &self.theater
@@ -1501,6 +1548,7 @@ impl FakeSim {
         // A generation change clears the agent's memory of rows that left.
         self.late.clear();
         self.graves.clear();
+        self.ruins.clear();
         self.applied_spec.clear();
         self.applied_order.clear();
         // Marks, drawings and menu items are gone with the mission.
@@ -1712,6 +1760,18 @@ impl FakeSim {
         self.refuse_damages = n;
     }
 
+    /// The next `n` `STATIC_SPAWN` commands with `dead = true` are answered
+    /// `DCS_REFUSED`, and DCS adds nothing.
+    pub fn refuse_ruins(&mut self, n: u32) {
+        self.refuse_ruins = n;
+    }
+
+    /// The next `n` `STATIC_SPAWN` commands with `dead = true` are answered
+    /// `BAD_PAYLOAD`, a rejection a resend cannot fix.
+    pub fn reject_ruins(&mut self, n: u32) {
+        self.reject_ruins = n;
+    }
+
     /// The initial life the `OBJECT` records of a unit entity carry.
     pub fn set_life0(&mut self, entity: u64, life0: f32) {
         self.life0_of.insert(entity, life0);
@@ -1820,7 +1880,7 @@ impl FakeSim {
         let Some(o) = self.remove_object(object) else {
             return;
         };
-        self.kill_ledger(&o);
+        self.kill_ledger(object, &o);
         self.unattributed(object, &o);
         let category = Self::category(&o);
         self.scenery_deaths(object);
@@ -1841,7 +1901,7 @@ impl FakeSim {
         let Some(o) = self.remove_object(object) else {
             return;
         };
-        self.kill_ledger(&o);
+        self.kill_ledger(object, &o);
         // The row left DCS without a death fact, so far.
         self.ledger
             .removed
@@ -1892,6 +1952,8 @@ impl FakeSim {
         self.ledger
             .left_in
             .remove(&(self.agent_boot, self.mission_gen_, o.campaign, o.entity));
+        // A revived static is no ruin.
+        self.ruins.retain(|_, r| r.object != object);
         let gid = if o.kind == object_kind::STATIC {
             object
         } else {
@@ -1954,9 +2016,25 @@ impl FakeSim {
         }
     }
 
-    fn kill_ledger(&mut self, o: &FObject) {
+    fn kill_ledger(&mut self, object: u64, o: &FObject) {
         if o.entity != 0 {
             self.ledger.deaths.insert((o.campaign, o.entity));
+        }
+        // A killed static stays in DCS as a dead object under its name.
+        if o.kind == object_kind::STATIC {
+            self.ruins.insert(
+                o.name.clone(),
+                Ruin {
+                    object,
+                    entity: o.entity,
+                    campaign: o.campaign,
+                    type_name: o.type_name.clone(),
+                    x: o.at.x,
+                    z: o.at.z,
+                    heading: self.heading.get(&object).copied().unwrap_or(0.0),
+                    spawned: false,
+                },
+            );
         }
     }
 
@@ -2721,6 +2799,23 @@ impl FakeSim {
                     z: lv::num_at(table, "y").unwrap_or(0.0),
                 };
                 let heading = lv::num_at(table, "heading").unwrap_or(0.0);
+                if matches!(lv::get(table, "dead"), Some(Lv::Bool(true))) {
+                    if self.reject_ruins > 0 {
+                        self.reject_ruins -= 1;
+                        return self.result(&cmd, rc::BAD_PAYLOAD, 0, "", Lv::Nil);
+                    }
+                    if self.refuse_ruins > 0 {
+                        self.refuse_ruins -= 1;
+                        return self.result(
+                            &cmd,
+                            rc::DCS_REFUSED,
+                            0,
+                            "injected: the dead static was refused",
+                            Lv::Nil,
+                        );
+                    }
+                    return self.spawn_ruin(&cmd, name, t, at, heading);
+                }
                 self.spawn(&cmd, name, vec![(name.clone(), t, at, heading)], true);
             }
             Body::GroupOrder(task) => {
@@ -3098,6 +3193,10 @@ impl FakeSim {
     ) {
         let h = &cmd.header;
         self.graves.retain(|_, (_, g)| g.name != name);
+        // A static under the name of a dead one replaces it.
+        if is_static && self.ruins.remove(name).is_some() {
+            self.ledger.ruins_replaced_alive += 1;
+        }
         if let Some(old) = self
             .groups
             .iter()
@@ -3177,6 +3276,62 @@ impl FakeSim {
         }
     }
 
+    /// `STATIC_SPAWN` with `dead = true`: DCS holds a dead static under the
+    /// name. Its `isExist` reads false, so the agent adds no row and writes
+    /// no `OBJECT`; the `RESULT` carries the new object ID. A live static
+    /// under the name is replaced, as by any spawn.
+    fn spawn_ruin(
+        &mut self,
+        cmd: &Command,
+        name: &str,
+        type_name: String,
+        at: Position,
+        heading: f64,
+    ) {
+        let h = &cmd.header;
+        self.graves.retain(|_, (_, g)| g.name != name);
+        if let Some(old) = self
+            .groups
+            .iter()
+            .find(|(_, g)| g.name == name)
+            .map(|(id, _)| *id)
+        {
+            if !self.orphans.contains(&old) {
+                self.ledger.replacements += 1;
+            }
+            self.destroy_group(old);
+        }
+        if let Some(old) = self.ruins.remove(name) {
+            self.ledger.ruins_replaced.push((
+                self.agent_boot,
+                self.mission_gen_,
+                old.campaign,
+                old.entity,
+                old.spawned,
+            ));
+        }
+        let object = self.next_object;
+        self.next_object += 1;
+        self.ruins.insert(
+            name.to_owned(),
+            Ruin {
+                object,
+                entity: h.entity,
+                campaign: name_campaign(name, self.campaign),
+                type_name,
+                x: at.x,
+                z: at.z,
+                heading,
+                spawned: true,
+            },
+        );
+        self.applied_spec.insert(h.entity, h.rev);
+        self.ledger
+            .ruin_spawns
+            .push((self.agent_boot, self.mission_gen_, h.entity, h.rev));
+        self.result(cmd, rc::APPLIED, object, "", Lv::Nil);
+    }
+
     fn destroy_group(&mut self, gid: u64) {
         let Some(g) = self.groups.remove(&gid) else {
             return;
@@ -3208,6 +3363,18 @@ impl FakeSim {
         if let Some(gid) = self.group_of(entity) {
             self.destroy_group(gid);
         }
+        // `STATIC_DESTROY` finds a dead static by its name and destroys it
+        // (LIVE, docs/results/2026-11-18-ruins.md). Nothing is left to
+        // revive.
+        let campaign = self.campaign;
+        let gone: Vec<u64> = self
+            .ruins
+            .values()
+            .filter(|r| r.entity == entity && entity != 0 && r.campaign == campaign)
+            .map(|r| r.object)
+            .collect();
+        self.ruins.retain(|_, r| !gone.contains(&r.object));
+        self.graves.retain(|id, _| !gone.contains(id));
         self.applied_spec.remove(&entity);
         self.applied_order.remove(&entity);
         self.options.remove(&entity);

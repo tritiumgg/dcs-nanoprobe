@@ -740,6 +740,7 @@ fn owned_and_stocked(
                 ..pb::Position::default()
             }),
             heading: 0.0,
+            dead: false,
             extra: Some(extra),
         }),
     };

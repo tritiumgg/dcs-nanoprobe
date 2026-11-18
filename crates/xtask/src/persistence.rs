@@ -666,6 +666,34 @@ impl Target for LiveTarget<'_> {
         Ok(())
     }
 
+    fn kill_static(&mut self, name: &str) -> Result<(), String> {
+        self.no_players()?;
+        let source = set_line(
+            RUINS_KILL_LUA,
+            "local NAME = ''",
+            &format!("local NAME = {}", lua_string(name)),
+        )?;
+        let v = self.eval("server", "ruins-kill", &source)?;
+        if v != json!("ok") {
+            return Err(format!("no static {name} to kill: {v}"));
+        }
+        Ok(())
+    }
+
+    fn static_state(&mut self, names: &[String]) -> Result<Option<Value>, String> {
+        let list = names
+            .iter()
+            .map(|n| lua_string(n))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let source = set_line(
+            RUINS_READ_LUA,
+            "local NAMES = {}",
+            &format!("local NAMES = {{ {list} }}"),
+        )?;
+        self.eval("server", "ruins-read", &source).map(Some)
+    }
+
     fn integer_keys(&mut self, units: &[String]) -> Result<Value, String> {
         let list = units
             .iter()
@@ -762,6 +790,19 @@ fn timing_lines(text: &str) -> Vec<Value> {
 
 fn nanoprobe_api_timings_var() -> &'static str {
     "NANOPROBE_COMMIT_TIMINGS"
+}
+
+/// The `ruins` scenario's reads and its kill, which `lua/tests/ruins_live.lua`
+/// rehearses on the mock.
+const RUINS_READ_LUA: &str = include_str!("../../../lua/live/ruins-read.lua");
+const RUINS_KILL_LUA: &str = include_str!("../../../lua/live/ruins-kill.lua");
+
+/// `source` with its parameter line `line` replaced by `value`.
+fn set_line(source: &str, line: &str, value: &str) -> Result<String, String> {
+    if !source.contains(line) {
+        return Err(format!("the snippet no longer holds the line `{line}`"));
+    }
+    Ok(source.replacen(line, value, 1))
 }
 
 /// Every group of every coalition whose name starts as a platform name.

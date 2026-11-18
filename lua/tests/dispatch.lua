@@ -809,6 +809,59 @@ scenario('world', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   expect(r[4], APPLIED, 'STATIC_DESTROY')
   expect(r[5], APPLIED, 'STATIC_DESTROY of nothing')
 
+  -- A static spawned dead, a ruin (spec/world.md, "Ruins"): `dead = true` in
+  -- the table reaches DCS, and the result carries the static's ID. It reads
+  -- life 0 and does not exist, so the agent holds no row for it. A spawn
+  -- again at the revision is AT_REVISION, a clear leaves it, and only the
+  -- destroy removes it; a spawn after the destroy runs again.
+  local R1 = 'np#hGxR'
+  local function ruin_spawn()
+    return { op = 'STATIC_SPAWN', entity = 27, rev = 3, country = USA, name = R1,
+      static = { name = R1, type = 'Barrier', x = 700, y = 800, heading = 0, dead = true } }
+  end
+  local function ruin_of()
+    for _, s in pairs(sim.dead_statics) do
+      if s.name == R1 then
+        return s
+      end
+    end
+  end
+  -- A dead static nobody manages beside it: the control that the clear's
+  -- sphere holds the place.
+  local loose = sim:add_static(USA, { name = 'loose by the ruin', type = 'Barrier', x = 705, y = 800 })
+  sim:doom_static(loose)
+  r = run({
+    ruin_spawn(),
+    ruin_spawn(),
+    { op = 'CLEAR_DEBRIS', volume = 1, x = 700, y = 0, z = 800, radius = 50 },
+  }, 'a static spawned dead')
+  expect(r[1], APPLIED, 'STATIC_SPAWN dead')
+  local ruin = ruin_of()
+  assert(ruin and not ruin.alive and sim.statics[R1] == nil, 'the static was not spawned dead:\n' .. dump(ctx))
+  assert(r[1].object == ruin.id, 'object is ' .. tostring(r[1].object) .. ', not the ruin ID ' .. ruin.id)
+  assert(server.StaticObject.getByName(R1):getLife() == 0 and not server.StaticObject.getByName(R1):isExist(),
+    'the ruin reads alive')
+  assert(server.__nanoprobe_shim.T.slot_of[ruin.id] == nil, 'the shim holds a row for a ruin')
+  expect(r[2], AT_REVISION, 'STATIC_SPAWN dead again')
+  expect(r[3], APPLIED, 'CLEAR_DEBRIS on a ruin')
+  assert(sim.gone_statics[loose.id] == loose and r[3].value >= 1,
+    'the clear missed the unmanaged dead static beside the ruin: ' .. tostring(r[3].value))
+  assert(ruin_of() == ruin, 'a clear destroyed a ruin the platform manages')
+  r = run({ { op = 'STATIC_DESTROY', entity = 27 }, ruin_spawn() }, 'a ruin destroyed and spawned again')
+  expect(r[1], APPLIED, 'STATIC_DESTROY of a ruin')
+  assert(sim.gone_statics[ruin.id] == ruin, 'the destroy left the ruin')
+  expect(r[2], APPLIED, 'STATIC_SPAWN dead after its destroy')
+  assert(ruin_of() and ruin_of() ~= ruin, 'the ruin was not spawned again after its destroy')
+  -- A live static under the ruin's name replaces it, and its old ID is
+  -- reported destroyed.
+  local second = ruin_of()
+  r = run({ { op = 'STATIC_SPAWN', entity = 27, rev = 4, country = USA, name = R1,
+    static = { name = R1, type = 'Barrier', x = 700, y = 800, heading = 0 } },
+    { op = 'STATIC_DESTROY', entity = 27 } }, 'a live static over a ruin')
+  expect(r[1], APPLIED, 'STATIC_SPAWN over a ruin')
+  assert(sim.gone_statics[second.id] == second and ruin_of() == nil, 'the ruin outlived the static spawned over it')
+  expect(r[2], APPLIED, 'STATIC_DESTROY of the static over a ruin')
+
   -- A FARP static makes an airbase: the shim samples it this generation. A
   -- FARP spawned again under the name takes its entry; one that is gone, or
   -- a static of the name that is no FARP, leaves a tombstone in its place.

@@ -90,7 +90,14 @@ message StaticSpec {
   string type = 3;
   Position position = 4;
   double heading = 5;
+  // Further keys of the DCS static table. A `dead` key is refused: use the
+  // field below.
   google.protobuf.Struct extra = 6;
+  // Create the static destroyed. It is in state `dead` from the start, and
+  // DCS shows its ruin, spawned with `dead = true`, wherever a live static
+  // would be in DCS. Some types have no destroyed model and show intact
+  // (spec/world.md, "Ruins").
+  bool dead = 7;
 }
 
 message Waypoint {

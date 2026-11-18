@@ -492,14 +492,32 @@ fn put_static(g: &mut Inner, c: u64, r: &PutStaticRequest) -> Result<PutStaticRe
     let at = place(spec.position.as_ref(), slot, "spec.position")?;
     let theater = spec.position.as_ref().expect("placed").theater.clone();
     let heading = finite(spec.heading, "spec.heading")?;
+    // Whether a static spawns destroyed is the platform's to say, from its
+    // state in the store: a `dead` key among the further keys would spawn a
+    // static the store calls alive as a ruin, or be dropped.
+    if spec
+        .extra
+        .as_ref()
+        .is_some_and(|e| e.fields.contains_key("dead"))
+    {
+        return Err(invalid(
+            "spec.extra",
+            "set spec.dead to create a static destroyed; extra takes no dead key",
+        ));
+    }
     fits(
         2 * OVERHEAD + spec.r#type.len() + lv_len(&extra_to_lua(spec.extra.as_ref())),
         g.backend.max_command(),
         "spec",
     )?;
-    let id = slot
-        .store
-        .create_static(NewGroup {
+    let create = if spec.dead {
+        Store::create_ruin
+    } else {
+        Store::create_static
+    };
+    let id = create(
+        &mut slot.store,
+        NewGroup {
             theater,
             country: spec.country,
             category: 0,
@@ -518,8 +536,9 @@ fn put_static(g: &mut Inner, c: u64, r: &PutStaticRequest) -> Result<PutStaticRe
             authority: Authority::Sim,
             label: spec.label.clone(),
             extra: nanoprobe_transport::codec::Lv::Nil,
-        })
-        .map_err(store_error)?;
+        },
+    )
+    .map_err(store_error)?;
     Ok(PutStaticResponse {
         static_id: id.0,
         spec_revision: slot.store.group(id).map_or(0, |x| x.spec_rev),
