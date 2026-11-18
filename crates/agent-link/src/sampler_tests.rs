@@ -21,6 +21,14 @@ struct Rec {
     periods: [f64; 4],
     /// The commanded work the last frame handed on, µs.
     commanded: f64,
+    /// When set, the recorder holds event-class and control-class records
+    /// until a flush, as the link does, and a sample goes into `records` at
+    /// once, past them. Unset, every record goes into `records` at once.
+    queue: Option<Vec<(u64, Vec<u8>)>>,
+    /// A sidecar attached and its `HELLO` is due: the next flush writes it
+    /// after the queue and counts it, and samples are dropped until then
+    /// (spec/records.md, "Delivery classes").
+    hello_due: bool,
 }
 
 impl Rec {
@@ -37,7 +45,24 @@ impl Rec {
             slice: 0.0,
             periods: [0.0; 4],
             commanded: 0.0,
+            queue: None,
+            hello_due: false,
         }
+    }
+
+    /// A sidecar of `boot` attaches: the link takes its boot at once, and
+    /// writes its `HELLO` at the next flush.
+    fn attach(&mut self, boot: u64) {
+        self.queue.get_or_insert_with(Vec::new);
+        self.boot = boot;
+        self.hello_due = true;
+    }
+
+    /// The records since the last `HELLO`, or every record when there is
+    /// none.
+    fn since_hello(&self) -> &[(u64, Vec<u8>)] {
+        let at = self.records.iter().rposition(|(k, _)| *k == kind::HELLO);
+        &self.records[at.map_or(0, |i| i + 1)..]
     }
 
     fn of(&self, k: u64) -> impl Iterator<Item = &Vec<u8>> {
@@ -50,13 +75,43 @@ impl Rec {
 
 impl Port for Rec {
     fn enqueue(&mut self, kind: u16, payload: Vec<u8>) {
-        self.records.push((u64::from(kind), payload));
+        match &mut self.queue {
+            Some(q) => q.push((u64::from(kind), payload)),
+            None => self.records.push((u64::from(kind), payload)),
+        }
     }
     fn sample(&mut self, kind: u16, payload: &[u8]) -> bool {
+        if self.hello_due {
+            return false;
+        }
+        // A sample goes into the ring past anything queued: no `VITALS` row
+        // may name an object whose `OBJECT` still waits in the queue.
+        if u64::from(kind) == kind::VITALS
+            && let Some(q) = &self.queue
+        {
+            let objects = Vitals::decode(payload).unwrap().object;
+            for (k, p) in q {
+                if *k == kind::OBJECT {
+                    let o = Object::decode(p).unwrap().object;
+                    assert!(
+                        !objects.contains(&o),
+                        "a VITALS of {o} passed its queued OBJECT"
+                    );
+                }
+            }
+        }
         self.records.push((u64::from(kind), payload.to_vec()));
         true
     }
-    fn flush(&mut self) {}
+    fn flush(&mut self) {
+        if let Some(q) = &mut self.queue {
+            self.records.append(q);
+        }
+        if std::mem::take(&mut self.hello_due) {
+            self.hellos += 1;
+            self.records.push((kind::HELLO, Vec::new()));
+        }
+    }
     fn max_payload(&self) -> usize {
         32 << 10
     }
@@ -1096,6 +1151,219 @@ fn an_attach_reads_every_row_again() {
         s.idle_units > 1500,
         "{} units read less often",
         s.idle_units
+    );
+}
+
+/// Rows the records since the last `HELLO` give an `OBJECT`, rows they give
+/// a `VITALS` row, and rows whose `VITALS` row comes before their `OBJECT`.
+fn order_since_hello(rec: &Rec) -> (BTreeSet<u64>, BTreeSet<u64>, BTreeSet<u64>) {
+    let (mut known, mut vital, mut early) = (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
+    for (k, p) in rec.since_hello() {
+        if *k == kind::OBJECT {
+            known.insert(Object::decode(p).unwrap().object);
+        } else if *k == kind::VITALS {
+            for o in Vitals::decode(p).unwrap().object {
+                if !known.contains(&o) {
+                    early.insert(o);
+                }
+                vital.insert(o);
+            }
+        }
+    }
+    (known, vital, early)
+}
+
+/// A sidecar of a new boot holds no row until the row's first `OBJECT`
+/// after its `HELLO`: no row's `VITALS` goes before it (spec/records.md,
+/// "Samples"), in the order the ring holds records. Every row still has its
+/// life within seconds. Each attach comes after hits marked 50 rows. The
+/// third one's `HELLO` is written by a flush inside a pump, after five
+/// births queued their `OBJECT`: an order stricter than the driver's, which
+/// pumps only once a new boot's first `HELLO` is written at a frame's last
+/// flush.
+#[test]
+fn after_a_new_sidecar_attaches_no_vitals_precede_the_object() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 100.0);
+    let mut w = world(1960, 40, 20);
+    halt_four_in_five(&mut w);
+    w.sweep = Some((1.5, 0.7));
+    run_x(&mut s, &mut rec, &mut w, 60.0, 100.0, 185.0, 29.0, 2.2);
+    assert_eq!(s.len(), 2000);
+    for attach in 0..3u64 {
+        for o in 1001 + attach * 100..1051 + attach * 100 {
+            s.mark(Some(o as f64));
+        }
+        let hellos = rec.hellos;
+        rec.attach(rec.boot + 1);
+        if attach == 2 {
+            for i in 0..5 {
+                w.spawn(50_000 + i, object_kind::UNIT, format!("n{i}"), 5.0);
+            }
+        } else {
+            // The frame's last flush, before the next frame's check_attach.
+            rec.flush();
+        }
+        run_x(&mut s, &mut rec, &mut w, 10.0, 100.0, 185.0, 29.0, 2.2);
+        assert_eq!(rec.hellos, hellos + 1, "attach {attach}: HELLO");
+        if attach == 2 {
+            // The births' OBJECT records went before the HELLO: the agent
+            // counts those rows as not held.
+            let at = rec.records.len() - rec.since_hello().len();
+            let before: BTreeSet<u64> = rec.records[..at]
+                .iter()
+                .filter(|(k, _)| *k == kind::OBJECT)
+                .map(|(_, p)| Object::decode(p).unwrap().object)
+                .collect();
+            assert!(
+                (50_000..50_005).all(|o| before.contains(&o)),
+                "the births' OBJECT records after the HELLO"
+            );
+        }
+        let (known, vital, early) = order_since_hello(&rec);
+        assert!(
+            early.is_empty(),
+            "attach {attach}: {} rows' VITALS before their OBJECT",
+            early.len()
+        );
+        assert_eq!(known.len(), s.len(), "attach {attach}: OBJECT records");
+        assert_eq!(
+            vital.len(),
+            s.len(),
+            "attach {attach}: life after the attach"
+        );
+    }
+}
+
+/// A sidecar keeps its table across a later `HELLO` of its own boot, such as
+/// the resync after `CONTROL_LOST`, so a subscribed row's life is not held
+/// for the row's `OBJECT`: over three resyncs at live costs (an enumeration
+/// item 10 µs, a `coalition.getGroups` step 570 µs), the subscribed rows,
+/// which the enumeration reaches last, have life written before their
+/// `OBJECT`.
+#[test]
+fn after_a_resync_subscribed_rows_keep_their_life() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 100.0);
+    let mut w = world(1960, 40, 20);
+    w.sweep = Some((1.5, 0.7));
+    w.batch_us = 7.0;
+    w.close_us = 3.0;
+    w.enum_item_us = Some(10.0);
+    w.enum_step_us = Some(570.0);
+    halt_four_in_five(&mut w);
+    s.set_campaign(1);
+    for i in 1941..=1960u64 {
+        w.objects.get_mut(&(1000 + i)).unwrap().name = unit_name(i);
+    }
+    run_x(&mut s, &mut rec, &mut w, 120.0, 100.0, 185.0, 35.0, 2.2);
+    // After the first frame's attach, which drops what a sidecar of
+    // another boot subscribed.
+    s.subscribe(1.0, false, &(1941..=1960).collect::<Vec<_>>());
+    run_x(&mut s, &mut rec, &mut w, 10.0, 100.0, 185.0, 35.0, 2.2);
+    let watched: BTreeSet<u64> = (2941..=2960).collect();
+    let rows: BTreeSet<u64> = s
+        .sub_slots
+        .iter()
+        .filter_map(|slot| s.object_at(*slot))
+        .collect();
+    assert_eq!(rows, watched, "the subscribed rows");
+    let mut before = 0;
+    for _ in 0..3 {
+        rec.attach(rec.boot);
+        rec.flush();
+        run_x(&mut s, &mut rec, &mut w, 30.0, 100.0, 185.0, 35.0, 2.2);
+        let (_, _, early) = order_since_hello(&rec);
+        before += watched.intersection(&early).count();
+    }
+    eprintln!("subscribed rows' life before their OBJECT: {before}");
+    assert!(
+        before > 0,
+        "every subscribed row's life waited for its OBJECT"
+    );
+}
+
+/// The agent's time around an attach at live costs (the costs of
+/// `at_live_costs_the_fill_the_enumeration_and_no_row_owed_keep_the_pump_bound`),
+/// and for each row the seconds from its first `OBJECT` after the `HELLO`
+/// to its first life the new sidecar keeps: a `VITALS` after that
+/// `OBJECT`. Prints its figures.
+#[test]
+#[ignore = "a measurement, run by hand"]
+fn agent_time_around_an_attach_at_live_costs() {
+    const SECS: u32 = 60;
+    const ATTACHES: u32 = 5;
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 100.0);
+    let mut w = world(1960, 40, 20);
+    w.sweep = Some((1.5, 0.7));
+    w.batch_us = 7.0;
+    w.close_us = 3.0;
+    w.enum_item_us = Some(10.0);
+    w.enum_step_us = Some(570.0);
+    halt_four_in_five(&mut w);
+    run_x(&mut s, &mut rec, &mut w, 120.0, 100.0, 185.0, 35.0, 2.2);
+    let (mut share, mut frames, mut over, mut plain) = (0.0, 0, 0, 0);
+    let (mut longest, mut pumps) = (0.0f64, 0);
+    for attach in 0..ATTACHES {
+        // A sidecar of a new boot, with no table.
+        rec.records.clear();
+        rec.attach(rec.boot + 1);
+        rec.flush();
+        let mut object_at: BTreeMap<u64, u32> = BTreeMap::new();
+        let mut life_at: BTreeMap<u64, u32> = BTreeMap::new();
+        let mut early = 0;
+        for second in 1..=SECS {
+            let r = run_x(&mut s, &mut rec, &mut w, 1.0, 100.0, 185.0, 35.0, 2.2);
+            share += r.share;
+            frames += r.frames;
+            over += r.over_250;
+            plain += r.over_250_plain;
+            longest = longest.max(r.longest_us);
+            pumps += r.pumps;
+            for (k, p) in rec.records.drain(..) {
+                if k == kind::OBJECT {
+                    object_at
+                        .entry(Object::decode(&p).unwrap().object)
+                        .or_insert(second);
+                } else if k == kind::VITALS {
+                    for o in Vitals::decode(&p).unwrap().object {
+                        if object_at.contains_key(&o) {
+                            life_at.entry(o).or_insert(second);
+                        } else {
+                            early += 1;
+                        }
+                    }
+                }
+            }
+        }
+        let waits: Vec<u32> = object_at
+            .iter()
+            .filter_map(|(o, at)| life_at.get(o).map(|l| l - at))
+            .collect();
+        // Rows whose `OBJECT` came 10 s or more before the end, with no
+        // kept life.
+        let unvital = object_at
+            .iter()
+            .filter(|(o, at)| **at + 10 <= SECS && !life_at.contains_key(o))
+            .count();
+        eprintln!(
+            "attach {attach}: {} rows with an OBJECT, {} with life, {early} VITALS rows \
+             before their OBJECT, {unvital} rows without life 10 s after their OBJECT, \
+             longest wait {} s",
+            object_at.len(),
+            life_at.len(),
+            waits.iter().max().copied().unwrap_or(0)
+        );
+    }
+    let secs = f64::from(SECS * ATTACHES);
+    eprintln!(
+        "around an attach: share {:.5}, frames over 250 µs {:.4} % ({:.4} % with no \
+         enumeration step), longest {longest:.0} µs, {:.2} pumps a second",
+        share / secs,
+        100.0 * over as f64 / frames.max(1) as f64,
+        100.0 * plain as f64 / frames.max(1) as f64,
+        pumps as f64 / secs
     );
 }
 

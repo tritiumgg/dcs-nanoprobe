@@ -796,6 +796,20 @@ event shows within the 60 s life sweep, which takes 98 s under load (LIVE, S10).
 Subscribed rows are current within 5 s. Read the sample's age, not its presence. A
 capture reads life itself.
 
+**Life follows the row's `OBJECT`.** A sidecar drops a sample of an object it does not
+hold. A sidecar of a new boot, and any sidecar at an agent process's first `HELLO`, may
+lack a row whose `OBJECT` came before that `HELLO`. After such a `HELLO` the agent
+counts a row as held only from the row's first `OBJECT` after it, and writes no `VITALS`
+row for an object before that `OBJECT`. The one exception is an `OBJECT` the link
+queued and then dropped: the `GAP` of events that counts it comes first, and the
+sidecar holds the row once the full enumeration that the `GAP` forces writes the row's
+`OBJECT`. At a later `HELLO` of the same sidecar boot and agent boot, such as the resync
+after `CONTROL_LOST`, the agent counts every row as held. A sidecar that drops its
+table there, as the reconciler does at a `HELLO` of another campaign, gets each row's
+life again after the row's next `OBJECT`, and a subscribed row's within a vitals period.
+`POSITIONS` and `ATTITUDE` have no such rule: a row's next position sweep carries them
+again.
+
 ### Layout: POSITIONS
 
 | Offset | Type | Field | Meaning |
