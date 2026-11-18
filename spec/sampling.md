@@ -151,9 +151,9 @@ Which rows a sweep reads:
   `S_EVENT_HIT` names the row as its target, no sooner than 1 s after the row's last
   read. The slow sweep also checks `isExist` on each row it visits, which
   finds a kill that sent no hit event (spec/records.md, "The object table"). A sidecar subscribes the units players occupy.
-- **Ammunition** has no tier and no period. A birth or a takeoff of a unit asks for one
-  read of that unit's ammunition if a player occupies it ("Loadout reads"). No other unit
-  is read for ammunition.
+- **Ammunition** has no tier and no period. A birth or a takeoff of a unit a player
+  occupies asks for one read of that unit's ammunition ("Loadout reads"). No other unit
+  is read for ammunition, or asked for a player name.
 - An event with no target, and an event naming an object the table
   lacks, marks nothing. Damage that sends no event, such as a scripted explosion's
   splash on a unit it does not kill (LIVE), shows at the row's next slow sweep of life.
@@ -242,37 +242,70 @@ one `wants` check and is dropped. Every birth resolves within one enumeration pe
 plus that enumeration's duration. While births wait, as in a fill of 2,000 objects at
 37 µs a birth (LIVE, S11), the enumeration waits behind them.
 
+The shim resolves the oldest birth first. A unit's row therefore trails its birth by
+the births ahead of it, and never by those born after it. Births resolve at 28 to 33 a
+second on a server at 110 frames a second (LIVE,
+docs/results/2026-11-17-bind-lag.md). When objects are born faster than that, the last
+of `N` born at `s` a second gets its row about `N` × (1 / 30 − 1 / `s`) seconds after
+its birth.
+
+The units of a group the platform spawns do not wait for this tier: the `GROUP_SPAWN`
+handler reads them and adds their rows as part of the command (spec/commands.md,
+"Layout: GROUP_SPAWN"), outside the sampling budget. Their births still arrive; each
+costs this tier one `wants` check and is dropped, as the birth of an object the
+enumeration added is. The tier's reads are for objects the platform did not spawn with
+`GROUP_SPAWN`: a mission's own units as they activate, players' aircraft, statics, and a
+unit the handler could not read.
+
 ### Loadout reads
 
 The ammunition of a unit a player occupies is read on two events and on no period. The
-event handler does not read it: for an `S_EVENT_BIRTH` or an `S_EVENT_TAKEOFF` whose
-initiator is a unit (an initiator category, when the event has one, of 1), the agent
-marks the initiator's object ID with the cause, birth or takeoff. A birth's row does not
-exist yet when the event arrives, so the mark names the object ID and waits for the row.
-A second event for a marked object replaces its cause: the later one is kept. A mark for
-an object that has a row that is not a unit is not kept; a mark whose object has no row
-after 600 pumps is dropped; a removed row loses its mark.
+event handler does not read it. It marks the initiator's object ID with the cause, birth
+or takeoff, and only for a unit a player occupies:
+
+- **A birth** (`S_EVENT_BIRTH` whose initiator category, when the event has one, is 1, a
+  unit) is marked when a connected player holds the slot the unit was born in: the
+  event's `INITIATOR_MISSION_ID` equals the slot ID of a `PLAYER` record, without its
+  `_N` seat suffix (spec/records.md, "Codes: event_field"). The agent keeps each
+  connection's slot from the `PLAYER` records it writes: every record but a `DISCONNECT`
+  carries the slot the player holds now, an empty slot holds none, and it keeps at most
+  1,024 connections. A player takes the slot before the unit is born in it (LIVE,
+  docs/results/2026-11-17-bind-lag.md: 47 s before, for a client slot). Whether a
+  dynamic-spawn slot's ID equals its unit's mission ID is UNVERIFIED; where it does not,
+  the birth is not read.
+- **A takeoff** (`S_EVENT_TAKEOFF`, the same category rule) is marked when the unit's
+  birth was marked. The agent keeps those units, at most 1,024, until their rows leave
+  or the mission generation changes.
+
+Any other unit gets no mark: the birth or the takeoff of an AI unit costs the pump
+nothing, however many are born at once.
+
+A birth's row does not exist yet when the event arrives, so the mark names the object ID
+and waits for the row. A second event for a marked object replaces its cause: the later
+one is kept. A mark for an object that has a row that is not a unit is not kept; a mark
+whose object has no row after 600 pumps is dropped; a removed row loses its mark.
 
 The pump makes the reads after its tiers, so the births it resolved are in the table.
-Births come first. Every unit birth and takeoff is marked, AI units included, and the
-player check runs in the pump, so a spawn of thousands of AI units leaves thousands of
-marks. While any birth waits for the pump, no mark is handed out and a pump does not count
-a mark as work, so the marks never take the pump from the births. A mark's wait of 600
-pumps counts only pumps in which it could have been handed out, those with no birth
-pending, so a long spawn does not expire a player's mark. With no birth pending, a pump
-takes at most 8 marks, and at most as many as the budget left after the tiers pays for at
-the cost of a vitals row each, and at least one; the rest wait for the next pump. A pump
-with no birth pending and a mark that has its row counts as having work ("The pump's
-worth"). The list holds at most 1,024 marks; when it is full, a new mark drops the oldest and
-the drop is counted, so a player's slot-in after a large spawn keeps its mark. For each mark the shim calls
-`Unit.getPlayerName` under `pcall`, in the pump and never in the event handler. A unit with
-no player name is dropped with no further read and no record. For a unit with one, the
-shim calls `getAmmo`, reduces each row to its type name (`desc.typeName`) and count, keeps
-at most 64 rows, and the agent writes one `AMMO` record with the cause (spec/records.md,
-"Layout: AMMO"). A read that raises writes nothing and counts in the shim's read errors.
+Births come first. While any birth waits for the pump, no mark is handed out and a pump
+does not count a mark as work, so the marks never take the pump from the births. A mark's
+wait of 600 pumps counts only pumps in which it could have been handed out, those with no
+birth pending, so a long spawn does not expire a player's mark. With no birth pending, a
+pump takes at most 8 marks, and at most as many as the budget left after the tiers pays
+for at the cost of a vitals row each, and at least one; the rest wait for the next pump.
+A read costs more than a vitals row, about 22 µs (LIVE,
+docs/results/2026-11-17-s19-spawn-state.md); marks come only for players' units, a few
+at a time, so the difference is the frame's debt. A pump with no birth pending and a mark
+that has its row counts as having work ("The pump's worth"). The list holds at most 1,024
+marks; when it is full, a new mark drops the oldest and the drop is counted. For each
+mark the shim calls `Unit.getPlayerName` under `pcall`, in the pump and never in the event
+handler. A unit with no player name is dropped with no further read and no record. For a
+unit with one, the shim calls `getAmmo`, reduces each row to its type name
+(`desc.typeName`) and count, keeps at most 64 rows, and the agent writes one `AMMO` record
+with the cause (spec/records.md, "Layout: AMMO"). A read that raises writes nothing and
+counts in the shim's read errors.
 
-The cost of a birth or a takeoff of an AI unit is one `getPlayerName` call. The cost of a
-player unit's is that call and one `getAmmo` call, twice in a unit's life at most.
+The cost of a player unit's birth or takeoff is one `getPlayerName` call and one
+`getAmmo` call, twice in a unit's life at most.
 
 A sample the ring has no room for is dropped (spec/records.md, "Delivery classes"). When
 the `AMMO` record of a read is dropped, the agent puts the unit's mark back: a later pump
@@ -358,8 +391,8 @@ With the sweep in `frame` the pump is called only when it has work worth its cal
   skipped because the sweep is behind or the rank is strict do not set it;
 - or no birth waits and a loadout mark has its unit row ("Loadout reads"). Such a pump
   is not counted in `W` below, so the bound of 5 a second does not hold it. Marks come
-  only from birth and takeoff events, and each pump takes at most 8, so a mark makes one
-  pump;
+  only from the birth and the takeoff of a unit a player occupies, and each pump takes
+  at most 8, so a mark makes one pump;
 - or they owe anything and the last pump is 1 s old.
 
 A pump not wanted for the subscribed rows read with their attitude reads none of them:

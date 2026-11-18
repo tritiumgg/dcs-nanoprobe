@@ -1,6 +1,10 @@
 //! The loadout marks a birth or a takeoff event leaves, the pairs a pump
 //! hands out, and the `AMMO` record the read writes (spec/sampling.md,
 //! "Loadout reads").
+//!
+//! Only a unit a player occupies is marked, so every birth marked here is
+//! one in a slot a player holds (`slot_held` true), and a takeoff is marked
+//! only after such a birth of its unit.
 
 use super::*;
 use nanoprobe_transport::records::Ammo;
@@ -109,9 +113,12 @@ fn slot_of(s: &Sampler, object: u64) -> u32 {
 #[test]
 fn a_marked_unit_is_handed_out_once_with_its_cause() {
     let (mut s, _rec) = table(3);
-    s.mark_loadout(Some(2.0), Ammo::BIRTH);
-    s.mark_loadout(Some(3.0), Ammo::TAKEOFF);
     let mut out = Vec::new();
+    // Unit 3 was born in a held slot and its birth was read.
+    s.mark_loadout(Some(3.0), Ammo::BIRTH, true);
+    assert_eq!(s.loadouts(&mut out), 1);
+    s.mark_loadout(Some(2.0), Ammo::BIRTH, true);
+    s.mark_loadout(Some(3.0), Ammo::TAKEOFF, false);
     assert_eq!(s.loadouts(&mut out), 2);
     assert_eq!(
         out,
@@ -142,8 +149,8 @@ fn nothing_marks_a_unit_but_a_mark_call() {
 #[test]
 fn the_later_cause_replaces_the_earlier_for_a_unit() {
     let (mut s, _rec) = table(1);
-    s.mark_loadout(Some(1.0), Ammo::BIRTH);
-    s.mark_loadout(Some(1.0), Ammo::TAKEOFF);
+    s.mark_loadout(Some(1.0), Ammo::BIRTH, true);
+    s.mark_loadout(Some(1.0), Ammo::TAKEOFF, false);
     assert_eq!(s.loadouts_waiting(), 1);
     let mut out = Vec::new();
     assert_eq!(s.loadouts(&mut out), 1);
@@ -155,7 +162,7 @@ fn a_pump_hands_out_at_most_a_bounded_number_and_the_rest_wait() {
     let n = LOADOUTS_PER_PUMP as u64 * 2 + 3;
     let (mut s, _rec) = table(n);
     for id in 1..=n {
-        s.mark_loadout(Some(id as f64), Ammo::BIRTH);
+        s.mark_loadout(Some(id as f64), Ammo::BIRTH, true);
     }
     let mut out = Vec::new();
     let mut seen = Vec::new();
@@ -177,7 +184,7 @@ fn a_pump_hands_out_at_most_a_bounded_number_and_the_rest_wait() {
 fn the_mark_list_is_bounded() {
     let (mut s, _rec) = table(1);
     for id in 0..(LOADOUT_MARKS_MAX as u64 + 5) {
-        s.mark_loadout(Some(10_000.0 + id as f64), Ammo::BIRTH);
+        s.mark_loadout(Some(10_000.0 + id as f64), Ammo::BIRTH, true);
     }
     assert_eq!(s.loadouts_waiting(), LOADOUT_MARKS_MAX);
     assert_eq!(s.loadouts_dropped(), 5);
@@ -189,9 +196,9 @@ fn a_full_list_drops_its_oldest_mark_so_a_players_mark_is_kept() {
     s.direct = true;
     // The AI births of a large spawn have no row in the table here.
     for id in 0..1100u64 {
-        s.mark_loadout(Some(10_000.0 + id as f64), Ammo::BIRTH);
+        s.mark_loadout(Some(10_000.0 + id as f64), Ammo::BIRTH, true);
     }
-    s.mark_loadout(Some(1.0), Ammo::BIRTH);
+    s.mark_loadout(Some(1.0), Ammo::BIRTH, true);
     assert_eq!(s.loadouts_waiting(), LOADOUT_MARKS_MAX);
     assert_eq!(s.loadouts_dropped(), 1101 - LOADOUT_MARKS_MAX as u64);
     let mut out = Vec::new();
@@ -206,7 +213,7 @@ fn a_full_list_drops_its_oldest_mark_so_a_players_mark_is_kept() {
 fn a_mark_for_a_suspect_unit_row_waits_for_the_row_to_clear() {
     let (mut s, _rec) = table(1);
     let slot = slot_of(&s, 1);
-    s.mark_loadout(Some(1.0), Ammo::BIRTH);
+    s.mark_loadout(Some(1.0), Ammo::BIRTH, true);
     s.rows[slot as usize].as_mut().expect("row").suspect = true;
     let mut out = Vec::new();
     for _ in 0..5 {
@@ -222,7 +229,7 @@ fn a_mark_for_a_suspect_unit_row_waits_for_the_row_to_clear() {
 fn a_birth_mark_waits_for_its_row_and_a_static_is_ignored() {
     let (mut s, mut rec) = table(1);
     // The birth event comes before the pump adds the row.
-    s.mark_loadout(Some(9.0), Ammo::BIRTH);
+    s.mark_loadout(Some(9.0), Ammo::BIRTH, true);
     let mut out = Vec::new();
     assert_eq!(s.loadouts(&mut out), 0);
     assert_eq!(s.loadouts_waiting(), 1);
@@ -231,14 +238,14 @@ fn a_birth_mark_waits_for_its_row_and_a_static_is_ignored() {
     assert_eq!(out, [(slot_of(&s, 9), Ammo::BIRTH)]);
     // A mark for a row that is no unit is not kept.
     s.add(&mut rec, found(20, object_kind::STATIC), false);
-    s.mark_loadout(Some(20.0), Ammo::BIRTH);
+    s.mark_loadout(Some(20.0), Ammo::BIRTH, true);
     assert_eq!(s.loadouts_waiting(), 0);
 }
 
 #[test]
 fn a_mark_with_no_row_is_dropped_after_its_wait() {
     let (mut s, _rec) = table(1);
-    s.mark_loadout(Some(99.0), Ammo::BIRTH);
+    s.mark_loadout(Some(99.0), Ammo::BIRTH, true);
     let mut out = Vec::new();
     for _ in 0..LOADOUT_WAIT_PUMPS {
         assert_eq!(s.loadouts(&mut out), 0);
@@ -251,12 +258,43 @@ fn a_mark_with_no_row_is_dropped_after_its_wait() {
 #[test]
 fn bad_objects_mark_nothing_and_a_removed_row_loses_its_mark() {
     let (mut s, mut rec) = table(2);
-    s.mark_loadout(None, Ammo::BIRTH);
-    s.mark_loadout(Some(f64::NAN), Ammo::BIRTH);
-    s.mark_loadout(Some(-1.0), Ammo::BIRTH);
+    s.mark_loadout(None, Ammo::BIRTH, true);
+    s.mark_loadout(Some(f64::NAN), Ammo::BIRTH, true);
+    s.mark_loadout(Some(-1.0), Ammo::BIRTH, true);
     assert_eq!(s.loadouts_waiting(), 0);
-    s.mark_loadout(Some(1.0), Ammo::TAKEOFF);
+    s.mark_loadout(Some(1.0), Ammo::BIRTH, true);
+    assert_eq!(s.loadouts_waiting(), 1);
     s.remove(&mut rec, 1, gone::REMOVED);
+    assert_eq!(s.loadouts_waiting(), 0);
+}
+
+#[test]
+fn a_unit_no_player_occupies_gets_no_mark() {
+    let (mut s, mut rec) = table(3);
+    let mut out = Vec::new();
+    // An AI unit: its birth is in no held slot, and neither its birth nor
+    // its takeoff leaves a mark, so neither gives a pump work.
+    s.mark_loadout(Some(1.0), Ammo::BIRTH, false);
+    s.mark_loadout(Some(1.0), Ammo::TAKEOFF, false);
+    assert_eq!(s.loadouts_waiting(), 0);
+    assert!(!s.loadouts_ready());
+    assert_eq!(s.loadouts(&mut out), 0);
+    // A player's unit: its birth and then its takeoff are each read.
+    s.mark_loadout(Some(2.0), Ammo::BIRTH, true);
+    assert_eq!(s.loadouts(&mut out), 1);
+    assert_eq!(out, [(slot_of(&s, 2), Ammo::BIRTH)]);
+    s.mark_loadout(Some(2.0), Ammo::TAKEOFF, false);
+    assert_eq!(s.loadouts(&mut out), 1);
+    assert_eq!(out, [(slot_of(&s, 2), Ammo::TAKEOFF)]);
+    // The unit left: an object that takes its ID is no player's unit.
+    s.remove(&mut rec, 2, gone::REMOVED);
+    s.add(&mut rec, found(2, object_kind::UNIT), false);
+    s.mark_loadout(Some(2.0), Ammo::TAKEOFF, false);
+    assert_eq!(s.loadouts_waiting(), 0);
+    // A new mission generation forgets every player's unit.
+    s.mark_loadout(Some(3.0), Ammo::BIRTH, true);
+    s.new_generation(2);
+    s.mark_loadout(Some(3.0), Ammo::TAKEOFF, false);
     assert_eq!(s.loadouts_waiting(), 0);
 }
 
@@ -264,7 +302,7 @@ fn bad_objects_mark_nothing_and_a_removed_row_loses_its_mark() {
 fn a_loadout_marks_a_pump_as_worth_its_call_and_a_pump_that_is_not_sampling_hands_out_nothing() {
     let (mut s, _rec) = table(1);
     s.direct = true;
-    s.mark_loadout(Some(1.0), Ammo::BIRTH);
+    s.mark_loadout(Some(1.0), Ammo::BIRTH, true);
     assert!(s.pump_worth(Instant::now()));
     s.sampling = false;
     let mut out = Vec::new();
@@ -304,7 +342,7 @@ fn the_read_writes_one_ammo_record_with_its_cause_and_rows() {
 fn a_pump_whose_tiers_used_the_budget_hands_out_one_loadout() {
     let (mut s, _rec) = table(4);
     for id in 1..=4 {
-        s.mark_loadout(Some(id as f64), Ammo::BIRTH);
+        s.mark_loadout(Some(id as f64), Ammo::BIRTH, true);
     }
     s.tiers[Tier::Vitals.index()].cost = 10.0;
     // The whole budget of the frame is 1 s; what the tiers left is none.
@@ -318,7 +356,7 @@ fn a_pump_whose_tiers_used_the_budget_hands_out_one_loadout() {
 #[test]
 fn a_dropped_ammo_keeps_its_mark_until_a_read_is_written() {
     let (mut s, mut rec) = table(1);
-    s.mark_loadout(Some(1.0), Ammo::BIRTH);
+    s.mark_loadout(Some(1.0), Ammo::BIRTH, true);
     let mut out = Vec::new();
     rec.full = true;
     assert_eq!(s.loadouts(&mut out), 1);
@@ -338,7 +376,7 @@ fn a_dropped_ammo_keeps_its_mark_until_a_read_is_written() {
 #[test]
 fn the_retries_of_a_dropped_ammo_end_with_the_wait() {
     let (mut s, mut rec) = table(1);
-    s.mark_loadout(Some(1.0), Ammo::BIRTH);
+    s.mark_loadout(Some(1.0), Ammo::BIRTH, true);
     rec.full = true;
     let mut out = Vec::new();
     let mut pumps = 0;
@@ -356,7 +394,7 @@ fn no_loadout_is_handed_out_while_a_birth_is_pending() {
     let (mut s, _rec) = table(3);
     s.direct = true;
     for id in 1..=3 {
-        s.mark_loadout(Some(id as f64), Ammo::BIRTH);
+        s.mark_loadout(Some(id as f64), Ammo::BIRTH, true);
     }
     s.set_pending(5, 0);
     let mut out = Vec::new();
@@ -371,7 +409,7 @@ fn no_loadout_is_handed_out_while_a_birth_is_pending() {
 #[test]
 fn a_marks_wait_does_not_run_down_while_births_are_pending() {
     let (mut s, mut rec) = table(1);
-    s.mark_loadout(Some(9.0), Ammo::BIRTH);
+    s.mark_loadout(Some(9.0), Ammo::BIRTH, true);
     let mut out = Vec::new();
     s.set_pending(1, 0);
     for _ in 0..LOADOUT_WAIT_PUMPS * 2 {
@@ -390,7 +428,7 @@ fn loadouts_are_handed_out_after_the_births_drain() {
     let n = LOADOUTS_PER_PUMP as u64 * 2;
     let (mut s, _rec) = table(n);
     for id in 1..=n {
-        s.mark_loadout(Some(id as f64), Ammo::BIRTH);
+        s.mark_loadout(Some(id as f64), Ammo::BIRTH, true);
     }
     s.set_pending(3, 0);
     let mut out = Vec::new();

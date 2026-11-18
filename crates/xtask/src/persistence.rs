@@ -706,6 +706,11 @@ impl Target for LiveTarget<'_> {
         Ok(timing_lines(&text))
     }
 
+    fn bind_timings(&mut self) -> Result<Vec<Value>, String> {
+        let text = format!("{}\n{}", self.logs, self.container_logs());
+        Ok(event_lines(&text, "bind_timings"))
+    }
+
     fn agent_reports(&mut self) -> Result<Option<Vec<Value>>, String> {
         let log = self.run.remote.full_path("nanoprobe/logs/agent.log");
         let o = self.run.remote.shell(
@@ -754,10 +759,47 @@ impl Target for LiveTarget<'_> {
 
 /// The timing lines in a log.
 fn timing_lines(text: &str) -> Vec<Value> {
+    event_lines(text, "commit_timings")
+}
+
+/// The sidecar's diagnostic lines of one `ev` in a log.
+fn event_lines(text: &str, ev: &str) -> Vec<Value> {
+    let needle = format!("\"ev\":\"{ev}\"");
     text.lines()
-        .filter(|l| l.contains("\"ev\":\"commit_timings\""))
+        .filter(|l| l.contains(&needle))
         .filter_map(|l| serde_json::from_str(l.trim()).ok())
         .collect()
+}
+
+/// The bind lag over the sidecar's `bind_timings` lines from `skip` on: the
+/// time from a spawn's applied result to each unit's `OBJECT` record, ranked
+/// over every unit bound, and the units still waiting at the last line.
+pub(crate) fn bind_lag(lines: &[Value], skip: usize) -> Value {
+    let lines = lines.get(skip..).unwrap_or_default();
+    let mut ms: Vec<u64> = lines
+        .iter()
+        .filter_map(|l| l["ms"].as_array())
+        .flatten()
+        .filter_map(Value::as_u64)
+        .collect();
+    ms.sort_unstable();
+    // Nearest rank.
+    let at = |q: f64| -> Option<u64> {
+        let i = ((q * ms.len() as f64).ceil() as usize).clamp(1, ms.len().max(1)) - 1;
+        ms.get(i).copied()
+    };
+    json!({
+        "binds": ms.len(),
+        "median_ms": at(0.5),
+        "p90_ms": at(0.9),
+        "max_ms": ms.last(),
+        "over_1s": ms.iter().filter(|m| **m > 1000).count(),
+        // Units whose `OBJECT` came after their spawn's result. A line of a
+        // sidecar that does not count them adds none.
+        "after_result": lines.iter().filter_map(|l| l["late"].as_u64()).sum::<u64>(),
+        "waiting_at_end": lines.last().map(|l| l["waiting"].clone()),
+        "reports": lines.len(),
+    })
 }
 
 fn nanoprobe_api_timings_var() -> &'static str {
@@ -1047,6 +1089,13 @@ impl Target for FakeTarget {
         Ok(json!({ "ground_roe": 0, "ground_hold": 4, "air_roe": 0, "air_hold": 4 }))
     }
 
+    fn bind_timings(&mut self) -> Result<Vec<Value>, String> {
+        Ok(event_lines(
+            &std::fs::read_to_string(&self.log).unwrap_or_default(),
+            "bind_timings",
+        ))
+    }
+
     fn timings(&mut self) -> Result<Vec<Value>, String> {
         Ok(timing_lines(
             &std::fs::read_to_string(&self.log).unwrap_or_default(),
@@ -1076,5 +1125,25 @@ mod tests {
         let l = timing_lines(log);
         assert_eq!(l.len(), 1);
         assert_eq!(l[0]["units"], 2);
+    }
+
+    #[test]
+    fn the_bind_lag_ranks_every_unit_of_the_lines_after_the_skip() {
+        let log = "{\"ev\":\"bind_timings\",\"binds\":1,\"median_ms\":9000,\"max_ms\":9000,\"waiting\":0,\"ms\":[9000]}\n\
+                   {\"ev\":\"commit_timings\",\"commits\":0}\n\
+                   {\"ev\":\"bind_timings\",\"binds\":3,\"median_ms\":20,\"max_ms\":1500,\"waiting\":4,\"ms\":[10,20,1500]}\n\
+                   {\"ev\":\"bind_timings\",\"binds\":1,\"median_ms\":5,\"max_ms\":5,\"waiting\":2,\"ms\":[5]}\n";
+        let lines = event_lines(log, "bind_timings");
+        assert_eq!(lines.len(), 3);
+        let v = bind_lag(&lines, 1);
+        assert_eq!(v["binds"], 4);
+        assert_eq!(v["median_ms"], 10);
+        assert_eq!(v["max_ms"], 1500);
+        assert_eq!(v["over_1s"], 1);
+        assert_eq!(v["waiting_at_end"], 2);
+        // No line after the skip: no rank.
+        let none = bind_lag(&lines, 3);
+        assert_eq!(none["binds"], 0);
+        assert!(none["median_ms"].is_null() && none["max_ms"].is_null());
     }
 }

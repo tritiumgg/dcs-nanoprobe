@@ -3098,19 +3098,23 @@ impl FakeSim {
     ) {
         let h = &cmd.header;
         self.graves.retain(|_, (_, g)| g.name != name);
-        if let Some(old) = self
+        let old = self
             .groups
             .iter()
             .find(|(_, g)| g.name == name)
-            .map(|(id, _)| *id)
-        {
+            .map(|(id, _)| *id);
+        if let Some(old) = old {
             if !self.orphans.contains(&old) {
                 self.ledger.replacements += 1;
                 if h.rev > self.applied_spec.get(&h.entity).copied().unwrap_or(0) {
                     self.ledger.in_place += 1;
                 }
             }
-            self.destroy_group(old);
+            // A static's old object leaves first, as the agent writes it. A
+            // group's leaves after the new units' `OBJECT` records (below).
+            if is_static {
+                self.destroy_group(old);
+            }
         }
         let gid = self.next_object;
         let mut members = Vec::new();
@@ -3168,12 +3172,29 @@ impl FakeSim {
             h.rev,
             entities,
         ));
+        // A group's handler reads the new units, so the agent writes their
+        // `OBJECT` records before the replaced group's `OBJECT_GONE` and the
+        // `RESULT` (spec/commands.md, "Layout: GROUP_SPAWN"). A static's
+        // `OBJECT` follows its result.
+        if !is_static {
+            for m in &members {
+                let o = &self.objects[m];
+                self.table.insert(*m, (o.entity, o.group_entity));
+                let r = self.object_record(*m, 0);
+                self.emit(r);
+            }
+            if let Some(old) = old {
+                self.destroy_group(old);
+            }
+        }
         self.result(cmd, rc::APPLIED, gid, "", Lv::Nil);
-        for m in members {
-            let o = &self.objects[&m];
-            self.table.insert(m, (o.entity, o.group_entity));
-            let r = self.object_record(m, 0);
-            self.emit(r);
+        if is_static {
+            for m in members {
+                let o = &self.objects[&m];
+                self.table.insert(m, (o.entity, o.group_entity));
+                let r = self.object_record(m, 0);
+                self.emit(r);
+            }
         }
     }
 

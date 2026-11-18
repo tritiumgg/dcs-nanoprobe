@@ -564,7 +564,10 @@ event, so a cut `EVENT` always fits (see "Oversized records").
 `HIT` and `KILL` in the catalogue, scenery included (LIVE). The API reports them as
 `initiator_type` and `target_type`, from the mission's mirror when the event has none.
 `INITIATOR_MISSION_ID` joins a player's slot to the unit born in it (spec/world.md,
-"Players"); that it equals the slot ID DCS gives the player is UNVERIFIED.
+"Players"). It equals the slot ID DCS gives the player for a client slot of the mission
+(LIVE, docs/results/2026-11-17-bind-lag.md); for a dynamic-spawn slot that is UNVERIFIED.
+The agent uses the same join to mark a player's unit for its loadout read
+(spec/sampling.md, "Loadout reads").
 The agent reads `INITIATOR_TYPE` on every event type whose row below lists
 `INITIATOR_CATEGORY`, `TARGET_TYPE` on every one that lists `TARGET_CATEGORY`, and
 `INITIATOR_MISSION_ID` on `S_EVENT_BIRTH` only.

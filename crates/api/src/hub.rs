@@ -1305,6 +1305,11 @@ impl Inner {
         let Some(t) = self.timings.as_mut() else {
             return;
         };
+        // The reconciler times binds while the report is on; one rebuilt
+        // since the last step starts here.
+        if let Some(rec) = self.rec.as_mut() {
+            rec.measure_binds();
+        }
         let campaigns = &self.campaigns;
         let active = self.active;
         let units = || {
@@ -1318,6 +1323,10 @@ impl Inner {
         };
         if let Some(line) = t.due(Instant::now(), units) {
             eprintln!("{line}");
+            if let Some(rec) = self.rec.as_mut() {
+                let (ms, waiting, late) = rec.take_bind_lags();
+                eprintln!("{}", crate::timings::bind_line(ms, waiting, late));
+            }
         }
     }
 

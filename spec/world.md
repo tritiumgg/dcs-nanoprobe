@@ -438,6 +438,23 @@ command. The burst turns on when more groups are already `materializing` than th
 budget, as a mission load leaves every live group; a group the controller moves to DCS
 while paused leaves `virtual` within the budget.
 
+**Bound units.** A unit is bound while the sidecar holds a DCS object for it: from its
+`OBJECT` record until its `OBJECT_GONE`. `live` says the spawn was applied, not that
+every unit is bound. The agent writes the `OBJECT` record of each unit of a spawned
+group that it can read before the spawn's `RESULT` (spec/commands.md, "Layout:
+GROUP_SPAWN"), so those units are bound when the group turns `live`. A unit it could not
+read then binds when its birth resolves (spec/sampling.md, "Tiers") or at the next full
+enumeration. A static binds when its birth resolves. What a call on a unit that is not
+bound does:
+
+| Call | On an entity DCS holds no object of |
+|---|---|
+| `DoEffect` with a unit or a group as its scope, a damage effect, `Capture` | Refused: `FAILED_PRECONDITION`, reason `EntityNotFound`. A group counts as bound when one of its units is |
+| An attack order whose target is not bound | Kept: the order is compiled and sent when the target binds |
+| Any other order or option of the group | Sent: the agent finds the group by its name |
+
+The sidecar queues none of the refused calls; the controller sends them again.
+
 ## Spawn state
 
 Every spawn of a unit, a first materialization, a restore after a mission load or a DCS

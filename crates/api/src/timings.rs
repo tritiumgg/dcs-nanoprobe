@@ -11,7 +11,8 @@
 //! A commit is one [`crate::hub::Inner`] settle: the events, the stores and
 //! the server store written, before the step's commands are let through. A
 //! checkpoint is the timer's. `units` is the active campaign's unit count
-//! when the line is printed. Not part of the product's interface.
+//! when the line is printed. Each report is followed by a `bind_timings`
+//! line ([`bind_line`]). Not part of the product's interface.
 
 use std::time::{Duration, Instant};
 
@@ -91,6 +92,35 @@ fn us(d: Duration) -> u64 {
     u64::try_from(d.as_micros()).unwrap_or(u64::MAX)
 }
 
+/// The bind-lag line that goes with a report: the time from a spawn's
+/// applied result to each of its units' `OBJECT` records in the period, ms
+/// (`Reconciler::take_bind_lags`), the units still waiting for theirs, and
+/// how many of the period's units got their `OBJECT` after the result.
+///
+/// ```text
+/// {"ev":"bind_timings","binds":N,"median_ms":..,"max_ms":..,"waiting":N,"late":N,"ms":[.., ...]}
+/// ```
+///
+/// `ms` holds every lag, sorted, so a reader can take ranks over a whole run.
+pub fn bind_line(mut ms: Vec<u64>, waiting: usize, late: u64) -> String {
+    ms.sort_unstable();
+    // Nearest rank.
+    let median = ms
+        .get(ms.len().div_ceil(2).max(1) - 1)
+        .copied()
+        .unwrap_or(0);
+    let all: Vec<String> = ms.iter().map(u64::to_string).collect();
+    format!(
+        "{{\"ev\":\"bind_timings\",\"binds\":{},\"median_ms\":{},\"max_ms\":{},\"waiting\":{},\"late\":{},\"ms\":[{}]}}",
+        ms.len(),
+        median,
+        ms.last().copied().unwrap_or(0),
+        waiting,
+        late,
+        all.join(",")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,6 +142,18 @@ mod tests {
         assert_eq!(
             t.due(t0 + Duration::from_secs(20), || 0).unwrap(),
             r#"{"ev":"commit_timings","commits":0,"median_us":0,"p99_us":0,"max_us":0,"checkpoints":[],"units":0}"#
+        );
+    }
+
+    #[test]
+    fn the_bind_line_holds_every_lag_sorted() {
+        assert_eq!(
+            bind_line(vec![900, 5, 40, 0], 3, 2),
+            r#"{"ev":"bind_timings","binds":4,"median_ms":5,"max_ms":900,"waiting":3,"late":2,"ms":[0,5,40,900]}"#
+        );
+        assert_eq!(
+            bind_line(Vec::new(), 0, 0),
+            r#"{"ev":"bind_timings","binds":0,"median_ms":0,"max_ms":0,"waiting":0,"late":0,"ms":[]}"#
         );
     }
 }
