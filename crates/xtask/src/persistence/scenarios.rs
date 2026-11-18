@@ -114,6 +114,50 @@ pub trait Target {
     fn agent_reports(&mut self) -> Result<Option<Vec<Value>>, String> {
         Ok(None)
     }
+    /// The agent's `sampling` reports after the first `seen`, each report's
+    /// `data`, and how many the log holds; with no `seen`, only the count.
+    /// `None` on the fake.
+    fn agent_reports_after(
+        &mut self,
+        _seen: Option<usize>,
+    ) -> Result<Option<(Vec<Value>, usize)>, String> {
+        Ok(None)
+    }
+    /// What the soak reads outside the API for one record, by key: the
+    /// processes' memory, descriptors and threads, the container's memory,
+    /// the sizes of `campaign`'s store files, and what DCS says of its own
+    /// objects. A figure that cannot be read is absent, and `errors` lists
+    /// why. The keys are in `soak.rs`, "Records".
+    fn soak_probe(&mut self, campaign: u64, fps_s: u32) -> Value;
+    /// The Lua heaps right after a forced full collect, by state, in KiB.
+    /// `None` where there is no Lua.
+    fn heap_floors(&mut self) -> Result<Option<Value>, String> {
+        Ok(None)
+    }
+    /// What identifies the DCS and sidecar processes running now. It
+    /// changes when either starts again. `Ok(None)` when DCS is not running;
+    /// `Err` when the target could not be asked.
+    fn identity(&mut self) -> Result<Option<String>, String>;
+    /// After DCS or the sidecar started again by itself: wait for DCS, load
+    /// the campaign's mission if DCS restarted, and start the sidecar from
+    /// its store. Fails, to be tried again, while a player is connected or
+    /// DCS is not back.
+    fn soak_recover(&mut self) -> Result<(), String>;
+    /// Rehearsal only: stop DCS and the sidecar behind the tool's back, as
+    /// a watchdog's restart looks from outside.
+    fn inject_restart(&mut self) -> Result<(), String> {
+        Err("this target has no restart to inject".into())
+    }
+    /// Rehearsal only: freeze the sidecar for `seconds`, as a stall looks
+    /// from outside. The thaw does not wait for the caller, whose calls
+    /// the stall holds.
+    fn inject_stall(&mut self, _seconds: f64) -> Result<(), String> {
+        Err("this target has no stall to inject".into())
+    }
+    /// Explode every unit named, where DCS holds it now. How many it found.
+    fn explode_units(&mut self, _units: &[String]) -> Result<usize, String> {
+        Err("exploding a unit by name needs DCS".into())
+    }
 }
 
 /// Where the scenarios spawn: the hello's start, which is land on Caucasus

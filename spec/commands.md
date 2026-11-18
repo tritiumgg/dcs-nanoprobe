@@ -965,9 +965,35 @@ The cost: the `world.removeJunk` call alone takes about 4 us per object it remov
 4 to 6 us when it removes nothing, at any size. A `CLEAR_DEBRIS` command's `cost_us`
 includes the pump around it: 20 us at the median for a box that removes little, 37 us
 at p99, 981 us at most, and 6.4 ms in all for a whole-map clear of 217 objects, spread
-over 4 frames (LIVE, run 3 of the results). These figures were measured before the
-handler searched the volume for dead statics. The search, a `getLife` and `isExist` on
-each static in the volume and a destroy of each dead one add a cost that is UNVERIFIED.
+over 4 frames (LIVE, run 3 of the results). Those figures are of a handler without the
+search for dead statics. With the search, on a map with one live static and no dead
+one: 24 us at the median for a whole-map box, 51 us at p99, 369 us at most, 7.0 ms in all
+for 71 objects over 4 frames, and 85 to 136 us for a sphere, a box and a column that each
+removed 12 objects (LIVE, docs/results/2026-11-18-clear-debris-column.md). The cost of a
+`getLife` and `isExist` on many statics in the volume and of a destroy of each dead one
+is UNVERIFIED.
+
+A sphere's and a box's `y` are meters above sea level: a static on an airfield reads a
+`y` of 969.7, and `land.getHeight` gives 970.0 at the airbase's point, about 330 m from
+it (LIVE, docs/results/2026-11-18-clear-debris-column.md). A sphere far below the ground
+holds nothing: a 30 m sphere at `y` 0 on that airfield removed nothing (LIVE,
+docs/results/2026-11-17-person-fixes.md). The agent reads no ground height.
+
+A column is the form for a place whose ground height the controller does not know. It
+is a form of the API, not of this layout: the sidecar sends it as one `BOX`, a square on
+the map round the column's center, `half_width` to each edge in x and in z, from 10 km
+below sea level to 100 km above it, the heights of the whole map's boxes below. The API
+ignores the center's altitude, so two columns that differ only in it are the same bytes.
+It refuses a column whose `half_width` is not a finite number above 0 or whose edge lies
+beyond 10,000 km, so the agent's check passes; its center's theater, north and east are
+checked as a sphere's are. A box that tall cleared the wrecks on the ground under it at
+one airfield on the Caucasus map, whose height was not recorded (LIVE,
+docs/results/2026-11-16-clear-debris.md, run 3). On ground 970 m up, a column of
+half-width 50 m removed the 4 wrecks of the row inside it and left every wreck outside
+it, the nearest 70 m from its edge, and a live managed static inside it; the command cost
+131 us (LIVE, docs/results/2026-11-18-clear-debris-column.md). A column takes junk at
+every height inside it; junk away from the ground has not been seen (UNVERIFIED that none
+exists).
 
 A clear of the whole map is not one command, so that no single command removes the junk
 of the whole map at once. The sidecar sends it as boxes 250 km square that tile x and z

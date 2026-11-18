@@ -24,6 +24,7 @@
 //! `persistence.json`, the run's verdict.
 
 mod api;
+pub(crate) mod campaign_soak;
 mod scenarios;
 mod virtualization;
 
@@ -138,7 +139,7 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
     })
 }
 
-/// The server: set up, run, and put back whatever happened.
+/// The server: set up, run the scenarios, and put back whatever happened.
 #[allow(clippy::too_many_arguments)]
 fn on_server(
     repository: &Path,
@@ -151,6 +152,43 @@ fn on_server(
     tag: &str,
     results: &mut Value,
     extra: &mut Value,
+) -> Result<(), String> {
+    on_server_with(
+        repository,
+        run,
+        host,
+        name,
+        shell,
+        extra,
+        &ServerOptions::default(),
+        &mut |t| scenarios::run(rt, t, which, tag, results),
+    )
+}
+
+/// How [`on_server_with`] runs the sidecar.
+#[derive(Default)]
+struct ServerOptions {
+    /// Start the sidecar's container in the game container's process
+    /// namespace too, so a script in the game container reads the sidecar's
+    /// memory, threads and descriptors from `/proc`. The sidecar's image has
+    /// no shell to read them with.
+    share_pid: bool,
+    /// Lines added to the `[store]` table of `sidecar.toml`.
+    store_toml: String,
+}
+
+/// The server: set up, start the sidecar, run `body`, and put back whatever
+/// happened.
+#[allow(clippy::too_many_arguments)]
+fn on_server_with(
+    repository: &Path,
+    run: &Run,
+    host: &Host,
+    name: &str,
+    shell: &[u8],
+    extra: &mut Value,
+    options: &ServerOptions,
+    body: &mut dyn FnMut(&mut LiveTarget) -> Result<(), String>,
 ) -> Result<(), String> {
     let sidecar = build_sidecar(repository)?;
     extra["tree"] = json!(
@@ -218,10 +256,9 @@ fn on_server(
             &dir,
             &dcs_missions,
             mission,
+            options,
         )?;
-        let r = t
-            .start_sidecar()
-            .and_then(|()| scenarios::run(rt, &mut t, which, tag, results));
+        let r = t.start_sidecar().and_then(|()| body(&mut t));
         extra["sidecar_restarts"] = json!(t.boots);
         let _ = t.freeze_dcs(false);
         let _ = t.freeze_sidecar(false);
@@ -285,6 +322,16 @@ struct LiveTarget<'a> {
     logs: String,
     boots: u32,
     folder: PathBuf,
+    /// See [`ServerOptions::share_pid`].
+    share_pid: bool,
+    /// The store folder as the game container sees it.
+    store_dir: String,
+    /// The DCS process the sidecar was last started beside, as
+    /// [`campaign_soak::identity_of`] names it.
+    dcs_boot: Option<String>,
+    /// The CPU ticks of DCS and of the sidecar, and the clock, at the last
+    /// soak record.
+    cpu_before: std::collections::BTreeMap<&'static str, (f64, f64)>,
 }
 
 impl<'a> LiveTarget<'a> {
@@ -298,6 +345,7 @@ impl<'a> LiveTarget<'a> {
         dir: &str,
         dcs_missions: &str,
         mission: String,
+        options: &ServerOptions,
     ) -> Result<LiveTarget<'a>, String> {
         let uid = run.sh("id -u; id -g", &[])?;
         let uid: Vec<String> = String::from_utf8_lossy(&uid)
@@ -340,8 +388,9 @@ impl<'a> LiveTarget<'a> {
         let toml = format!(
             "[agent]\nmap_path = \"/nanoprobe-shm/nanoprobe.map\"\nhandshake = \"127.0.0.1:{port}\"\n\
              token_path = \"/etc/nanoprobe/agent-token\"\n\n[api]\nlisten = \"0.0.0.0:{API_PORT}\"\n\
-             tokens_path = \"/etc/nanoprobe/tokens.toml\"\n\n[store]\ndir = \"/store\"\n\n\
-             [missions]\ndir = \"/missions\"\ndcs_dir = '{dcs_missions}'\n"
+             tokens_path = \"/etc/nanoprobe/tokens.toml\"\n\n[store]\ndir = \"/store\"\n{}\n\
+             [missions]\ndir = \"/missions\"\ndcs_dir = '{dcs_missions}'\n",
+            options.store_toml
         );
         upload(host, dir, "sidecar.toml", toml.as_bytes(), "644")?;
         let local = std::net::TcpListener::bind("127.0.0.1:0")
@@ -368,6 +417,10 @@ impl<'a> LiveTarget<'a> {
             logs: String::new(),
             boots: 0,
             folder: run.folder.clone(),
+            share_pid: options.share_pid,
+            store_dir: format!("{profile}/{STORE_DIR}"),
+            dcs_boot: None,
+            cpu_before: std::collections::BTreeMap::new(),
         })
     }
 
@@ -513,13 +566,18 @@ impl Target for LiveTarget<'_> {
         // under `[missions] dir` (spec/config.md, "[missions]").
         self.host.sh(
             &format!(
-                "docker run -d --name {SIDECAR_C} --network container:\"$1\" --user \"$2\" \
+                "docker run -d --name {SIDECAR_C} --network container:\"$1\" {pid} --user \"$2\" \
                  -e {var}={TIMINGS_S} \
                  -v \"$3\":/nanoprobe-shm -v \"$4\":/etc/nanoprobe/agent-token:ro \
                  -v \"$5/sidecar.toml\":/etc/nanoprobe/sidecar.toml:ro -v \"$5/tokens.toml\":/etc/nanoprobe/tokens.toml:ro \
                  -v \"$6\":/missions:rw -v \"$7\":/store \
                  --tmpfs /var/lib/nanoprobe:rw,size=16m,uid={u},gid={g},mode=0700 {IMAGE} >/dev/null",
                 var = nanoprobe_api_timings_var(),
+                pid = if self.share_pid {
+                    "--pid container:\"$1\""
+                } else {
+                    ""
+                },
                 u = self.uid.0,
                 g = self.uid.1,
             ),
@@ -551,6 +609,9 @@ impl Target for LiveTarget<'_> {
             .to_owned();
         self.forward.stop();
         self.forward = Forward::start(&self.host.ssh, self.local, &ip, API_PORT)?;
+        self.dcs_boot = campaign_soak::processes(self.run, "")
+            .ok()
+            .and_then(|p| campaign_soak::identity_of(&p, "dcs"));
         Ok(())
     }
 
@@ -752,32 +813,105 @@ impl Target for LiveTarget<'_> {
     }
 
     fn on_land(&mut self, points: &[(f64, f64)]) -> Result<Vec<bool>, String> {
-        let pts = points
+        on_land(self.run, points)
+    }
+
+    fn agent_reports_after(
+        &mut self,
+        seen: Option<usize>,
+    ) -> Result<Option<(Vec<Value>, usize)>, String> {
+        campaign_soak::agent_reports_after(self.run, seen).map(Some)
+    }
+
+    fn soak_probe(&mut self, _campaign: u64, fps_s: u32) -> Value {
+        // The store holds one campaign folder: the soak's.
+        let store = self
+            .run
+            .sh(
+                "ls -d \"$1\"/[0-9]* 2>/dev/null | head -n 1",
+                &[&self.store_dir],
+            )
+            .map(|o| String::from_utf8_lossy(&o).trim().to_owned())
+            .unwrap_or_default();
+        campaign_soak::probe(self.run, &store, "np", fps_s, &mut self.cpu_before)
+    }
+
+    fn heap_floors(&mut self) -> Result<Option<Value>, String> {
+        campaign_soak::heap_floors(self.run).map(Some)
+    }
+
+    fn identity(&mut self) -> Result<Option<String>, String> {
+        let p = campaign_soak::processes(self.run, "")?;
+        Ok(campaign_soak::identity_of(&p, "dcs").map(|dcs| {
+            format!(
+                "dcs={dcs};sidecar={}",
+                campaign_soak::identity_of(&p, "sidecar").unwrap_or_else(|| "none".into())
+            )
+        }))
+    }
+
+    fn soak_recover(&mut self) -> Result<(), String> {
+        let before = self.dcs_boot.clone();
+        self.kill_sidecar_stopped()?;
+        self.run.eval("hook", "soak-up", "return 1", 60)?;
+        let now = campaign_soak::identity_of(&campaign_soak::processes(self.run, "")?, "dcs")
+            .ok_or("DCS is not running")?;
+        if before.as_deref() != Some(now.as_str()) {
+            // DCS started its own mission; the campaign's is loaded as an
+            // operator would, which no player may be connected for.
+            LiveTarget::no_players(self)?;
+            self.load_mission()?;
+        }
+        self.cpu_before.clear();
+        self.start_sidecar()
+    }
+
+    fn explode_units(&mut self, units: &[String]) -> Result<usize, String> {
+        let list = units
             .iter()
-            .map(|(n, e)| format!("{{{n}, {e}}}"))
+            .map(|u| lua_string(u))
             .collect::<Vec<_>>()
             .join(", ");
         let v = self.eval(
             "server",
-            "s18-land",
+            "soak-kill",
             &format!(
-                "local out = {{}}\nfor i, p in ipairs({{{pts}}}) do out[i] = land.getSurfaceType({{ x = p[1], y = p[2] }}) end\nreturn out\n"
+                "local n = 0\nfor _, name in ipairs({{ {list} }}) do\n  local u = Unit.getByName(name)\n  \
+                 if u and u:isExist() then trigger.action.explosion(u:getPoint(), 300); n = n + 1 end\nend\nreturn n\n"
             ),
         )?;
-        // land.SurfaceType: LAND 1, SHALLOW_WATER 2, WATER 3, ROAD 4, RUNWAY 5.
-        let types = v.as_array().cloned().unwrap_or_default();
-        if types.len() != points.len() {
-            return Err(format!(
-                "land check: {} answers for {} points",
-                types.len(),
-                points.len()
-            ));
-        }
-        Ok(types
-            .iter()
-            .map(|t| matches!(t.as_u64(), Some(1 | 4)))
-            .collect())
+        Ok(v.as_u64().unwrap_or(0) as usize)
     }
+}
+
+/// Which points are on land, by `land.getSurfaceType` in the `server` state.
+fn on_land(run: &Run, points: &[(f64, f64)]) -> Result<Vec<bool>, String> {
+    let pts = points
+        .iter()
+        .map(|(n, e)| format!("{{{n}, {e}}}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let v = run.eval(
+        "server",
+        "s18-land",
+        &format!(
+            "local out = {{}}\nfor i, p in ipairs({{{pts}}}) do out[i] = land.getSurfaceType({{ x = p[1], y = p[2] }}) end\nreturn out\n"
+        ),
+        120,
+    )?;
+    // land.SurfaceType: LAND 1, SHALLOW_WATER 2, WATER 3, ROAD 4, RUNWAY 5.
+    let types = v.as_array().cloned().unwrap_or_default();
+    if types.len() != points.len() {
+        return Err(format!(
+            "land check: {} answers for {} points",
+            types.len(),
+            points.len()
+        ));
+    }
+    Ok(types
+        .iter()
+        .map(|t| matches!(t.as_u64(), Some(1 | 4)))
+        .collect())
 }
 
 /// The timing lines in a log.
@@ -915,6 +1049,7 @@ fn rehearse(
         log: folder.join("fake-sidecar.log"),
         port,
         child: None,
+        extra: Vec::new(),
     };
     t.start_sidecar()?;
     let r = scenarios::run(rt, &mut t, which, tag, results);
@@ -928,6 +1063,8 @@ struct FakeTarget {
     log: PathBuf,
     port: u16,
     child: Option<Child>,
+    /// More arguments for the fake sidecar.
+    extra: Vec<String>,
 }
 
 impl FakeTarget {
@@ -946,6 +1083,14 @@ impl FakeTarget {
                 .map_err(|e| e.to_string())?;
         }
         Ok(())
+    }
+}
+
+/// The fake sidecar ends with its target, on every way out: one started
+/// with a planted leak grows until it is stopped.
+impl Drop for FakeTarget {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -1013,6 +1158,7 @@ impl Target for FakeTarget {
                 "--store",
             ])
             .arg(&self.store)
+            .args(&self.extra)
             .env(nanoprobe_api_timings_var(), "2")
             .stdin(Stdio::null())
             .stdout(log.try_clone().map_err(|e| e.to_string())?)
@@ -1020,7 +1166,10 @@ impl Target for FakeTarget {
             .spawn()
             .map_err(|e| format!("{}: {e}", self.program.display()))?;
         self.child = Some(child);
-        let deadline = Instant::now() + Duration::from_secs(30);
+        // A host's launch check can hold the first start of a freshly built
+        // binary for most of a minute (46 s seen on macOS), so the wait is
+        // two minutes.
+        let deadline = Instant::now() + Duration::from_secs(120);
         while std::net::TcpStream::connect(("127.0.0.1", self.port)).is_err() {
             if Instant::now() > deadline {
                 return Err("the fake sidecar did not listen".into());
@@ -1096,6 +1245,51 @@ impl Target for FakeTarget {
 
     fn on_land(&mut self, points: &[(f64, f64)]) -> Result<Vec<bool>, String> {
         Ok(vec![true; points.len()])
+    }
+
+    fn soak_probe(&mut self, campaign: u64, _fps_s: u32) -> Value {
+        let mut v = json!({ "errors": [] });
+        if let Some(c) = &self.child {
+            v["sidecar"] = campaign_soak::local_process(c.id());
+        }
+        let dir = self.store.join(campaign.to_string());
+        for (key, file) in campaign_soak::STORE_FILES {
+            if let Ok(m) = std::fs::metadata(dir.join(file)) {
+                v["store"][key] = json!(m.len());
+            }
+        }
+        v
+    }
+
+    fn identity(&mut self) -> Result<Option<String>, String> {
+        let Some(c) = &mut self.child else {
+            return Ok(None);
+        };
+        let running = c.try_wait().map_err(|e| e.to_string())?.is_none();
+        Ok(running.then(|| format!("fake={}", c.id())))
+    }
+
+    fn soak_recover(&mut self) -> Result<(), String> {
+        self.kill_sidecar()
+    }
+
+    fn inject_restart(&mut self) -> Result<(), String> {
+        self.stop();
+        Ok(())
+    }
+
+    fn inject_stall(&mut self, seconds: f64) -> Result<(), String> {
+        let pid = self
+            .child
+            .as_ref()
+            .map(|c| c.id().to_string())
+            .ok_or("the fake sidecar is not running")?;
+        self.signal("-STOP")?;
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs_f64(seconds));
+            let _ = Command::new("kill").args(["-CONT", &pid]).status();
+        });
+        Ok(())
     }
 }
 

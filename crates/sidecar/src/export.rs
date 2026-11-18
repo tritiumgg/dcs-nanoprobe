@@ -439,4 +439,45 @@ mod tests {
         .expect("export");
         assert_eq!(n, 2);
     }
+
+    #[test]
+    fn the_journal_lines_start_at_the_oldest_row_kept() {
+        let d = tempfile::tempdir().expect("dir");
+        let c = Campaigns::new(d.path(), 10, 2).expect("campaigns");
+        let id = CampaignId(3);
+        let record = CampaignRecord {
+            name: "c".into(),
+            state: CampaignState::Suspended,
+            theaters: vec!["Caucasus".into()],
+            theater: "Caucasus".into(),
+            clock_ms: None,
+            created_ms: 1,
+            component_schemas: Default::default(),
+            outcome: None,
+        };
+        let mut s = c.create(id, record).expect("create");
+        for i in 1..=4 {
+            s.journal(crate::store::Entry::Spec {
+                entity: crate::ids::EntityId(i),
+                rev: i,
+            });
+        }
+        s.commit().expect("commit");
+        Connection::open(c.store_path(id))
+            .expect("conn")
+            .execute_batch("UPDATE journal SET at_ms = seq * 1000")
+            .expect("stamp");
+        s.prune_journal(1_500, 1_000_000, 1_000).expect("prune");
+        let mut seqs = Vec::new();
+        export(3, &c.store_path(id), &c.events_path(id), &mut |l| {
+            let v: Value = serde_json::from_slice(&l).expect("json");
+            if v["kind"] == "journal" {
+                seqs.push(v["seq"].as_u64().expect("seq"));
+            }
+            true
+        })
+        .expect("export");
+        // Cutoff 4000 - 1500: rows 1 and 2 go.
+        assert_eq!(seqs, [3, 4]);
+    }
 }

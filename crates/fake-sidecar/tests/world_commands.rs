@@ -1216,3 +1216,212 @@ async fn clear_debris_effects() {
     assert_eq!(e.code(), tonic::Code::InvalidArgument);
     assert_eq!(fake(&hub, |s| s.ledger().debris.len()), 2 + 256);
 }
+
+/// A `ClearDebris` column: one box, a square round the center from 10 km
+/// below sea level to 100 km above it, the same whatever `center.alt` holds.
+/// It clears a wreck on ground 900 m up and one at sea level, where a sphere
+/// at `alt` 0 clears only the one at sea level; a dead static the platform
+/// manages stays. Bad columns are refused before anything is sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn clear_debris_column() {
+    use nanoprobe_proto::errors::detail;
+    use nanoprobe_sidecar::sim::wire::Debris;
+    use pb::ErrorReason;
+    use pb::clear_debris::Volume;
+    let (hub, ch) = in_process(cfg(), fake_config()).await.expect("server");
+    let l = lease(&ch).await;
+    let c = campaign(&ch, &l).await;
+    let mut cmd = CommandsServiceClient::new(ch.clone());
+    let g = cmd
+        .put_group(group(&l, "g", c, 0.0, 2, false))
+        .await
+        .expect("put")
+        .into_inner();
+    until(&ch, c, g.group_id, live).await;
+    let at = |north: f64, alt: f64, east: f64| {
+        Some(pb::Position {
+            theater: "Caucasus".into(),
+            north,
+            east,
+            alt,
+        })
+    };
+    let clear = |key: &str, v: Volume| pb::DoEffectRequest {
+        write: write(&l, key, c),
+        effect: Some(pb::Effect {
+            effect: Some(pb::effect::Effect::ClearDebris(pb::ClearDebris {
+                volume: Some(v),
+            })),
+        }),
+    };
+    let column = |center, half_width| Volume::Column(pb::Column { center, half_width });
+    let sphere = |center, radius| Volume::Sphere(pb::Sphere { center, radius });
+    // The numbers of a sent volume, bit for bit: with the volume code they
+    // are the whole payload (spec/commands.md, "Layout: CLEAR_DEBRIS").
+    let bits = |d: &Debris| -> Vec<u64> {
+        match d {
+            Debris::Box { min, max } => min.iter().chain(max).map(|n| n.to_bits()).collect(),
+            Debris::Sphere { .. } => panic!("a column is sent as a box"),
+        }
+    };
+    // The fake's base count for any clear.
+    const BASE: u64 = 3;
+
+    // Ground 900 m up at north 50 km, and at sea level at north 0. The
+    // fake has no terrain, so each object is placed at its ground's height.
+    const HIGH: f64 = 900.0;
+    fake(&hub, |s| {
+        s.place_wreck("high inside", [50_000.0, HIGH, 20.0]);
+        s.place_wreck("high edge", [50_030.0, HIGH, -30.0]);
+        s.place_wreck("high outside", [50_031.0, HIGH, 0.0]);
+        s.place_dead_static("loose ruin", [50_010.0, HIGH, -10.0]);
+        s.place_dead_static("np#ruin", [50_005.0, HIGH, 5.0]);
+        s.place_wreck("low inside", [0.0, 0.0, 20.0]);
+        s.place_wreck("low outside", [0.0, 0.0, 500.0]);
+    });
+    let left = |hub: &Hub| -> Vec<String> {
+        fake(hub, |s| {
+            s.junk_left().into_iter().map(str::to_owned).collect()
+        })
+    };
+
+    // A sphere at `alt` 0 is sent at y = 0 and holds nothing on high ground.
+    let r = cmd
+        .do_effect(clear("sphere-high", sphere(at(50_000.0, 0.0, 0.0), 30.0)))
+        .await
+        .expect("sphere")
+        .into_inner();
+    assert_eq!(r.debris_removed, Some(BASE));
+    assert_eq!(
+        fake(&hub, |s| s.ledger().debris.clone()),
+        vec![Debris::Sphere {
+            center: [50_000.0, 0.0, 0.0],
+            radius: 30.0
+        }]
+    );
+    assert_eq!(left(&hub).len(), 7);
+
+    // The column there: the wrecks inside and on its edge and the unmanaged
+    // dead static go; the wreck outside and the managed dead static stay.
+    let r = cmd
+        .do_effect(clear("column-high", column(at(50_000.0, 0.0, 0.0), 30.0)))
+        .await
+        .expect("column")
+        .into_inner();
+    assert_eq!(
+        r.result.as_ref().expect("result").outcome,
+        pb::Outcome::Applied as i32
+    );
+    assert_eq!(r.debris_removed, Some(BASE + 3));
+    assert_eq!(
+        left(&hub),
+        ["high outside", "np#ruin", "low inside", "low outside"]
+    );
+    let sent = fake(&hub, |s| s.ledger().debris.clone());
+    assert_eq!(
+        sent[1],
+        Debris::Box {
+            min: [49_970.0, -10_000.0, -30.0],
+            max: [50_030.0, 100_000.0, 30.0],
+        }
+    );
+
+    // The same column with another `alt`, and with one that is no number:
+    // the same box, bit for bit.
+    for (key, alt) in [
+        ("column-alt", 5_000.0),
+        ("column-nan", f64::NAN),
+        ("column-far", 1.0e9),
+    ] {
+        let r = cmd
+            .do_effect(clear(key, column(at(50_000.0, alt, 0.0), 30.0)))
+            .await
+            .expect(key)
+            .into_inner();
+        assert_eq!(r.debris_removed, Some(BASE), "{key}");
+    }
+    let sent = fake(&hub, |s| s.ledger().debris.clone());
+    assert_eq!(sent.len(), 5);
+    for d in &sent[2..] {
+        assert_eq!(bits(d), bits(&sent[1]));
+    }
+    // An unset `alt` is 0 on the wire: the default position gives it too.
+    assert_eq!(pb::Position::default().alt.to_bits(), 0.0f64.to_bits());
+
+    // At sea level a column clears what a sphere at `alt` 0 clears.
+    let r = cmd
+        .do_effect(clear("column-low", column(at(0.0, 0.0, 0.0), 30.0)))
+        .await
+        .expect("column at sea level")
+        .into_inner();
+    assert_eq!(r.debris_removed, Some(BASE + 1));
+    assert_eq!(left(&hub), ["high outside", "np#ruin", "low outside"]);
+    let r = cmd
+        .do_effect(clear("sphere-low", sphere(at(0.0, 0.0, 500.0), 30.0)))
+        .await
+        .expect("sphere at sea level")
+        .into_inner();
+    assert_eq!(r.debris_removed, Some(BASE + 1));
+    assert_eq!(left(&hub), ["high outside", "np#ruin"]);
+    let o = outcome(&ch, "column-high").await;
+    assert_eq!(o.debris_removed, Some(BASE + 3));
+
+    // The widest column the reach allows is sent; one meter wider is not.
+    let n = fake(&hub, |s| s.ledger().debris.len());
+    cmd.do_effect(clear("widest", column(at(0.0, 0.0, 0.0), 1.0e7)))
+        .await
+        .expect("the widest column");
+    assert_eq!(fake(&hub, |s| s.ledger().debris.len()), n + 1);
+    let mut other = at(0.0, 0.0, 0.0);
+    other.as_mut().expect("at").theater = "Syria".into();
+    let bad = [
+        ("zero", column(at(0.0, 0.0, 0.0), 0.0)),
+        ("negative", column(at(0.0, 0.0, 0.0), -1.0)),
+        ("nan", column(at(0.0, 0.0, 0.0), f64::NAN)),
+        ("infinite", column(at(0.0, 0.0, 0.0), f64::INFINITY)),
+        ("too-wide", column(at(0.0, 0.0, 0.0), 1.0e7 + 1.0)),
+        ("north-edge", column(at(1.0e7 - 10.0, 0.0, 0.0), 11.0)),
+        ("east-edge", column(at(0.0, 0.0, -1.0e7 + 10.0), 11.0)),
+        ("far-center", column(at(1.0e7 + 1.0, 0.0, 0.0), 5.0)),
+        ("north-nan", column(at(f64::NAN, 0.0, 0.0), 5.0)),
+        ("no-center", column(None, 5.0)),
+        ("theater", column(other.clone(), 5.0)),
+    ];
+    // Each refusal names the field at fault.
+    const F: &str = "effect.clear_debris.column";
+    let fields = [
+        "half_width",
+        "half_width",
+        "half_width",
+        "half_width",
+        "half_width",
+        "half_width",
+        "half_width",
+        "center.north",
+        "center.north",
+        "center",
+        "center.theater",
+    ];
+    for ((key, v), field) in bad.into_iter().zip(fields) {
+        let e = cmd.do_effect(clear(key, v)).await.expect_err(key);
+        assert_eq!(e.code(), tonic::Code::InvalidArgument, "{key}");
+        let d = detail(&e).expect("a detail");
+        assert_eq!(d.reason, ErrorReason::InvalidField as i32, "{key}");
+        assert_eq!(d.field, format!("{F}.{field}"), "{key}");
+    }
+    // A wrong theater is refused as a sphere's is, with the same reason.
+    let e = cmd
+        .do_effect(clear("sphere-theater", sphere(other, 5.0)))
+        .await
+        .expect_err("a sphere on another theater");
+    let d = detail(&e).expect("a detail");
+    assert_eq!(
+        (e.code(), d.reason, d.field.as_str()),
+        (
+            tonic::Code::InvalidArgument,
+            ErrorReason::InvalidField as i32,
+            "effect.clear_debris.sphere.center.theater"
+        )
+    );
+    assert_eq!(fake(&hub, |s| s.ledger().debris.len()), n + 1);
+}
