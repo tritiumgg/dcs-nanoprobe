@@ -958,11 +958,21 @@ local function main()
     assert(m.counters.disagreements == 0, 'the mirror and the agent disagree on an enumeration')
     S.ok('at 2,000 moving, mixed objects, with deaths, the mirror matches the oracle')
 
-    -- The periods are reported, near their targets.
+    -- The periods are reported, near their targets. The agent's period is
+    -- wall time: a period read while the machine starved this process (the
+    -- compare's rule, `peak` over 1.5) says nothing about the agent, and is
+    -- read again from a new compare, up to three times in all. The band is
+    -- the same on every read.
     local p = m.periods
+    for _ = 1, 2 do
+      if (p[1] > 0.8 and p[1] < 1.5) or peak <= 1.5 then
+        break
+      end
+      p = select(2, compare('2000')).periods
+    end
     -- The vitals period is not judged here: a pass that partial batches end
     -- early reports under 4 s in some runs of the mock.
-    assert(p[1] > 0.8 and p[1] < 1.5, 'position period ' .. p[1])
+    assert(p[1] > 0.8 and p[1] < 1.5, 'position period ' .. p[1] .. string.format(' peak %.2f', peak))
     assert(p[2] > 0, 'no vitals period reported')
     S.ok('the status block reports the achieved periods near their targets')
   else
