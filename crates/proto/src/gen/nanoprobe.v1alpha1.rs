@@ -1259,7 +1259,10 @@ pub struct Airbase {
     pub name: ::prost::alloc::string::String,
     #[prost(enumeration = "Coalition", tag = "3")]
     pub owner: i32,
-    /// Stock by item name. Absent until sampled.
+    /// Stock by item name, as DCS's getInventory lists it. Absent until
+    /// sampled. An unlimited warehouse lists no item of an unlimited kind,
+    /// unless a script or a WAREHOUSE_ADJUST added some, and each liquid of
+    /// unlimited fuel at 100,000 (spec/commands.md, "Layout: WAREHOUSE_SET").
     #[prost(btree_map = "string, double", tag = "4")]
     pub stock: ::prost::alloc::collections::BTreeMap<
         ::prost::alloc::string::String,
@@ -3080,6 +3083,11 @@ pub struct DynamicSpawn {
     #[prost(uint64, tag = "1")]
     pub airbase_id: u64,
     /// `dynamicSpawn`: players may spawn aircraft from the airport's stock.
+    /// True also makes the airport's aircraft limited (`unlimitedAircrafts`
+    /// false), so dynamic spawn offers the aircraft stock the controller sets
+    /// (SetWarehouseStock). Whether the owner SetAirbaseOwner sets decides the
+    /// coalition it offers them to is UNVERIFIED (spec/persistence.md). AI the
+    /// mission spawns there use the same stock.
     #[prost(bool, tag = "2")]
     pub enabled: bool,
     /// `allowHotStart`.
@@ -5523,11 +5531,13 @@ pub struct Box {
 pub struct WholeMap {}
 /// Remove wrecks, craters and debris. DCS removes the wrecks of ground units
 /// that have stopped burning; craters count as junk too (inferred from the
-/// count). It leaves every live unit and static, a wreck that is still
-/// burning, a dead static's object and destroyed scenery. Around a dead
-/// aircraft or a dead static it removes something; what is UNVERIFIED. A burning wreck it
-/// leaves still explodes and sends its death events. Coordinates and sizes
-/// are within 10,000 km of 0.
+/// count). It also destroys every dead static in the volume that the
+/// platform does not manage, so its ruin leaves the clients' screens. A
+/// managed static, dead or alive, stays, with its record.
+/// It leaves every live unit and static, a wreck that is still burning and
+/// destroyed scenery. Around a dead aircraft it removes something; what is
+/// UNVERIFIED. A burning wreck it leaves still explodes and sends its death
+/// events. Coordinates and sizes are within 10,000 km of 0.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ClearDebris {
     #[prost(oneof = "clear_debris::Volume", tags = "1, 2, 3")]
@@ -5589,9 +5599,10 @@ pub struct DoEffectResponse {
     #[prost(message, optional, tag = "1")]
     pub result: ::core::option::Option<CommandResult>,
     /// For ClearDebris: how many junk objects DCS removed, craters and debris
-    /// included. For a whole-map clear that did not apply, the count of the
-    /// boxes that did. Absent when the clear has no result (unknown, not_sent)
-    /// and for any other effect.
+    /// included, plus the dead statics in the volume it destroyed. For a
+    /// whole-map clear that did not apply, the count of the boxes that did.
+    /// Absent when the clear has no result (unknown, not_sent) and for any
+    /// other effect.
     #[prost(uint64, optional, tag = "2")]
     pub debris_removed: ::core::option::Option<u64>,
 }

@@ -4385,7 +4385,10 @@ impl Sampler {
         now: impl FnOnce() -> Instant,
     ) -> bool {
         let i = self.batch.done;
-        if self.batch.slots.get(i) == Some(&index) {
+        // An empty name means the shim writes nothing for this index this
+        // pass: a FARP whose static is gone, or an airbase whose coalition
+        // could not be read (spec/sampling.md). Its index stays.
+        if self.batch.slots.get(i) == Some(&index) && !airbase.airbase.is_empty() {
             let max = link.max_payload();
             let name = airbase.airbase.clone();
             let a = airbase.encode();

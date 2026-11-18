@@ -176,6 +176,8 @@ impl Counters {
 /// What the latest samples say about one airbase and its warehouse.
 #[derive(Clone, Debug, Default)]
 struct BaseSeen {
+    /// The airbase's object ID: a FARP's is its static's.
+    object: u64,
     coalition: Option<u32>,
     stock: Option<Stock>,
 }
@@ -571,6 +573,7 @@ impl Reconciler {
             }
             Input::ObjectGone(g) => {
                 if self.current(store, r.agent_boot) {
+                    self.base_gone(g.object);
                     self.adopt_gone(g.object);
                     self.gone(store, g);
                 }
@@ -2218,6 +2221,7 @@ impl Reconciler {
             .unwrap_or_default();
         let unresolved = self.base_unresolved(true, &a.airbase);
         let seen = self.bases.entry(a.airbase.clone()).or_default();
+        seen.object = a.object;
         let prev = seen.coalition.replace(a.coalition);
         let own = self.own_owner.remove(&a.airbase).unwrap_or_default();
         let desired = store
@@ -2229,6 +2233,29 @@ impl Reconciler {
             && prev == desired
         {
             store.observe_airbase_owner(&theater, &a.airbase, a.coalition);
+        }
+    }
+
+    /// A spawned FARP's static is gone, and its airbase with it (spec/world.md,
+    /// "Kinds"): what was seen and sent for it is forgotten. The desired
+    /// owner and stock stay in the store by name, so a FARP spawned again
+    /// under the name gets them sent again once its first samples come.
+    fn base_gone(&mut self, object: u64) {
+        if object == 0 {
+            return;
+        }
+        let names: Vec<String> = self
+            .bases
+            .iter()
+            .filter(|(_, b)| b.object == object)
+            .map(|(n, _)| n.clone())
+            .collect();
+        for name in names {
+            self.bases.remove(&name);
+            self.owner_sent.remove(&name);
+            self.stock_sent.remove(&name);
+            self.own_owner.remove(&name);
+            self.own_stock.remove(&name);
         }
     }
 
