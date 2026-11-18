@@ -123,11 +123,11 @@ do
   assert(steps.kill.before_kill.exists == true, 'ruin-person: the static is gone before the kill')
   assert(steps.read.now.exists == false, 'ruin-person: the static still exists after the kill')
   assert(type(steps.clear.removed) == 'number', 'ruin-person: removeJunk gave no count')
-  -- The mock drops a dead static from getByName, so `destroy` finds nothing
-  -- here; live, the dead static was still found by name and destroyed
-  -- (docs/results/2026-11-16-person-tests-2.md, section 4).
-  assert(steps.destroy.before_destroy.found == false, 'ruin-person: the mock found the dead static by name')
-  assert(steps.destroy.destroyed.ok == false, 'ruin-person: destroy did not report the missing static')
+  -- The mock finds a dead static by its name, as DCS does, and `destroy`
+  -- takes it out (LIVE, docs/results/2026-11-16-person-tests-2.md, section
+  -- 4, and docs/results/2026-11-18-ruins.md).
+  assert(steps.destroy.before_destroy.found == true, 'ruin-person: the mock did not find the dead static by name')
+  assert(steps.destroy.destroyed.ok == true, 'ruin-person: destroy failed: ' .. tostring(steps.destroy.destroyed.error))
   S.ok('ruin-person.lua@server: spawn, kill, read, clear, destroy')
 end
 

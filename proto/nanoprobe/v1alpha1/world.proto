@@ -144,12 +144,17 @@ message Static {
   string type = 4;
   Coalition coalition = 5;
   uint32 country = 6;
+  // False for a destroyed static. A destroyed managed static stays listed,
+  // in state `dead`, where it stood: DCS shows its ruin (spec/world.md,
+  // "Ruins"). Only RemoveEntity takes it out.
   bool alive = 7;
   Position position = 8;
   double heading = 9;
   optional double life = 10;
   EntityState state = 11;
-  // The engine's error for an unspawnable static.
+  // The engine's error for an unspawnable static, or for a dead static
+  // whose ruin DCS refused, until a spawn of the ruin applies
+  // (spec/world.md, "Ruins").
   string last_error = 12;
   // Changes when the spec changes, and when a lost static is spawned again,
   // whose spec may be the same (spec/world.md, "Revisions").

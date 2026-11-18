@@ -197,6 +197,7 @@ async fn orders_statics_authority_and_policy() {
                 r#type: "Tent".into(),
                 position: at(-50.0, 0.0),
                 heading: 0.0,
+                dead: false,
                 extra: None,
             }),
         })
