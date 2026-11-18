@@ -712,7 +712,9 @@ fn owned_and_stocked(
             let v = run.eval(
                 "server",
                 "s19-person-farp",
-                "for _, s in ipairs(coalition.getStaticObjects(2) or {}) do local n = s:getName() if n:sub(1, 3) == 'np#' and s:getTypeName() == 'FARP' and Airbase.getByName(n) then return n end end\nreturn ''\n",
+                // `coalition.getStaticObjects` does not list a FARP (LIVE);
+                // `world.getAirbases` lists its airbase under its name.
+                "for _, b in ipairs(world.getAirbases()) do local n = b:getName() if n:sub(1, 3) == 'np#' then return n end end\nreturn ''\n",
                 60,
             )?;
             Ok(v.as_str().filter(|n| !n.is_empty()).map(str::to_string))
