@@ -103,6 +103,44 @@ proptest! {
     }
 }
 
+/// A late death the lost policy calls dead first, after a foreign campaign
+/// took the agent and handed it back (the agent holds no applied revision):
+/// the ruin's spawn is answered applied and replaces the static's dead
+/// object before its death record reaches the sidecar. Nothing told the
+/// sidecar that DCS holds that object, so this is no violation, and the
+/// static ends `dead` with its ruin in DCS.
+#[test]
+fn a_ruin_spawned_before_a_late_death_is_read_replaces_the_dead_object() {
+    let ops = [
+        Op::Frames(2),
+        Op::Kill(0),
+        Op::Kill(0),
+        Op::ForeignCampaign,
+        Op::Kill(29),
+        Op::SidecarRestart,
+        Op::Revive(15548),
+        Op::Kill(54261),
+        Op::Kill(45909),
+    ];
+    let mut w = World::new_late(1, 2, LostPolicy::Dead, 169_791_043);
+    for op in &ops {
+        w.apply(op).unwrap();
+    }
+    w.settle().unwrap();
+    let l = w.sim.ledger();
+    let [(b, g, c, e, spawned, known)] = l.ruins_replaced[..] else {
+        panic!("one ruin replaced: {:?}", l.ruins_replaced);
+    };
+    assert!(!spawned && !known, "the static's own dead object, unread");
+    assert!(
+        l.deaths_read.contains_key(&(b, g, c, e)),
+        "its death was read after the spawn"
+    );
+    let id = nanoprobe_sidecar::ids::EntityId(e);
+    assert_eq!(w.store.group(id).expect("static").state, State::Dead);
+    assert!(w.sim.ruins(CAMPAIGN).iter().any(|r| r.entity == e));
+}
+
 #[test]
 fn with_no_faults_every_group_goes_live_and_takes_its_order() {
     let mut w = World::new(5, 2, LostPolicy::Report);
