@@ -508,8 +508,25 @@ were written `DESTROYED` once (LIVE, step S15 exit test, agent build
 `9590d6f6771c67a1`, DCS 2.9.31.29434 dedicated server under Wine 10.0, 2026-11-15).
 The same replace while the simulation runs is PRIOR; step S18's restore checks it.
 
-The result's `object` is the group's DCS ID, and an `OBJECT` record follows for each
-unit.
+The result's `object` is the group's DCS ID. On `APPLIED` the handler reads each unit
+of the new group that exists, as the births tier reads a born object (spec/sampling.md,
+"Tiers": the same reads, each unit under `pcall`), and the agent writes an `OBJECT`
+record for each, with `enumeration` 0, in the spawn's frame and before its `RESULT`. On
+a replacing spawn they also come before the old rows' `OBJECT_GONE`. A sidecar that
+reads the `RESULT` has therefore read the `OBJECT` of every unit the handler could read,
+unless the agent's event queue dropped the record: the `GAP` it writes then makes the
+sidecar force a full enumeration, which writes the unit's `OBJECT` (spec/records.md,
+"Delivery classes"). A unit whose read raises, or that does not exist yet, gets no
+record here and the result stays `APPLIED`: its birth or the next full enumeration adds it. The reads are part of
+the command: their time is in its `cost_us` and counts as commanded work, not as the
+agent's overhead. The later `S_EVENT_BIRTH` of a unit the handler added costs the births
+tier one `wants` check and writes nothing.
+
+The units can be read inside the handler, right after `coalition.addGroup` returns
+(LIVE, docs/results/2026-11-17-bind-lag.md: each of 2,740 one-unit ground groups had its
+`OBJECT` ahead of its spawn's `RESULT`, DCS 2.9.31.29434 dedicated server under Wine
+10.0, 2026-11-18). A group of several units, an aircraft or a ship read there, and a
+late-activated group's units, are UNVERIFIED.
 
 ### Layout: GROUP_ORDER
 

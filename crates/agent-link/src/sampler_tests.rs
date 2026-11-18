@@ -163,6 +163,38 @@ struct World {
     /// What a row of each tier costs inside the pump, µs, where it is not
     /// [`cost`]'s default: a live cost.
     tier_us: [Option<f64>; 7],
+    /// Births that arrive while a run goes on, as the spawns of a
+    /// materialization do.
+    stream: Option<Stream>,
+    /// The pump resolves the newest birth first.
+    newest_first: bool,
+    /// What one loadout mark costs the pump, µs. `None`: the pump asks for
+    /// no marks.
+    mark_us: Option<f64>,
+    /// When each streamed object was born, and how long after it its row
+    /// was added, s.
+    born: HashMap<u64, Instant>,
+    lags: Vec<f64>,
+    /// Loadout marks the pumps read.
+    marks_read: u64,
+}
+
+/// A spawn stream: one unit born every `every` frames, `left` more to come.
+/// Each birth is counted as the driver counts a birth event, and marked for
+/// a loadout read when `held` says a player holds its slot.
+struct Stream {
+    next: u64,
+    left: usize,
+    every: u64,
+    frame: u64,
+    held: bool,
+    /// One group of ten in this many moves, as [`halt_four_in_five`] has
+    /// one in five; 0 for none.
+    moving_in: u64,
+    /// The spawn's handler reads the unit and adds its row, as commanded
+    /// work, before the birth event counts (spec/commands.md, "Layout:
+    /// GROUP_SPAWN").
+    handler_adds: bool,
 }
 
 /// When the host's sweep read each object, and every gap between two reads
@@ -230,6 +262,35 @@ impl World {
         for o in self.objects.values_mut() {
             o.pos[0] += o.speed * dt;
         }
+    }
+
+    /// The frame's births from the spawn stream, at `now`: what the event
+    /// handler does for each.
+    fn arrive(&mut self, s: &mut Sampler, rec: &mut Rec, now: Instant) {
+        let Some(st) = self.stream.as_mut() else {
+            return;
+        };
+        st.frame += 1;
+        if st.left == 0 || !st.frame.is_multiple_of(st.every) {
+            return;
+        }
+        st.left -= 1;
+        let (object, held, handler_adds) = (st.next, st.held, st.handler_adds);
+        let moves = st.moving_in > 0 && (object / 10).is_multiple_of(st.moving_in);
+        let speed = if moves { 5.0 } else { 0.0 };
+        st.next += 1;
+        self.spawn(object, object_kind::UNIT, format!("n{object}"), speed);
+        // The handler's read is commanded work: the model's clock holds the
+        // agent's own time only, so it does not move here. A unit whose row
+        // the handler added has no lag; any other waits for the births tier.
+        let added = handler_adds && self.found(object).is_some_and(|f| s.add(rec, f, false) > 0);
+        if added {
+            self.lags.push(0.0);
+        } else {
+            self.born.insert(object, now);
+        }
+        s.birth_waits();
+        s.mark_loadout(Some(object as f64), Ammo::BIRTH, held);
     }
 }
 
@@ -309,13 +370,18 @@ fn pump(s: &mut Sampler, rec: &mut Rec, w: &mut World, clock: &mut Clock) {
         match plan.tier {
             Tier::Births => {
                 for _ in 0..plan.rows {
-                    let Some(object) = (!w.births.is_empty()).then(|| w.births.remove(0)) else {
+                    let next = if w.newest_first {
+                        w.births.pop()
+                    } else {
+                        (!w.births.is_empty()).then(|| w.births.remove(0))
+                    };
+                    let Some(object) = next else {
                         break;
                     };
                     // A birth the table already has costs the shim one
                     // `wants` check.
                     let wanted = s.wants(object);
-                    if let Some(f) = w.found(object) {
+                    if wanted && let Some(f) = w.found(object) {
                         s.add(rec, f, false);
                         w.spot(s, object);
                     }
@@ -325,6 +391,9 @@ fn pump(s: &mut Sampler, rec: &mut Rec, w: &mut World, clock: &mut Clock) {
                         1.0
                     };
                     let t = clock.add(us);
+                    if let Some(born) = w.born.remove(&object) {
+                        w.lags.push(t.saturating_duration_since(born).as_secs_f64());
+                    }
                     if s.item(|| t) {
                         stop = true;
                         break;
@@ -441,6 +510,13 @@ fn pump(s: &mut Sampler, rec: &mut Rec, w: &mut World, clock: &mut Clock) {
             }
         }
         let _ = stop;
+    }
+    // The loadout marks, after the tiers, as the shim's `loadouts`.
+    if let Some(us) = w.mark_us {
+        let mut marks = Vec::new();
+        let n = s.loadouts_at(&mut marks, clock.0);
+        w.marks_read += n as u64;
+        clock.add(us * n as f64);
     }
     // A batch still open ends with its close, which takes what one in `plan`
     // does.
@@ -578,6 +654,7 @@ fn run_x(
         rec.began = t0;
         let elapsed = f as f64 * interval / 1e6;
         w.step(interval / 1e6);
+        w.arrive(s, rec, t0);
         rec.syscall = if w.alternate {
             f % 2 == 0
         } else {
@@ -3674,6 +3751,9 @@ mod sweep;
 
 #[path = "sampler_fill_tests.rs"]
 mod fill;
+
+#[path = "sampler_bind_tests.rs"]
+mod bind;
 
 /// One 110 Hz frame of `frame_us` microseconds, with `excused_us` of it
 /// commanded work; returns the sampler's debt, credit and window agent time.

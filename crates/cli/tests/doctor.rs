@@ -563,8 +563,8 @@ fn the_per_map_templates_are_checked() {
     assert!(report.has(Mark::Note, "--missions"), "{report}");
     // Unless a theater is named: then the folder must be there.
     let named = Missions {
-        dir: None,
         theaters: vec!["Caucasus".into()],
+        ..Missions::default()
     };
     let report = templates(&root, &named);
     assert!(
@@ -597,8 +597,8 @@ fn the_per_map_templates_are_checked() {
     assert!(report.has(Mark::Ok, "per-map templates in"), "{report}");
     assert!(report.has(Mark::Ok, ": Caucasus"), "{report}");
     let syria = Missions {
-        dir: None,
         theaters: vec!["Caucasus".into(), "Syria".into()],
+        ..Missions::default()
     };
     let report = templates(&root, &syria);
     assert!(
@@ -630,7 +630,7 @@ fn the_per_map_templates_are_checked() {
     // --missions names the folder; one that does not exist fails.
     let elsewhere = Missions {
         dir: Some(scratch.0.join("elsewhere")),
-        theaters: Vec::new(),
+        ..Missions::default()
     };
     let report = templates(&root, &elsewhere);
     assert!(
@@ -640,4 +640,297 @@ fn the_per_map_templates_are_checked() {
     std::fs::create_dir_all(scratch.0.join("elsewhere")).unwrap();
     std::fs::write(scratch.0.join("elsewhere/Caucasus.miz"), CAUCASUS).unwrap();
     assert_clean(&templates(&root, &elsewhere));
+}
+
+/// `doctor --profile <root>` with `missions`: the exit code and what it
+/// printed.
+fn run(root: &Path, missions: &Missions) -> (i32, String) {
+    let place = Where {
+        profile: Some(root.to_path_buf()),
+        ..Where::default()
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let code = doctor::run(&place, missions, &Env::default(), &mut out, &mut err);
+    (code, String::from_utf8(out).unwrap())
+}
+
+/// A `sidecar.toml` beside the mission folder and the template folder it
+/// names, with the token path `token`.
+fn sidecar_toml(dir: &Path, token: &Path, template_dirs: &str) -> PathBuf {
+    let path = dir.join("sidecar.toml");
+    write(
+        &path,
+        &format!(
+            "[agent]\nmap_path = \"nanoprobe.map\"\ntoken_path = '{}'\n\
+             [missions]\ndir = \"missions\"\ndcs_dir = 'C:\\missions'\ntemplate_dirs = {template_dirs}\n",
+            token.display()
+        ),
+    );
+    path
+}
+
+#[test]
+fn the_sidecar_config_is_checked() {
+    let scratch = Scratch::new("sidecar-config");
+    let root = scratch.0.join("DCS");
+    good(&root);
+    let side = scratch.0.join("sidecar");
+    std::fs::create_dir_all(side.join("missions")).unwrap();
+    std::fs::write(side.join("missions/Caucasus.miz"), CAUCASUS).unwrap();
+    std::fs::create_dir_all(side.join("templates")).unwrap();
+
+    // The file names the profile's token, a mission folder with a template
+    // and a template folder: every line is ok, and doctor read the mission
+    // folder the file names.
+    let file = sidecar_toml(&side, &root.join("nanoprobe/token"), "[\"templates\"]");
+    let with_file = Missions {
+        sidecar_config: Some(file.clone()),
+        ..Missions::default()
+    };
+    let (code, out) = run(&root, &with_file);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("is a file the sidecar accepts"), "{out}");
+    assert!(out.contains("per-map templates in"), "{out}");
+    assert!(out.contains(": Caucasus"), "{out}");
+    assert!(out.contains("templates is a folder"), "{out}");
+    let token = std::fs::read_to_string(root.join("nanoprobe/token")).unwrap();
+    assert!(!out.contains(token.trim()), "doctor printed the token");
+
+    // A listed folder that does not exist allows nothing.
+    sidecar_toml(
+        &side,
+        &root.join("nanoprobe/token"),
+        "[\"templates\", \"absent\"]",
+    );
+    let (code, out) = run(&root, &with_file);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("the sidecar allows no file in it"), "{out}");
+
+    // An empty list is the default: a note, not a failure.
+    sidecar_toml(&side, &root.join("nanoprobe/token"), "[]");
+    let (code, out) = run(&root, &with_file);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("note [missions] template_dirs is empty"),
+        "{out}"
+    );
+
+    // --template-dir and --missions stand in for the file's paths, as for a
+    // sidecar in a container: the file's own folders are not read.
+    sidecar_toml(&side, &root.join("nanoprobe/token"), "[\"absent\"]");
+    let seen_here = Missions {
+        sidecar_config: Some(file.clone()),
+        dir: Some(side.join("missions")),
+        template_dirs: vec![side.join("templates")],
+        ..Missions::default()
+    };
+    let (code, out) = run(&root, &seen_here);
+    assert_eq!(code, 0, "{out}");
+    assert!(!out.contains("absent"), "{out}");
+
+    // One of dir and dcs_dir alone: the sidecar starts and refuses every
+    // activation.
+    let text = std::fs::read_to_string(&file).unwrap();
+    write(
+        &file,
+        &text.replace("dcs_dir = 'C:\\missions'", "dcs_dir = ''"),
+    );
+    let (code, out) = run(&root, &with_file);
+    assert_eq!(code, 1, "{out}");
+    assert!(
+        out.contains("fail [missions] dir and dcs_dir are not both set"),
+        "{out}"
+    );
+
+    // Another token than the profile's: the handshake would be refused.
+    let other = side.join("other-token");
+    std::fs::write(&other, "cd".repeat(32) + "\n").unwrap();
+    sidecar_toml(&side, &other, "[]");
+    let (code, out) = run(&root, &with_file);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("names another token"), "{out}");
+    assert!(!out.contains(&"cd".repeat(32)), "doctor printed a token");
+
+    // A file the sidecar refuses: its own message. The mission folder is
+    // then the profile's, and a --template-dir is still checked.
+    let profile_missions = root.join("nanoprobe/missions");
+    std::fs::create_dir_all(&profile_missions).unwrap();
+    std::fs::write(profile_missions.join("Caucasus.miz"), CAUCASUS).unwrap();
+    let refused = Missions {
+        sidecar_config: Some(file.clone()),
+        template_dirs: vec![side.join("templates")],
+        ..Missions::default()
+    };
+    for text in [
+        "[agent]\nmap_path = \"m\"\ntoken_path = \"none\"\n".to_owned(),
+        "[nonsense]\n".to_owned(),
+        // A listener off loopback needs a tokens file.
+        format!(
+            "[agent]\nmap_path = \"m\"\ntoken_path = '{}'\n[api]\nlisten = \"0.0.0.0:47311\"\n",
+            root.join("nanoprobe/token").display()
+        ),
+        // A tokens file the sidecar cannot read.
+        format!(
+            "[agent]\nmap_path = \"m\"\ntoken_path = '{}'\n[api]\ntokens_path = \"no-tokens.toml\"\n",
+            root.join("nanoprobe/token").display()
+        ),
+    ] {
+        write(&file, &text);
+        let (code, out) = run(&root, &refused);
+        assert_eq!(code, 1, "{text}\n{out}");
+        assert!(
+            out.contains("fail the sidecar refuses to start"),
+            "{text}\n{out}"
+        );
+        assert!(
+            !out.contains("is a file the sidecar accepts"),
+            "{text}\n{out}"
+        );
+        assert!(
+            out.contains(&format!(
+                "per-map templates in {}",
+                profile_missions.display()
+            )),
+            "{text}\n{out}"
+        );
+        assert!(out.contains("templates is a folder"), "{text}\n{out}");
+    }
+    std::fs::remove_dir_all(&profile_missions).unwrap();
+
+    // A sidecar serves one DCS: with two installed profiles in a prefix the
+    // file has no one profile to be checked against.
+    let prefix = scratch.0.join("wine");
+    for name in ["DCS", "DCS.dcs_serverrelease"] {
+        good(&prefix.join("drive_c/users/abc/Saved Games").join(name));
+    }
+    sidecar_toml(&side, &root.join("nanoprobe/token"), "[]");
+    let place = Where {
+        wine_prefix: Some(prefix),
+        ..Where::default()
+    };
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code = doctor::run(&place, &with_file, &Env::default(), &mut out, &mut err);
+    assert_eq!(code, 2, "{}", String::from_utf8_lossy(&out));
+    assert!(out.is_empty());
+    let err = String::from_utf8(err).unwrap();
+    assert!(
+        err.contains("name the one the sidecar serves with --profile"),
+        "{err}"
+    );
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    assert_eq!(
+        doctor::run(
+            &place,
+            &Missions::default(),
+            &Env::default(),
+            &mut out,
+            &mut err
+        ),
+        0,
+        "{}",
+        String::from_utf8_lossy(&out)
+    );
+}
+
+#[test]
+fn the_template_folders_are_checked() {
+    let scratch = Scratch::new("template-dirs");
+    let dir = scratch.0.join("templates");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = scratch.0.join("file");
+    std::fs::write(&file, "x").unwrap();
+    let check = |dirs: &[&Path]| {
+        let mut report = Report::default();
+        let dirs: Vec<PathBuf> = dirs.iter().map(|d| d.to_path_buf()).collect();
+        doctor::template_dirs(&dirs, &mut report);
+        report
+    };
+
+    let report = check(&[&dir]);
+    assert_clean(&report);
+    assert!(report.has(Mark::Ok, "is a folder"), "{report}");
+    assert!(
+        check(&[&file]).has(Mark::Fail, "is not a folder"),
+        "{}",
+        check(&[&file])
+    );
+    let absent = scratch.0.join("absent");
+    assert!(check(&[&absent]).has(Mark::Fail, "allows no file in it"));
+    assert!(check(&[]).lines.is_empty());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = |m| std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(m)).unwrap();
+        mode(0o775);
+        let report = check(&[&dir]);
+        assert_clean(&report);
+        assert!(
+            report.has(Mark::Note, "the group of the template folder"),
+            "{report}"
+        );
+        mode(0o777);
+        assert!(check(&[&dir]).has(Mark::Fail, "every user of this machine can write"));
+        // A link to a folder is judged by the folder it names.
+        let link = scratch.0.join("link");
+        std::os::unix::fs::symlink(&dir, &link).unwrap();
+        assert!(check(&[&link]).has(Mark::Fail, "every user of this machine can write"));
+        mode(0o755);
+        assert_clean(&check(&[&link]));
+    }
+}
+
+/// The example `sidecar.toml` of each release archive is one the sidecar's
+/// loader accepts once its placeholders are replaced.
+#[test]
+fn the_release_s_example_sidecar_configs_are_accepted() {
+    use nanoprobe_api::sidecar_toml::SidecarToml;
+
+    let scratch = Scratch::new("examples");
+    let token = scratch.0.join("token");
+    std::fs::write(&token, "ab".repeat(32) + "\n").unwrap();
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let read = |name: &str| std::fs::read_to_string(repo.join(name)).unwrap();
+    let token_text = token.to_str().unwrap();
+    // Outside its comments, no placeholder is left.
+    let filled = |text: &str| {
+        text.lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .all(|line| !line.contains('<'))
+    };
+
+    // The Windows archive's: a sidecar beside DCS, every path in the profile.
+    let windows = read("tools/release/sidecar.windows.toml")
+        .replace(r"<DCS profile>\nanoprobe\token", token_text)
+        .replace(
+            "<temp folder of the account that runs DCS>",
+            scratch.0.to_str().unwrap(),
+        )
+        .replace("<DCS profile>", r"C:\Users\me\Saved Games\DCS");
+    assert!(filled(&windows), "a placeholder is left:\n{windows}");
+    let t = SidecarToml::parse(&windows, &scratch.0).expect("the Windows example");
+    assert_eq!(t.api.listen, "127.0.0.1:47311".parse().unwrap());
+    assert_eq!(
+        t.missions.dcs_dir,
+        r"C:\Users\me\Saved Games\DCS\nanoprobe\missions"
+    );
+    assert!(t.api.template_dirs.is_empty());
+    // With Windows line ends, as the archive carries it.
+    SidecarToml::parse(&windows.replace('\n', "\r\n"), &scratch.0).expect("CR LF");
+
+    // The Linux archive's, in deploy/: a sidecar in a container.
+    let linux = read("deploy/sidecar.toml")
+        // The whole quoted value, as a literal string: a Windows host's
+        // path has backslashes, which a basic string would read as escapes.
+        .replace("\"/etc/nanoprobe/agent-token\"", &format!("'{token_text}'"))
+        .replace("<Windows path of the DCS profile>", r"Z:\profile");
+    assert!(
+        linux.contains(token_text),
+        "the token path was not replaced"
+    );
+    assert!(filled(&linux), "a placeholder is left:\n{linux}");
+    let t = SidecarToml::parse(&linux, &scratch.0).expect("the Linux example");
+    // On Windows `/missions` has no drive and resolves under the base.
+    assert!(t.missions.dir.is_some_and(|dir| dir.ends_with("missions")));
 }

@@ -42,7 +42,7 @@
 //! budget. Tolerances are this test's own (docs/results, S20).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use nanoprobe_proto::v1alpha1::{self as pb, EntityState, GroupCategory};
 use nanoprobe_transport::names::{self, Kind};
@@ -376,6 +376,7 @@ pub fn run(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Value, String
     }
     let status0 = api.server_status()?;
     let reports0 = t.agent_reports()?.map_or(0, |r| r.len());
+    let binds0 = t.bind_timings()?.len();
     let t_run = Instant::now();
 
     let mut tally = Tally::default();
@@ -675,6 +676,17 @@ pub fn run(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Value, String
     };
     let tail = crate::sampling::live::tail(&reports);
     let timings = t.timings()?;
+    // The sidecar reports the bind lags once a period: the last move's are
+    // in the next report after it, so the run waits for one more, at most
+    // 30 s. The lag is reported, not judged: it has no owner target.
+    let seen = t.bind_timings()?.len();
+    let waited = Instant::now();
+    let mut binds = t.bind_timings()?;
+    while binds.len() <= seen && waited.elapsed() < Duration::from_secs(30) {
+        std::thread::sleep(Duration::from_millis(500));
+        binds = t.bind_timings()?;
+    }
+    let bind_lag = crate::persistence::bind_lag(&binds, binds0);
     let over_budget = status1
         .commands_over_budget
         .saturating_sub(status0.commands_over_budget);
@@ -696,6 +708,7 @@ pub fn run(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Value, String
         "materialize_per_frame": MATERIALIZE_PER_FRAME,
         "overhead_share_status": status1.overhead_share,
         "sidecar_timings": timings.iter().rev().take(20).collect::<Vec<_>>(),
+        "bind_lag": bind_lag,
     });
     let (tally_moving_turned, tally_hit_out) = (tally.moving_turned, tally.hit_out);
     let mut v = verdict(&tally, extra);

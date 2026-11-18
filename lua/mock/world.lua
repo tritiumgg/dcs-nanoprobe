@@ -1561,7 +1561,8 @@ local function scripting(host, name)
     end
     return {
       coalition = side_of(state, thing.group.country),
-      mission_id = thing.mission_id,
+      -- A string in DCS (LIVE, docs/results/2026-11-13-event-catalogue.md).
+      mission_id = tostring(thing.mission_id),
       object_category = state.Object.Category.UNIT,
       object_id = thing.id,
       unit_name = thing.name,

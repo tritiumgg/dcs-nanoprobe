@@ -53,6 +53,7 @@ const BURST: u16 = 6;
 const INITIATOR: u16 = 2;
 const TARGET: u16 = 3;
 const INITIATOR_CATEGORY: u16 = 17;
+const INITIATOR_MISSION_ID: u16 = 21;
 
 /// Breadcrumb codes for the status block's `crumb` (spec/transport.md,
 /// "Breadcrumbs").
@@ -77,6 +78,10 @@ struct Driver {
     /// player occupies it: a birth, and a takeoff.
     loadout_birth_events: Vec<u32>,
     loadout_takeoff_events: Vec<u32>,
+    /// The slot each connected player holds, by the ID DCS gives the
+    /// connection, without the seat suffix: a birth in one of them is a
+    /// player's unit (spec/sampling.md, "Loadout reads").
+    held_slots: Vec<(u32, String)>,
     /// A frame began and its `finish` has not run.
     open: bool,
     root: PathBuf,
@@ -289,6 +294,7 @@ pub fn start(root: &Path, dcs_version: &str) -> Result<String, String> {
         watch_events: Vec::new(),
         loadout_birth_events: Vec::new(),
         loadout_takeoff_events: Vec::new(),
+        held_slots: Vec::new(),
         open: false,
         link,
         root: root.to_path_buf(),
@@ -1847,7 +1853,15 @@ pub fn event(event: Event, started: Instant) -> u32 {
             event.id,
             field(INITIATOR_CATEGORY),
         ) {
-            d.sampler.mark_loadout(field(INITIATOR), cause);
+            // A birth is a player's when a connected player holds the slot
+            // its mission ID names. The handler reads no more than the
+            // event's own fields.
+            let held = cause == Ammo::BIRTH
+                && event.fields.iter().any(|(c, v)| {
+                    *c == INITIATOR_MISSION_ID
+                        && matches!(v, Lv::String(m) if slot_held(&d.held_slots, m))
+                });
+            d.sampler.mark_loadout(field(INITIATOR), cause, held);
         }
         let max = d.link.outbound().ring().max_payload();
         let mut payload = event.encode();
@@ -1875,7 +1889,45 @@ pub fn event(event: Event, started: Instant) -> u32 {
 /// Queue a `PLAYER` record from the hook's callbacks. An event-class record:
 /// it is held when the ring is full, and a loss is a `GAP`.
 pub fn player(record: &Player) {
-    with(|d| d.link.enqueue(kind::PLAYER as u16, record.encode()));
+    with(|d| {
+        hold_slot(&mut d.held_slots, record);
+        d.link.enqueue(kind::PLAYER as u16, record.encode());
+    });
+}
+
+/// The most connections whose slot the agent keeps. A connection past it
+/// holds no slot here, so its aircraft's loadout is not read.
+const HELD_SLOTS_MAX: usize = 1024;
+
+/// The `player_event` code of a disconnect (spec/records.md, "Codes:
+/// player_event").
+const PLAYER_DISCONNECT: u32 = 2;
+
+/// Keep the slot a player record names for its connection. Every record but
+/// a disconnect carries the slot the player holds now; an empty slot is a
+/// spectator and holds none.
+fn hold_slot(held: &mut Vec<(u32, String)>, record: &Player) {
+    held.retain(|(player, _)| *player != record.player);
+    let slot = base_slot(&record.slot);
+    if record.event != PLAYER_DISCONNECT && !slot.is_empty() && held.len() < HELD_SLOTS_MAX {
+        held.push((record.player, slot.to_owned()));
+    }
+}
+
+/// The slot ID without its `_N` seat suffix: every seat of a multi-crew
+/// aircraft names the one unit.
+fn base_slot(slot: &str) -> &str {
+    match slot.rsplit_once('_') {
+        Some((b, n)) if !b.is_empty() && !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()) => {
+            b
+        }
+        _ => slot,
+    }
+}
+
+/// Whether a connected player holds the slot a birth's mission ID names.
+fn slot_held(held: &[(u32, String)], mission_id: &[u8]) -> bool {
+    held.iter().any(|(_, slot)| slot.as_bytes() == mission_id)
 }
 
 /// Queue a `MENU` record from the shim's menu callback.
@@ -2799,6 +2851,50 @@ mod tests {
             assert_eq!(cause(id, Some(1.0)), None, "event {id}");
         }
         assert_eq!(loadout_cause(&[], &[], 15, Some(1.0)), None);
+    }
+
+    #[test]
+    fn a_birth_is_a_players_when_a_connected_player_holds_its_slot() {
+        let record = |event, player, slot: &str| Player {
+            event,
+            player,
+            side: 2,
+            seat: 0,
+            client: "c".into(),
+            name: "n".into(),
+            slot: slot.into(),
+            text: String::new(),
+        };
+        let mut held = Vec::new();
+        // A connect with no slot is a spectator: no birth is a player's.
+        hold_slot(&mut held, &record(1, 7, ""));
+        assert!(!slot_held(&held, b"8580"));
+        // A slot change holds the slot; the mission ID of the unit born in
+        // it is the slot ID (LIVE, an A-10C_2 in a client slot).
+        hold_slot(&mut held, &record(3, 7, "8580"));
+        assert!(slot_held(&held, b"8580"));
+        assert!(!slot_held(&held, b"1000005"));
+        assert!(!slot_held(&held, b""));
+        // A second seat names the same unit; a chat keeps the slot.
+        hold_slot(&mut held, &record(3, 8, "8580_2"));
+        hold_slot(&mut held, &record(4, 7, "8580"));
+        assert_eq!(held.len(), 2);
+        // The first player leaves the slot: the second still holds it.
+        hold_slot(&mut held, &record(3, 7, ""));
+        assert!(slot_held(&held, b"8580"));
+        // A disconnect drops the slot, whatever slot the record carries.
+        hold_slot(&mut held, &record(2, 8, "8580_2"));
+        assert!(!slot_held(&held, b"8580"));
+        assert!(held.is_empty());
+        // A name with an underscore and no seat number is the whole slot.
+        assert_eq!(base_slot("red_F16"), "red_F16");
+        assert_eq!(base_slot("12_3"), "12");
+        assert_eq!(base_slot("_3"), "_3");
+        // The list is bounded.
+        for player in 0..HELD_SLOTS_MAX as u32 + 5 {
+            hold_slot(&mut held, &record(3, player, "9"));
+        }
+        assert_eq!(held.len(), HELD_SLOTS_MAX);
     }
 
     #[test]

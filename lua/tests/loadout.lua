@@ -1,14 +1,17 @@
 -- The loadout read (spec/sampling.md, "Loadout reads"), with the real shim
 -- and agent on the mock, and `link-probe --record` as the sidecar. A birth
--- or a takeoff event marks its initiator; the next pump asks the unit for its
--- player name and reads `getAmmo` only for a unit a player occupies:
+-- in a slot a connected player holds marks its initiator, and so does that
+-- unit's takeoff; the next pump asks the unit for its player name and reads
+-- `getAmmo`:
 --
 --   a. the birth of a player unit writes exactly one AMMO record, cause 1;
---   b. the birth of an AI unit writes none;
+--   b. the birth of an AI unit writes none, and the unit is never asked for
+--      a player name;
 --   c. a player unit's takeoff writes exactly one more, cause 2, and an AI
 --      unit's takeoff none;
 --   d. many pumps with no event write none: nothing reads ammunition on a
---      period.
+--      period;
+--   e. a birth in a slot no connected player holds is not read.
 
 local S = dofile((arg[0]:match('^(.*/)') or './') .. 'support.lua')
 local root = S.root()
@@ -146,6 +149,13 @@ local function main()
     ammo_calls[self.id_] = (ammo_calls[self.id_] or 0) + 1
     return real_getAmmo(self, ...)
   end)
+  -- And the `getPlayerName` calls: a unit no player occupies gets none.
+  local real_getPlayerName = Unit.getPlayerName
+  local name_calls = {}
+  rawset(Unit, 'getPlayerName', function(self, ...)
+    name_calls[self.id_] = (name_calls[self.id_] or 0) + 1
+    return real_getPlayerName(self, ...)
+  end)
 
   assert(os.execute(string.format(
     '%s --map %s --port %d --token-file %s --seconds 600 --record %s >> %s 2>&1 & echo $! > %s',
@@ -186,8 +196,17 @@ local function main()
       alt = 1000, player = player } } })
     return sim.by_name[name .. '-1']
   end
+  -- The player takes the slot before the unit is born in it, as in DCS, and
+  -- the birth's mission ID is the slot ID (LIVE, spec/records.md). The agent
+  -- marks a birth only in a slot a connected player holds.
+  host:connect(2, { ucid = 'ucid-pilot', name = 'Pilot', side = 2, slot = '' })
+  host:change_slot(2, 2, tostring(sim.next_mission))
   local pilot = add('np-ld-player', 41000, 'Pilot')
+  assert(tostring(pilot.mission_id) == host.players[2].slot, 'the mock gave the unit another mission ID')
   local ai = add('np-ld-ai', 41100, nil)
+  -- (e) A unit a player sits in whose slot no connected player holds: the
+  -- agent has no way to know of the player without a read, and makes none.
+  local stray = add('np-ld-stray', 41200, 'Stray')
 
   -- (a, b) The player's birth writes one AMMO record with cause 1; the AI
   -- unit's birth writes none.
@@ -210,7 +229,10 @@ local function main()
   end
   assert((ammo_calls[pilot.id] or 0) >= 1, 'the shim did not read the player unit\'s ammunition')
   assert((ammo_calls[ai.id] or 0) == 0, 'the shim called getAmmo on the AI unit after its birth')
-  S.ok('a player unit\'s birth gives exactly one AMMO record with cause birth; an AI unit\'s gives none')
+  assert((name_calls[ai.id] or 0) == 0, 'the shim asked the AI unit for a player name after its birth')
+  assert(count(stray.id) == 0 and (name_calls[stray.id] or 0) == 0,
+    'a birth in a slot no connected player holds was read')
+  S.ok('a player unit\'s birth gives exactly one AMMO record with cause birth; an AI unit\'s gives none and costs no read')
 
   -- (c) The takeoffs: one more record for the player, none for the AI unit.
   sim:takeoff(pilot)
@@ -224,6 +246,7 @@ local function main()
   assert(last.cause == TAKEOFF, 'the takeoff read has cause ' .. last.cause)
   assert(count(ai.id) == 0, 'the AI unit has an AMMO record after its takeoff')
   assert((ammo_calls[ai.id] or 0) == 0, 'the shim called getAmmo on the AI unit after its takeoff')
+  assert((name_calls[ai.id] or 0) == 0, 'the shim asked the AI unit for a player name after its takeoff')
   S.ok('a player unit\'s takeoff gives exactly one AMMO record with cause takeoff; an AI unit\'s gives none')
 
   -- (d) Nothing reads ammunition on a period: many pumps, no new record.

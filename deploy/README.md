@@ -6,9 +6,20 @@ The sidecar beside a DCS dedicated server that runs under Wine in a Docker conta
 |---|---|
 | `Dockerfile` | The sidecar's image: the static Linux program `nanoprobe-sidecar` on an empty base |
 | `docker-compose.nanoprobe.yml` | An overlay for your compose file: the sidecar in the DCS container's network namespace, with a shared memory-backed volume for the mapped file |
-| `sidecar.toml` | The sidecar's settings for that overlay (spec/config.md) |
+| `sidecar.toml` | The sidecar's settings for that overlay (`spec/config.md` in the project's repository) |
 
 ## Build the image
+
+The image holds one file, the static program `nanoprobe-sidecar`. No image is published;
+build it where it runs.
+
+From an unpacked Linux release, in the release's folder, which holds the program:
+
+```sh
+docker build -t nanoprobe-sidecar:<version> -f deploy/Dockerfile .
+```
+
+From a source checkout:
 
 ```sh
 mise install
@@ -23,13 +34,21 @@ docker build -t nanoprobe-sidecar:<version> deploy/
    the user and group that run DCS, and the host path of the DCS profile.
    In `sidecar.toml`, set `[missions] dcs_dir` to the profile's `nanoprobe\missions`
    folder as DCS opens it. Save a template for each map your campaigns use in that
-   folder, as `<theater>.miz` ([docs/mission-templates.md](../docs/mission-templates.md)).
+   folder, as `<theater>.miz` (`docs/mission-templates.md` in the project's
+   repository).
    The sidecar writes each campaign's shell under `shells/` in that folder.
    `nanoprobe doctor --wine-prefix <prefix> --theater <theater>`, with one `--theater`
-   for each map, reports a missing template.
+   for each map, reports a missing template. With `--template-dir <host path>` for each
+   folder mounted for `template_dirs`, it also checks those folders.
 2. Put `sidecar.toml` in `./nanoprobe/` beside your compose file, and create
    `./nanoprobe/data/` owned by the DCS user.
-3. In `<profile>/nanoprobe/agent.toml`, set `map_path = 'Z:\nanoprobe-shm\nanoprobe.map'`.
+3. In `<profile>/nanoprobe/agent.toml`, set `map_path` in the `[transport]` table:
+
+   ```toml
+   [transport]
+   map_path = 'Z:\nanoprobe-shm\nanoprobe.map'
+   ```
+
 4. Run `docker compose -f docker-compose.yml -f docker-compose.nanoprobe.yml up -d`.
    The DCS container is created again with the new volume, which restarts DCS.
 
@@ -40,5 +59,5 @@ container's address, a tokens file and its mount, the port published on the DCS
 service, and the `NANOPROBE_TOKEN` the health check then needs.
 
 `docker compose ps` shows the sidecar's health: the verdict of
-`nanoprobe-sidecar health` (spec/config.md). With a `tokens_path`, the health check
-needs an observer token in the container's `NANOPROBE_TOKEN`.
+`nanoprobe-sidecar health` (`spec/config.md` in the repository). With a `tokens_path`,
+the health check needs an observer token in the container's `NANOPROBE_TOKEN`.

@@ -33,8 +33,10 @@ of `A`-`Z`, `a`-`z`, `0`-`9`, `_` and `-`.
 
 Each campaign's mission is a copy of the template with only these values changed: the
 date and start time, the weather, and each named airport's dynamic spawn and hot start
-(spec/persistence.md, "Mission shells"). Airbase owners and warehouse stocks are set
-after the mission starts. Every other part of the template is kept.
+(spec/persistence.md, "Mission shells"). An airport with dynamic spawn turned on gets a
+limited aircraft stock, which the controller sets with `SetWarehouseStock`. Airbase
+owners and warehouse stocks are set after the mission starts. Every other part of the
+template is kept.
 
 ## A campaign's own template
 
@@ -57,6 +59,31 @@ file into the campaign's store. The campaign uses the copy from then on:
 
 A call with no path removes the campaign's template, and the campaign uses the shared
 one again.
+
+## Group templates
+
+The Mission Editor saves a group's layout as a group template: the unit types, each
+unit's offset and heading, and a country. DCS ships its own in one file,
+`MissionEditor/data/scripts/templates.lua` in its install (ED-CODE,
+docs/results/2026-11-18-spawn-template.md). Where the editor saves a user's own, and
+that the file has the same form, is UNVERIFIED; look for a `templates.lua` under
+`MissionEditor` in the Saved Games profile.
+
+A controller makes a group from one with `PutGroupFromTemplate`:
+
+1. The administrator copies the file into a folder that `[missions] template_dirs`
+   lists, as for a campaign's own template. Nothing in the DCS install is changed.
+2. The controller names the file's path as the sidecar opens it, the template's name
+   in the file, and an anchor: the point on the map where the template's origin goes.
+3. Optionally it gives a heading, which turns the whole layout about the anchor; a
+   country, which replaces the template's own; and a label.
+
+The sidecar reads the file once and keeps the group it made. The file can be changed,
+moved or deleted after the call, and the group is changed afterwards with `PutGroup`.
+Only ground groups are built: a template whose `type` is not `"vehicle"` is refused.
+The file is read as data and never run. A file over 1 MiB, or one that holds anything
+but the one `templates = {...}` table of plain values, is refused
+(spec/world.md, "Group templates").
 
 ## Check the templates
 

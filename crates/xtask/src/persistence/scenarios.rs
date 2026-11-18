@@ -107,6 +107,9 @@ pub trait Target {
     fn option_ids(&mut self) -> Result<Value, String>;
     /// The sidecar's commit timing lines so far, this boot and earlier.
     fn timings(&mut self) -> Result<Vec<Value>, String>;
+    /// The sidecar's bind timing lines so far, this boot and earlier: the
+    /// time from a spawn's applied result to each unit's `OBJECT` record.
+    fn bind_timings(&mut self) -> Result<Vec<Value>, String>;
     /// Which points are on land.
     fn on_land(&mut self, points: &[(f64, f64)]) -> Result<Vec<bool>, String>;
     /// The agent's `sampling` reports in its log so far, each report's

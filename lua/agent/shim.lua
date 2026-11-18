@@ -289,7 +289,12 @@ T.unit = T.unit or {}
 -- Each unit row's slot by object ID, for the positions fallback when DCS
 -- lacks getUnitPositionByObjectId.
 T.slot_of = T.slot_of or {}
+-- The births waiting for a pump, a queue: the pump resolves the oldest
+-- first, so a unit's row trails its birth by the births ahead of it and
+-- never by those behind (spec/sampling.md, "Tiers").
 T.births = T.births or {}
+T.birth_head = T.birth_head or 1
+T.birth_tail = T.birth_tail or #T.births
 T.airbases = T.airbases or {}
 -- Births the handler keeps at most (spec/sampling.md, "The frame").
 local MAX_BIRTHS = 4096
@@ -352,8 +357,13 @@ local function forward(event)
     local category = type(data) == 'table' and rawget(data, 'object_category')
     local object = rawget(event, 'initiator')
     -- 1 is a unit, 3 a static, 6 a cargo static (LIVE, S10).
-    if (category == 1 or category == 3 or category == 6) and type(object) == 'table' and #T.births < MAX_BIRTHS then
-      T.births[#T.births + 1] = { object, category == 1 }
+    if
+      (category == 1 or category == 3 or category == 6)
+      and type(object) == 'table'
+      and T.birth_tail - T.birth_head + 1 < MAX_BIRTHS
+    then
+      T.birth_tail = T.birth_tail + 1
+      T.births[T.birth_tail] = { object, category == 1 }
     end
   end
 end
@@ -554,12 +564,18 @@ end
 
 local function births(rows)
   for _ = 1, rows do
-    local n = #T.births
-    if n == 0 then
+    local head = T.birth_head
+    if head > T.birth_tail then
       return
     end
-    local birth = T.births[n]
-    T.births[n] = nil
+    local birth = T.births[head]
+    T.births[head] = nil
+    if head == T.birth_tail then
+      -- Empty: the indexes start over.
+      T.birth_head, T.birth_tail = 1, 0
+    else
+      T.birth_head = head + 1
+    end
     try_read(birth[1], false, birth[2])
     if agent.item() then
       return true
@@ -890,6 +906,7 @@ local RUN = {
 local function reset(gen)
   T.gen = gen
   T.ids, T.objs, T.unit, T.births, T.airbases, T.enum = {}, {}, {}, {}, {}, nil
+  T.birth_head, T.birth_tail = 1, 0
   T.slot_of = {}
   -- The statics CLEAR_DEBRIS destroyed this generation: one a later clear
   -- finds again is not counted again.
@@ -1673,6 +1690,20 @@ local HANDLERS = {
     if not got or type(id) ~= 'number' then
       return DCS_REFUSED, nil, 'the new group has no ID'
     end
+    -- The new units get their rows now, as part of the command: the agent
+    -- writes their OBJECT records before the RESULT, so each is bound when
+    -- the sidecar reads the result (spec/commands.md, "Layout:
+    -- GROUP_SPAWN"). Each read is the births tier's, under its pcall. A unit
+    -- that does not exist yet, or whose read raises, is left to its birth
+    -- or the next enumeration, and the spawn is applied all the same.
+    local listed, units = pcall(g.getUnits, g)
+    if listed and type(units) == 'table' then
+      for i = 1, #units do
+        if type(units[i]) == 'table' then
+          try_read(units[i], false, true)
+        end
+      end
+    end
     return APPLIED, id, nil, ids
   end,
   -- GROUP_ORDER
@@ -2376,7 +2407,7 @@ local function loadouts()
 end
 
 local function pump()
-  local gen, sample = agent.pump_begin(#T.births, #T.airbases, collectgarbage('count'))
+  local gen, sample = agent.pump_begin(T.birth_tail - T.birth_head + 1, #T.airbases, collectgarbage('count'))
   if gen == nil then
     return
   end

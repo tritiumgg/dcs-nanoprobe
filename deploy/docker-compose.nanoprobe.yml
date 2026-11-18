@@ -8,7 +8,7 @@
 #
 # The sidecar shares the DCS container's network namespace, so the agent's
 # loopback handshake reaches it, and one small memory-backed volume, which holds
-# the mapped file both open (spec/transport.md).
+# the mapped file both open (spec/transport.md in the project's repository).
 # Set the agent's `map_path` in `<profile>/nanoprobe/agent.toml` to
 # `Z:\nanoprobe-shm\nanoprobe.map` and restart DCS once.
 

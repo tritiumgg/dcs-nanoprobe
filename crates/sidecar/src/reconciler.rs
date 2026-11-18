@@ -217,6 +217,21 @@ pub struct Binding {
     pub dcs_group: u64,
 }
 
+/// The bind-lag diagnostic's state ([`Reconciler::measure_binds`]).
+#[derive(Debug, Default)]
+struct BindLags {
+    /// The units of applied spawns with no `OBJECT` yet, and when their
+    /// spawn's result was read.
+    waiting: HashMap<EntityId, std::time::Instant>,
+    /// The lags measured and not yet taken, ms.
+    ms: Vec<u64>,
+    /// Of those, the units whose `OBJECT` came after their spawn's result.
+    late: u64,
+}
+
+/// The most units and lags the diagnostic holds.
+const BIND_LAGS_MAX: usize = 65_536;
+
 #[derive(Clone, Debug)]
 struct EnumRun {
     id: u64,
@@ -264,6 +279,9 @@ pub struct Reconciler {
     order_held: HashMap<EntityId, u64>,
     /// An order revision DCS refused; not sent again until it changes.
     order_refused: HashMap<EntityId, u64>,
+    /// A test diagnostic, off unless [`Reconciler::measure_binds`] turned it
+    /// on: the time from a spawn's result to each unit's `OBJECT`.
+    bind_lags: Option<BindLags>,
     /// The revision of each extension the agent holds, as far as answers
     /// show, in this agent boot and campaign.
     ext_held: HashMap<String, u64>,
@@ -462,6 +480,7 @@ impl Reconciler {
             enum_wanted: false,
             order_held: HashMap::new(),
             order_refused: HashMap::new(),
+            bind_lags: None,
             ext_held: HashMap::new(),
             ext_refused: HashMap::new(),
             ext_not_ready: HashMap::new(),
@@ -517,6 +536,59 @@ impl Reconciler {
     /// The binding mirror, by DCS object ID.
     pub fn binding(&self) -> &HashMap<u64, Binding> {
         &self.binding
+    }
+
+    /// Turn on the bind-lag diagnostic: from here on the reconciler times
+    /// each unit from its group's applied spawn to the `OBJECT` record that
+    /// binds it. A test measurement, not part of the product's interface.
+    pub fn measure_binds(&mut self) {
+        self.bind_lags.get_or_insert_with(BindLags::default);
+    }
+
+    /// The bind lags measured since the last call, ms, in the order the
+    /// units were bound; the units of applied spawns still unbound; and, of
+    /// the lags, how many are of a unit whose `OBJECT` came after its
+    /// spawn's result. Empty when the diagnostic is off. A unit that left
+    /// DCS before its `OBJECT` came (its group destroyed, dematerialized or
+    /// dead) stays in the unbound count: the count is an upper bound.
+    pub fn take_bind_lags(&mut self) -> (Vec<u64>, usize, u64) {
+        self.bind_lags.as_mut().map_or((Vec::new(), 0, 0), |b| {
+            (
+                std::mem::take(&mut b.ms),
+                b.waiting.len(),
+                std::mem::take(&mut b.late),
+            )
+        })
+    }
+
+    /// A spawn of `group` was applied: its members that are not bound yet
+    /// wait for their `OBJECT` from now; one bound already has no lag.
+    fn bind_lags_spawned(&mut self, store: &Store, group: EntityId) {
+        let Some(b) = self.bind_lags.as_mut() else {
+            return;
+        };
+        let Some(g) = store.group(group) else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        for &m in &g.members {
+            if self.binding.values().any(|r| r.unit == m) {
+                b.ms.push(0);
+            } else if b.waiting.len() < BIND_LAGS_MAX {
+                b.waiting.insert(m, now);
+            }
+        }
+    }
+
+    /// An `OBJECT` bound `unit`.
+    fn bind_lags_bound(&mut self, unit: EntityId) {
+        if let Some(b) = self.bind_lags.as_mut()
+            && let Some(since) = b.waiting.remove(&unit)
+            && b.ms.len() < BIND_LAGS_MAX
+        {
+            b.ms.push(u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX));
+            b.late += 1;
+        }
     }
 
     /// Whether the reconciler is attached and DCS runs a mission it may
@@ -1056,6 +1128,7 @@ impl Reconciler {
                             store
                                 .transition(id, Trigger::SpawnApplied)
                                 .expect("materializing");
+                            self.bind_lags_spawned(store, id);
                         }
                         if store.all_dead(id) {
                             store.transition(id, Trigger::AllDead).expect("live");
@@ -1370,6 +1443,7 @@ impl Reconciler {
         }
         store.set_missing(row.unit, false);
         store.set_object(row.unit, o.object);
+        self.bind_lags_bound(row.unit);
         store.observe_life0(row.unit, f64::from(o.life0));
         store.observe_coalition(row.group, o.coalition);
         if let Some(c) = store.country_coalition(o.country)

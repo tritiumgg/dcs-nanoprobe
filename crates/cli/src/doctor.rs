@@ -2,14 +2,16 @@
 //!
 //! Each check adds one line, marked `ok`, `fail` or `note`, and every check
 //! runs whatever an earlier one found, since a broken install often has more
-//! than one cause. `doctor` reads the profile and the mission folder, and
-//! writes nothing. Of `autoexec.cfg` it reports only the two `net.*` keys, and
-//! of `dcs.log` only the platform's own lines.
+//! than one cause. `doctor` reads the profile, the mission folder and, when
+//! it is given one, the sidecar's `sidecar.toml`, and writes nothing. Of
+//! `autoexec.cfg` it reports only the two `net.*` keys, and of `dcs.log` only
+//! the platform's own lines.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use nanoprobe_agent_link::config::AgentToml;
+use nanoprobe_api::sidecar_toml::SidecarToml;
 use nanoprobe_install::autoexec::{self, AUTOEXEC};
 use nanoprobe_install::{
     AGENT_TOML, DISABLE, LOADER, LOGS, Local, Profile, RUNNING, TOKEN, VERSION_LUA, VERSIONS,
@@ -569,6 +571,130 @@ pub struct Missions {
     pub dir: Option<PathBuf>,
     /// `--theater`, once per theater: a template that must be there.
     pub theaters: Vec<String>,
+    /// `--sidecar-config`: the sidecar's `sidecar.toml`, on a machine that
+    /// sees the paths in it as the sidecar does.
+    pub sidecar_config: Option<PathBuf>,
+    /// `--template-dir`, once per folder: a folder `[missions]
+    /// template_dirs` lists, as this machine sees it.
+    pub template_dirs: Vec<PathBuf>,
+}
+
+/// Check `--sidecar-config` with the sidecar's own parser, and compare the
+/// token it names with the profile's. Returns what the mission checks use:
+/// each `--missions` and `--template-dir` given stands, and the file fills
+/// in the rest. `None` for the mission folder's check means the file leaves
+/// `[missions] dir` empty, so there is no folder to check.
+fn sidecar_config(root: &Path, missions: &Missions, report: &mut Report) -> Option<Missions> {
+    let Some(path) = &missions.sidecar_config else {
+        return Some(missions.clone());
+    };
+    // What the sidecar checks before it serves: the file, then the
+    // listener's tokens (a file it can read, or a loopback address).
+    let read = SidecarToml::read(path).and_then(|file| {
+        nanoprobe_api::server::tokens_for(&file.api)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(file)
+    });
+    let file = match read {
+        Ok(file) => file,
+        Err(e) => {
+            report.fail(format!("the sidecar refuses to start: {e}"));
+            return Some(missions.clone());
+        }
+    };
+    report.ok(format!("{} is a file the sidecar accepts", path.display()));
+    // A profile without a token already failed its own check.
+    if let Ok(token) = std::fs::read_to_string(root.join(TOKEN))
+        && token.trim() != file.link.token
+    {
+        report.fail(format!(
+            "[agent] token_path in {} names another token than this profile's {TOKEN}: the agent refuses the sidecar",
+            path.display()
+        ));
+    }
+    // The sidecar starts with one of the two set, and then refuses every
+    // activation and reload.
+    if file.missions.dir.is_some() == file.missions.dcs_dir.is_empty() {
+        report.fail(
+            "[missions] dir and dcs_dir are not both set: no campaign can be activated or reloaded",
+        );
+    }
+    let mut used = missions.clone();
+    if used.template_dirs.is_empty() {
+        used.template_dirs = file.api.template_dirs;
+        if used.template_dirs.is_empty() {
+            report.note(
+                "[missions] template_dirs is empty: every call that names a template file by its path is refused",
+            );
+        }
+    }
+    if used.dir.is_none() {
+        used.dir = file.missions.dir;
+        if used.dir.is_none() {
+            report.note(
+                "[missions] dir is empty: no campaign can be activated or reloaded, and the per-map templates are not checked",
+            );
+            template_dirs(&used.template_dirs, report);
+            return None;
+        }
+    }
+    Some(used)
+}
+
+/// The folders `[missions] template_dirs` lists (spec/config.md): each must
+/// resolve to a folder, or it allows nothing. On Unix one that every user
+/// can write in fails, since a controller can make the sidecar read any file
+/// there; one its group can write in is a note. Windows access lists are not
+/// read.
+pub fn template_dirs(dirs: &[PathBuf], report: &mut Report) {
+    for dir in dirs {
+        let shown = dir.display();
+        let meta = std::fs::canonicalize(dir).and_then(std::fs::metadata);
+        match meta {
+            Err(e) => report.fail(format!(
+                "the template folder {shown}: {e}; the sidecar allows no file in it"
+            )),
+            Ok(meta) if !meta.is_dir() => report.fail(format!(
+                "the template folder {shown} is not a folder: the sidecar allows no file in it"
+            )),
+            Ok(meta) => match writers(&meta) {
+                Writers::Everyone => report.fail(format!(
+                    "every user of this machine can write in the template folder {shown}: a controller can make the sidecar read any file put there; leave write access to the administrator"
+                )),
+                Writers::Group => {
+                    report.ok(format!("the template folder {shown} is a folder"));
+                    report.note(format!(
+                        "the group of the template folder {shown} can write in it: a controller can make the sidecar read any file put there"
+                    ));
+                }
+                Writers::Owner => report.ok(format!("the template folder {shown} is a folder")),
+            },
+        }
+    }
+}
+
+/// Who can write in a folder, by its mode bits. Off Unix nothing is read, and
+/// every folder counts as its owner's.
+#[cfg_attr(not(unix), expect(dead_code))]
+enum Writers {
+    Owner,
+    Group,
+    Everyone,
+}
+
+#[cfg(unix)]
+fn writers(meta: &std::fs::Metadata) -> Writers {
+    use std::os::unix::fs::MetadataExt as _;
+    match meta.mode() {
+        mode if mode & 0o002 != 0 => Writers::Everyone,
+        mode if mode & 0o020 != 0 => Writers::Group,
+        _ => Writers::Owner,
+    }
+}
+
+#[cfg(not(unix))]
+fn writers(_meta: &std::fs::Metadata) -> Writers {
+    Writers::Owner
 }
 
 /// The per-map templates: each `<theater>.miz` in the mission folder must
@@ -661,7 +787,8 @@ pub fn is_theater_name(theater: &str) -> bool {
 }
 
 /// Run doctor on every target. Returns the exit code: 0 when nothing
-/// failed, 1 when a check failed, 2 when there was nothing to check.
+/// failed, 1 when a check failed, 2 when there was nothing to check, or when
+/// `--sidecar-config` is given and more than one profile is found.
 pub fn run(
     place: &Where,
     missions: &Missions,
@@ -676,13 +803,25 @@ pub fn run(
             return 2;
         }
     };
+    // A sidecar serves one DCS, so its file is checked against one profile.
+    if missions.sidecar_config.is_some() && targets.len() > 1 {
+        let _ = writeln!(
+            err,
+            "nanoprobe doctor: --sidecar-config is checked against one profile, and {} hold nanoprobe; name the one the sidecar serves with --profile",
+            targets.len()
+        );
+        return 2;
+    }
     let mut failed = false;
     for (i, found) in targets.iter().enumerate() {
         if i > 0 {
             let _ = writeln!(out);
         }
         let mut report = check(found);
-        templates(&found.path, missions, &mut report);
+        if let Some(used) = sidecar_config(&found.path, missions, &mut report) {
+            templates(&found.path, &used, &mut report);
+            template_dirs(&used.template_dirs, &mut report);
+        }
         failed |= report.failed();
         let _ = write!(out, "{report}");
     }

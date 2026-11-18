@@ -936,6 +936,10 @@ pub struct Sampler {
     /// The marks the last [`Sampler::loadouts`] handed out. A read whose
     /// `AMMO` the ring dropped puts its mark back.
     loadouts_handed: Vec<LoadoutMark>,
+    /// The units born in a slot a player held: the only units a loadout
+    /// mark is kept for. A unit leaves with its row, or with a mark dropped
+    /// while it has no row.
+    occupied: HashSet<u64>,
     /// Oldest loadout marks dropped because the list was full.
     loadouts_dropped: u64,
     /// Loadout reads made, since start: one per `ammo` call for a unit row.
@@ -1190,6 +1194,7 @@ impl Sampler {
             life_marks: Vec::new(),
             loadouts: Vec::new(),
             loadouts_handed: Vec::new(),
+            occupied: HashSet::new(),
             loadouts_dropped: 0,
             loadout_reads: 0,
             scratch: Vec::new(),
@@ -1315,6 +1320,7 @@ impl Sampler {
         self.life_marks.clear();
         self.loadouts.clear();
         self.loadouts_handed.clear();
+        self.occupied.clear();
         self.idle_units = 0;
         self.cargo = 0;
         self.idle_cargo = 0;
@@ -1871,31 +1877,42 @@ impl Sampler {
     /// A birth or a takeoff event named `object` as its initiator: the next
     /// pump reads the unit's ammunition if a player occupies it
     /// (spec/sampling.md, "Loadout reads"). `cause` is [`Ammo::BIRTH`] or
-    /// [`Ammo::TAKEOFF`]. A birth's row does not exist yet, so the mark keeps
-    /// the object ID and waits for the row. An object whose row is not a unit
-    /// is ignored; a second event for an object already marked replaces its
-    /// cause.
-    pub fn mark_loadout(&mut self, object: Option<f64>, cause: u32) {
+    /// [`Ammo::TAKEOFF`]. Only a unit a player occupies is marked: a birth
+    /// counts when `slot_held` says a connected player holds the slot the
+    /// unit was born in, and a takeoff when the unit's birth counted. Any
+    /// other unit gets no mark and costs the pump nothing. A birth's row
+    /// does not exist yet, so the mark keeps the object ID and waits for the
+    /// row. An object whose row is not a unit is ignored; a second event for
+    /// an object already marked replaces its cause.
+    pub fn mark_loadout(&mut self, object: Option<f64>, cause: u32, slot_held: bool) {
         let Some(object) = object.filter(|o| (0.0..9.007_199_254_740_992e15).contains(o)) else {
             return;
         };
         let object = object as u64;
-        if self
-            .by_object
-            .get(&object)
-            .and_then(|&slot| self.rows[slot as usize].as_ref())
-            .is_some_and(|row| !row.unit())
-        {
+        // The gates come first: the birth or the takeoff of a unit no player
+        // occupies returns here, before any lookup in the table.
+        if cause == Ammo::BIRTH {
+            if !slot_held || self.has_other_row(object) {
+                return;
+            }
+            // The set holds one entry per player aircraft that has a row or
+            // a birth mark waiting for one: an entry leaves with its row, or
+            // with a mark dropped while no row exists. Past the marks' own
+            // bound a birth is still read; only its takeoff read is lost.
+            if self.occupied.len() < LOADOUT_MARKS_MAX {
+                self.occupied.insert(object);
+            }
+        } else if !self.occupied.contains(&object) || self.has_other_row(object) {
             return;
         }
         if let Some(mark) = self.loadouts.iter_mut().find(|m| m.object == object) {
             mark.cause = cause;
         } else {
-            // A full list drops its oldest mark: a player's slot-in comes
-            // after the AI births of a large spawn.
+            // A full list drops its oldest mark.
             if self.loadouts.len() >= LOADOUT_MARKS_MAX {
-                self.loadouts.remove(0);
+                let oldest = self.loadouts.remove(0);
                 self.loadouts_dropped += 1;
+                self.forget_unborn(oldest.object);
             }
             self.loadouts.push(LoadoutMark {
                 object,
@@ -1948,6 +1965,11 @@ impl Sampler {
     /// waits `LOADOUT_WAIT_PUMPS` pumps with no birth pending is dropped.
     /// Nothing when the pump is not sampling.
     pub fn loadouts(&mut self, out: &mut Vec<(u32, u32)>) -> usize {
+        self.loadouts_at(out, Instant::now())
+    }
+
+    /// [`Sampler::loadouts`] at `now`.
+    pub fn loadouts_at(&mut self, out: &mut Vec<(u32, u32)>, now: Instant) -> usize {
         out.clear();
         self.loadouts_handed.clear();
         if !self.sampling || self.loadouts.is_empty() || self.births > 0 {
@@ -1955,7 +1977,7 @@ impl Sampler {
         }
         let cost = self.tiers[Tier::Vitals.index()].cost;
         let afford = if cost > 0.0 {
-            (self.remaining_us(Instant::now()).max(0.0) / cost) as usize
+            (self.remaining_us(now).max(0.0) / cost) as usize
         } else {
             LOADOUTS_PER_PUMP
         };
@@ -1974,6 +1996,8 @@ impl Sampler {
                     mark.waits += 1;
                     if mark.waits <= LOADOUT_WAIT_PUMPS && !self.has_other_row(mark.object) {
                         kept.push(mark);
+                    } else {
+                        self.forget_unborn(mark.object);
                     }
                 }
             }
@@ -1981,6 +2005,21 @@ impl Sampler {
         self.loadouts = kept;
         self.checked |= !out.is_empty();
         out.len()
+    }
+
+    /// A mark of `object` was dropped: unless a unit row holds the object,
+    /// it is no player's unit any more, so a later takeoff of that object ID
+    /// is not read. A unit row, suspect or not, keeps its entry until the
+    /// row leaves.
+    fn forget_unborn(&mut self, object: u64) {
+        let unit_row = self
+            .by_object
+            .get(&object)
+            .and_then(|&slot| self.rows[slot as usize].as_ref())
+            .is_some_and(|row| row.unit());
+        if !unit_row {
+            self.occupied.remove(&object);
+        }
     }
 
     /// Whether the object has a row that is not a unit, a static. A unit row
@@ -2177,6 +2216,7 @@ impl Sampler {
         self.life_marks.retain(|s| *s != slot);
         self.loadouts.retain(|m| m.object != object);
         self.loadouts_handed.retain(|m| m.object != object);
+        self.occupied.remove(&object);
         self.put(link, kind::OBJECT_GONE as u16, gone_record.encode());
         self.resolve_miss(link, object, false);
         slot + 1

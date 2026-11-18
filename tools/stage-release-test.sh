@@ -1,8 +1,9 @@
 #!/bin/sh
 # Check the archives tools/stage-release.sh wrote: each holds exactly the
-# expected files, the programs are a Windows and a Linux executable, both
-# carry the same payload, the schema is staged (tools/stage-schema-test.sh),
-# and SHA256SUMS matches.
+# files spec/install.md lists, the programs are Windows executables and static
+# Linux ones, both carry the same payload, the texts are the repository's, the
+# Linux scripts pass on their arguments and the program's exit code, the
+# schema is staged (tools/stage-schema-test.sh), and SHA256SUMS matches.
 #
 # Usage: sh tools/stage-release-test.sh [out-dir]
 # POSIX sh. Needs unzip, tar, and sha256sum or shasum.
@@ -38,9 +39,17 @@ payload() {
         "$1/payload/lua/shim.lua" "$1/payload/nanoprobe-hook.lua" "$1/payload/nanoprobe_agent.dll"
 }
 
-{ payload "$WIN"; printf '%s\n' "$WIN/install.cmd" "$WIN/nanoprobe.exe" "$WIN/uninstall.cmd"; } |
-    LC_ALL=C sort >"$TMP/win.want"
-{ payload "$LINUX"; printf '%s\n' "$LINUX/nanoprobe"; } | LC_ALL=C sort >"$TMP/linux.want"
+{
+    payload "$WIN"
+    printf '%s\n' "$WIN/README.txt" "$WIN/install.cmd" "$WIN/nanoprobe-sidecar.exe" \
+        "$WIN/nanoprobe.exe" "$WIN/sidecar.toml" "$WIN/uninstall.cmd"
+} | LC_ALL=C sort >"$TMP/win.want"
+{
+    payload "$LINUX"
+    printf '%s\n' "$LINUX/README.txt" "$LINUX/install.sh" "$LINUX/nanoprobe" \
+        "$LINUX/nanoprobe-sidecar" "$LINUX/uninstall.sh"
+    (cd "$ROOT" && git ls-files -- deploy) | sed "s|^|$LINUX/|"
+} | LC_ALL=C sort >"$TMP/linux.want"
 
 [ -f "$OUT/$WIN.zip" ] || { printf 'no %s. Run: mise run package\n' "$OUT/$WIN.zip" >&2; exit 2; }
 [ -f "$OUT/$LINUX.tar.gz" ] || { printf 'no %s. Run: mise run package\n' "$OUT/$LINUX.tar.gz" >&2; exit 2; }
@@ -63,16 +72,63 @@ mkdir "$TMP/win" "$TMP/linux"
 magic() {
     od -An -tx1 -N4 "$1" | tr -d ' \n'
 }
-case $(magic "$TMP/win/$WIN/nanoprobe.exe") in
-    4d5a*) pass "nanoprobe.exe is a Windows executable" ;;
-    *) fail "nanoprobe.exe is not a Windows executable" ;;
-esac
-case $(magic "$TMP/linux/$LINUX/nanoprobe") in
-    7f454c46) pass "nanoprobe is a Linux executable" ;;
-    *) fail "nanoprobe is not an ELF executable" ;;
-esac
-[ -x "$TMP/linux/$LINUX/nanoprobe" ] && pass "nanoprobe is executable" ||
-    fail "nanoprobe has no execute permission"
+for name in nanoprobe nanoprobe-sidecar; do
+    case $(magic "$TMP/win/$WIN/$name.exe") in
+        4d5a*) pass "$name.exe is a Windows executable" ;;
+        *) fail "$name.exe is not a Windows executable" ;;
+    esac
+    case $(magic "$TMP/linux/$LINUX/$name") in
+        7f454c46) pass "$name is a Linux executable" ;;
+        *) fail "$name is not an ELF executable" ;;
+    esac
+    # A static program names no loader. A dynamic one holds the loader's path,
+    # ld-linux or ld-musl, in its interpreter header.
+    if LC_ALL=C grep -qa -e '/ld-linux' -e '/ld-musl' "$TMP/linux/$LINUX/$name"; then
+        fail "$name names a dynamic loader: it is not static"
+    else
+        pass "$name is static"
+    fi
+done
+for name in nanoprobe nanoprobe-sidecar install.sh uninstall.sh; do
+    [ -x "$TMP/linux/$LINUX/$name" ] && pass "$name is executable" ||
+        fail "$name has no execute permission"
+done
+
+# The texts are the repository's: the Windows ones with Windows line ends.
+uncr() {
+    tr -d '\r' <"$1"
+}
+uncr "$TMP/win/$WIN/README.txt" | cmp -s - "$ROOT/tools/release/README.windows.txt" &&
+    uncr "$TMP/win/$WIN/sidecar.toml" | cmp -s - "$ROOT/tools/release/sidecar.windows.toml" &&
+    [ "$(LC_ALL=C grep -c "$(printf '\r')\$" "$TMP/win/$WIN/README.txt")" = \
+        "$(wc -l <"$ROOT/tools/release/README.windows.txt" | tr -d ' ')" ] &&
+    pass "the Windows README.txt and sidecar.toml are the repository's, with Windows line ends" ||
+    fail "the Windows README.txt or sidecar.toml differs from tools/release/"
+cmp -s "$TMP/linux/$LINUX/README.txt" "$ROOT/tools/release/README.linux.txt" &&
+    pass "the Linux README.txt is the repository's" || fail "the Linux README.txt differs"
+(cd "$ROOT" && git ls-files -- deploy) | while IFS= read -r f; do
+    cmp -s "$ROOT/$f" "$TMP/linux/$LINUX/$f" || { printf 'FAIL  %s differs from the repository\n' "$f" >&2; exit 1; }
+done && pass "deploy/ is the repository's" || FAILED=1
+
+# The Linux scripts run the program beside them. A stand-in program shows
+# that the arguments, spaces included, and the exit code pass through.
+mkdir "$TMP/scripts"
+cp "$TMP/linux/$LINUX/install.sh" "$TMP/linux/$LINUX/uninstall.sh" "$TMP/scripts/"
+cat >"$TMP/scripts/nanoprobe" <<'STUB'
+#!/bin/sh
+for arg do printf '[%s]' "$arg"; done
+exit 7
+STUB
+chmod 0755 "$TMP/scripts/nanoprobe"
+for verb in install uninstall; do
+    code=0
+    got=$(cd / && "$TMP/scripts/$verb.sh" --wine-prefix "a b" --profile=c) || code=$?
+    if [ "$got" = "[$verb][--wine-prefix][a b][--profile=c]" ] && [ "$code" = 7 ]; then
+        pass "$verb.sh passes on its arguments and the program's exit code"
+    else
+        fail "$verb.sh ran \`$got\` and exited $code"
+    fi
+done
 
 if (cd "$TMP/win/$WIN" && find payload LICENSE -type f | LC_ALL=C sort | xargs cat) >"$TMP/w" &&
     (cd "$TMP/linux/$LINUX" && find payload LICENSE -type f | LC_ALL=C sort | xargs cat) >"$TMP/l" &&
@@ -101,6 +157,29 @@ else
     fail "no agent PDB at $PDB"
 fi
 
+# A release is public: no staged file may name the machine that built it. The
+# builder's home folder holds the checkout's, cargo's and the toolchain's
+# paths, which rustc and the linker would write into the programs, the DLL
+# and the PDB (tools/remap.sh).
+LEAKS=0
+for f in $(find "$TMP/win" "$TMP/linux" -type f | LC_ALL=C sort); do
+    for path in "$ROOT" "$HOME"; do
+        n=$(LC_ALL=C grep -acF -- "$path" "$f" || true)
+        if [ "$n" != 0 ]; then
+            fail "${f#"$TMP"/} names this machine's path $path on $n lines"
+            LEAKS=1
+        fi
+    done
+done
+[ "$LEAKS" = 0 ] && pass "no file in an archive names this machine's home folder or checkout"
+# The PDB is the exception, and the test says so on every run: the linker
+# writes the absolute path of each object file and library it read, and of
+# its own command line, and rustc's remapping does not reach those. A PDB
+# built under a person's home folder names that folder.
+n=$(LC_ALL=C grep -acF -- "$HOME" "$PDB" || true)
+[ "$n" = 0 ] && pass "the staged PDB does not name this machine's home folder" ||
+    printf 'note  the staged PDB names the home folder of this machine on %s lines: the object and library paths the linker wrote. Build the release where those paths may be public, or do not publish the PDB.\n' "$n"
+
 cmp -s "$ROOT/lua/hook/nanoprobe-hook.lua" "$TMP/linux/$LINUX/payload/nanoprobe-hook.lua" ||
     fail "payload/nanoprobe-hook.lua is not lua/hook/nanoprobe-hook.lua"
 
@@ -109,6 +188,10 @@ cmp -s "$ROOT/lua/hook/nanoprobe-hook.lua" "$TMP/linux/$LINUX/payload/nanoprobe-
 PROFILE="$TMP/prefix/drive_c/users/abc/Saved Games/DCS.dcs_serverrelease"
 mkdir -p "$PROFILE/Config"
 printf 'options.example = 1\n' >"$PROFILE/Config/autoexec.cfg"
+# A sidecar's folder beside the profile: install and uninstall leave it alone.
+mkdir -p "$TMP/prefix/drive_c/users/abc/Saved Games/sidecar/campaigns"
+printf 'store\n' >"$TMP/prefix/drive_c/users/abc/Saved Games/sidecar/campaigns/store.sqlite"
+cp "$ROOT/deploy/sidecar.toml" "$TMP/prefix/drive_c/users/abc/Saved Games/sidecar/sidecar.toml"
 # Each path whole, with its mode and size: paths here hold spaces.
 snapshot() {
     (cd "$TMP/prefix" && find . -print | LC_ALL=C sort | while IFS= read -r p; do
@@ -127,9 +210,9 @@ else
 fi
 snapshot >"$TMP/after"
 if cmp -s "$TMP/before" "$TMP/after" && [ "$(cat "$PROFILE/Config/autoexec.cfg")" = "options.example = 1" ]; then
-    pass "uninstall left the profile as it was"
+    pass "uninstall left the profile, and a sidecar's folder beside it, as they were"
 else
-    fail "uninstall left the profile changed"
+    fail "uninstall left the profile or the sidecar's folder changed"
     diff "$TMP/before" "$TMP/after" >&2 || true
 fi
 
