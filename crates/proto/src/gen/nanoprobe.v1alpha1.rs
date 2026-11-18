@@ -3819,9 +3819,12 @@ pub struct SetCampaignTemplateRequest {
     /// name it exactly.
     #[prost(string, tag = "2")]
     pub theater: ::prost::alloc::string::String,
-    /// The .miz file, at most 16 MiB. Empty removes the campaign's template.
-    #[prost(bytes = "vec", tag = "3")]
-    pub miz: ::prost::alloc::vec::Vec<u8>,
+    /// The .miz file, at most 16 MiB, as the sidecar opens it: an absolute
+    /// path that resolves, after symbolic links and `..`, to a file inside a
+    /// folder that \[missions\] template_dirs lists (spec/config.md). Empty
+    /// removes the campaign's template.
+    #[prost(string, tag = "4")]
+    pub path: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SetCampaignTemplateResponse {
@@ -4288,9 +4291,11 @@ pub mod campaign_service_client {
             self.inner.unary(req, path, codec).await
         }
         /// Set or remove the campaign's own template for one of its theaters: a
-        /// mission the author saved in the Mission Editor, used in place of the
-        /// shared one in \[missions\] dir. Its units stay unmanaged. Kept in the
-        /// campaign's store, so a backup or a copy of the campaign carries it.
+        /// mission saved in the Mission Editor, used in place of the shared one in
+        /// \[missions\] dir. Its units stay unmanaged. The sidecar copies the file
+        /// into the campaign's store when the call is made, so a backup or a copy
+        /// of the campaign carries it, and a later edit of the file takes effect
+        /// when the template is set again.
         pub async fn set_campaign_template(
             &mut self,
             request: impl tonic::IntoRequest<super::SetCampaignTemplateRequest>,
@@ -4423,9 +4428,11 @@ pub mod campaign_service_server {
             tonic::Status,
         >;
         /// Set or remove the campaign's own template for one of its theaters: a
-        /// mission the author saved in the Mission Editor, used in place of the
-        /// shared one in \[missions\] dir. Its units stay unmanaged. Kept in the
-        /// campaign's store, so a backup or a copy of the campaign carries it.
+        /// mission saved in the Mission Editor, used in place of the shared one in
+        /// \[missions\] dir. Its units stay unmanaged. The sidecar copies the file
+        /// into the campaign's store when the call is made, so a backup or a copy
+        /// of the campaign carries it, and a later edit of the file takes effect
+        /// when the template is set again.
         async fn set_campaign_template(
             &self,
             request: tonic::Request<super::SetCampaignTemplateRequest>,

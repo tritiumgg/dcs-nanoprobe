@@ -585,9 +585,10 @@ fn with_map(
             "[agent]\nmap_path = \"/nanoprobe-shm/nanoprobe.map\"\nhandshake = \"127.0.0.1:{port}\"\n\
              token_path = \"/etc/nanoprobe/agent-token\"\n\n[api]\nlisten = \"0.0.0.0:{API_PORT}\"\n\
              tokens_path = \"/etc/nanoprobe/tokens.toml\"\nlease_ttl_s = {LEASE_TTL_S}\n\n[store]\ndir = \"/var/lib/nanoprobe/campaigns\"\n\n\
-             [missions]\ndir = \"/missions\"\ndcs_dir = '{dcs_missions}'\n\n\
+             [missions]\ndir = \"/missions\"\ndcs_dir = '{dcs_missions}'\ntemplate_dirs = [\"{own}\"]\n\n\
              [health]\nheartbeat_stale_s = {stale}\n",
             stale = crate::shell_live::HEARTBEAT_STALE_S,
+            own = crate::shell_live::TEMPLATE_DIR,
         );
         upload(host, dir, "sidecar.toml", toml.as_bytes(), "644")?;
         println!("== nanoprobe-sidecar in its container");

@@ -152,10 +152,18 @@ mod tests {
             outcome: None,
         };
         let mut s = c.create(CampaignId(3), record).expect("create");
+        // The campaign's own template is in the store, so the backup holds
+        // it and the restore brings it back.
+        s.set_template("Caucasus", Some(b"miz".to_vec()));
         s.commit().expect("commit");
         c.backup(CampaignId(3), 1, s.revision(), BackupReason::Manual)
             .expect("backup");
+        s.set_template("Caucasus", None);
+        s.commit().expect("commit");
         s.close().expect("close");
+        let template =
+            || nanoprobe_sidecar::store::template_of(&c.store_path(CampaignId(3)), "Caucasus");
+        assert_eq!(template().expect("read"), None);
         drop(s);
         let o = Options {
             store: d.path().to_path_buf(),
@@ -175,5 +183,6 @@ mod tests {
             String::from_utf8_lossy(&err)
         );
         assert!(String::from_utf8_lossy(&out).contains("restored backup 1 of campaign 3"));
+        assert_eq!(template().expect("read").as_deref(), Some(&b"miz"[..]));
     }
 }

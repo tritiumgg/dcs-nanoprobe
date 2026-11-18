@@ -2075,10 +2075,8 @@ impl Inner {
         Ok(())
     }
 
-    /// Set or remove campaign `id`'s own template for `theater` (plan
-    /// revision 35). An empty `miz` removes it.
-    pub fn set_template(&mut self, id: u64, theater: &str, miz: &[u8]) -> Result<(), Status> {
-        use nanoprobe_sidecar::shell;
+    /// Refuse a `theater` that is not one of campaign `id`'s.
+    pub fn template_theater(&self, id: u64, theater: &str) -> Result<(), Status> {
         let slot = self.campaigns.get(&id).expect("resolved");
         if !slot.meta.theaters.iter().any(|t| t == theater) {
             return Err(crate::convert::invalid(
@@ -2086,29 +2084,43 @@ impl Inner {
                 format!("{theater:?} is not one of the campaign's theaters"),
             ));
         }
-        if !miz.is_empty() {
+        Ok(())
+    }
+
+    /// Set or remove campaign `id`'s own template for `theater` (plan
+    /// revision 35). `miz` is the bytes read from the file the call named
+    /// (`template_file::read`), which the store keeps as the campaign's
+    /// copy; `None` removes the template. A refusal changes nothing.
+    pub fn set_template(
+        &mut self,
+        id: u64,
+        theater: &str,
+        miz: Option<Vec<u8>>,
+    ) -> Result<(), Status> {
+        use nanoprobe_sidecar::shell;
+        self.template_theater(id, theater)?;
+        if let Some(miz) = &miz {
             if miz.len() > shell::TEMPLATE_MAX {
                 return Err(crate::convert::invalid(
-                    "miz",
+                    "path",
                     format!("a template is at most {} bytes", shell::TEMPLATE_MAX),
                 ));
             }
             self.space_check(id, miz.len() as u64)?;
-            shell::check(miz, theater).map_err(|e| crate::convert::invalid("miz", e))?;
-            let names = shell::placed_names(miz).map_err(|e| crate::convert::invalid("miz", e))?;
+            shell::check(miz, theater).map_err(|e| crate::convert::invalid("path", e))?;
+            let names = shell::placed_names(miz).map_err(|e| crate::convert::invalid("path", e))?;
             if let Some(n) = names
                 .iter()
                 .find(|n| nanoprobe_transport::names::parse(n).is_some())
             {
                 return Err(crate::convert::invalid(
-                    "miz",
+                    "path",
                     format!("the template places {n:?}, which reads as a platform name"),
                 ));
             }
         }
         let slot = self.campaigns.get_mut(&id).expect("resolved");
-        slot.store
-            .set_template(theater, (!miz.is_empty()).then(|| miz.to_vec()));
+        slot.store.set_template(theater, miz);
         slot.meta.templates = slot.store.template_theaters().map(str::to_owned).collect();
         Ok(())
     }
@@ -4338,7 +4350,7 @@ mod tests {
             assert_eq!(nanoprobe_proto::errors::reason(&e), ErrorReason::SpaceLow);
         };
         low(g.space_check(1, 0));
-        low(g.set_template(1, "Caucasus", TEMPLATE));
+        low(g.set_template(1, "Caucasus", Some(TEMPLATE.to_vec())));
         // A closed store is read through a copy, which needs room too.
         g.suspend(&cfg, 1, None);
         g.settle(Some(1));
@@ -4445,11 +4457,11 @@ mod tests {
         g.add_campaign(&cfg, meta, "Caucasus".into()).expect("add");
         let code = |r: Result<(), Status>| r.expect_err("refused").code();
         assert_eq!(
-            code(g.set_template(1, "Syria", TEMPLATE)),
+            code(g.set_template(1, "Syria", Some(TEMPLATE.to_vec()))),
             Code::InvalidArgument
         );
         assert_eq!(
-            code(g.set_template(1, "Caucasus", b"not a zip")),
+            code(g.set_template(1, "Caucasus", Some(b"not a zip".to_vec()))),
             Code::InvalidArgument
         );
         // A placed unit whose name reads as a platform name.
@@ -4480,7 +4492,7 @@ mod tests {
         }
         let named = w.finish().expect("zip").into_inner();
         let e = g
-            .set_template(1, "Caucasus", &named)
+            .set_template(1, "Caucasus", Some(named))
             .expect_err("platform name");
         assert!(e.message().contains("platform name"), "{}", e.message());
 
@@ -4497,7 +4509,7 @@ mod tests {
             },
         )
         .expect("own");
-        g.set_template(1, "Caucasus", &own).expect("set");
+        g.set_template(1, "Caucasus", Some(own)).expect("set");
         assert_eq!(g.campaigns[&1].meta.templates, ["Caucasus"]);
         g.activate(&cfg, 1).expect("activate");
         let path = missions
@@ -4516,7 +4528,7 @@ mod tests {
         let d = shell::lua::parse(&mission).expect("parse");
         let w = d.root.get(&shell::lua::Key::s("weather")).expect("weather");
         assert_eq!(shell::lua::value(&mission, w), Some(weather));
-        g.set_template(1, "Caucasus", b"").expect("remove");
+        g.set_template(1, "Caucasus", None).expect("remove");
         assert!(g.campaigns[&1].meta.templates.is_empty());
     }
 
@@ -5414,6 +5426,343 @@ mod tests {
             .expect("campaign")
             .id;
         assert_eq!(again, first);
+        let _ = stop.send(());
+        task.await.expect("join").expect("serve");
+    }
+
+    /// The weather a shell or a template carries, as the shell writer reads it.
+    fn weather_of(miz: &[u8]) -> Option<nanoprobe_transport::codec::Lv> {
+        use nanoprobe_sidecar::shell;
+        let mission = shell::members(miz)
+            .expect("members")
+            .into_iter()
+            .find(|(n, _)| n == "mission")
+            .expect("mission")
+            .1;
+        let d = shell::lua::parse(&mission).expect("parse");
+        let w = d.root.get(&shell::lua::Key::s("weather")).expect("weather");
+        shell::lua::value(&mission, w)
+    }
+
+    /// `SetCampaignTemplate` by path (spec/persistence.md, "Set a template"):
+    /// the file is copied into the store when the call is made, each refusal
+    /// changes nothing, and an activation, a reload, a backup, an export and
+    /// a restarted sidecar use the copy with the file gone. The mission
+    /// folder holds no shared template, so every shell written here comes
+    /// from the copy.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_template_is_copied_from_its_path_and_the_file_is_not_read_again() {
+        use nanoprobe_proto::errors;
+        use nanoprobe_proto::v1alpha1::campaign_service_client::CampaignServiceClient;
+        use nanoprobe_proto::v1alpha1::mission_service_client::MissionServiceClient;
+        use nanoprobe_sidecar::shell;
+        use nanoprobe_sidecar::store::template_of;
+        use sha2::Digest;
+
+        let (dir, missions, mut cfg) = owed_setup();
+        let shared = missions.dir.clone().expect("dir");
+        std::fs::remove_file(shared.join("Caucasus.miz")).expect("no shared template");
+        let listed = dir.path().join("templates");
+        let unlisted = dir.path().join("elsewhere");
+        std::fs::create_dir_all(listed.join("sub")).expect("listed");
+        std::fs::create_dir_all(&unlisted).expect("unlisted");
+        cfg.template_dirs = vec![listed.clone()];
+        let weather = nanoprobe_transport::codec::Lv::Table(vec![(
+            nanoprobe_transport::codec::Lv::String(b"own".to_vec()),
+            nanoprobe_transport::codec::Lv::Bool(true),
+        )]);
+        let own = shell::write(
+            TEMPLATE,
+            &shell::Runtime {
+                weather: Some(weather.clone()),
+                ..shell::Runtime::default()
+            },
+        )
+        .expect("own");
+        let source = listed.join("own.miz");
+        std::fs::write(&source, &own).expect("source");
+        std::fs::write(unlisted.join("own.miz"), &own).expect("unlisted source");
+        std::fs::write(listed.join("bad.miz"), b"not a zip").expect("bad");
+        std::fs::write(listed.join("empty.miz"), b"").expect("empty");
+        let text = |p: &std::path::Path| p.to_str().expect("utf-8").to_owned();
+
+        let backend = |missions: &crate::real::Missions| {
+            Box::new(Folder(
+                nanoprobe_sim_fake::FakeSim::new(nanoprobe_sim_fake::Config::default()),
+                missions.clone(),
+            ))
+        };
+        let hub = Hub::open(cfg.clone(), backend(&missions)).expect("hub");
+        let (channel, stop, task) = serve_hub(&hub).await;
+        let lease = lease_of(&channel).await;
+        let mut campaigns = CampaignServiceClient::new(channel.clone());
+        let mut mission = MissionServiceClient::new(channel.clone());
+        let a = campaigns
+            .create_campaign(pb::CreateCampaignRequest {
+                theaters: vec!["Caucasus".into(), "Afghanistan".into()],
+                ..create(&lease, "a", "Caucasus", false)
+            })
+            .await
+            .expect("a")
+            .into_inner()
+            .campaign
+            .expect("campaign")
+            .id;
+        let set = |key: &str, theater: &str, path: String| pb::SetCampaignTemplateRequest {
+            write: Some(pb::Write {
+                lease: Some(lease.clone()),
+                idempotency: Some(pb::Idempotency { key: key.into() }),
+                campaign_id: a,
+            }),
+            theater: theater.into(),
+            path,
+        };
+        let store_path = hub.lock().files().expect("files").store_path(CampaignId(a));
+        let kept = || template_of(&store_path, "Caucasus").expect("read");
+
+        // Every refusal names its field and leaves the campaign as it was.
+        let refusals = [
+            (
+                "r-unlisted",
+                "Caucasus",
+                text(&unlisted.join("own.miz")),
+                "path",
+            ),
+            (
+                "r-dots",
+                "Caucasus",
+                text(&listed.join("../elsewhere/own.miz")),
+                "path",
+            ),
+            (
+                "r-missing",
+                "Caucasus",
+                text(&listed.join("none.miz")),
+                "path",
+            ),
+            ("r-folder", "Caucasus", text(&listed.join("sub")), "path"),
+            ("r-relative", "Caucasus", "own.miz".to_owned(), "path"),
+            (
+                "r-not-zip",
+                "Caucasus",
+                text(&listed.join("bad.miz")),
+                "path",
+            ),
+            (
+                "r-empty",
+                "Caucasus",
+                text(&listed.join("empty.miz")),
+                "path",
+            ),
+            // The file is a Caucasus mission.
+            ("r-member", "Afghanistan", text(&source), "path"),
+            ("r-theater", "Syria", text(&source), "theater"),
+        ];
+        for (key, theater, path, field) in &refusals {
+            let e = campaigns
+                .set_campaign_template(set(key, theater, path.clone()))
+                .await
+                .expect_err(key);
+            assert_eq!(e.code(), Code::InvalidArgument, "{key}: {e}");
+            assert_eq!(errors::reason(&e), ErrorReason::InvalidField, "{key}");
+            assert_eq!(errors::detail(&e).expect("detail").field, *field, "{key}");
+            assert!(hub.lock().campaigns[&a].meta.templates.is_empty(), "{key}");
+            assert_eq!(kept(), None, "{key}");
+        }
+
+        // Set: the store holds the file's bytes.
+        let shown = campaigns
+            .set_campaign_template(set("set-1", "Caucasus", text(&source)))
+            .await
+            .expect("set")
+            .into_inner()
+            .campaign
+            .expect("campaign");
+        assert_eq!(shown.templates, ["Caucasus"]);
+        assert_eq!(kept().as_deref(), Some(&own[..]));
+
+        // A refused replacement keeps the copy.
+        for (key, path) in [
+            ("r2-not-zip", text(&listed.join("bad.miz"))),
+            ("r2-unlisted", text(&unlisted.join("own.miz"))),
+        ] {
+            campaigns
+                .set_campaign_template(set(key, "Caucasus", path))
+                .await
+                .expect_err(key);
+            assert_eq!(kept().as_deref(), Some(&own[..]), "{key}");
+        }
+
+        // An edit of the file changes nothing until the template is set
+        // again; then the file goes, with its folder.
+        let edited = shell::write(TEMPLATE, &shell::Runtime::default()).expect("edited");
+        std::fs::write(&source, &edited).expect("edit");
+        assert_eq!(kept().as_deref(), Some(&own[..]));
+        std::fs::remove_dir_all(&listed).expect("remove the listed folder");
+
+        // A repeat under the answered key gets the first answer; a new call
+        // for the missing file is refused and keeps the copy.
+        let again = campaigns
+            .set_campaign_template(set("set-1", "Caucasus", text(&source)))
+            .await
+            .expect("the repeat")
+            .into_inner()
+            .campaign
+            .expect("campaign");
+        assert_eq!(again.templates, ["Caucasus"]);
+        campaigns
+            .set_campaign_template(set("set-2", "Caucasus", text(&source)))
+            .await
+            .expect_err("the file is gone");
+        assert_eq!(kept().as_deref(), Some(&own[..]));
+
+        // An activation and a reload write their shells from the copy.
+        let shell_of = |slot: &str| {
+            std::fs::read(shared.join("shells").join(format!("{a}.{slot}.miz"))).expect("shell")
+        };
+        let applied = |hub: &Arc<Hub>| {
+            let hub = Arc::clone(hub);
+            async move {
+                for _ in 0..500 {
+                    if hub.lock().campaigns[&a].store.owed_load().is_none() {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                panic!("the load stayed owed");
+            }
+        };
+        campaigns
+            .activate_campaign(pb::ActivateCampaignRequest {
+                lease: Some(lease.clone()),
+                campaign_id: a,
+                idempotency: Some(pb::Idempotency {
+                    key: "activate".into(),
+                }),
+            })
+            .await
+            .expect("activate with the campaign's copy only");
+        assert_eq!(weather_of(&shell_of("a")), Some(weather.clone()));
+        applied(&hub).await;
+        let reload = |key: &str| pb::ReloadRequest {
+            write: Some(pb::Write {
+                lease: Some(lease.clone()),
+                idempotency: Some(pb::Idempotency { key: key.into() }),
+                campaign_id: 0,
+            }),
+        };
+        mission.reload(reload("reload-1")).await.expect("reload");
+        assert_eq!(weather_of(&shell_of("b")), Some(weather.clone()));
+        applied(&hub).await;
+
+        // A backup's store copy and the export carry the template.
+        campaigns
+            .backup_campaign(pb::BackupCampaignRequest {
+                lease: Some(lease.clone()),
+                campaign_id: a,
+                idempotency: Some(pb::Idempotency { key: "bk".into() }),
+            })
+            .await
+            .expect("backup");
+        let backup = store_path
+            .parent()
+            .expect("folder")
+            .join("backups/1/store.sqlite");
+        assert_eq!(
+            template_of(&backup, "Caucasus").expect("read").as_deref(),
+            Some(&own[..])
+        );
+        let mut stream = campaigns
+            .export_campaign(pb::ExportCampaignRequest { campaign_id: a })
+            .await
+            .expect("export")
+            .into_inner();
+        let mut lines = Vec::new();
+        while let Some(m) = stream.message().await.expect("message") {
+            lines.extend(m.lines);
+        }
+        let exported: Vec<serde_json::Value> = lines
+            .split(|b| *b == b'\n')
+            .filter(|l| !l.is_empty())
+            .map(|l| serde_json::from_slice(l).expect("json"))
+            .filter(|v: &serde_json::Value| v["kind"] == "template")
+            .collect();
+        let hash: String = sha2::Sha256::digest(&own)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            exported,
+            [serde_json::json!({
+                "kind": "template", "theater": "Caucasus", "size": own.len(), "sha256": hash,
+            })]
+        );
+
+        // A new sidecar, and a new DCS, with the file still gone.
+        let _ = stop.send(());
+        task.await.expect("join").expect("serve");
+        hub.lock().close_all().expect("close");
+        drop(hub);
+        for slot in ["a", "b"] {
+            std::fs::remove_file(shared.join("shells").join(format!("{a}.{slot}.miz")))
+                .expect("remove the shell");
+        }
+        let hub = Hub::open(cfg, backend(&missions)).expect("hub");
+        let (channel, stop, task) = serve_hub(&hub).await;
+        let lease = lease_of(&channel).await;
+        let mut mission = MissionServiceClient::new(channel.clone());
+        let mut campaigns = CampaignServiceClient::new(channel);
+        let shown = campaigns
+            .get_campaign(pb::GetCampaignRequest { campaign_id: a })
+            .await
+            .expect("get")
+            .into_inner()
+            .campaign
+            .expect("campaign");
+        assert_eq!(shown.templates, ["Caucasus"]);
+        applied(&hub).await;
+        mission
+            .reload(pb::ReloadRequest {
+                write: Some(pb::Write {
+                    lease: Some(lease.clone()),
+                    idempotency: Some(pb::Idempotency {
+                        key: "reload-2".into(),
+                    }),
+                    campaign_id: 0,
+                }),
+            })
+            .await
+            .expect("reload after the restart");
+        let written: Vec<Vec<u8>> = ["a", "b"]
+            .iter()
+            .filter_map(|slot| {
+                std::fs::read(shared.join("shells").join(format!("{a}.{slot}.miz"))).ok()
+            })
+            .collect();
+        assert_eq!(written.len(), 1, "one shell written since the restart");
+        assert_eq!(weather_of(&written[0]), Some(weather));
+
+        // An empty path removes the template and reads no file: the listed
+        // folder is gone.
+        let shown = campaigns
+            .set_campaign_template(pb::SetCampaignTemplateRequest {
+                write: Some(pb::Write {
+                    lease: Some(lease.clone()),
+                    idempotency: Some(pb::Idempotency {
+                        key: "remove".into(),
+                    }),
+                    campaign_id: a,
+                }),
+                theater: "Caucasus".into(),
+                path: String::new(),
+            })
+            .await
+            .expect("remove")
+            .into_inner()
+            .campaign
+            .expect("campaign");
+        assert!(shown.templates.is_empty());
+        assert_eq!(kept(), None);
         let _ = stop.send(());
         task.await.expect("join").expect("serve");
     }

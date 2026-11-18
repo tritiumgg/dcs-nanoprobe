@@ -6,7 +6,7 @@ campaign uses. nanoprobe ships none.
 
 A template lives in the mission folder that `[missions] dir` names (spec/config.md),
 as `<theater>.miz`. A campaign with neither this template nor its own for its map
-(`SetCampaignTemplate`) cannot be activated or reloaded there.
+("A campaign's own template") cannot be activated or reloaded there.
 
 ## Save a template
 
@@ -36,8 +36,27 @@ date and start time, the weather, and each named airport's dynamic spawn and hot
 (spec/persistence.md, "Mission shells"). Airbase owners and warehouse stocks are set
 after the mission starts. Every other part of the template is kept.
 
-A campaign can carry its own template for a map (`SetCampaignTemplate`), which it uses
-in place of the shared one.
+## A campaign's own template
+
+A campaign can carry its own template for a map, which it uses in place of the shared
+one. The administrator saves the mission in a folder that `[missions] template_dirs`
+lists in `sidecar.toml` (spec/config.md); no folder is listed by default, so the list
+decides which files a controller can name. The controller calls `SetCampaignTemplate`
+with the file's path as the sidecar opens it. For a sidecar in a container that is the
+path inside the container (deploy/sidecar.toml). For a native sidecar beside DCS under
+Wine it is the Linux path. It is never the path DCS has for the file.
+
+The sidecar checks the file as it checks a shared template, with one more rule: no
+group, unit or static in it has a name in the platform's own format. It then copies the
+file into the campaign's store. The campaign uses the copy from then on:
+
+- A reload, an activation and a restart of the sidecar never read the file again.
+- A backup, a restore and an export carry the copy.
+- An edit of the file takes effect when the controller sets the template again.
+- The file can be moved or deleted after the call.
+
+A call with no path removes the campaign's template, and the campaign uses the shared
+one again.
 
 ## Check the templates
 

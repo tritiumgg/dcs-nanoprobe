@@ -44,6 +44,9 @@ pub struct Config {
     /// The `[store]` files; `None` keeps every store in memory, as
     /// `[store] enabled = false` does.
     pub store: Option<StoreFiles>,
+    /// `[missions] template_dirs`: the folders a `SetCampaignTemplate` may
+    /// name a file in. Empty refuses every path.
+    pub template_dirs: Vec<PathBuf>,
 }
 
 /// The `[store]` keys of a store on disk (spec/config.md,
@@ -95,6 +98,7 @@ impl Default for Config {
             on_lost: nanoprobe_sidecar::store::LostPolicy::Report,
             step: Duration::from_millis(2),
             store: None,
+            template_dirs: Vec::new(),
         }
     }
 }
