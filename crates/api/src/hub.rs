@@ -23,8 +23,8 @@ use nanoprobe_sidecar::server::{ServerStore, StoreLock};
 use nanoprobe_sidecar::sim::wire::{Body, Command, Input};
 use nanoprobe_sidecar::sim::{Detached, RawRecord, SimAdapter};
 use nanoprobe_sidecar::store::{
-    CampaignRecord, CampaignState, Checkpoint, DiskError, Loadout, LostPolicy, Outcome, OwedLoad,
-    Store, TierPeriod, checkpoint_of,
+    CampaignRecord, CampaignState, Checkpoint, DiskError, JournalPrune, Loadout, LostPolicy,
+    Outcome, OwedLoad, Store, TierPeriod, checkpoint_of,
 };
 use nanoprobe_transport::records::CommandHeader;
 use prost::Message;
@@ -265,6 +265,10 @@ pub struct Inner {
     epoch_floor: u64,
     /// When the event retention next runs, wall ms.
     next_retention_ms: u64,
+    /// The active campaign's journal has old entries to delete: a batch
+    /// runs in each step until none remain. Set when a campaign becomes
+    /// active (at activation and at the sidecar's start) and once an hour.
+    journal_prune_due: bool,
     /// The scheduled backup running on a worker thread.
     backup_job: Option<BackupJob>,
     /// Campaigns with a backup running: one at a time each.
@@ -1412,8 +1416,43 @@ impl Inner {
             .ok()
             .and_then(|b| b.last().map(|b| b.at_ms))
             .unwrap_or(now);
+        // A suspended campaign's journal waits for its next activation; a
+        // finished campaign's is never deleted.
+        self.journal_prune_due = true;
         self.next_checkpoint_ms = now.saturating_add(ms(sf.checkpoint));
         self.next_backup_ms = newest.saturating_add(ms(sf.backup_interval));
+    }
+
+    /// Run one batch of the journal retention on the active campaign's
+    /// store (spec/persistence.md, "Journal retention") while one is due.
+    /// A clock behind the newest entry deletes nothing and is logged. A
+    /// failed delete stops the sidecar.
+    fn prune_journal_batch(&mut self, retention: Duration) {
+        if !self.journal_prune_due {
+            return;
+        }
+        let Some(id) = self.active else {
+            self.journal_prune_due = false;
+            return;
+        };
+        let Some(slot) = self.campaigns.get_mut(&id).filter(|s| s.opened) else {
+            return;
+        };
+        match slot
+            .store
+            .prune_journal(ms(retention), wall_ms(), JOURNAL_BATCH)
+        {
+            Ok(JournalPrune::Deleted { more: true, .. }) => {}
+            Ok(JournalPrune::ClockBehind { now_ms, newest_ms }) => {
+                eprintln!(
+                    "nanoprobe: the clock ({now_ms} ms) is behind the newest journal entry of \
+                     campaign {id} ({newest_ms} ms): its retention is skipped"
+                );
+                self.journal_prune_due = false;
+            }
+            Ok(_) => self.journal_prune_due = false,
+            Err(e) => panic!("the store of campaign {id} could not be written, stopping: {e}"),
+        }
     }
 
     /// The active campaign's checkpoint and scheduled backup, when due. A
@@ -1440,6 +1479,8 @@ impl Inner {
             if let Err(e) = retain(&mut self.server_log, 0, sf.server_log_retention) {
                 panic!("the server event log could not be written, stopping: {e}");
             }
+            // The active campaign's journal, in batches below.
+            self.journal_prune_due = true;
             // Keys past `idempotency_keep_h`, from every store.
             let before = now.saturating_sub(ms(self.idem_keep));
             for slot in self.campaigns.values_mut() {
@@ -1459,6 +1500,10 @@ impl Inner {
             }
             self.next_retention_ms = now.saturating_add(RETENTION_EVERY_MS);
         }
+        // One batch of the journal retention per step while it is due. A
+        // step ends with `settle`, which commits the store, so a commit
+        // comes between two batches.
+        self.prune_journal_batch(sf.journal_retention);
         let Some(id) = self.active else {
             return;
         };
@@ -2376,6 +2421,13 @@ fn push_once(
 /// How often the event retention runs.
 const RETENTION_EVERY_MS: u64 = 3_600_000;
 
+/// The most journal entries one batch of the journal retention deletes. A
+/// primary-key range delete of 1,000 small rows costs about as much as an
+/// ordinary commit, so a batch each driver step keeps the store's only
+/// writer free between steps, and a backlog of ten million rows drains in
+/// about 20 seconds at one batch per 2 ms step.
+pub const JOURNAL_BATCH: usize = 1_000;
+
 fn ms(d: Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
@@ -2522,6 +2574,7 @@ impl Hub {
                 unreadable: Vec::new(),
                 epoch_floor: 0,
                 next_retention_ms: 0,
+                journal_prune_due: false,
                 backup_job: None,
                 backing_up: std::collections::BTreeSet::new(),
                 hold_after: None,
@@ -3653,6 +3706,145 @@ mod tests {
             .expect("shell")
             .expect("a file");
         assert!(o.path.ends_with("1.b.miz"), "{}", o.path);
+    }
+
+    /// Journal entries written at two times, `n` of them first and one
+    /// after, each group in a commit of its own.
+    fn old_and_new_journal(g: &mut Inner, n: u64) {
+        let entry = |i| nanoprobe_sidecar::store::Entry::Spec {
+            entity: nanoprobe_sidecar::ids::EntityId(i),
+            rev: i,
+        };
+        for i in 0..n {
+            g.campaigns
+                .get_mut(&1)
+                .expect("slot")
+                .store
+                .journal(entry(i));
+        }
+        g.commit(1);
+        std::thread::sleep(Duration::from_millis(10));
+        g.campaigns
+            .get_mut(&1)
+            .expect("slot")
+            .store
+            .journal(entry(n));
+        g.commit(1);
+    }
+
+    fn journal_rows(g: &Inner) -> usize {
+        let path = g.files().expect("files").store_path(CampaignId(1));
+        nanoprobe_sidecar::store::journal_of(&path)
+            .expect("journal")
+            .len()
+    }
+
+    #[test]
+    fn a_journal_backlog_drains_one_batch_a_step_and_then_stops() {
+        let (_dir, missions, mut cfg) = owed_setup();
+        let hub = folder_hub(&cfg, &missions, 0x8000);
+        add_and_activate(&hub, &cfg, true);
+        let mut g = hub.lock();
+        assert!(g.journal_prune_due, "an activation sets it");
+        old_and_new_journal(&mut g, 2_500);
+        let before = journal_rows(&g);
+        assert!(before > 2_500);
+        // Retention 0 deletes nothing and ends the pass.
+        g.next_retention_ms = u64::MAX;
+        g.timers(&cfg);
+        assert_eq!(journal_rows(&g), before);
+        assert!(!g.journal_prune_due);
+        if let Some(sf) = cfg.store.as_mut() {
+            sf.journal_retention = Duration::from_millis(1);
+        }
+        g.journal_prune_due = true;
+        let t0 = Instant::now();
+        g.timers(&cfg);
+        eprintln!("one journal batch of {JOURNAL_BATCH}: {:?}", t0.elapsed());
+        assert_eq!(journal_rows(&g), before - JOURNAL_BATCH, "one batch");
+        assert!(g.journal_prune_due, "more remain");
+        for _ in 0..5 {
+            g.timers(&cfg);
+        }
+        assert_eq!(journal_rows(&g), 1, "the newest row stays");
+        assert!(!g.journal_prune_due);
+    }
+
+    #[test]
+    fn the_hourly_timer_sets_the_flag_and_a_suspended_campaign_is_not_pruned() {
+        let (_dir, missions, mut cfg) = owed_setup();
+        if let Some(sf) = cfg.store.as_mut() {
+            sf.journal_retention = Duration::from_millis(1);
+        }
+        let hub = folder_hub(&cfg, &missions, 0x9000);
+        add_and_activate(&hub, &cfg, true);
+        let mut g = hub.lock();
+        g.next_retention_ms = u64::MAX;
+        g.timers(&cfg);
+        old_and_new_journal(&mut g, 20);
+        g.journal_prune_due = false;
+        g.next_retention_ms = 0;
+        g.timers(&cfg);
+        assert!(g.next_retention_ms > 0, "the hour passed");
+        assert_eq!(journal_rows(&g), 1, "the hourly pass set it and pruned");
+        // Suspended: the hourly pass and the flag leave the journal alone.
+        old_and_new_journal(&mut g, 20);
+        g.suspend(&cfg, 1, None);
+        g.settle(Some(1));
+        let suspended = journal_rows(&g);
+        g.journal_prune_due = true;
+        g.next_retention_ms = 0;
+        g.timers(&cfg);
+        assert!(!g.journal_prune_due, "no active campaign: the flag ends");
+        assert_eq!(journal_rows(&g), suspended);
+        // The next activation prunes it.
+        g.activate(&cfg, 1).expect("activate");
+        assert!(g.journal_prune_due);
+        g.next_retention_ms = u64::MAX;
+        for _ in 0..3 {
+            g.timers(&cfg);
+        }
+        assert!(journal_rows(&g) < suspended);
+    }
+
+    #[test]
+    fn a_finished_campaigns_journal_is_never_pruned() {
+        let (_dir, missions, mut cfg) = owed_setup();
+        if let Some(sf) = cfg.store.as_mut() {
+            sf.journal_retention = Duration::from_millis(1);
+        }
+        let hub = folder_hub(&cfg, &missions, 0xa000);
+        hub.start();
+        add_and_activate(&hub, &cfg, true);
+        let rows = {
+            let mut g = hub.lock();
+            old_and_new_journal(&mut g, 20);
+            g.suspend(&cfg, 1, Some(Vec::new()));
+            g.settle(Some(1));
+            g.journal_prune_due = true;
+            g.next_retention_ms = 0;
+            journal_rows(&g)
+        };
+        steps(&hub, 5);
+        {
+            let mut g = hub.lock();
+            assert_eq!(journal_rows(&g), rows, "the finished journal is whole");
+            assert!(!g.journal_prune_due, "the flag ended");
+            g.next_retention_ms = 0;
+            g.journal_prune_due = true;
+            for _ in 0..3 {
+                g.timers(&cfg);
+            }
+            assert_eq!(journal_rows(&g), rows);
+            assert!(!g.journal_prune_due);
+            g.close_all().expect("close");
+        }
+        // A restart over the same folder leaves it whole too.
+        drop(hub);
+        let hub = folder_hub(&cfg, &missions, 0xb000);
+        hub.start();
+        steps(&hub, 5);
+        assert_eq!(journal_rows(&hub.lock()), rows);
     }
 
     #[test]

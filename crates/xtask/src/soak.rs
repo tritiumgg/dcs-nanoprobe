@@ -62,6 +62,8 @@ use crate::meter::{self, Sampler};
 use crate::sampling::live::{self, DIR, Opened, Run, SHARE};
 use crate::{bundle, link};
 
+pub mod series;
+
 const USAGE: &str = "usage: cargo xtask soak <name> [--minutes 30] [--units 1200] \
 [--collect-every MINUTES] [--no-sidecar]";
 
@@ -739,6 +741,11 @@ fn parse_options(args: &[&str]) -> Result<Options, String> {
 }
 
 pub fn command(repository: &Path, name: &str, args: &[&str]) -> Result<ExitCode, String> {
+    // The long soak's commands stand where the churn soak takes a target.
+    if crate::persistence::campaign_soak::is_command(name) {
+        let all: Vec<&str> = std::iter::once(name).chain(args.iter().copied()).collect();
+        return crate::persistence::campaign_soak::command(repository, &all);
+    }
     let options = parse_options(args)?;
     let Opened { run, shell, probe } = live::open(repository, name, "soak")?;
     println!(

@@ -53,7 +53,7 @@ use super::scenarios::{COUNTRY, GROUND, ORIGIN, Target, campaign, one_per_entity
 
 const WORLD: usize = 10_000;
 /// Meters between grid places.
-const SPACING: f64 = 300.0;
+pub(super) const SPACING: f64 = 300.0;
 /// Points checked against land in one eval.
 const LAND_CHUNK: usize = 2_000;
 /// Groups each materialize or dematerialize call names.
@@ -106,7 +106,11 @@ fn angle_gap(a: f64, b: f64) -> f64 {
 }
 
 /// `n` places on land on a square grid from `origin`, north and east.
-fn places(t: &mut dyn Target, origin: (f64, f64), n: usize) -> Result<Vec<(f64, f64)>, String> {
+pub(super) fn places(
+    t: &mut dyn Target,
+    origin: (f64, f64),
+    n: usize,
+) -> Result<Vec<(f64, f64)>, String> {
     let side = ((n as f64).sqrt().ceil() as usize) * 3 / 2;
     let cand: Vec<(f64, f64)> = (0..side * side)
         .map(|i| {

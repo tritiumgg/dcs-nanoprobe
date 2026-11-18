@@ -72,7 +72,7 @@ of the `Event` message of the package named in the events file's `meta`
 | `meta` | `key TEXT PRIMARY KEY`, `value BLOB` | One per key below |
 | `entity` | `id INTEGER`, `kind TEXT`, `body BLOB`; the key is `id` and `kind` | One per group or static (`kind` is `group`) and one per unit (`unit`). A static is its own unit, so its `EntityId` has both rows. |
 | `extension` | `name TEXT PRIMARY KEY`, `body BLOB` | One per registered Lua extension, and one tombstone per removed one |
-| `journal` | `seq INTEGER PRIMARY KEY`, `at_ms INTEGER`, `kind TEXT`, `entity INTEGER`, `body BLOB` | One per journal entry, in order, from 1 |
+| `journal` | `seq INTEGER PRIMARY KEY`, `at_ms INTEGER`, `kind TEXT`, `entity INTEGER`, `body BLOB` | One per journal entry, in order. The numbers start at 1; the first row is the oldest entry kept (see "Journal retention") |
 | `inflight` | `epoch INTEGER`, `seq INTEGER`, `body BLOB`; the key is `epoch` and `seq` | One per command sent with no outcome yet |
 | `idempotency` | `key TEXT PRIMARY KEY`, `at_ms INTEGER`, `request_hash BLOB`, `response BLOB` | One per changing call answered on this campaign |
 | `checkpoint` | `seq INTEGER PRIMARY KEY`, `body BLOB` | The last checkpoint, one row |
@@ -104,13 +104,41 @@ group's body records whether it is a `group` or a `static`.
 The journal holds the entries spec/world.md says are journalled, each with its `kind`
 (`command`, `outcome`, `death`, and so on), the entity it names (0 for none), the wall
 time it was made and its fields. The journal is an audit trail: the sidecar appends to
-it and never reads it back. An `inflight` row is inserted with the `command` entry that
+it and never reads an entry's body back. An `inflight` row is inserted with the `command` entry that
 sends it and deleted with the entry that gives its outcome, in the same transaction; it
 is what a restarted reconciler reads to learn which commands it is owed a result for.
 
 The checkpoint row holds `seq`, `at_ms` (wall time), `revision`, `model_time` and
 `mission_gen` (the samples' model time and generation), and `achieved` (below). A new
 checkpoint replaces it, with `seq` one more.
+
+### Journal retention
+
+`journal_retention_days` above 0 deletes the journal entries older than the retention,
+from the active campaign's store. The delete runs when a campaign is activated, when
+the sidecar starts with one active, and once an hour while it is active. A suspended
+campaign's journal is pruned at its next activation. A finished campaign's journal is
+never deleted.
+
+The cutoff is the earlier of now and the newest entry's `at_ms`, less the retention.
+The delete takes the oldest entries in sequence order, up to the first one inside the
+retention. The journal stays contiguous, and an entry whose time is out of order ends
+the delete there. The newest entry is always kept, so the sequence numbers go on from
+it after a restart. When the clock is behind the newest entry's `at_ms` the delete is
+skipped and a warning logged: a clock set back must not delete the journal.
+
+The delete runs in batches of at most 1,000 entries, one per driver step, with the
+step's commit between two batches. A large backlog does not hold the writer.
+
+`inflight` is not touched, and a restart needs nothing from the journal. A command
+whose `command` entry was deleted and that has no outcome is still owed, and its
+outcome resolves it.
+
+A backup holds the journal as it was when taken. Older backups, and a `pre_migration`
+backup kept outside `backup_keep`, hold deleted entries until those backups are
+deleted. A delete does not shrink `store.sqlite`: the freed pages are reused by later
+writes. A backup is made with `VACUUM INTO` and is compact. An author who wants the
+full audit trail with retention on exports regularly (see "Export").
 
 ## Writes
 
@@ -463,8 +491,9 @@ rows with the event's Protobuf encoding in base 64 (`event_b64`). A stored body 
 decoded to JSON by the rule of spec/world.md, "Lua tables in the API"; a string that is
 not UTF-8 is `{"bytes_b64": ...}`. The store is read in one read transaction on a
 connection of its own, so the lines come from one snapshot while the driver goes on
-writing; the events run up to the newest at the export's start. It works on a campaign
-in any state.
+writing; the events run up to the newest at the export's start. The `journal` lines
+start at the oldest entry kept (`journal_retention_days`). It works on a campaign in any
+state.
 
 ### Free space
 
