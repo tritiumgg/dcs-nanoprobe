@@ -218,8 +218,9 @@ impl Reconciler {
         }
     }
 
-    /// A static's last death fact arrived in the loaded generation: DCS
-    /// holds its dead object there, and no ruin is spawned over it.
+    /// In the loaded generation a static's last death fact arrived, or the
+    /// object the store knows of a static already `dead` died: DCS holds its
+    /// dead object there, and no ruin is spawned over it.
     pub(super) fn ruin_died(&mut self, store: &mut Store, id: EntityId) {
         let Some(l) = store.loaded().cloned() else {
             return;

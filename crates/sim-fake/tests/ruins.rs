@@ -808,3 +808,48 @@ fn a_lost_destroy_result_keeps_the_mark_of_a_spawn_written_since() {
     let g = store.group(id).expect("static");
     assert_eq!((g.ruin_in, g.ruin_sent_in), (None, Some((7, 3))));
 }
+
+/// A static whose destroys DCS refuses until the lost policy marks it dead
+/// keeps its object in DCS. When that object dies, DCS holds the dead
+/// object, which the static, now the campaign's, should not hold: it is
+/// destroyed, and no ruin is spawned.
+#[test]
+fn the_dead_object_of_a_static_the_lost_policy_marked_dead_is_destroyed() {
+    let mut w = World::with_config(
+        1,
+        1,
+        LostPolicy::Dead,
+        Config {
+            event_queue: 10_000,
+            ..Config::default()
+        },
+    );
+    ticks(&mut w, 40);
+    let id = statics(&w)[0];
+    let o = object_of(&w, id).expect("the static is in DCS");
+    w.sim.refuse_destroys(u32::MAX);
+    w.store
+        .set_authority(id, Authority::Campaign)
+        .expect("static");
+    ticks(&mut w, 200);
+    assert_eq!(state(&w, id), State::Dead, "the lost policy marked it dead");
+    assert_eq!(object_of(&w, id), Some(o), "the refused destroys left it");
+    let refused = commands(&w, id, opcode::STATIC_DESTROY);
+
+    w.sim.kill(o);
+    ticks(&mut w, 5);
+    assert!(ruin_of(&w, id).is_some(), "DCS holds the dead object");
+    let loaded = w.store.loaded().expect("a mission is loaded");
+    assert_eq!(
+        w.store.group(id).expect("static").ruin_in,
+        Some((loaded.agent_boot, loaded.mission_gen)),
+        "the store marks the dead object as held in this generation"
+    );
+    w.sim.refuse_destroys(0);
+    ticks(&mut w, 20);
+    assert!(commands(&w, id, opcode::STATIC_DESTROY) > refused);
+    assert_eq!(ruin_of(&w, id), None, "the dead object left DCS");
+    assert_eq!(ruin_spawns(&w, id), 0);
+    assert_eq!(state(&w, id), State::Dead);
+    w.settle().unwrap();
+}
