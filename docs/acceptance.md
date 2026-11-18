@@ -1,9 +1,11 @@
 # Acceptance checklist
 
-A release is accepted when the six criteria below hold on a DCS dedicated server under
-Wine and on a Windows machine that hosts a session from the DCS client, each from a
-clean install of the staged release. This page maps each criterion to the evidence the
-repository holds and lists what the acceptance run must still show.
+The record of the 0.1 acceptance, which runs once, before the 0.1 tag; later releases
+are not run through it (docs/releasing.md). 0.1 is accepted when the six criteria
+below hold on a DCS dedicated server under Wine and on a Windows machine that hosts a
+session from the DCS client, each from a clean install of the staged release. This
+page maps each criterion to the evidence the repository holds and lists what the
+acceptance run must still show.
 
 A DCS dedicated server on Windows is unverified: no test has run on one. The release
 notes say so.
@@ -13,10 +15,19 @@ notes say so.
 Both platforms follow the same steps. Every result is committed to `docs/results/` with
 its script, the DCS build, the platform and the date.
 
-1. **Stage.** `mise run package` stages the release in `dist/` and checks it. These
-   cross-built files are the release (spec/install.md, "Release"), and the run tests
-   them and no others: record `SHA256SUMS`, and on each machine check the copied
-   archive against its line before unpacking it.
+1. **Stage.** A manual run of the release workflow builds the release's files on its
+   runner without releasing them. Download them and the PDB folder into
+   `dist/runner-<commit>/` and `dist/runner-<commit>/private/` with the commands of
+   docs/releasing.md, step 3, where `<commit>` is the first 12 characters of the commit
+   the run built; `mise run package` never writes that folder. The run tests these files
+   and no others, and records the run's ID, its full commit
+   (`gh run view <run> --json headSha`) and its `SHA256SUMS` with the results: on
+   each machine check the copied archive against its line before unpacking it. The
+   release the tag publishes is that build repeated, not the same bytes, on a commit
+   that differs from the run's only in files the release build does not read
+   (spec/install.md, "Release"; docs/releasing.md, step 4): the results and their
+   scripts go in documents or test tooling. Files that `mise run package` stages on a
+   development machine are a rehearsal.
 2. **Baseline.** With DCS stopped and no nanoprobe file in the profile, record the
    profile's file list with sizes and checksums, `Config/autoexec.cfg` byte for byte,
    and the DCS install's file list with sizes and modification times.
@@ -38,8 +49,8 @@ its script, the DCS build, the platform and the date.
 8. **Criteria that need the test tooling.** Criterion 1, the DCS kill of 3 and the
    conformance suite of 6, each on its own development deploy of the staged DLL, as
    "What the tools can drive" below describes. To symbolize a crash record from such a
-   deploy, copy `dist/private/<signature>/nanoprobe.pdb` to the `nanoprobe.pdb` path the
-   deploy prints.
+   deploy, copy `dist/runner-<commit>/private/<signature>/nanoprobe.pdb` to the
+   `nanoprobe.pdb` path the deploy prints.
    Afterward the profile is checked against the baseline again.
 
 ### How the staged files reach each platform
