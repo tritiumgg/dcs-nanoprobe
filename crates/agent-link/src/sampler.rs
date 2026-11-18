@@ -736,6 +736,10 @@ pub struct Sampler {
     dirty: bool,
     hellos_seen: u64,
     sidecar_seen: u64,
+    /// The `HELLO` count once the agent wrote its first `HELLO` to the
+    /// attached sidecar's boot. A row whose `Row::sent` is at most this
+    /// counts as not held by that sidecar ([`Sampler::known_from`]).
+    boot_hellos: u64,
     last_frame: Option<Instant>,
     sampling: bool,
     pump_start: Option<Instant>,
@@ -1105,6 +1109,7 @@ impl Sampler {
             dirty: false,
             hellos_seen: 0,
             sidecar_seen: 0,
+            boot_hellos: 0,
             last_frame: None,
             sampling: false,
             pump_start: None,
@@ -1446,7 +1451,15 @@ impl Sampler {
         if row.encoded.is_empty() {
             row.encoded = object_record(row, 0).encode();
         }
+        // The row's first `OBJECT` since a `HELLO`: its life is read on a
+        // coming pump, after this record. For a sidecar of a new boot, which
+        // drops a row's life until it holds the row, that read is the row's
+        // first life it keeps (spec/records.md, "Samples").
+        let fresh = row.sent != link.hellos() + 1;
         row.sent = link.hellos() + 1;
+        if fresh && !row.vital() && !std::mem::replace(&mut row.life_marked, true) {
+            self.life_marks.push(slot);
+        }
         let mut payload = row.encoded.clone();
         let at = Object::ENUMERATION_AT;
         payload[at..at + 8].copy_from_slice(&n.to_le_bytes());
@@ -2423,22 +2436,35 @@ impl Sampler {
         self.request_enumeration();
         // A sidecar that attaches holds no samples. Every row is read as a
         // new one is: its position on the coming sweeps, whether or not it
-        // has moved, and its life on a coming pump.
-        for (slot, row) in self.rows.iter_mut().enumerate() {
-            let Some(row) = row.as_mut().filter(|r| r.found.object != 0) else {
-                continue;
-            };
-            row.unmoved = 0;
-            if !row.vital() && !std::mem::replace(&mut row.life_marked, true) {
-                self.life_marks.push(slot as u32);
+        // has moved, and its life on a coming pump once the enumeration has
+        // queued its `OBJECT` ([`Sampler::enqueue_known`]).
+        for row in self.rows.iter_mut().flatten() {
+            if row.found.object != 0 {
+                row.unmoved = 0;
             }
         }
         self.recount = true;
         let boot = link.served_boot();
         if boot != self.sidecar_seen {
             self.sidecar_seen = boot;
+            self.boot_hellos = hellos;
             self.rates = self.defaults;
             self.subscribe(0.0, false, &[]);
+        }
+    }
+
+    /// The `HELLO` count the attached sidecar holds rows from: it has read
+    /// the `OBJECT` of a row whose `Row::sent` is past it. A sidecar of a
+    /// new boot starts with no table and holds a row from its first `OBJECT`
+    /// after that boot's first `HELLO`. A sidecar keeps its table across a
+    /// later `HELLO` of its own boot (spec/records.md, "Samples"). A new
+    /// boot that attached since the frame's [`Sampler::check_attach`]
+    /// counts from the link's count now.
+    fn known_from(&self, link: &impl Port) -> u64 {
+        if link.served_boot() == self.sidecar_seen {
+            self.boot_hellos
+        } else {
+            link.hellos()
         }
     }
 
@@ -4139,6 +4165,22 @@ impl Sampler {
                 // again. Every row read notes when.
                 let lead = std::mem::take(&mut self.batch.lead).min(self.batch.slots.len());
                 if tier == Tier::Vitals {
+                    // The batch's samples go into the ring at once, past
+                    // anything still queued: an `OBJECT` queued since the
+                    // plan's flush goes first. `finish_pump` queues one when
+                    // it resolves an undecided check before this close. A
+                    // `HELLO` this flush writes is counted below.
+                    if self.dirty {
+                        link.flush();
+                        self.dirty = false;
+                    }
+                    // A row the agent counts as not held by the sidecar: its
+                    // life is not written and not noted as read. Its next
+                    // `OBJECT` marks it again, unless it is subscribed
+                    // ([`Sampler::enqueue_known`]; spec/records.md,
+                    // "Samples").
+                    let from = self.known_from(link);
+                    let mut early = false;
                     for i in 0..self.batch.slots.len().max(lead) {
                         let Some(&slot) = self.batch.slots.get(i) else {
                             break;
@@ -4152,13 +4194,20 @@ impl Sampler {
                             continue;
                         };
                         if read {
-                            row.life_at = Some(now);
+                            if row.found.object != 0 && row.sent > from {
+                                row.life_at = Some(now);
+                            } else {
+                                early = true;
+                            }
                             if i < lead {
                                 row.life_marked = false;
                             }
                         } else if row.found.object != 0 {
                             self.life_marks.push(slot);
                         }
+                    }
+                    if early {
+                        self.drop_early_vitals(from);
                     }
                 }
                 // A row no subscription names has its existence checked when
@@ -4295,6 +4344,31 @@ impl Sampler {
         }
         let row = self.live(slot)?;
         (self.batch.versions.get(i) == Some(&row.version)).then_some(row.found.object)
+    }
+
+    /// Leave out of the vitals batch every object the agent counts as not
+    /// held by the sidecar: one with no row, or whose row's `Row::sent` is
+    /// at most `from` ([`Sampler::known_from`]). The close calls it only
+    /// when a row it read is not held, so a batch whose one such entry is a
+    /// row that left during the batch is written whole.
+    fn drop_early_vitals(&mut self, from: u64) {
+        let (rows, by_object) = (&self.rows, &self.by_object);
+        let v = &mut self.batch.vitals;
+        let mut kept = 0;
+        for i in 0..v.object.len() {
+            let object = v.object[i];
+            let early = by_object
+                .get(&object)
+                .and_then(|s| rows[*s as usize].as_ref())
+                .is_none_or(|r| r.sent <= from);
+            if !early {
+                v.object[kept] = object;
+                v.life[kept] = v.life[i];
+                kept += 1;
+            }
+        }
+        v.object.truncate(kept);
+        v.life.truncate(kept);
     }
 
     /// The values the shim's plan buffer holds for a batch's slots: for
