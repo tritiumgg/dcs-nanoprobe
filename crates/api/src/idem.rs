@@ -103,6 +103,7 @@ const METHODS: &[&str] = &[
     "MovePlayer",
     "PutDrawing",
     "PutGroup",
+    "PutGroupFromTemplate",
     "PutMark",
     "PutMenuItem",
     "PutStatic",

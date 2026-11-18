@@ -264,6 +264,9 @@ impl<'a> P<'a> {
                 _ => return Err(self.err("`,` or `}`")),
             }
         }
+        // A pushed-to list keeps room for more: four fields' worth for one
+        // field. Many small tables would hold four times what they use.
+        fields.shrink_to_fit();
         Ok(Node {
             span: start..self.i,
             fields,
