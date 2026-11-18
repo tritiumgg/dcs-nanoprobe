@@ -7,6 +7,7 @@ use std::time::Duration;
 use nanoprobe_proto::v1alpha1::campaign_service_client::CampaignServiceClient;
 use nanoprobe_proto::v1alpha1::commands_service_client::CommandsServiceClient;
 use nanoprobe_proto::v1alpha1::events_service_client::EventsServiceClient;
+use nanoprobe_proto::v1alpha1::mission_service_client::MissionServiceClient;
 use nanoprobe_proto::v1alpha1::session_service_client::SessionServiceClient;
 use nanoprobe_proto::v1alpha1::world_service_client::WorldServiceClient;
 use nanoprobe_proto::v1alpha1::{self as pb, entity};
@@ -44,6 +45,7 @@ pub struct Api<'r> {
     commands: CommandsServiceClient<Svc>,
     world: WorldServiceClient<Svc>,
     events: EventsServiceClient<Svc>,
+    mission: MissionServiceClient<Svc>,
     pub lease: Option<pb::Lease>,
     renew: Option<tokio::task::JoinHandle<()>>,
     /// Makes each idempotency key unique in the run.
@@ -99,7 +101,8 @@ impl<'r> Api<'r> {
             campaigns: CampaignServiceClient::with_interceptor(channel.clone(), auth.clone()),
             commands: CommandsServiceClient::with_interceptor(channel.clone(), auth.clone()),
             world: WorldServiceClient::with_interceptor(channel.clone(), auth.clone()),
-            events: EventsServiceClient::with_interceptor(channel, auth),
+            events: EventsServiceClient::with_interceptor(channel.clone(), auth.clone()),
+            mission: MissionServiceClient::with_interceptor(channel, auth),
             lease: None,
             renew: None,
             keys: 0,
@@ -377,6 +380,70 @@ impl<'r> Api<'r> {
             }
             Ok(out)
         })
+    }
+
+    /// The groups of `campaign` with a unit within `radius` meters of a
+    /// point: the interest query.
+    pub fn query_area(
+        &mut self,
+        campaign: u64,
+        center: pb::Position,
+        radius: f64,
+    ) -> Result<Vec<pb::Group>, String> {
+        let mut w = self.world.clone();
+        let req = pb::QueryAreaRequest {
+            filter: Some(pb::WorldFilter {
+                campaign_id: campaign,
+                center: Some(center),
+                radius,
+                kinds: vec![pb::EntityKind::Group as i32],
+                ..pb::WorldFilter::default()
+            }),
+        };
+        Ok(self
+            .rt
+            .block_on(w.query_area(req))
+            .map_err(fail("QueryArea"))?
+            .into_inner()
+            .entities
+            .into_iter()
+            .filter_map(|e| match e.kind {
+                Some(entity::Kind::Group(g)) => Some(g),
+                _ => None,
+            })
+            .collect())
+    }
+
+    pub fn server_status(&mut self) -> Result<pb::ServerStatus, String> {
+        let mut m = self.mission.clone();
+        self.rt
+            .block_on(m.get_server_status(pb::GetServerStatusRequest {}))
+            .map_err(fail("GetServerStatus"))?
+            .into_inner()
+            .status
+            .ok_or_else(|| "GetServerStatus gave no status".into())
+    }
+
+    /// Set a unit's life in DCS, as a percentage of its initial life
+    /// (`DoEffect` with `Damage`). The effect's outcome.
+    pub fn damage(&mut self, campaign: u64, unit: u64, life_percent: f64) -> Result<i32, String> {
+        let req = pb::DoEffectRequest {
+            write: self.write(campaign, "damage"),
+            effect: Some(pb::Effect {
+                effect: Some(pb::effect::Effect::Damage(pb::Damage {
+                    unit_id: unit,
+                    life_percent,
+                })),
+            }),
+        };
+        let mut c = self.commands.clone();
+        Ok(self
+            .rt
+            .block_on(c.do_effect(req))
+            .map_err(fail("DoEffect"))?
+            .into_inner()
+            .result
+            .map_or(0, |r| r.outcome))
     }
 
     /// The campaign's events after `after`, at most `limit`.

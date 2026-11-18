@@ -49,6 +49,9 @@ pub trait Port {
     fn served_boot(&self) -> u64;
     /// Store the slice, periods and rows per clock read for the status block.
     fn set_sampling(&mut self, slice_us: f64, periods: [f64; 4], rows_per_clock: u64);
+    /// The frame's commanded work, µs, which its agent time leaves out
+    /// (spec/sampling.md, "Slice").
+    fn set_frame_commanded(&mut self, us: f64);
 }
 
 impl Port for Link {
@@ -87,6 +90,9 @@ impl Port for Link {
     }
     fn set_sampling(&mut self, slice_us: f64, periods: [f64; 4], rows_per_clock: u64) {
         Link::set_sampling(self, slice_us, periods, rows_per_clock);
+    }
+    fn set_frame_commanded(&mut self, us: f64) {
+        Link::set_frame_commanded(self, us);
     }
 }
 
@@ -4640,8 +4646,10 @@ impl Sampler {
         let share = link.overhead_share();
         let frame_us = now.saturating_duration_since(link.began()).as_secs_f64() * 1e6;
         let b = &mut self.budget;
-        let agent_us = (frame_us - std::mem::take(&mut b.commanded_us)).max(0.0)
-            + std::mem::take(&mut b.events_us);
+        let commanded_us = std::mem::take(&mut b.commanded_us);
+        link.set_frame_commanded(commanded_us);
+        let b = &mut self.budget;
+        let agent_us = (frame_us - commanded_us).max(0.0) + std::mem::take(&mut b.events_us);
         let cap = share * SECOND_US;
         let start = *b.syscall_window_start.get_or_insert(now);
         if now.saturating_duration_since(start) >= Duration::from_secs(1) {

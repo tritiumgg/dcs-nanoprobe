@@ -98,6 +98,7 @@ impl Port for Rec {
         1
     }
     fn set_sampling(&mut self, _slice_us: f64, _periods: [f64; 4], _rows_per_clock: u64) {}
+    fn set_frame_commanded(&mut self, _us: f64) {}
 }
 
 fn found(object: u64) -> Found {

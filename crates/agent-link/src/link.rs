@@ -295,6 +295,9 @@ pub struct Link {
     /// Event time, µs, since the last frame ended. The next frame's agent
     /// time for the tail includes it (spec/sampling.md, "Slice").
     events_us: f64,
+    /// The frame's commanded work, µs, which its agent time for the tail
+    /// leaves out, as the sampler's does.
+    commanded_us: f64,
     notes: Vec<String>,
     /// The theater and mission of the last `LIFECYCLE`, for the last one
     /// [`Link::disable`] writes.
@@ -395,6 +398,7 @@ impl Link {
             last_pump: None,
             frame_tail: FrameTail::default(),
             events_us: 0.0,
+            commanded_us: 0.0,
             notes,
             names: (String::new(), String::new()),
             #[cfg(feature = "faults")]
@@ -1232,6 +1236,13 @@ impl Link {
         std::mem::take(&mut self.frame_tail)
     }
 
+    /// The frame's commanded work, µs, from the sampler.
+    pub fn set_frame_commanded(&mut self, us: f64) {
+        if us.is_finite() && us > 0.0 {
+            self.commanded_us = us;
+        }
+    }
+
     /// Count the agent's time for one world event in `hist_event`.
     pub fn record_event(&mut self, cost_us: f64) {
         if cost_us.is_finite() && cost_us > 0.0 {
@@ -1540,9 +1551,11 @@ impl Link {
         let began = self.began;
         let pump_us = began.elapsed().as_secs_f64() * 1e6;
         self.metrics.hist[0][status::bucket(pump_us)] += 1;
-        // Agent time: the frame span plus the events since the last frame,
-        // the basis of `Sampler::end_frame`. The histograms keep the span.
-        let agent_us = pump_us + std::mem::take(&mut self.events_us);
+        // Agent time: the frame span less its commanded work, plus the
+        // events since the last frame, as `Sampler::end_frame` takes it. The
+        // histograms keep the span.
+        let agent_us = (pump_us - std::mem::take(&mut self.commanded_us)).max(0.0)
+            + std::mem::take(&mut self.events_us);
         let t = &mut self.frame_tail;
         t.max_us = t.max_us.max(agent_us);
         if agent_us > FRAME_CAP_US {
@@ -1916,6 +1929,29 @@ mod tests {
         assert!(t.max_us < 150.0, "events counted twice, max {}", t.max_us);
         // A taken tail starts again from zero.
         assert_eq!(link.take_frame_tail(), FrameTail::default());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A frame's commanded work stays out of its agent time for the tail:
+    /// a frame that is over the cap only by commanded work does not count,
+    /// and the value does not carry into the next frame.
+    #[test]
+    fn commanded_work_stays_out_of_the_tail() {
+        let (mut link, dir) = open("tail-commanded");
+        link.begin(Instant::now(), 0.0, 0.0);
+        std::thread::sleep(Duration::from_micros(400));
+        link.set_frame_commanded(1_000_000.0);
+        link.end();
+        let t = link.take_frame_tail();
+        assert_eq!(t.over, 0, "commanded work counted, max {}", t.max_us);
+        assert_eq!(t.max_us, 0.0, "commanded work in the longest frame");
+        // The next frame, with no commanded work, counts in full.
+        link.begin(Instant::now(), 0.0, 0.0);
+        std::thread::sleep(Duration::from_micros(400));
+        link.end();
+        let t = link.take_frame_tail();
+        assert_eq!(t.over, 1, "the commanded time carried over");
+        assert!(t.max_us >= 400.0, "max {}", t.max_us);
         let _ = std::fs::remove_dir_all(dir);
     }
 

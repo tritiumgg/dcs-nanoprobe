@@ -496,13 +496,21 @@ impl World {
         on_lost: LostPolicy,
         config: Config,
     ) -> World {
+        World::with_store(
+            new_store(groups, statics),
+            config,
+            RecConfig {
+                materialize_per_frame: 2,
+                on_lost,
+                destroy_retries: 3,
+            },
+        )
+    }
+
+    /// A world over `store`, with a fake sim and a reconciler of the given
+    /// settings, and the sidecar attached.
+    pub fn with_store(store: Store, config: Config, rec_cfg: RecConfig) -> World {
         let sim = FakeSim::new(config);
-        let store = new_store(groups, statics);
-        let rec_cfg = RecConfig {
-            materialize_per_frame: 2,
-            on_lost,
-            destroy_retries: 3,
-        };
         let rec = Reconciler::new(rec_cfg, &store);
         let mut w = World {
             scan: Scan::default(),

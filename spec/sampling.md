@@ -524,7 +524,7 @@ message `sampling` and these `data` keys:
 | `syscall_per_s` | `C` |
 | `debt_us`, `credit_us` | `D` when above 0, and the credit when `D` is below 0 |
 | `pumps`, `frames` | Frames in the window that called the shim's pump, and all frames |
-| `frames_over_250`, `syscall_over_250`, `frame_max_us` | Frames whose agent time passed 250 µs, the per-frame cap, counted exactly since the last report, and of those the system-call frames; and the longest frame, µs. The histograms' bucket edge is 256 µs, so they cannot place a p99 against 250 µs. A report counts frames up to the one before it |
+| `frames_over_250`, `syscall_over_250`, `frame_max_us` | Frames whose agent time ("Slice": commanded work left out) passed 250 µs, the per-frame cap, counted exactly since the last report, and of those the system-call frames; and the longest agent time of one frame, µs. The histograms' bucket edge is 256 µs, so they cannot place a p99 against 250 µs. A report counts frames up to the one before it |
 | `gap_max_s` | The longest real time, s, between the starts of two consecutive frames the agent pumped in the window. A gap that spans a report boundary counts in the window where it ends; the first frame after attach adds none. The positions check uses it to find stall windows, which a frame count cannot show |
 | `empty_pumps` | Pumps in the window that planned no row. They are in no frame count below |
 | `check_pumps`, `check_overrun_us` | Of those, the pumps that made existence checks, and the most one ran past `B`. At least one check goes out whatever the budget, so such a pump may pass it |

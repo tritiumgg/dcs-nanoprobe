@@ -69,7 +69,8 @@ const EFFECT_RESULTS_KEPT: usize = 1024;
 /// The reconciler's settings (spec/config.md, `[world]`).
 #[derive(Clone, Copy, Debug)]
 pub struct Config {
-    /// Groups spawned per step; the sidecar steps once per frame it reads.
+    /// Spawns unanswered at a time outside the restore burst, so at most
+    /// this many reach DCS in one frame (spec/world.md, "Authority").
     pub materialize_per_frame: usize,
     /// The default policy for a lost group.
     pub on_lost: LostPolicy,
@@ -231,7 +232,7 @@ pub struct Reconciler {
     /// The agent boot, generation and active campaign of the last `FRAME`,
     /// replays included, which stamp the records after it.
     stamp: (u64, u32, u64),
-    inflight: BTreeMap<(u64, u64), Journalled>,
+    inflight: Inflight,
     /// The binding mirror, by DCS object ID, for the loaded mission.
     binding: HashMap<u64, Binding>,
     run: Option<EnumRun>,
@@ -370,14 +371,64 @@ fn rejected_for_now(code: u16) -> bool {
     )
 }
 
+/// The commands written and not yet answered, by epoch and sequence
+/// number, with an index by entity.
+#[derive(Debug, Default)]
+struct Inflight {
+    map: BTreeMap<(u64, u64), Journalled>,
+    by_entity: HashMap<EntityId, BTreeSet<(u64, u64)>>,
+}
+
+impl Inflight {
+    fn insert(&mut self, c: Journalled) {
+        let key = (c.epoch, c.seq);
+        if let Some(old) = self.remove(&key) {
+            debug_assert_eq!(old.entity, c.entity, "a sequence number used twice");
+        }
+        self.by_entity.entry(c.entity).or_default().insert(key);
+        self.map.insert(key, c);
+    }
+
+    fn remove(&mut self, key: &(u64, u64)) -> Option<Journalled> {
+        let c = self.map.remove(key)?;
+        self.unindex(c.entity, *key);
+        Some(c)
+    }
+
+    fn unindex(&mut self, entity: EntityId, key: (u64, u64)) {
+        if let Some(keys) = self.by_entity.get_mut(&entity) {
+            keys.remove(&key);
+            if keys.is_empty() {
+                self.by_entity.remove(&entity);
+            }
+        }
+    }
+
+    fn get(&self, key: &(u64, u64)) -> Option<&Journalled> {
+        self.map.get(key)
+    }
+
+    fn values(&self) -> impl Iterator<Item = &Journalled> {
+        self.map.values()
+    }
+
+    /// The unanswered commands of one entity.
+    fn of(&self, entity: EntityId) -> impl Iterator<Item = &Journalled> {
+        self.by_entity
+            .get(&entity)
+            .into_iter()
+            .flatten()
+            .filter_map(|k| self.map.get(k))
+    }
+}
+
 impl Reconciler {
     /// A reconciler for a store: at the sidecar's start, or after a restart.
     pub fn new(cfg: Config, store: &Store) -> Reconciler {
-        let inflight = store
-            .unanswered()
-            .into_iter()
-            .map(|c| ((c.epoch, c.seq), c))
-            .collect();
+        let mut inflight = Inflight::default();
+        for c in store.unanswered() {
+            inflight.insert(c);
+        }
         Reconciler {
             cfg,
             agent_boot: store.loaded().map_or(0, |l| l.agent_boot),
@@ -1566,7 +1617,7 @@ impl Reconciler {
                     j.position
                 );
                 if !control {
-                    self.inflight.insert((j.epoch, j.seq), j);
+                    self.inflight.insert(j);
                 }
                 true
             }
@@ -1609,12 +1660,23 @@ impl Reconciler {
         let Some(l) = store.loaded() else {
             return false;
         };
-        self.inflight.values().any(|c| {
-            c.entity == entity
-                && ops.contains(&c.opcode)
+        self.inflight.of(entity).any(|c| {
+            ops.contains(&c.opcode)
                 && c.agent_boot == l.agent_boot
                 && c.mission_gen == l.mission_gen
         })
+    }
+
+    /// Spawns written for the loaded mission and not yet answered.
+    fn spawns_inflight(&self, loaded: &Loaded) -> usize {
+        self.inflight
+            .values()
+            .filter(|c| {
+                matches!(c.opcode, opcode::GROUP_SPAWN | opcode::STATIC_SPAWN)
+                    && c.agent_boot == loaded.agent_boot
+                    && c.mission_gen == loaded.mission_gen
+            })
+            .count()
     }
 
     /// An `EXTENSION_SET` resolved. Applied, the agent holds the revision;
@@ -1781,12 +1843,17 @@ impl Reconciler {
         if !self.hold && !self.restore_burst(store, sim, &loaded) {
             return;
         }
+        // Outside the burst, unanswered spawns count against the budget:
+        // spawns queued behind other commands in the ring would otherwise
+        // reach DCS together, more than one frame's share.
         let mut spawns = if self.hold {
             0
         } else if self.burst {
             usize::MAX
         } else {
-            self.cfg.materialize_per_frame
+            self.cfg
+                .materialize_per_frame
+                .saturating_sub(self.spawns_inflight(&loaded))
         };
         let ids: Vec<EntityId> = store.groups().map(|g| g.id).collect();
         for id in ids {

@@ -95,7 +95,7 @@ handshake_timeout_s = 15    # how long one handshake attempt waits, counting onl
 
 [world]
 position_period_min_s = 0.1 # the cap: the shortest position period a subscription gets
-materialize_per_frame = 1   # groups spawned per frame outside the restore burst
+materialize_per_frame = 1   # spawns unanswered at a time outside the restore burst: at most this many reach DCS in a frame
 on_lost = "report"          # report, respawn or dead: the default policy for a lost group
 destroy_retries = 3         # refused or unknown destroys of one entity before the sidecar stops
 
