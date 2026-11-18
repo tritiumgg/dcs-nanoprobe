@@ -110,7 +110,9 @@ pub struct Counters {
     pub enumerations_discarded: u64,
     /// `EVENT` records read.
     pub events: u64,
-    /// Records about an entity already `dead`, which change nothing.
+    /// Records about an entity already `dead`. They change nothing, except
+    /// that a death in DCS of the object the store knows of a dead static
+    /// marks that DCS holds its ruin (spec/world.md, "Ruins").
     pub after_dead: u64,
     /// `OBJECT` and `OBJECT_GONE` records stamped with another campaign than
     /// the store's (campaign 0 included): their binding names no entity of
@@ -1536,7 +1538,19 @@ impl Reconciler {
         let known = store.unit(unit).map_or(0, |u| u.object);
         let stale = known != 0 && g.object != 0 && known != g.object;
         match g.reason {
-            gone_reason::DEAD if state == State::Dead => self.counters.after_dead += 1,
+            gone_reason::DEAD if state == State::Dead => {
+                self.counters.after_dead += 1;
+                // A static the lost policy marked dead while DCS still held
+                // its object (its destroys were refused): that object died
+                // here, and DCS holds it dead. It is the static's ruin for
+                // this generation, destroyed by the plan when the static
+                // should have none, and no ruin is spawned over it when it
+                // should. A death of an older object says nothing of the
+                // one DCS holds now.
+                if !stale {
+                    self.ruin_died(store, group);
+                }
+            }
             gone_reason::DEAD if stale => {
                 store.stale_death(unit, g.object);
                 self.counters.stale_deaths += 1;

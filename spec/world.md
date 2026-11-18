@@ -341,9 +341,11 @@ CLEAR_DEBRIS").
   reads false (LIVE, docs/results/2026-11-17-person-fixes.md), so no `OBJECT` reports
   it and no enumeration finds it. The store keeps two marks for each dead static
   instead: the agent boot and generation in which a ruin's spawn was written, and those
-  in which DCS holds the dead object. A death fact and an applied ruin spawn set the
-  second. An applied destroy clears both. They are written with the step, before its
-  commands reach DCS (spec/persistence.md, "Writes"). So a sidecar that restarts sends
+  in which DCS holds the dead object. A death fact, an `OBJECT_GONE` `DEAD` for the
+  object the store knows of a static already `dead`, and an applied ruin spawn set the
+  second; an `OBJECT_GONE` `DEAD` for an older object sets nothing. An applied destroy
+  clears both. They are written with the step, before its commands reach DCS
+  (spec/persistence.md, "Writes"). So a sidecar that restarts sends
   nothing for a ruin the store marks as held, sends again a ruin's spawn that was
   written and not answered ("One ruin a generation"), and still destroys a ruin whose
   spawn it had written.
@@ -373,9 +375,13 @@ CLEAR_DEBRIS").
   a live static's spawn never carries one.
 - **`dead` without a death in DCS.** A static the lost policy marks dead is a ruin too,
   and so is one a `ResolveMember` `DEAD` names, once the lifecycle makes it `dead`. In
-  the generation the static left in, the agent still holds its revision and DCS holds
-  no object, so the ruin's spawn is answered `AT_REVISION` and nothing is spawned. The
-  next generation spawns the ruin.
+  the generation the static left in, with no object of it in DCS, the agent still
+  holds its revision, so the ruin's spawn is answered `AT_REVISION` and nothing is
+  spawned. The next generation spawns the ruin. DCS may still hold the static's live
+  object there, when the destroys of a `Dematerialize` were refused until the lost
+  policy marked it dead. While that object lives, the binding holds it, and the table's
+  row for a live object applies. When it dies, DCS holds the dead object, as for a
+  static that died in the generation: it is the ruin, and the table applies.
 - **A death the platform never reads.** A static that left as `MISSING` or `REMOVED`
   and whose death event the mission's end cut off has no death fact. It is no ruin: it
   is held like any such member ("Respawn gate").
