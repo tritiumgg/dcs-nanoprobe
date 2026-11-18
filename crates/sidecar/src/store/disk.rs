@@ -31,6 +31,29 @@ use crate::stock::Stock;
 /// The schema version this sidecar writes (spec/persistence.md).
 pub const SCHEMA: u32 = 1;
 
+/// What [`Store::prune_journal`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JournalPrune {
+    /// Retention is off, the store has no file, or the oldest entry is
+    /// inside the retention: nothing was deleted and nothing is left to.
+    Kept,
+    /// Entries were deleted.
+    Deleted {
+        /// How many.
+        rows: u64,
+        /// The batch was full and every entry in it was old: more old
+        /// entries may remain.
+        more: bool,
+    },
+    /// The clock is behind the newest entry: nothing was deleted.
+    ClockBehind {
+        /// The clock, milliseconds since the Unix epoch.
+        now_ms: u64,
+        /// The newest entry's time.
+        newest_ms: u64,
+    },
+}
+
 /// A store file that could not be read or written.
 #[derive(Debug)]
 pub enum DiskError {
@@ -854,6 +877,77 @@ impl Store {
             "DELETE FROM idempotency WHERE at_ms < ?1",
             [i64::try_from(before_ms).unwrap_or(i64::MAX)],
         )?)
+    }
+
+    /// Delete the oldest journal entries that are older than `retention_ms`,
+    /// at most `max_rows` of them (spec/persistence.md, "Journal
+    /// retention"). The cutoff is the earlier of `now_ms` and the newest
+    /// entry's `at_ms`, less the retention. The delete takes a prefix in
+    /// `seq` order: it ends at the first entry inside the retention, even if
+    /// later entries are older. The newest entry is always kept, so `seq`
+    /// goes on from it after a reopen. Nothing is deleted when the clock is
+    /// behind the newest entry, when the retention or `max_rows` is 0, or in
+    /// a store in memory. No other table is touched, and entries not yet
+    /// written are not affected.
+    pub fn prune_journal(
+        &mut self,
+        retention_ms: u64,
+        now_ms: u64,
+        max_rows: usize,
+    ) -> Result<JournalPrune, DiskError> {
+        let Some(d) = self.disk.0.as_ref() else {
+            return Ok(JournalPrune::Kept);
+        };
+        if retention_ms == 0 || max_rows == 0 {
+            return Ok(JournalPrune::Kept);
+        }
+        let newest: Option<(i64, i64)> = d
+            .conn
+            .query_row(
+                "SELECT seq, at_ms FROM journal ORDER BY seq DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((newest_seq, newest_ms)) = newest else {
+            return Ok(JournalPrune::Kept);
+        };
+        let newest_ms = u64::try_from(newest_ms).unwrap_or(0);
+        if now_ms < newest_ms {
+            return Ok(JournalPrune::ClockBehind { now_ms, newest_ms });
+        }
+        let cutoff =
+            i64::try_from(now_ms.min(newest_ms).saturating_sub(retention_ms)).unwrap_or(i64::MAX);
+        let mut st = d
+            .conn
+            .prepare("SELECT seq, at_ms FROM journal ORDER BY seq LIMIT ?1")?;
+        let rows = st.query_map([i64::try_from(max_rows).unwrap_or(i64::MAX)], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        let mut last = None;
+        let mut count = 0usize;
+        let mut read = 0usize;
+        for r in rows {
+            let (seq, at_ms) = r?;
+            read += 1;
+            if at_ms >= cutoff || seq >= newest_seq {
+                break;
+            }
+            last = Some(seq);
+            count += 1;
+        }
+        drop(st);
+        let Some(last) = last else {
+            return Ok(JournalPrune::Kept);
+        };
+        let n = d
+            .conn
+            .execute("DELETE FROM journal WHERE seq <= ?1", [last])?;
+        Ok(JournalPrune::Deleted {
+            rows: n as u64,
+            // The batch was full and every row in it was old.
+            more: count == max_rows && read == count,
+        })
     }
 
     /// The last checkpoint written, if any.
@@ -3406,5 +3500,268 @@ mod tests {
             template_of(&p, "Caucasus").expect("read"),
             Some(b"miz".to_vec())
         );
+    }
+
+    fn command(seq: u64) -> Entry {
+        Entry::Command(Journalled {
+            agent_boot: 1,
+            epoch: 1,
+            seq,
+            opcode: 16,
+            entity: EntityId(1),
+            rev: 1,
+            mission_gen: 1,
+            position: seq,
+            units: vec![],
+        })
+    }
+
+    /// A store on disk with `n` journal rows, row `i` stamped `i * 1000`.
+    fn journalled(p: &Path, n: u64) -> Store {
+        let mut s = Store::create_on_disk(p, CampaignId(7), record(), 10).expect("create");
+        for i in 1..=n {
+            s.journal(Entry::Spec {
+                entity: EntityId(i),
+                rev: i,
+            });
+        }
+        s.commit().expect("commit");
+        stamp(p);
+        s
+    }
+
+    /// Give each journal row the time `seq * 1000`.
+    fn stamp(p: &Path) {
+        Connection::open(p)
+            .expect("conn")
+            .execute_batch("UPDATE journal SET at_ms = seq * 1000")
+            .expect("stamp");
+    }
+
+    fn journal_seqs(p: &Path) -> Vec<i64> {
+        let conn = Connection::open(p).expect("conn");
+        let mut st = conn
+            .prepare("SELECT seq FROM journal ORDER BY seq")
+            .expect("prepare");
+        st.query_map([], |r| r.get(0))
+            .expect("query")
+            .map(|r| r.expect("row"))
+            .collect()
+    }
+
+    #[test]
+    fn journal_retention_zero_keeps_every_row() {
+        let d = tempfile::tempdir().expect("dir");
+        let p = d.path().join("store.sqlite");
+        let mut s = journalled(&p, 5);
+        assert_eq!(
+            s.prune_journal(0, u64::MAX, 1_000).expect("prune"),
+            JournalPrune::Kept
+        );
+        assert_eq!(journal_seqs(&p), [1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn journal_rows_older_than_the_retention_go_and_the_newest_stays() {
+        let d = tempfile::tempdir().expect("dir");
+        let p = d.path().join("store.sqlite");
+        let mut s = journalled(&p, 5);
+        // Cutoff 5000 - 2500: rows at 1000 and 2000 go.
+        assert_eq!(
+            s.prune_journal(2_500, 1_000_000, 1_000).expect("prune"),
+            JournalPrune::Deleted {
+                rows: 2,
+                more: false
+            }
+        );
+        assert_eq!(journal_seqs(&p), [3, 4, 5]);
+        // Every row old: the newest still stays.
+        assert_eq!(
+            s.prune_journal(1, 1_000_000_000, 1_000).expect("prune"),
+            JournalPrune::Deleted {
+                rows: 2,
+                more: false
+            }
+        );
+        assert_eq!(journal_seqs(&p), [5]);
+        assert_eq!(
+            s.prune_journal(1, 1_000_000_000, 1_000).expect("prune"),
+            JournalPrune::Kept
+        );
+        assert_eq!(journal_seqs(&p), [5]);
+    }
+
+    #[test]
+    fn journal_seq_goes_on_from_the_newest_row_after_a_prune_and_reopen() {
+        let d = tempfile::tempdir().expect("dir");
+        let p = d.path().join("store.sqlite");
+        let mut s = journalled(&p, 5);
+        s.prune_journal(1, 1_000_000, 1_000).expect("prune");
+        drop(s);
+        let mut s = Store::open(&p, 10).expect("open");
+        s.journal(Entry::Spec {
+            entity: EntityId(9),
+            rev: 9,
+        });
+        s.commit().expect("commit");
+        assert_eq!(journal_seqs(&p), [5, 6]);
+    }
+
+    #[test]
+    fn a_journal_backlog_drains_in_batches_with_commits_between() {
+        let d = tempfile::tempdir().expect("dir");
+        let p = d.path().join("store.sqlite");
+        let mut s = journalled(&p, 10);
+        let mut gone = Vec::new();
+        for round in 0..6u64 {
+            let next = 11 + round;
+            // A commit of new entries between two batches.
+            s.journal(Entry::Spec {
+                entity: EntityId(next),
+                rev: next,
+            });
+            s.commit().expect("commit");
+            let r = s.prune_journal(1, u64::MAX, 4).expect("prune");
+            let JournalPrune::Deleted { rows, more } = r else {
+                gone.push((round, 0, false));
+                continue;
+            };
+            assert!(rows <= 4);
+            gone.push((round, rows, more));
+        }
+        // The first two rounds are full and report more; a later one ends.
+        assert_eq!((gone[0].1, gone[0].2), (4, true));
+        assert_eq!((gone[1].1, gone[1].2), (4, true));
+        assert!(gone.iter().any(|g| !g.2), "{gone:?}");
+        // The new entries (stamped by the commit's clock, not `seq * 1000`)
+        // kept their numbers.
+        let seqs = journal_seqs(&p);
+        assert!(seqs.windows(2).all(|w| w[1] == w[0] + 1), "{seqs:?}");
+        assert_eq!(*seqs.last().expect("rows"), 16);
+    }
+
+    #[test]
+    fn an_entry_out_of_order_ends_the_prefix() {
+        let d = tempfile::tempdir().expect("dir");
+        let p = d.path().join("store.sqlite");
+        let mut s = journalled(&p, 6);
+        // Row 3 is inside the retention (a clock that stepped back).
+        Connection::open(&p)
+            .expect("conn")
+            .execute_batch("UPDATE journal SET at_ms = 5500 WHERE seq = 3")
+            .expect("stamp");
+        // Cutoff 6000 - 1500 = 4500: rows 1 and 2 go; row 3 stops the
+        // prefix, though rows 4 and later are older than row 3.
+        assert_eq!(
+            s.prune_journal(1_500, 1_000_000, 1_000).expect("prune"),
+            JournalPrune::Deleted {
+                rows: 2,
+                more: false
+            }
+        );
+        assert_eq!(journal_seqs(&p), [3, 4, 5, 6]);
+        // An oldest entry inside the retention ends it with nothing deleted.
+        assert_eq!(
+            s.prune_journal(1_500, 1_000_000, 1_000).expect("prune"),
+            JournalPrune::Kept
+        );
+        assert_eq!(journal_seqs(&p), [3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn a_clock_behind_the_newest_journal_row_deletes_nothing() {
+        let d = tempfile::tempdir().expect("dir");
+        let p = d.path().join("store.sqlite");
+        let mut s = journalled(&p, 5);
+        assert_eq!(
+            s.prune_journal(1, 2_500, 1_000).expect("prune"),
+            JournalPrune::ClockBehind {
+                now_ms: 2_500,
+                newest_ms: 5_000
+            }
+        );
+        assert_eq!(journal_seqs(&p), [1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn a_store_in_memory_has_no_journal_to_prune() {
+        let mut s = Store::new(CampaignId(7), 10);
+        s.journal(command(1));
+        assert_eq!(
+            s.prune_journal(1, u64::MAX, 1_000).expect("prune"),
+            JournalPrune::Kept
+        );
+        assert_eq!(s.entries().len(), 1);
+    }
+
+    #[test]
+    fn an_unanswered_command_whose_entry_was_deleted_is_still_owed_and_resolves() {
+        let d = tempfile::tempdir().expect("dir");
+        let p = d.path().join("store.sqlite");
+        let mut s = Store::create_on_disk(&p, CampaignId(7), record(), 10).expect("create");
+        s.journal(command(1));
+        s.journal(command(2));
+        s.journal(Entry::Outcome {
+            epoch: 1,
+            seq: 2,
+            outcome: Outcome::Applied,
+        });
+        s.journal(Entry::Spec {
+            entity: EntityId(1),
+            rev: 1,
+        });
+        s.commit().expect("commit");
+        stamp(&p);
+        assert_eq!(
+            s.prune_journal(1, 1_000_000, 1_000).expect("prune"),
+            JournalPrune::Deleted {
+                rows: 3,
+                more: false
+            }
+        );
+        assert_eq!(journal_seqs(&p), [4]);
+        let inflight = || -> i64 {
+            Connection::open(&p)
+                .expect("conn")
+                .query_row("SELECT count(*) FROM inflight", [], |r| r.get(0))
+                .expect("count")
+        };
+        assert_eq!(inflight(), 1);
+        drop(s);
+        let mut s = Store::open(&p, 10).expect("open");
+        assert_eq!(s.unanswered().len(), 1);
+        assert_eq!(s.unanswered()[0].seq, 1);
+        // The restarted reconciler's outcome resolves it.
+        s.journal(Entry::Outcome {
+            epoch: 1,
+            seq: 1,
+            outcome: Outcome::Applied,
+        });
+        s.commit().expect("commit");
+        assert_eq!(inflight(), 0);
+        assert!(s.unanswered().is_empty());
+        drop(s);
+        assert!(Store::open(&p, 10).expect("open").unanswered().is_empty());
+    }
+
+    #[test]
+    fn a_backup_taken_after_a_delete_holds_no_deleted_row() {
+        let d = tempfile::tempdir().expect("dir");
+        let p = d.path().join("store.sqlite");
+        let mut s = journalled(&p, 5);
+        s.prune_journal(1_500, 1_000_000, 1_000).expect("prune");
+        let dest = d.path().join("backup.sqlite");
+        backup_file(&p, &dest).expect("backup");
+        let seqs: Vec<i64> = {
+            let conn = Connection::open(&dest).expect("conn");
+            let mut st = conn
+                .prepare("SELECT seq FROM journal ORDER BY seq")
+                .expect("prepare");
+            st.query_map([], |r| r.get(0))
+                .expect("query")
+                .map(|r| r.expect("row"))
+                .collect()
+        };
+        assert_eq!(seqs, [4, 5]);
     }
 }

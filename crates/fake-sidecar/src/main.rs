@@ -10,7 +10,7 @@ use nanoprobe_sim_fake::FakeSim;
 const USAGE: &str = "\
 Usage: nanoprobe-fake-sidecar [--listen ADDR] [--tokens PATH] [--frame-ms MS]
                               [--store DIR] [--theater NAME]
-                              [--run PROGRAM [ARGS...]]
+                              [--leak-kib-per-s N] [--run PROGRAM [ARGS...]]
 
 Serve the nanoprobe API over a fake DCS, for development and tests.
 
@@ -22,6 +22,9 @@ Serve the nanoprobe API over a fake DCS, for development and tests.
 --theater NAME  Start the fake DCS with a mission on NAME loaded, as a DCS
                 that started its own mission. Without it no mission is
                 loaded until an activation loads one.
+--leak-kib-per-s N
+                Leak N KiB of memory each second, for a test that a drift
+                check catches a leak (`cargo xtask soak rehearse`).
 --run PROGRAM   Run PROGRAM with NANOPROBE_ADDR set to the server's URL, then
                 stop and exit with its exit code. Without it, serve until
                 Ctrl-C.
@@ -32,6 +35,7 @@ struct Args {
     cfg: Config,
     theater: Option<String>,
     run: Vec<String>,
+    leak_kib_per_s: usize,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
@@ -41,6 +45,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
     };
     let mut run = Vec::new();
     let mut theater = None;
+    let mut leak_kib_per_s = 0;
     let mut i = 0;
     while i < args.len() {
         let value = |i: usize| {
@@ -73,6 +78,12 @@ fn parse(args: &[String]) -> Result<Args, String> {
                 theater = Some(value(i)?);
                 i += 2;
             }
+            "--leak-kib-per-s" => {
+                leak_kib_per_s = value(i)?
+                    .parse()
+                    .map_err(|e| format!("--leak-kib-per-s: {e}"))?;
+                i += 2;
+            }
             "--run" => {
                 run = args[i + 1..].to_vec();
                 if run.is_empty() {
@@ -84,7 +95,12 @@ fn parse(args: &[String]) -> Result<Args, String> {
             other => return Err(format!("unknown argument `{other}`")),
         }
     }
-    Ok(Args { cfg, run, theater })
+    Ok(Args {
+        cfg,
+        run,
+        theater,
+        leak_kib_per_s,
+    })
 }
 
 #[tokio::main]
@@ -122,6 +138,17 @@ async fn main() -> ExitCode {
         }
     };
     println!("listening on {}", server.endpoint());
+    if a.leak_kib_per_s > 0 {
+        // A planted leak: each block is written, so it is resident, and is
+        // never freed.
+        let kib = a.leak_kib_per_s;
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+                std::mem::forget(vec![0xA5u8; kib * 1024]);
+            }
+        });
+    }
     // The lives the fake DCS holds, for a test that reads them from the log
     // (`cargo xtask persistence`): one line when they change.
     let hub = std::sync::Arc::clone(&server.hub);

@@ -10,7 +10,7 @@ use nanoprobe_sidecar::sim::real::Limits;
 use nanoprobe_sidecar::store::LostPolicy;
 use serde::Deserialize;
 
-use crate::config::{Config, StoreFiles};
+use crate::config::{Config, JOURNAL_RETENTION_DEFAULT, StoreFiles};
 use crate::real::Missions;
 
 #[derive(Debug, Default, Deserialize)]
@@ -90,6 +90,7 @@ struct Store {
     backup_interval_h: u64,
     backup_keep: usize,
     event_retention_days: u64,
+    journal_retention_days: u64,
     server_log_days: u64,
     idempotency_keep_h: u64,
     world_changes_keep: usize,
@@ -104,6 +105,7 @@ impl Default for Store {
             backup_interval_h: 24,
             backup_keep: 7,
             event_retention_days: 0,
+            journal_retention_days: JOURNAL_RETENTION_DEFAULT.as_secs() / 86_400,
             server_log_days: 30,
             idempotency_keep_h: 24,
             world_changes_keep: 100_000,
@@ -254,6 +256,7 @@ impl SidecarToml {
             backup_interval: hours(f.store.backup_interval_h),
             backup_keep: f.store.backup_keep,
             event_retention: days(f.store.event_retention_days),
+            journal_retention: days(f.store.journal_retention_days),
             server_log_retention: days(f.store.server_log_days),
         });
         let poll = Duration::from_millis(f.agent.poll_ms);
@@ -339,6 +342,9 @@ mod tests {
         );
         assert_eq!(t.on_lost, LostPolicy::Report);
         assert_eq!(t.api.on_lost, LostPolicy::Report);
+        let sf = t.api.store.as_ref().expect("store");
+        assert_eq!(sf.event_retention, Duration::ZERO);
+        assert_eq!(sf.journal_retention, JOURNAL_RETENTION_DEFAULT);
         let r = SidecarToml::parse(
             "[agent]\nmap_path = \"m\"\ntoken_path = \"token\"\n[world]\non_lost = \"respawn\"\n",
             d.path(),
@@ -356,6 +362,10 @@ mod tests {
             ("[agent]\nmap_path = \"m\"\n", "token_path"),
             (&format!("{ok}poll_ms = 9\n"), "poll_ms"),
             (&format!("{ok}nonsense = 1\n"), "unknown field"),
+            (
+                &format!("{ok}[store]\njournal_retention_day = 1\n"),
+                "unknown field",
+            ),
             (&format!("{ok}[world]\non_lost = \"keep\"\n"), "on_lost"),
             (&format!("{ok}[api]\ntls_cert = \"c\"\n"), "TLS"),
             (
@@ -405,6 +415,19 @@ mod tests {
         )
         .expect("parse");
         assert_eq!(t.api.template_dirs, [d.path().join("templates"), abs]);
+    }
+
+    #[test]
+    fn the_journal_retention_is_read_in_days() {
+        let d = dir_with_token();
+        let t = SidecarToml::parse(
+            "[agent]\nmap_path = \"m\"\ntoken_path = \"token\"\n[store]\njournal_retention_days = 3\n",
+            d.path(),
+        )
+        .expect("parse");
+        let sf = t.api.store.as_ref().expect("store");
+        assert_eq!(sf.journal_retention, Duration::from_secs(3 * 86_400));
+        assert_eq!(sf.event_retention, Duration::ZERO);
     }
 
     #[test]
