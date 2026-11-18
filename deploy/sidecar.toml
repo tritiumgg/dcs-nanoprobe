@@ -1,5 +1,6 @@
 # sidecar.toml for the container in docker-compose.nanoprobe.yml. Every key and
-# its default is in spec/config.md; only the keys the container needs are here.
+# its default is in spec/config.md in the project's repository; only the keys
+# the container needs are here.
 
 [agent]
 # The mapped file on the shared memory-backed volume. The agent names the same

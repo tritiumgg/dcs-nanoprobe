@@ -98,7 +98,8 @@ needs or that it cannot read, by line number and key, and nothing else from the 
 
 A release is two archives, the agent's PDB (`nanoprobe-<version>-agent.pdb`, which
 symbolizes its crash records and is not installed), the API schema, and `SHA256SUMS`
-over the five files, built by `mise run package` (`tools/stage-release.sh`). The schema
+over the five files, built by `mise run package` (`tools/stage-release.sh`) on macOS or
+Linux. The schema
 is `nanoprobe-<version>-schema.tar.gz`, one folder `nanoprobe-<version>-schema/` with
 `buf.yaml`, `LICENSE` and `proto/`, and `nanoprobe-<version>-schema.binpb`, the file
 descriptor set `buf build` makes of it, with its imports and comments. Users generate
@@ -107,16 +108,42 @@ they are published. Each archive holds one folder,
 `nanoprobe-<version>-<platform>/`:
 
 ```
-nanoprobe[.exe]                 doctor, install, uninstall, inspect, top, watch
-install.cmd, uninstall.cmd      Windows only
+nanoprobe[.exe]                 doctor, install, uninstall, inspect, top, watch, restore
+nanoprobe-sidecar[.exe]         the sidecar (spec/config.md)
+install.cmd, uninstall.cmd      Windows only: run the program on a double click
+install.sh, uninstall.sh        Linux only: run the program with their arguments
+README.txt                      what the folder holds and the first steps
+sidecar.toml                    Windows only: an example for a sidecar beside DCS
+deploy/                         Linux only: the repository's deploy/ folder
 LICENSE
 payload/nanoprobe-hook.lua      the loader
 payload/nanoprobe_agent.dll     the agent DLL
 payload/lua/hook.lua, log.lua, shim.lua
 ```
 
-The platforms are `windows-x86_64` (a zip) and `linux-x86_64` (a tar.gz with a static
-`nanoprobe`). The payload is the same in both: a Linux server runs DCS under Wine.
+`install.sh` and `uninstall.sh` run `nanoprobe install` and `nanoprobe uninstall` with
+the program beside them, and pass on every argument and the program's exit code.
+`deploy/` holds the sidecar's `Dockerfile`, a compose overlay and an example
+`sidecar.toml` for a DCS server in a container. The image is built from the archive's
+`nanoprobe-sidecar`, where it runs; no image is published. Each example `sidecar.toml`
+is one the sidecar accepts once its placeholders are replaced. The Windows archive's
+`README.txt` and `sidecar.toml` end their lines with CR LF.
+
+No file in an archive holds a path of the machine that built it: the builds map the
+checkout, cargo's registry and the toolchain to `nanoprobe`, `cargo` and `rust`
+(`tools/remap.sh`), and the archive test fails on the builder's home folder. The PDB is
+not covered: the linker writes into it the absolute path of every object file and
+library it read.
+
+The sidecar is not installed: the user runs it from the unpacked folder or from the
+image, with a `sidecar.toml` of their own. `nanoprobe install` and `uninstall` write no
+`sidecar.toml`, and place and remove nothing of the sidecar: its stores are in its own
+folder (spec/config.md) and stay. The exception is a folder the user puts
+inside `<profile>/nanoprobe`, the mission folder included, which undeploy removes with
+the rest.
+
+The platforms are `windows-x86_64` (a zip) and `linux-x86_64` (a tar.gz whose two
+programs are static). The payload is the same in both: a Linux server runs DCS under Wine.
 `nanoprobe install` reads `payload/` beside the program. It installs into the one DCS
 profile it finds, or the one `--profile` names: a folder named `DCS` or `DCS.<branch>`
 in `%USERPROFILE%\Saved Games` on Windows, or in `<prefix>/drive_c/users/*/Saved Games`
