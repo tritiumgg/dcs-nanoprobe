@@ -70,6 +70,19 @@ pub fn templates() -> [(&'static str, &'static [u8]); 2] {
     [("Caucasus.miz", CAUCASUS), ("Afghanistan.miz", AFGHANISTAN)]
 }
 
+/// The folder `[missions] template_dirs` lists for the part, as the sidecar
+/// in its container opens it: `own/` in the mission folder, which the run
+/// makes and removes.
+pub const TEMPLATE_DIR: &str = "/missions/own";
+
+/// Put the `--template` mission where the sidecar may read it, and give its
+/// path as the sidecar opens it (`SetCampaignTemplate` takes a path).
+fn own_template_file(run: &Run, t: &[u8]) -> Result<String, String> {
+    run.remote
+        .write(&format!("{}/own/own.miz", crate::sidecar::MISSIONS_DIR), t)?;
+    Ok(format!("{TEMPLATE_DIR}/own.miz"))
+}
+
 #[derive(Clone)]
 struct Auth(MetadataValue<tonic::metadata::Ascii>);
 
@@ -120,8 +133,7 @@ impl Api {
         let c = |ch: &Channel| InterceptedService::new(ch.clone(), auth.clone());
         let mut api = Api {
             session: SessionServiceClient::new(c(&channel)),
-            campaigns: CampaignServiceClient::new(c(&channel))
-                .max_encoding_message_size(17 * 1024 * 1024),
+            campaigns: CampaignServiceClient::new(c(&channel)),
             commands: CommandsServiceClient::new(c(&channel)),
             world: WorldServiceClient::new(c(&channel)),
             mission: MissionServiceClient::new(c(&channel)),
@@ -387,7 +399,7 @@ fn person(
     let req = pb::SetCampaignTemplateRequest {
         write: api.write("template", c),
         theater: theater.clone(),
-        miz: t.to_vec(),
+        path: own_template_file(run, t)?,
     };
     api.rt
         .block_on(api.campaigns.set_campaign_template(req))
@@ -1137,7 +1149,7 @@ pub fn drive(
         let req = pb::SetCampaignTemplateRequest {
             write: api.write("template", c2),
             theater: theater.clone(),
-            miz: t.to_vec(),
+            path: own_template_file(run, t)?,
         };
         api.rt
             .block_on(api.campaigns.set_campaign_template(req))
