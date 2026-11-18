@@ -183,7 +183,8 @@ mise run package    # the release archives, in dist/
 The host tests run on macOS, Linux and Windows. The agent DLL is built for Windows, and
 cross-built on macOS and Linux. The development and test tooling
 (`cargo xtask`) reads its targets from a file outside the repository and is not part of
-a release.
+a release. [docs/releasing.md](docs/releasing.md) says how a release is built and
+published.
 
 ## License
 

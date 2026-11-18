@@ -1,0 +1,145 @@
+# Build and publish a release (docs/releasing.md).
+#
+# A pushed tag `v<version>` builds every released file on one Linux runner
+# with `mise run package`, the task a developer runs, which checks the
+# archives with tools/stage-release-test.sh, and publishes them as the
+# release with the version's notes from docs/release-notes.md in the tagged
+# commit. A manual run is a dry run: the same build, its files kept as
+# workflow artifacts, and no release, so the runner's files can be tested
+# before a tag (the 0.1 acceptance run tests such files). The tag's build is a
+# rebuild, not the same bytes (the
+# archives keep file times, and cargo-xwin downloads the current MSVC CRT and
+# Windows SDK each time).
+#
+# The agent's PDB is never a release file. It is kept as the workflow artifact
+# `agent-symbols-<commit>` of the run that built the DLL. Each artifact's
+# name ends in the first 12 characters of the commit it was built from.
+#
+# No cache: a release is built from nothing, so no file an earlier run left
+# can reach it. Actions are pinned to commit SHAs; the comment names the tag.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  MISE_VERSION: 2026.8.2
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    outputs:
+      commit: ${{ steps.names.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The tag check needs origin/main and the tag's history.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The artifacts carry the commit they were built from in their names.
+      - name: Name the artifacts after the commit
+        id: names
+        run: printf 'commit=%s\n' "$(printf '%s' "$GITHUB_SHA" | cut -c1-12)" >>"$GITHUB_OUTPUT"
+
+      # The tools of mise.toml, the pinned gh among them, for every step below.
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+        with:
+          version: ${{ env.MISE_VERSION }}
+          cache: false
+
+      - name: Check the tag, the notes, and that no release has the tag
+        if: github.event_name == 'push'
+        env:
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_LINK_BASE: ${{ github.server_url }}/${{ github.repository }}/blob/${{ github.ref_name }}
+        run: |
+          version=$(sh tools/release-tag-check.sh "$TAG")
+          mkdir -p notes
+          sh tools/release-notes.sh "$version" notes/notes.md
+          # Only a 404 means no release; any other error stops the build.
+          if out=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" 2>&1); then
+            printf 'a release for %s exists: delete it before building the tag again\n' "$TAG" >&2
+            exit 1
+          elif ! printf '%s\n' "$out" | grep -q 'HTTP 404'; then
+            printf 'could not check for a release of %s:\n%s\n' "$TAG" "$out" >&2
+            exit 1
+          fi
+
+      - name: Build and check the release (mise run package)
+        run: mise run package
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-files-${{ steps.names.outputs.commit }}
+          path: |
+            dist/nanoprobe-*
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: agent-symbols-${{ steps.names.outputs.commit }}
+          path: dist/private/
+          if-no-files-found: error
+          retention-days: 14
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: github.event_name == 'push'
+        with:
+          name: release-notes-${{ steps.names.outputs.commit }}
+          path: notes/notes.md
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      # No checkout: this job runs only the runner's gh on the built files.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-files-${{ needs.build.outputs.commit }}
+          path: files
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-notes-${{ needs.build.outputs.commit }}
+          path: notes
+
+      - name: Publish the release
+        env:
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # This token sees drafts too: refuse any release with the tag.
+          found=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[] | select(.tag_name == env.TAG) | .id')
+          if [ -n "$found" ]; then
+            printf 'a release or draft for %s exists (id %s): delete it before building the tag again\n' "$TAG" "$found" >&2
+            exit 1
+          fi
+          (cd files && sha256sum -c --quiet SHA256SUMS)
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --latest \
+            --title "nanoprobe ${TAG#v}" --notes-file notes/notes.md files/*
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url,isDraft,assets --jq '{url, isDraft, assets: [.assets[].name]}'

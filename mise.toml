@@ -21,6 +21,11 @@ lua-language-server = "3.19.2"
 buf = "1.75.0"
 gitleaks = "8.30.1"
 gh = "2.97.0"
+# The lint of .github/workflows (`mise run check`). actionlint runs shellcheck
+# on each step's script when shellcheck is on PATH, so it is pinned too. The
+# lint runs on Linux and macOS, like the rest of the check task.
+actionlint = { version = "1.7.12", os = ["linux", "macos"] }
+shellcheck = { version = "0.11.0", os = ["linux", "macos"] }
 
 # The static Linux sidecar for its container (`mise run sidecar-linux`): zig is
 # the C compiler for the bundled SQLite, through tools/zigcc-musl.sh.
@@ -131,7 +136,7 @@ description = "Write spec/transport.golden from the tables in the transport spec
 run = "cargo xtask spec"
 
 [tasks.proto]
-description = "Lint the public API schema, check it for breaking changes against origin/main (else main, else HEAD), test that choice, and check the generated Rust code is current"
+description = "Lint the public API schema, check it for breaking changes at its merge base with origin/main (else main, else HEAD), test that choice, and check the generated Rust code is current"
 run = ["buf lint", "sh tools/protobreak.sh", "sh tools/protobreak-test.sh", "cargo xtask proto --check"]
 
 [tasks.hello]
@@ -189,8 +194,7 @@ run = [
   # runs the Python hello in that environment.
   "sh examples/hello-python/check.sh",
   # The Kotlin hello against the fake sidecar. Its first build fetches the
-  # pinned plugins and libraries with Gradle. Like the Python hello, it runs
-  # here and not in CI.
+  # pinned plugins and libraries with Gradle.
   "sh examples/hello-kotlin/check.sh",
   "sh tools/luatest.sh",
   "buf lint",
@@ -199,6 +203,9 @@ run = [
   "cargo xtask proto --check",
   "sh tools/stage-schema-test.sh",
   "sh tools/secretscan-test.sh",
+  # The tag and notes checks .github/workflows/release.yml runs before it builds a tag.
+  "sh tools/release-check-test.sh",
+  "actionlint",
 ]
 
 [tasks.sidecar-linux]
