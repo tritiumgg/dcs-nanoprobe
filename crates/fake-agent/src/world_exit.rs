@@ -114,19 +114,26 @@
 //! # Clearing debris: `--scenario debris`
 //!
 //! The probe creates `--groups` groups of `--units` `M-113`s on the grid of
-//! part A, and one control group of `--units` 1,500 m from the grid, and waits
-//! until all are `live` with every unit's `OBJECT`. It prints phase `spawned`
-//! with the grid's unit names and waits in `--control-dir` for `go`: the
-//! caller kills the grid's units with scripted explosions, runs model time
-//! until their wrecks stop burning, and writes the ground height at the first
-//! group into `go`. The probe then sends three `CLEAR_DEBRIS`:
-//! a sphere on the first group, a box round the second, and a clear of the
-//! whole map (the reconciler's tiles), and waits for their results.
+//! part A, one control group of `--units` 1,500 m from the grid, and one
+//! managed static inside the column below, and waits until all are `live`
+//! with every `OBJECT`. It prints phase `spawned` with the grid's unit names,
+//! the third group's (`column`), those of the group farthest from it
+//! (`outside`) and the static's name, and waits in `--control-dir` for `go`:
+//! the caller kills the grid's units with scripted explosions, runs model
+//! time until their wrecks stop burning, and writes the ground height at the
+//! first group into `go`. The probe then sends a column round the third
+//! group's row, which needs no ground height, prints phase `column` with its
+//! count and cost, and waits for `column-checked`: the caller reads DCS while
+//! only the column has cleared. Then it sends three more `CLEAR_DEBRIS`: a
+//! sphere on the first group at the ground height, a box round the second,
+//! and a clear of the whole map (the reconciler's tiles), and waits for
+//! their results.
 //!
-//! The run passes when: the three outcomes are `APPLIED`; the sphere and the
-//! box each removed at least `--units` junk objects, a group's wrecks, and the
-//! whole map at least those of the other `--groups` less 2; no control unit
-//! went; the clears spread over more than one frame; every over-budget frame
+//! The run passes when: the four outcomes are `APPLIED`; the column, the
+//! sphere and the box each removed at least `--units` junk objects, a group's
+//! wrecks, and the whole map at least those of the other `--groups` less 3;
+//! no control unit went and the static stayed `live` with its object; the
+//! whole map's tiles spread over more than one frame; every over-budget frame
 //! of the run is attributed to one command; and the agent's over-budget
 //! counter fits the results. The verdict gives each clear's count and cost,
 //! the whole map's tiles' cost (median, p99, maximum) and the frames they took.
@@ -527,8 +534,8 @@ fn opts(args: &[String]) -> Result<Opts, String> {
     if matches!(o.scenario.as_str(), "paused" | "debris") && o.control_dir.is_none() {
         return Err(format!("--scenario {} needs --control-dir", o.scenario));
     }
-    if o.scenario == "debris" && o.groups < 3 {
-        return Err("--scenario debris needs --groups 3 or more".into());
+    if o.scenario == "debris" && o.groups < 4 {
+        return Err("--scenario debris needs --groups 4 or more".into());
     }
     Ok(o)
 }
@@ -1316,6 +1323,50 @@ fn debris(c: &mut Ctx) -> Result<bool, String> {
         ));
     }
     let control = row_group(c, &theater, ox - 1_500.0, oz, "debris control".into())?;
+    // The column: a square round the third group's row. Its half width is
+    // half the row and 20 m, so every wreck of the row is 20 m inside it and
+    // the nearest other group, a grid step away, is far outside: a clear's
+    // edge is not exact, and a small sphere took wrecks 30 m from it (LIVE,
+    // docs/results/2026-11-16-clear-debris.md).
+    const COLUMN: usize = 2;
+    let len = (c.o.units.max(1) - 1) as f64 * 20.0;
+    let half_width = len / 2.0 + 20.0;
+    let (cx, cz) = (grid[COLUMN].1.0, grid[COLUMN].1.1 + len / 2.0);
+    // The grid's group farthest from the column: its wrecks must stay.
+    let far = (0..grid.len())
+        .max_by(|a, b| {
+            let d = |n: &usize| (grid[*n].1.0 - cx).hypot(grid[*n].1.1 - cz);
+            d(a).total_cmp(&d(b))
+        })
+        .expect("a grid");
+    // A static the platform manages, inside the column, 5 m from its
+    // northern edge and so away from the row's wrecks.
+    let mut hangar = NewUnit::new(
+        "Hangar A",
+        UnitState {
+            at: Point {
+                x: cx + half_width - 5.0,
+                y: 0.0,
+                z: cz,
+            },
+            ..UnitState::default()
+        },
+    );
+    hangar.extra = lv::obj(vec![("category", lv::s("Fortifications"))]);
+    let managed = c
+        .store
+        .create_static(NewGroup {
+            theater: theater.clone(),
+            country: 2,
+            category: 0,
+            coalition: 2,
+            units: vec![hangar],
+            authority: Authority::Sim,
+            label: "debris static".into(),
+            extra: Lv::Nil,
+        })
+        .map_err(|e| format!("store: {e:?}"))?;
+    let managed_name = name(NameKind::Static, CampaignId(c.o.campaign), managed);
     let members = |c: &Ctx, g: EntityId| c.store.group(g).expect("group").members.clone();
     let names_of = |c: &Ctx, gs: &[EntityId]| -> Vec<String> {
         gs.iter()
@@ -1327,26 +1378,34 @@ fn debris(c: &mut Ctx) -> Result<bool, String> {
     let kill = names_of(c, &grid_ids);
     let kept = names_of(c, &[control]);
     let all: Vec<String> = kill.iter().chain(&kept).cloned().collect();
-    c.until("every group live and every unit's OBJECT", |c| {
+    let all: Vec<String> = all.into_iter().chain([managed_name.clone()]).collect();
+    c.until("every group and the static live, with every OBJECT", |c| {
         grid_ids
             .iter()
-            .chain([&control])
+            .chain([&control, &managed])
             .all(|g| c.store.group(*g).is_some_and(|x| x.state == State::Live))
             && all
                 .iter()
                 .all(|n| c.log.objects.iter().any(|o| &o.name == n))
     })?;
+    // The control units' objects and the managed static's: none may go.
     let kept_objects: BTreeSet<u64> = c
         .log
         .objects
         .iter()
-        .filter(|o| kept.contains(&o.name))
+        .filter(|o| kept.contains(&o.name) || o.name == managed_name)
         .map(|o| o.object)
         .collect();
+    let inside = names_of(c, &[grid_ids[COLUMN]]);
+    let outside = names_of(c, &[grid_ids[far]]);
     println!(
-        "{{\"ev\":\"phase\",\"name\":\"spawned\",\"kill\":{},\"control\":{}}}",
+        "{{\"ev\":\"phase\",\"name\":\"spawned\",\"kill\":{},\"control\":{},\"column\":{},\
+         \"outside\":{},\"static\":{}}}",
         str_list(kill.iter()),
-        str_list(kept.iter())
+        str_list(kept.iter()),
+        str_list(inside.iter()),
+        str_list(outside.iter()),
+        json_string(&managed_name)
     );
     wait_file(c, "go", true)?;
     // The caller writes the ground height at the first group into `go`.
@@ -1357,8 +1416,35 @@ fn debris(c: &mut Ctx) -> Result<bool, String> {
         .map_err(|_| "go holds no ground height".to_owned())?;
     let counter0 = c.counter()?;
     let results0 = c.log.results.len();
-    let ((x0, z0), (x1, z1)) = (grid[0].1, grid[1.min(grid.len() - 1)].1);
-    let len = (c.o.units.max(1) - 1) as f64 * 20.0;
+    // The column first, alone, so the caller can read DCS before any other
+    // clear: the row's wrecks gone, the far group's left.
+    let mut keys = Vec::new();
+    {
+        let mut tap = Tap {
+            sim: &mut c.sim,
+            log: &mut c.log,
+        };
+        let key = c
+            .rec
+            .clear_debris_column(&mut c.store, &mut tap, cx, cz, half_width)
+            .ok_or("the column clear was not sent")?;
+        keys.push(("column", key));
+        c.until("the column answered", |c| {
+            c.rec.effect_result(key).is_some()
+        })?;
+        let r = c.rec.effect_result(key).expect("answered");
+        let (removed, cost) = r.result.as_ref().map_or((-1.0, 0), |x| match x.value {
+            Lv::Number(n) => (n, x.cost_us),
+            _ => (-1.0, x.cost_us),
+        });
+        println!(
+            "{{\"ev\":\"phase\",\"name\":\"column\",\"applied\":{},\"removed\":{removed},\
+             \"cost_us\":{cost},\"north\":{cx},\"east\":{cz},\"half_width\":{half_width}}}",
+            r.outcome == Outcome::Applied
+        );
+        wait_file(c, "column-checked", true)?;
+    }
+    let ((x0, z0), (x1, z1)) = (grid[0].1, grid[1].1);
     let sphere = Debris::Sphere {
         center: [x0, ground, z0 + len / 2.0],
         radius: len / 2.0 + c.o.spacing / 3.0,
@@ -1367,7 +1453,6 @@ fn debris(c: &mut Ctx) -> Result<bool, String> {
         min: [x1 - 30.0, -1_000.0, z1 - 30.0],
         max: [x1 + 30.0, 9_000.0, z1 + len + 30.0],
     };
-    let mut keys = Vec::new();
     for (what, v) in [
         ("sphere", Some(sphere)),
         ("box", Some(boxed)),
@@ -1399,7 +1484,8 @@ fn debris(c: &mut Ctx) -> Result<bool, String> {
     let run_results = &c.log.results[results0..];
     let report = budget_report(run_results, budget_us);
     // The whole map's own tiles: after the box's command, up to its last tile.
-    let (box_key, map_key) = (keys[1].1, keys[2].1);
+    let key_of = |what: &str| keys.iter().find(|(w, _)| *w == what).expect("sent").1;
+    let (box_key, map_key) = (key_of("box"), key_of("whole map"));
     let tiles: Vec<&Stamped> = run_results
         .iter()
         .filter(|st| {
@@ -1424,10 +1510,10 @@ fn debris(c: &mut Ctx) -> Result<bool, String> {
             (n, x.cost_us)
         });
         let applied = r.outcome == Outcome::Applied;
-        // Each wreck counts once at least: the sphere and the box hold one
-        // group each, and the whole map the rest.
+        // Each wreck counts once at least: the column, the sphere and the
+        // box hold one group each, and the whole map the rest.
         let groups = if *what == "whole map" {
-            c.o.groups.saturating_sub(2)
+            c.o.groups.saturating_sub(3)
         } else {
             1
         };
@@ -1448,16 +1534,22 @@ fn debris(c: &mut Ctx) -> Result<bool, String> {
         .store
         .group(control)
         .is_some_and(|g| g.state == State::Live);
+    let static_live = c
+        .store
+        .group(managed)
+        .is_some_and(|g| g.state == State::Live);
     let counter_ok = report.counter_fits(counter.saturating_sub(counter0));
     pass &= control_gone.is_empty()
         && control_live
+        && static_live
         && report.unattributed.is_empty()
         && counter_ok
         && frames.len() > 1;
     println!(
         "{{\"ev\":\"verdict\",\"scenario\":\"debris\",\"pass\":{pass},\"clears\":[{}],\
          \"tiles\":{},\"tile_cost_us\":{{\"median\":{median},\"p99\":{p99},\"max\":{max}}},\
-         \"tile_frames\":{},\"control_live\":{control_live},\"control_gone\":{},\
+         \"tile_frames\":{},\"control_live\":{control_live},\"static_live\":{static_live},\
+         \"control_gone\":{},\
          \"budget_us\":{budget_us},\"over_frames\":{},\"unattributed_frames\":{},\
          \"max_frame_us\":{},\"max_commands_in_frame\":{},\"counter_delta\":{},\
          \"counter_ok\":{}}}",

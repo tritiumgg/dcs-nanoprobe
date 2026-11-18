@@ -15,10 +15,12 @@
 -- OBJECT_GONE came. The mock repeats what a
 -- paused destroy does under Wine (the removal waits for the resume).
 --
--- debris: the grid's units are killed in the mock when the probe reports them
--- spawned, and the probe clears a sphere, a box and the whole map with
--- CLEAR_DEBRIS: every clear removes the wrecks inside it, the control group
--- stays, and the 256 tiles run under the budget's attribution rule.
+-- debris: the mock's ground is 900 m up. The grid's units are killed in the
+-- mock when the probe reports them spawned, and the probe clears a column
+-- with no height given, then a sphere, a box and the whole map with
+-- CLEAR_DEBRIS: every clear removes the wrecks inside it, the column leaves
+-- every wreck outside it, the control group and the managed static stay,
+-- and the 256 tiles run under the budget's attribution rule.
 
 local S = dofile((arg[0]:match('^(.*/)') or './') .. 'support.lua')
 local root = S.root()
@@ -73,10 +75,13 @@ end
 
 -- Run the probe on `scenario` against a fresh mock; `on_phase(host, event)` is
 -- called once for each phase line the probe prints. Returns the verdict.
-local function run(scenario, campaign, extra, on_phase)
+local function run(scenario, campaign, extra, on_phase, setup)
   local port = install()
   local out = profile .. scenario .. '.jsonl'
   local host = mock.new({ writedir = profile })
+  if setup then
+    setup(host)
+  end
   host:run('hook', profile .. 'Scripts/Hooks/nanoprobe-hook.lua')
   host:load_mission('first', { paused = false })
   assert(os.execute(string.format(
@@ -176,29 +181,116 @@ local function names()
 end
 
 local function debris()
-  local v = run('debris', 9, '--groups 4 --units 4', function(host, e)
-    if e.name == 'spawned' then
-      for _, n in ipairs(e.kill) do
-        host.sim:doom(assert(host.sim.by_name[n], 'no unit ' .. n))
-      end
-      S.write(control .. 'go', '0.0')
+  -- The ground is 900 m up everywhere, as on a high airfield: the mock
+  -- spawns the units and the static at that height.
+  local GROUND = 900
+  local wrecks, spawned, column_seen = {}, nil, false
+  -- The live check's snippets (lua/experiments/junk/column-*.lua), run in the
+  -- mock's server state as `cargo xtask commands <target> --part debris` runs
+  -- them in DCS, with the same placeholders filled.
+  local E = { store = {} }
+  local function quoted(names)
+    local out = {}
+    for i, n in ipairs(names) do
+      out[i] = "'" .. n .. "'"
     end
+    return table.concat(out, ',')
+  end
+  local function snippet(host, file, fill)
+    local source = assert(S.read(root .. 'lua/experiments/junk/' .. file), 'no ' .. file)
+    for placeholder, text in pairs(fill) do
+      source = source:gsub(placeholder, function()
+        return text
+      end)
+    end
+    assert(not source:find('__%u', 1), file .. ' has an unfilled placeholder')
+    local chunk = assert(loadstring(source, '=' .. file))
+    setfenv(chunk, host.states.server)
+    return chunk(E)
+  end
+  local function read_round(host)
+    return snippet(host, 'column-read.lua', {
+      __INSIDE__ = quoted(spawned.column), __OUTSIDE__ = quoted(spawned.outside),
+      __CONTROL__ = quoted(spawned.control), __STATIC__ = "'" .. spawned.static .. "'" })
+  end
+  local v = run('debris', 9, '--groups 5 --units 4', function(host, e)
+    local sim = host.sim
+    if e.name == 'spawned' then
+      spawned = e
+      local origin = snippet(host, 'column-origin.lua', { __MIN_GROUND__ = '500' })
+      assert(origin == '0.0 0.0 900.0 Alpha', 'the origin on high ground is ' .. tostring(origin))
+      assert(snippet(host, 'column-origin.lua', { __MIN_GROUND__ = '1000' }) == 'none 900.0',
+        'an origin was found above every airbase')
+      assert(snippet(host, 'column-origin.lua', { __MIN_GROUND__ = '-math.huge' }) == origin,
+        'no origin without a minimum')
+      -- From here on only the agent could read the ground height.
+      sim.height_reads = 0
+      for _, n in ipairs(e.kill) do
+        local unit = assert(sim.by_name[n], 'no unit ' .. n)
+        assert(unit.y == GROUND, n .. ' was spawned at ' .. unit.y .. ' m')
+        wrecks[n] = unit
+      end
+      local hit = snippet(host, 'column-kill.lua', { __NAMES__ = quoted(e.kill) })
+      assert(hit == string.format('%d %.1f', #e.kill, GROUND), 'the kill read is ' .. tostring(hit))
+      for n, unit in pairs(wrecks) do
+        assert(sim.dead[unit.id] == unit, 'the kill left ' .. n .. ' alive')
+      end
+      assert(sim.statics[e.static], 'the mock has no static ' .. tostring(e.static))
+      local before = read_round(host)
+      assert(before:match('^4 4 4 true:[%d.]+:900%.0 20$'), 'the read before the column is ' .. before)
+      S.write(control .. 'go', string.format('%.1f', GROUND))
+    elseif e.name == 'column' then
+      local after = read_round(host)
+      assert(after:match('^0 4 4 true:[%d.]+:900%.0 16$'), 'the read after the column is ' .. after)
+      -- Only the column has cleared: its row's wrecks are gone, every other
+      -- wreck is left, and the managed static and the control units stand.
+      column_seen = true
+      assert(e.applied and e.removed == #spawned.column,
+        'the column removed ' .. tostring(e.removed) .. ', not ' .. #spawned.column)
+      local inside = {}
+      for _, n in ipairs(spawned.column) do
+        inside[n] = true
+      end
+      for n, unit in pairs(wrecks) do
+        if inside[n] then
+          assert(sim.removed[unit.id] == unit, 'the column left the wreck of ' .. n)
+        else
+          assert(sim.dead[unit.id] == unit, 'the column removed the wreck of ' .. n .. ', outside it')
+        end
+      end
+      assert(#spawned.outside == 4, 'the probe named no outside group')
+      for _, n in ipairs(spawned.outside) do
+        assert(not inside[n] and wrecks[n], n .. ' is not an outside wreck')
+      end
+      local static = assert(sim.statics[spawned.static], 'the column removed the managed static')
+      assert(static.alive and static.y == GROUND, 'the managed static is not as it was spawned')
+      for _, n in ipairs(spawned.control) do
+        assert(sim.by_name[n] and sim.by_name[n].alive, 'the column removed the control unit ' .. n)
+      end
+      assert(sim.height_reads == 0, 'the agent read the ground height ' .. tostring(sim.height_reads) .. ' times')
+      S.write(control .. 'column-checked', '')
+    end
+  end, function(host)
+    host.sim.ground = GROUND
   end)
+  assert(column_seen, 'the probe printed no column phase')
   local removed = {}
   for _, c in ipairs(v.clears) do
     assert(c.applied, c.clear .. ' was not applied')
     removed[c.clear] = c.removed
   end
   -- The mock's removeJunk counts the dead units inside: a group each for the
-  -- sphere and the box, the other two groups for the whole map.
-  assert(removed.sphere == 4 and removed.box == 4 and removed['whole map'] == 8,
-    'removed ' .. tostring(removed.sphere) .. ', ' .. tostring(removed.box) .. ', ' .. tostring(removed['whole map']))
+  -- column, the sphere and the box, the other two groups for the whole map.
+  assert(removed.column == 4 and removed.sphere == 4 and removed.box == 4 and removed['whole map'] == 8,
+    'removed ' .. tostring(removed.column) .. ', ' .. tostring(removed.sphere) .. ', ' .. tostring(removed.box)
+      .. ', ' .. tostring(removed['whole map']))
   assert(v.tiles == 256, v.tiles .. ' whole-map tiles answered, not 256')
-  assert(v.control_live and #v.control_gone == 0, 'a control unit went')
+  assert(v.control_live and v.static_live and #v.control_gone == 0, 'a control unit or the managed static went')
   assert(v.tile_frames > 1 and v.over_frames > 0 and v.counter_ok,
     'the budget did not spread the tiles: ' .. v.tile_frames .. ' frames, ' .. v.over_frames .. ' over budget')
-  S.ok(string.format('debris: a sphere, a box and the whole map cleared in %d frames, %d over-budget frames '
-    .. 'all attributed', v.tile_frames, v.over_frames))
+  S.ok(string.format('debris: on ground %d m up a column cleared its row with no height given and left the rest, '
+    .. 'then a sphere, a box and the whole map cleared in %d frames, %d over-budget frames all attributed',
+    GROUND, v.tile_frames, v.over_frames))
 end
 
 local scenarios = { groups = groups, paused = paused, names = names, debris = debris }

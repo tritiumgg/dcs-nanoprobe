@@ -223,6 +223,30 @@ struct FAirbase {
     stock: Stock,
 }
 
+/// A wreck or a dead static a test placed ([`FakeSim::place_wreck`]).
+#[derive(Clone, Debug)]
+struct Junk {
+    name: String,
+    /// DCS `x`, `y`, `z`.
+    at: [f64; 3],
+    dead_static: bool,
+}
+
+impl Junk {
+    /// Whether it lies inside a `CLEAR_DEBRIS` volume, edges included.
+    fn inside(&self, volume: &Debris) -> bool {
+        match volume {
+            Debris::Sphere { center, radius } => {
+                let d2: f64 = (0..3).map(|i| (self.at[i] - center[i]).powi(2)).sum();
+                d2 <= radius * radius
+            }
+            Debris::Box { min, max } => {
+                (0..3).all(|i| min[i] <= self.at[i] && self.at[i] <= max[i])
+            }
+        }
+    }
+}
+
 /// What DCS holds of one unit object ([`FakeSim::unit_states`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UnitTruth {
@@ -308,7 +332,8 @@ pub struct Ledger {
     /// `PICTURE_STOP`s the agent applied.
     pub picture_stops: u32,
     /// `CLEAR_DEBRIS` volumes the agent applied, in order. Each removes
-    /// `Config::debris_per_clear` junk objects.
+    /// `Config::debris_per_clear` junk objects, and the placed wrecks and
+    /// unmanaged dead statics inside it.
     pub debris: Vec<Debris>,
     /// `MESSAGE`s the agent applied: scope, target, clear, seconds, text.
     pub messages: Vec<(u32, u64, bool, f64, String)>,
@@ -501,6 +526,8 @@ pub struct FakeSim {
     options: BTreeMap<u64, BTreeMap<u32, Lv>>,
     /// Life of a unit object as a percentage of its initial life, when set.
     life: BTreeMap<u64, f64>,
+    /// Wrecks and dead statics a test placed, which a `CLEAR_DEBRIS` removes.
+    junk: Vec<Junk>,
     /// The heading each unit object was spawned with, radians, which a
     /// capture reads back.
     heading: BTreeMap<u64, f64>,
@@ -618,6 +645,7 @@ impl FakeSim {
             airbases: BTreeMap::new(),
             options: BTreeMap::new(),
             life: BTreeMap::new(),
+            junk: Vec::new(),
             heading: BTreeMap::new(),
             rates: Rates::default(),
             rates_received: 0,
@@ -695,6 +723,32 @@ impl FakeSim {
     /// The value of a controller option DCS holds for a group entity.
     pub fn option_of(&self, entity: u64, option: u32) -> Option<&Lv> {
         self.options.get(&entity)?.get(&option)
+    }
+
+    /// Leave a wreck at a DCS point (`x`, `y`, `z`). The fake has no terrain:
+    /// a test puts the wreck at the height its ground has.
+    pub fn place_wreck(&mut self, name: &str, at: [f64; 3]) {
+        self.junk.push(Junk {
+            name: name.into(),
+            at,
+            dead_static: false,
+        });
+    }
+
+    /// Leave a dead static at a DCS point. One whose name starts with `np#`
+    /// is the platform's and stays through every clear (spec/commands.md,
+    /// "Layout: CLEAR_DEBRIS").
+    pub fn place_dead_static(&mut self, name: &str, at: [f64; 3]) {
+        self.junk.push(Junk {
+            name: name.into(),
+            at,
+            dead_static: true,
+        });
+    }
+
+    /// The names of the placed wrecks and dead statics no clear has removed.
+    pub fn junk_left(&self) -> Vec<&str> {
+        self.junk.iter().map(|j| j.name.as_str()).collect()
     }
 
     /// The life, as a percentage of the initial life, of a unit entity's
@@ -2845,7 +2899,12 @@ impl FakeSim {
             }
             Body::ClearDebris(d) => {
                 self.ledger.debris.push(*d);
-                let n = self.cfg.debris_per_clear;
+                // Every placed wreck and unmanaged dead static inside the
+                // volume goes and counts once.
+                let before = self.junk.len();
+                self.junk
+                    .retain(|j| !j.inside(d) || (j.dead_static && j.name.starts_with("np#")));
+                let n = self.cfg.debris_per_clear + (before - self.junk.len()) as f64;
                 self.result(&cmd, rc::APPLIED, 0, "", Lv::Number(n));
             }
             Body::Sound {

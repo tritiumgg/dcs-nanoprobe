@@ -938,6 +938,21 @@ over 4 frames (LIVE, run 3 of the results). These figures were measured before t
 handler searched the volume for dead statics. The search, a `getLife` and `isExist` on
 each static in the volume and a destroy of each dead one add a cost that is UNVERIFIED.
 
+A sphere's and a box's `y` are meters above sea level, as every DCS `y` is. A sphere
+centered at `y` 0 holds nothing where the ground is higher than its radius: a 30 m sphere
+at 0 on an airfield about 900 m up removed nothing (LIVE,
+docs/results/2026-11-17-person-fixes.md). The agent reads no ground height.
+
+A column clears a place whatever the ground's height there. It is a form of the API, not
+of this layout: the sidecar sends it as one `BOX`, a square on the map round the column's
+center, `half_width` to each edge in x and in z, from 10 km below sea level to 100 km
+above it, the heights of the whole map's boxes below. The API ignores the center's
+altitude, so two columns that differ only in it are the same bytes. It refuses a column
+whose `half_width` is not above 0 or whose edge lies beyond 10,000 km, so the agent's
+check passes. A box that tall cleared the wrecks on the ground under it (LIVE,
+docs/results/2026-11-16-clear-debris.md, run 3). A column takes junk at every height
+inside it; junk away from the ground has not been seen (UNVERIFIED that none exists).
+
 A clear of the whole map is not one command, so that no single command removes the junk
 of the whole map at once. The sidecar sends it as boxes 250 km square that tile x and z
 from -2,000 km to 2,000 km, 256 commands, each from 10 km below sea level to 100 km above

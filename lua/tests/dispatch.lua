@@ -1576,10 +1576,62 @@ scenario('clear-debris', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   r = run({ sphere(zero, 50) }, 'clear debris on a live static of life 0')
   expect(r[1], APPLIED, 'CLEAR_DEBRIS on a live static of life 0')
   assert(zero.alive and sim.statics.zero == zero, 'a clear removed a live static of life 0')
+  -- A column, as the sidecar sends it: a square box from 10 km below sea
+  -- level to 100 km above it (spec/commands.md, "Layout: CLEAR_DEBRIS"). On
+  -- ground 900 m up a sphere at y = 0 holds nothing; the column's box
+  -- removes the wreck inside it and the unmanaged dead static, and leaves
+  -- the wreck outside it, the live unit and the managed dead static. The
+  -- handler reads no ground height. At sea level the box removes the same.
+  local function column(x, z, half)
+    return { op = 'CLEAR_DEBRIS', volume = 2, x = x - half, y = -10000, z = z - half,
+      x2 = x + half, y2 = 100000, z2 = z + half }
+  end
+  for _, place in ipairs({ { x = 200000, ground = 900 }, { x = 300000, ground = 0 } }) do
+    sim.ground = function(x)
+      return x >= 200000 and x < 300000 and 900 or 0
+    end
+    local tag = tostring(place.ground)
+    local group = sim:add_group(2, 2, { name = 'column ' .. tag, units = {
+      { name = 'in ' .. tag, type = 'M-113', x = place.x, y = 0, heading = 0 },
+      { name = 'out ' .. tag, type = 'M-113', x = place.x + 200, y = 0, heading = 0 },
+      { name = 'live ' .. tag, type = 'M-113', x = place.x + 10, y = 10, heading = 0 } } })
+    local inside, outside, alive = group.units[1], group.units[2], group.units[3]
+    assert(inside.y == place.ground, 'the mock spawned a unit at ' .. inside.y .. ', not on the ground')
+    local managed = sim:add_static(2, { name = 'np#col' .. tag, type = 'FARP Fuel Depot', x = place.x + 5, y = -5 })
+    local loose_ruin = sim:add_static(2, { name = 'ruin ' .. tag, type = 'FARP Fuel Depot', x = place.x + 15, y = 5 })
+    assert(managed.y == place.ground and loose_ruin.y == place.ground, 'the mock spawned a static off the ground')
+    sim:doom(inside)
+    sim:doom(outside)
+    sim:doom_static(managed)
+    sim:doom_static(loose_ruin)
+    sim.height_reads = 0
+    local clears = { column(place.x, 0, 30) }
+    if place.ground > 0 then
+      table.insert(clears, 1, sphere({ x = place.x, y = 0, z = 0 }, 30))
+    end
+    r = run(clears, 'a column at ' .. tag .. ' m')
+    if place.ground > 0 then
+      expect(r[1], APPLIED, 'a sphere at y = 0 under ground at ' .. tag .. ' m')
+      assert(r[1].value == 0, 'a sphere at y = 0 under high ground removed ' .. tostring(r[1].value))
+    end
+    local col = r[#clears]
+    expect(col, APPLIED, 'a column where the ground is at ' .. tag .. ' m')
+    -- The mock counts the wreck, the junk of each of the two dead statics,
+    -- and the unmanaged static's destroy.
+    assert(col.value == 4, 'the column removed ' .. tostring(col.value) .. ' at ' .. tag .. ' m, not 4')
+    assert(sim.removed[inside.id] == inside, 'the column left the wreck inside it at ' .. tag .. ' m')
+    assert(sim.dead[outside.id] == outside, 'the column removed a wreck outside it at ' .. tag .. ' m')
+    assert(alive.alive, 'the column removed a live unit at ' .. tag .. ' m')
+    assert(sim.gone_statics[loose_ruin.id] == loose_ruin, 'the column left an unmanaged dead static at ' .. tag .. ' m')
+    assert(sim.dead_statics[managed.id] == managed, 'the column destroyed a managed dead static at ' .. tag .. ' m')
+    assert(sim.height_reads == 0, 'a clear read the ground height ' .. sim.height_reads .. ' times')
+  end
+  sim.ground = nil
   assert((sim.destroyed_in_search or 0) == 0, 'a static was destroyed inside the search')
   S.ok('CLEAR_DEBRIS: a sphere or a box removes the wrecks inside and returns the count, a bad volume is BAD_PAYLOAD,'
     .. ' a dead static inside is destroyed after the search and counted once, a destroy that raises is skipped,'
-    .. ' a live static of life 0 and a dead static the platform manages stay')
+    .. ' a live static of life 0 and a dead static the platform manages stay, and a column\'s box clears ground'
+    .. ' 900 m up and at sea level with no height read')
 end)
 
 scenario('picture', nil, function(ctx)

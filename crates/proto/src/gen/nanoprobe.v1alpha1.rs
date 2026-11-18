@@ -5507,7 +5507,9 @@ pub struct Picture {
 /// Take every picture off screen.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct PictureStop {}
-/// A sphere, in DCS coordinates.
+/// A sphere, in DCS coordinates. The center's `alt` is above sea level, and 0
+/// is sea level: a sphere at 0 holds nothing where the ground is higher than
+/// its radius. To clear at the ground without its height, use `Column`.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Sphere {
     #[prost(message, optional, tag = "1")]
@@ -5517,13 +5519,31 @@ pub struct Sphere {
     pub radius: f64,
 }
 /// A box aligned with the axes, in DCS coordinates. Each of `min`'s
-/// coordinates is at most the same one of `max`.
+/// coordinates is at most the same one of `max`. Each `alt` is above sea
+/// level, and 0 is sea level. To clear at the ground without its height, use
+/// `Column`.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Box {
     #[prost(message, optional, tag = "1")]
     pub min: ::core::option::Option<Position>,
     #[prost(message, optional, tag = "2")]
     pub max: ::core::option::Option<Position>,
+}
+/// A square on the map, at every height: 2 x `half_width` on a side, aligned
+/// with north and east, from 10 km below sea level to 100 km above it. It
+/// clears the ground at a place whose height the caller does not know. Its
+/// corners reach 1.41 x `half_width` from the center, and the edge DCS
+/// applies is not exact: wrecks some tens of meters outside a small volume
+/// have gone with it.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Column {
+    /// Only `theater`, `north` and `east` are read. `alt` is ignored.
+    #[prost(message, optional, tag = "1")]
+    pub center: ::core::option::Option<Position>,
+    /// Meters, above 0. Each edge, `north` and `east` less and plus
+    /// `half_width`, is within 10,000 km of 0.
+    #[prost(double, tag = "2")]
+    pub half_width: f64,
 }
 /// The map: x and z from -2,000 km to 2,000 km. That this covers every
 /// theater is UNVERIFIED.
@@ -5540,7 +5560,7 @@ pub struct WholeMap {}
 /// events. Coordinates and sizes are within 10,000 km of 0.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ClearDebris {
-    #[prost(oneof = "clear_debris::Volume", tags = "1, 2, 3")]
+    #[prost(oneof = "clear_debris::Volume", tags = "1, 2, 3, 4")]
     pub volume: ::core::option::Option<clear_debris::Volume>,
 }
 /// Nested message and enum types in `ClearDebris`.
@@ -5553,8 +5573,12 @@ pub mod clear_debris {
         Box(super::Box),
         /// Sent to DCS as several boxes, so that no single command clears the
         /// whole map at once.
+        ///
+        /// Sent to DCS as one box.
         #[prost(message, tag = "3")]
         WholeMap(super::WholeMap),
+        #[prost(message, tag = "4")]
+        Column(super::Column),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
