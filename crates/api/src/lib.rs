@@ -10,6 +10,7 @@ pub mod auth;
 pub mod config;
 pub mod convert;
 pub mod events;
+pub mod group_template;
 pub mod hub;
 pub mod idem;
 pub mod lease;

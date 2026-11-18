@@ -683,6 +683,18 @@ async fn tokens_give_roles() {
         .expect_err("observer");
     assert_eq!(e.code(), Code::PermissionDenied);
     assert_eq!(reason(&e), ErrorReason::RoleRequired);
+    // A changing call that reads a file is a controller's too, and the role
+    // is checked before the path is looked at.
+    let e = CommandsServiceClient::with_interceptor(ch.clone(), with(OBSERVER_TOKEN))
+        .put_group_from_template(pb::PutGroupFromTemplateRequest {
+            path: "/nowhere/templates.lua".into(),
+            template: "t".into(),
+            ..pb::PutGroupFromTemplateRequest::default()
+        })
+        .await
+        .expect_err("observer");
+    assert_eq!(e.code(), Code::PermissionDenied);
+    assert_eq!(reason(&e), ErrorReason::RoleRequired);
     let mut ctl = SessionServiceClient::with_interceptor(ch.clone(), with(CONTROLLER_TOKEN));
     ctl.acquire_lease(AcquireLeaseRequest::default())
         .await

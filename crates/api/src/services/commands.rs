@@ -14,7 +14,8 @@ use nanoprobe_proto::v1alpha1::{
     self as pb, AdjustWarehouseStockRequest, AdjustWarehouseStockResponse, CaptureRequest,
     CaptureResponse, DematerializeRequest, DematerializeResponse, DoEffectRequest,
     DoEffectResponse, ErrorReason, GetOutcomeRequest, GetOutcomeResponse, GroupCategory,
-    MaterializeRequest, MaterializeResponse, PutGroupRequest, PutGroupResponse, PutStaticRequest,
+    MaterializeRequest, MaterializeResponse, PutGroupFromTemplateRequest,
+    PutGroupFromTemplateResponse, PutGroupRequest, PutGroupResponse, PutStaticRequest,
     PutStaticResponse, RemoveEntityRequest, RemoveEntityResponse, Resolution, ResolveMemberRequest,
     ResolveMemberResponse, SetAirbaseOwnerRequest, SetAirbaseOwnerResponse, SetLostPolicyRequest,
     SetLostPolicyResponse, SetOptionsRequest, SetOptionsResponse, SetOrderRequest,
@@ -36,6 +37,7 @@ use crate::auth::{Access, require};
 use crate::convert::{
     dcs_category, dcs_coalition, entity, finite, intent, invalid, not_built, not_found,
 };
+use crate::group_template;
 use crate::hub::{Call, Hub, Inner, Need, Slot, settle};
 use crate::idem::EffectKind;
 use crate::lua::{extra_to_lua, from_lua, to_lua};
@@ -327,6 +329,57 @@ fn put_group(g: &mut Inner, c: u64, r: &PutGroupRequest) -> Result<PutGroupRespo
         unit_ids: grp.members.iter().map(|m| m.0).collect(),
         spec_revision: grp.spec_rev,
         revision: slot.store.revision(),
+    })
+}
+
+/// `PutGroupFromTemplate`: a new group from a template the caller's file
+/// holds (spec/world.md, "Group templates"). `file` is the template as it
+/// was read before the call took the lock, or why it was refused.
+///
+/// Every check comes before the first store write. The converted spec then
+/// goes through `put_group`, so the group is the one a `PutGroup` of that
+/// spec makes.
+fn put_group_from_template(
+    g: &mut Inner,
+    c: u64,
+    r: &PutGroupFromTemplateRequest,
+    file: Result<group_template::Template, Status>,
+) -> Result<PutGroupFromTemplateResponse, Status> {
+    let slot = g.campaigns.get(&c).expect("resolved campaign");
+    place(r.anchor.as_ref(), slot, "anchor")?;
+    finite(r.heading, "heading")?;
+    let t = file?;
+    let refused = |e: group_template::Refusal| invalid(e.field, e.text);
+    let anchor = r.anchor.as_ref().expect("placed");
+    let spec = group_template::spec(&t, anchor, r.heading, r.country, &r.label).map_err(refused)?;
+    fits(spawn_bound(&spec), g.backend.max_command(), "template")?;
+    let made = put_group(
+        g,
+        c,
+        &PutGroupRequest {
+            write: r.write.clone(),
+            group_id: 0,
+            spec: Some(spec),
+            order: r.order.clone(),
+        },
+    )?;
+    // The store keeps the spec alone; the log is where the file is named.
+    eprintln!(
+        "PutGroupFromTemplate made group {} from the template {:?} of {:?}{}",
+        made.group_id,
+        t.name,
+        r.path,
+        if t.dropped.is_empty() {
+            String::new()
+        } else {
+            format!("; keys not used: {}", t.dropped.join(", "))
+        }
+    );
+    Ok(PutGroupFromTemplateResponse {
+        group_id: made.group_id,
+        unit_ids: made.unit_ids,
+        spec_revision: made.spec_revision,
+        revision: made.revision,
     })
 }
 
@@ -1248,6 +1301,51 @@ impl CommandsService for Commands {
         req: Request<PutGroupRequest>,
     ) -> Result<Response<PutGroupResponse>, Status> {
         changing!(self, req, "PutGroup", Need::Campaign, put_group)
+    }
+
+    async fn put_group_from_template(
+        &self,
+        req: Request<PutGroupFromTemplateRequest>,
+    ) -> Result<Response<PutGroupFromTemplateResponse>, Status> {
+        require(&req, Access::Controller)?;
+        let r = req.into_inner();
+        let mut hashed = r.clone();
+        hashed.write = unleased(&r.write);
+        let w = r.write.clone().unwrap_or_default();
+        // The file is read and parsed here, on a worker thread and without
+        // the lock. Its refusal is given inside the call, after the lease
+        // and the campaign are checked, so a repeat under an answered key
+        // gets its first answer whatever has become of the file.
+        let dirs = self.0.cfg.template_dirs.clone();
+        let (path, name) = (r.path.clone(), r.template.clone());
+        let file = tokio::task::spawn_blocking(move || {
+            let bytes = crate::template_file::read_for(
+                "PutGroupFromTemplate",
+                group_template::FILE_WHAT,
+                group_template::FILE_MAX,
+                &dirs,
+                &path,
+            )
+            .map_err(|e| invalid("path", e))?;
+            group_template::read(&bytes, &name).map_err(|e| invalid(e.field, e.text))
+        })
+        .await
+        .unwrap_or_else(|_| Err(invalid("path", format!("{:?} could not be read", r.path))));
+        let resp = self
+            .0
+            .write(
+                Call {
+                    method: "PutGroupFromTemplate",
+                    key: w.idempotency.as_ref(),
+                    lease: w.lease.as_ref(),
+                    campaign: w.campaign_id,
+                    need: Need::Campaign,
+                },
+                &hashed,
+                |g: &mut Inner, c: u64| put_group_from_template(g, c, &r, file).map(|x| (x, c)),
+            )
+            .await?;
+        Ok(Response::new(resp))
     }
 
     async fn put_static(
