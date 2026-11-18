@@ -3,6 +3,7 @@
 //! It is built from source and never released. Every target it acts on is a
 //! profile in a file outside the repository (see [`profile`]).
 
+mod agent_dll;
 mod bundle;
 mod catalogue;
 mod chaos;
@@ -40,7 +41,16 @@ use nanoprobe_install as install;
 use profile::Target;
 
 const USAGE: &str = "\
-usage: cargo xtask <command>
+usage: cargo xtask [--dll <file>] <command>
+
+--dll <file>  Every command that installs the agent deploys this DLL instead of
+              building one, a staged release's `payload/nanoprobe_agent.dll`
+              for example. The file must be a 64-bit x86 Windows DLL. A
+              command's own --dll and --faults refuse it, and so does a
+              command that deploys no agent; a command that was given it and
+              deployed none, a `rehearse` or report form for example, exits 2
+              after its output. Each deploy prints the DLL's SHA-256, the
+              version folder's build and the loader's SHA-256.
 
 commands:
   target list               List the target profiles
@@ -245,8 +255,20 @@ Profiles are read from the file NANOPROBE_TARGETS names, or by default from
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let args = match agent_dll::split(&args) {
+        Ok((given, rest)) => {
+            if let Some(path) = given {
+                agent_dll::set(path);
+            }
+            rest
+        }
+        Err(message) => {
+            eprintln!("xtask: {message}");
+            return ExitCode::from(2);
+        }
+    };
 
-    let result = match args.as_slice() {
+    let result = match args {
         ["target", "list"] => target_list(),
         ["target", "check", name] => target_check(name),
         ["deploy", name, rest @ ..] => {
@@ -299,6 +321,13 @@ fn main() -> ExitCode {
     };
 
     match result {
+        Ok(_) if agent_dll::unused() => {
+            eprintln!(
+                "xtask: --dll was given, and this command deployed no agent: \
+                 its results are not for that DLL"
+            );
+            ExitCode::from(2)
+        }
         Ok(code) => code,
         Err(message) => {
             eprintln!("xtask: {message}");
@@ -379,6 +408,12 @@ fn open(name: &str) -> Result<Box<dyn Profile>, String> {
 /// `faults`, the DLL has fault injection (spec/faults.md): only a
 /// `--faults` deploy builds it, into target/faults, so the release path keeps
 /// the shipping DLL.
+///
+/// Off Windows the build takes the flags of `mise run windows`
+/// (tools/remap.sh), as tools/raiseshape.sh does. cargo then reuses that
+/// task's build instead of replacing `target/.../nanoprobe.dll`, the file
+/// tools/stage-release.sh copies into a release, with a build made from other
+/// flags.
 fn build_dll(faults: bool) -> Result<PathBuf, String> {
     let repo = repository();
     let dir = if faults {
@@ -386,25 +421,8 @@ fn build_dll(faults: bool) -> Result<PathBuf, String> {
     } else {
         repo.join("target")
     };
-    let args: &[&str] = if cfg!(windows) {
-        &["build"]
-    } else {
-        &["xwin", "build"]
-    };
     let status = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
-        .args(args)
-        .args([
-            "--release",
-            "-p",
-            "nanoprobe-agent",
-            "--target",
-            "x86_64-pc-windows-msvc",
-        ])
-        .args(if faults {
-            &["--features", "faults"][..]
-        } else {
-            &[]
-        })
+        .args(dll_build_args(&repo, faults)?)
         .arg("--target-dir")
         .arg(&dir)
         .current_dir(&repo)
@@ -415,22 +433,79 @@ fn build_dll(faults: bool) -> Result<PathBuf, String> {
             "the DLL build failed ({status}). Run it through mise: `mise exec -- cargo xtask ...`"
         ));
     }
-    Ok(dir.join("x86_64-pc-windows-msvc/release/nanoprobe.dll"))
+    Ok(dir.join(DLL_TRIPLE).join("release/nanoprobe.dll"))
 }
 
-/// The files to install: the DLL given, or one built with fault injection
-/// when `faults`, and the development files when `dev`.
+const DLL_TRIPLE: &str = "x86_64-pc-windows-msvc";
+
+/// `build_dll`'s cargo arguments, before `--target-dir`.
+fn dll_build_args(repo: &Path, faults: bool) -> Result<Vec<String>, String> {
+    let mut args: Vec<String> = if cfg!(windows) {
+        vec!["build".into()]
+    } else {
+        vec!["xwin".into(), "build".into()]
+    };
+    args.extend(["--release", "-p", "nanoprobe-agent", "--target", DLL_TRIPLE].map(String::from));
+    if faults {
+        args.extend(["--features", "faults"].map(String::from));
+    }
+    if !cfg!(windows) {
+        let out = Command::new("sh")
+            .arg("tools/remap.sh")
+            .arg(DLL_TRIPLE)
+            .current_dir(repo)
+            .output()
+            .map_err(|e| format!("could not run tools/remap.sh: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "tools/remap.sh failed ({}): {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        let value = String::from_utf8(out.stdout)
+            .map_err(|_| "tools/remap.sh printed something that is not UTF-8".to_owned())?;
+        args.extend(["--config".to_owned(), value.trim_end().to_owned()]);
+    }
+    Ok(args)
+}
+
+/// The files to install: the command's DLL or the top-level `--dll`, else
+/// one built (with fault injection when `faults`), and the development files
+/// when `dev`. Prints the DLL's and the loader's SHA-256 and the build, the
+/// version folder's name, so a run's output shows what it installed.
 fn payload(dll: Option<PathBuf>, dev: bool, faults: bool) -> Result<install::Payload, String> {
-    let dll = match dll {
+    let from_top = dll.is_none() && agent_dll::given().is_some();
+    let dll = match agent_dll::choose(dll, agent_dll::given(), faults)? {
         Some(path) => path,
         None => build_dll(faults)?,
     };
+    agent_dll::check(&dll)?;
     // Keep the DLL and its PDB, so a crash record from this build can be
     // symbolized later.
     if let Some(kept) = symbols::keep(&dll)? {
         println!("kept symbols in {}", kept.display());
+        let pdb = kept.join("nanoprobe.pdb");
+        if !pdb.is_file() {
+            println!(
+                "no PDB kept for this build: to symbolize its crash records, copy its PDB \
+                 (a release's dist/nanoprobe-<version>-agent.pdb) to {}",
+                pdb.display()
+            );
+        }
     }
-    install::Payload::from_repository(&repository(), &dll, dev)
+    let payload = install::Payload::from_repository(&repository(), &dll, dev)?;
+    println!(
+        "agent DLL {}: sha256 {}, build {}, loader sha256 {}",
+        dll.display(),
+        install::sha256(&payload.dll),
+        payload.build(),
+        install::sha256(&payload.loader)
+    );
+    if from_top {
+        agent_dll::mark_used();
+    }
+    Ok(payload)
 }
 
 /// On a Windows target, refuse while DCS runs there: the machine is also

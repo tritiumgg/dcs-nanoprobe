@@ -20,7 +20,8 @@ its script, the DCS build, the platform and the date.
    and the DCS install's file list with sizes and modification times.
 3. **Install.** One installer run from the unpacked archive, on the machine that holds
    the profile. "How the staged files reach each platform" below says where and as
-   whom.
+   whom. Record the name of the version folder it made, `nanoprobe/versions/<build>`:
+   it is the build ID that step 8 and the Windows deploy route compare against.
 4. **Check.** Start DCS and a mission. `nanoprobe doctor` exits 0 and reports every DCS
    name present in the hook state and in the server state.
 5. **Sidecar.** Run the archive's `nanoprobe-sidecar`: on Linux in the image built from
@@ -33,8 +34,10 @@ its script, the DCS build, the platform and the date.
    the baseline, the sidecar's folder is untouched, and the DCS install's file list
    equals its baseline.
 8. **Criteria that need the test tooling.** Criterion 1, the DCS kill of 3 and the
-   conformance suite of 6, each on its own development deploy, as "What the tools can
-   drive" below describes. Afterward the profile is checked against the baseline again.
+   conformance suite of 6, each on its own development deploy of the staged DLL, as
+   "What the tools can drive" below describes. To symbolize a crash record from such a
+   deploy, copy `dist/nanoprobe-<version>-agent.pdb` to the folder the deploy names.
+   Afterward the profile is checked against the baseline again.
 
 ### How the staged files reach each platform
 
@@ -48,8 +51,8 @@ other user. With DCS in a container that is one of:
 - inside the DCS container, as the user DCS runs as, with the unpacked archive on a
   path the container sees. The programs are static and need nothing in the image.
 
-The project's deploy tooling is not used for this step: `cargo xtask deploy` builds a
-DLL of its own, which is not the staged one.
+The project's deploy tooling is not used for this step: the step tests the archive's
+installer.
 
 **Windows.** One of two routes, chosen before the run and named in the results:
 
@@ -57,11 +60,10 @@ DLL of its own, which is not the staged one.
   shows criterion 5 on Windows.
 - The project's deploy tooling places the staged files over its own connection:
   `cargo xtask deploy <target> --dll <the archive's payload/nanoprobe_agent.dll>`. The
-  run then records that the installed version's build ID is the one the archive's
-  installer gives on the Wine server, since the build ID covers every installed file.
-  This route runs no installer and makes no `autoexec.cfg` merge of the release's
-  form, so **criterion 5 is not shown on Windows**, and the results and the release
-  notes say so.
+  run then makes the three compares of "What the tools can drive", with the build ID
+  that step 3 recorded on the Wine server. This route runs no installer and makes no
+  `autoexec.cfg` merge of the release's form, so **criterion 5 is not shown on
+  Windows**, and the results and the release notes say so.
 
 ### What the tools can drive
 
@@ -73,26 +75,42 @@ The measuring tools are development tooling, and each one deploys an agent befor
 runs: `cargo xtask sampling` (criterion 1), `cargo xtask persistence` (the DCS kill of
 criterion 3) and `cargo xtask sidecar --part conformance` (criterion 6). They need the
 development mission loader and the eval channel in the profile, which are Lua files
-beside the agent, and they build the agent DLL themselves from the checkout. None takes
-a DLL to deploy. So those three results are for an agent that is:
+beside the agent. The run gives each tool the staged DLL with xtask's top-level option,
+from the release's commit:
 
-- built from the commit the release is staged from, with the same Lua;
-- built without the path maps of `tools/remap.sh`, so it is not the staged file and
-  has another build ID;
-- the same code: the agent crate's assembly differs in no instruction between the two
-  builds ([2026-11-18-s22-release-host.md](results/2026-11-18-s22-release-host.md)).
+```
+cargo xtask --dll <the archive's payload/nanoprobe_agent.dll> sampling <target> --part mirror
+```
+
+xtask refuses the option for a command that deploys no agent, and fails a command that
+was given it and deployed none. The tenth part of `sampling` deploys a build with fault
+injection that it builds itself, so it cannot run on the staged DLL: with the option,
+`sampling` refuses that part and its default of both parts. Name one part, `--part
+mirror` on the Wine server and `--part windows` on Windows.
+
+Each deploy prints the DLL's SHA-256, the installed version's build ID and the loader's
+SHA-256. The run keeps each command's console output with its result, and the results
+compare three strings:
+
+- the DLL's SHA-256 with the archive's `payload/nanoprobe_agent.dll`;
+- the build ID with the one step 3 recorded. It covers the DLL and the version folder's
+  three Lua files, and not the development files, so it matches when the checkout's
+  Lua is the release's;
+- the loader's SHA-256 with the archive's `payload/nanoprobe-hook.lua`. The build ID
+  does not cover the loader.
+
+What those three results show is therefore exactly this: the released DLL, loader and
+Lua, with the development files beside them in the profile, placed by the tooling's
+deploy. They are not the archive as its installer installs it. `cargo xtask
+persistence` also runs its own sidecar, built from the checkout and run in a container
+it starts itself, not the archive's `nanoprobe-sidecar`; the conformance suite attaches
+in the sidecar's place.
 
 `cargo xtask persistence` and `cargo xtask sidecar` run only against a DCS server in a
 container under Wine. `cargo xtask sampling` has a part for a Windows machine
 (`--part windows`). So on Windows the tooling drives criterion 1 alone; the DCS kill of
 criterion 3 is done there by hand with the staged files, and the conformance suite is
 not run.
-
-Each such result names the agent build it ran and says that it is not the staged DLL.
-The run cannot claim criterion 1, the DCS kill of criterion 3 or the conformance suite
-for the staged files byte for byte. Two changes would close that, and neither is built:
-a `--dll` option on those three tools, as `cargo xtask deploy` has, or the path maps in
-the tooling's own DLL build, which would make its DLL the staged one.
 
 ## 1. Overhead
 
@@ -110,9 +128,10 @@ attributed.*
 | [2026-11-15-s15-world-commands.md](results/2026-11-15-s15-world-commands.md) | Wine server | no frame held more than the budget plus one command; every over-budget frame attributed to its command |
 | [2026-11-17-s20-virtualization.md](results/2026-11-17-s20-virtualization.md) | Wine server | 500 of 10,000 entities in DCS: mean share 0.276 %; 0.50 % of frames over 250 µs |
 
-Still to show, on both platforms, with `cargo xtask sampling` (on Windows its
-`--part windows`) on an agent built from the release's commit ("What the tools can
-drive"): the mean share, the share of frames over
+Still to show, on both platforms, with `cargo xtask --dll <staged DLL> sampling <target>
+--part mirror` (on Windows `--part windows`), on the released DLL, loader and Lua with
+the development files beside them ("What the tools can drive"): the mean share, the
+share of frames over
 250 µs, and the achieved period of each sampling tier at 2,000 objects; no frame over
 the commanded budget plus one command.
 
@@ -143,8 +162,9 @@ cites and does not repeat:
 | (the long soak's results document, to be named here when it is committed) | Wine server | the 8-hour soak, its control without the agent, and the tool's verdict |
 
 The soak ran on an agent built before the path maps: the same code, with another build
-ID ("What the tools can drive"). A soak on Windows is not planned; the release notes say
-which platform the soak ran on.
+ID ([2026-11-18-s22-release-host.md](results/2026-11-18-s22-release-host.md), "What the
+path remapping changes in the agent"). A soak on Windows is not planned; the release
+notes say which platform the soak ran on.
 
 ## 3. Recovery
 
@@ -163,13 +183,15 @@ Still to show:
 
 - A killed sidecar and a killed controller: the campaign carries on, and a new
   controller takes the lease. Both platforms.
-- A killed DCS that the host restarts, with `cargo xtask persistence` ("What the tools
-  can drive"): the status reads hung or gone until DCS is back,
-  then the world is restored and the convoy resumes, with no person and no test step
-  loading a mission. The sidecar exits when DCS restarts and must be started again: on
-  the Wine server the container restarts DCS and the overlay's restart policy restarts
-  the sidecar. On Windows the tool does not run, and nothing restarts a client-hosted
-  DCS or a sidecar run as a program: the run kills DCS, starts DCS and the staged
+- A killed DCS that the host restarts, with `cargo xtask --dll <staged DLL> persistence`
+  on the released DLL, loader and Lua with the development files beside them, and the
+  tool's own sidecar ("What the tools can drive"): the status reads hung or gone until
+  DCS is back, then the world is restored and the convoy resumes, with no person and no
+  test step loading a mission. The sidecar exits when DCS restarts and must be started
+  again: on the Wine server the container restarts DCS, and the tool restarts the
+  sidecar's container, not the overlay's restart policy. The results record that. The
+  overlay's restart policy after a DCS restart stays unverified. On Windows the tool
+  does not run, and nothing restarts a client-hosted DCS or a sidecar run as a program: the run kills DCS, starts DCS and the staged
   sidecar again by hand, and reads the restored convoy through the API. It records that
   the restart was by hand.
 - The verdict `gone`, which no result shows yet.
@@ -221,15 +243,15 @@ Still to show:
 - The conformance suite passes in full. Wine server only, for now.
 
 How the suite is run: from a source checkout, with the development tooling
-(`cargo xtask sidecar <target> --part conformance`). The suite attaches in place of the
-sidecar, spawns and destroys groups and loads a mission, so it needs a server nobody is
-flying on. The command does more than run the suite: it deploys a development build of
-the agent with the eval channel, points the agent's `map_path` elsewhere and restarts
-DCS. So it runs in step 8, on its own deploy, and not on the clean install that steps 3
-to 7 check. The suite therefore tests an agent built from the same source as the staged
-one, not the staged DLL itself ("What the tools can drive"). Afterward the run undeploys
-the development build and checks the profile and `autoexec.cfg` against the baseline of
-step 2 again.
+(`cargo xtask --dll <staged DLL> sidecar <target> --part conformance`). The suite
+attaches in place of the sidecar, spawns and destroys groups and loads a mission, so it
+needs a server nobody is flying on. The command does more than run the suite: it
+deploys the agent with the eval channel, points the agent's `map_path` elsewhere and
+restarts DCS. So it runs in step 8, on its own deploy, and not on the clean install that
+steps 3 to 7 check. The suite therefore tests the released DLL, loader and Lua with the
+development files beside them, not the archive as its installer installs it ("What the
+tools can drive"). Afterward the run undeploys and checks the profile and
+`autoexec.cfg` against the baseline of step 2 again.
 
 The command runs only against a DCS server in a container under Wine. The suite has no
 route to a Windows machine yet, so this half of the criterion is not shown on Windows.
@@ -246,6 +268,7 @@ Limits:
 - A DCS dedicated server on Windows.
 - A soak on Windows.
 - The conformance suite on Windows.
-- Criterion 1, the DCS kill of criterion 3 and the conformance suite against the staged
-  DLL itself: they run on an agent the tooling builds from the same commit.
+- Criterion 1, the DCS kill of criterion 3 and the conformance suite against the archive
+  as its installer installs it: they run on the released DLL, loader and Lua with the
+  development files beside them.
 - Criterion 5 on Windows, when the deploy tooling stands in for `install.cmd`.
