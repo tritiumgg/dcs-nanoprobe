@@ -221,4 +221,6 @@ other verdict (spec/config.md).
 The status also reports the free bytes on the store's file system, and whether they
 are below what the active campaign holds there (spec/persistence.md, "Free space").
 Space is not part of the verdict or of the health command's exit code: a full disk must
-not make a watchdog restart DCS.
+not make a watchdog restart DCS. Nor are scheduled backups: the status reports the last
+one that succeeded, the last one that failed and why (`last_backup`,
+`last_backup_failure`, `backup_error`; spec/persistence.md, "Backups").

@@ -3103,6 +3103,20 @@ pub struct ServerStatus {
     /// How big the active campaign's store is; unset with no active campaign.
     #[prost(message, optional, tag = "20")]
     pub store_size: ::core::option::Option<StoreSize>,
+    /// When the last scheduled backup that succeeded was taken, since the
+    /// sidecar started; unset for none.
+    #[prost(message, optional, tag = "21")]
+    pub last_backup: ::core::option::Option<::prost_types::Timestamp>,
+    /// When the last scheduled backup that failed, or was skipped for low free
+    /// space, was due, since the sidecar started; unset for none. A failed
+    /// backup is taken again at the next interval. Not part of health: a
+    /// watchdog must not restart DCS for it.
+    #[prost(message, optional, tag = "22")]
+    pub last_backup_failure: ::core::option::Option<::prost_types::Timestamp>,
+    /// Why that backup failed or was skipped, naming the store, with SQLite's
+    /// extended result code when SQLite failed; empty for none.
+    #[prost(string, tag = "23")]
+    pub backup_error: ::prost::alloc::string::String,
 }
 /// What the active campaign's store holds and how fast it is bounded
 /// (spec/persistence.md, "Size"). The counters count since the campaign's

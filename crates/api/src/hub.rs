@@ -255,9 +255,14 @@ pub struct Inner {
     next_checkpoint_ms: u64,
     /// When the active campaign's next scheduled backup is due, wall ms.
     next_backup_ms: u64,
-    /// Why the last scheduled backup failed, empty when it did not. A
-    /// failed backup is taken again at the next interval.
-    pub backup_error: String,
+    /// When the last scheduled backup that succeeded was taken, wall ms,
+    /// since the sidecar started.
+    pub last_backup_ms: Option<u64>,
+    /// When the last scheduled backup that failed was taken, wall ms, and
+    /// why, since the sidecar started. A failed backup is taken again at the
+    /// next interval. Reported in the status, not part of health
+    /// (spec/persistence.md, "Backups").
+    pub backup_failure: Option<(u64, String)>,
     /// Campaign folders that could not be read at start, with why. Their IDs
     /// are never given to a new campaign.
     pub unreadable: Vec<(u64, String)>,
@@ -316,7 +321,13 @@ pub struct Inner {
 /// A scheduled backup on its worker thread.
 struct BackupJob {
     campaign: u64,
-    handle: std::thread::JoinHandle<Result<Backup, DiskError>>,
+    /// When it was taken, wall ms.
+    at_ms: u64,
+    /// When its worker started, for the log line of its cost.
+    started: Instant,
+    /// The campaign's backup, or why it or the server store's failed,
+    /// naming the store.
+    handle: std::thread::JoinHandle<Result<Backup, String>>,
 }
 
 /// The shared state and its wake-ups.
@@ -1659,10 +1670,9 @@ impl Inner {
             && !self.backing_up.contains(&id)
             && let Err(e) = self.space_check(id, 0)
         {
-            eprintln!(
-                "nanoprobe: the scheduled backup of campaign {id} is skipped: {}",
-                e.message()
-            );
+            let why = format!("campaign {id}: skipped: {}", e.message());
+            eprintln!("nanoprobe: the scheduled backup is skipped: {why}");
+            self.backup_failure = Some((now, why));
             self.next_backup_ms = now.saturating_add(ms(sf.backup_interval));
         }
         if now >= self.next_backup_ms && !self.backing_up.contains(&id) {
@@ -1679,19 +1689,25 @@ impl Inner {
                 .as_ref()
                 .map(|s| (s.backup_folder(sf.backup_keep), s.epoch()));
             let handle = std::thread::spawn(move || {
-                let b = files.backup(CampaignId(id), now, revision, BackupReason::Scheduled)?;
+                let b = files
+                    .backup(CampaignId(id), now, revision, BackupReason::Scheduled)
+                    .map_err(|e| format!("campaign {id}: {e}"))?;
                 if let Some((folder, epoch)) = server {
-                    folder.take(
-                        now,
-                        nanoprobe_sidecar::server::SCHEMA,
-                        epoch,
-                        BackupReason::Scheduled,
-                    )?;
+                    folder
+                        .take(
+                            now,
+                            nanoprobe_sidecar::server::SCHEMA,
+                            epoch,
+                            BackupReason::Scheduled,
+                        )
+                        .map_err(|e| format!("campaign {id}, the server store: {e}"))?;
                 }
                 Ok(b)
             });
             self.backup_job = Some(BackupJob {
                 campaign: id,
+                at_ms: now,
+                started: Instant::now(),
                 handle,
             });
             self.next_backup_ms = now.saturating_add(ms(sf.backup_interval));
@@ -1699,8 +1715,8 @@ impl Inner {
     }
 
     /// Take the scheduled backup's result once its worker is done, or wait
-    /// for it with `wait`. A failure is recorded in `backup_error` and the
-    /// backup is taken again at the next interval.
+    /// for it with `wait`. A failure is recorded in `backup_failure` and
+    /// the backup is taken again at the next interval.
     fn collect_backup(&mut self, wait: bool) {
         let done = self
             .backup_job
@@ -1711,14 +1727,24 @@ impl Inner {
         }
         let job = self.backup_job.take().expect("a job");
         self.backing_up.remove(&job.campaign);
-        self.backup_error = match job.handle.join() {
-            Ok(Ok(_)) => String::new(),
-            Ok(Err(e)) => format!("campaign {}: {e}", job.campaign),
+        let why = match job.handle.join() {
+            Ok(Ok(b)) => {
+                eprintln!(
+                    "nanoprobe: scheduled backup {} of campaign {}: store copy {} bytes; \
+                     {} ms for the store copy, the events copy and the server store's",
+                    b.number,
+                    job.campaign,
+                    b.size,
+                    job.started.elapsed().as_millis()
+                );
+                self.last_backup_ms = Some(job.at_ms);
+                return;
+            }
+            Ok(Err(e)) => e,
             Err(_) => format!("campaign {}: the backup worker panicked", job.campaign),
         };
-        if !self.backup_error.is_empty() {
-            eprintln!("nanoprobe: scheduled backup failed: {}", self.backup_error);
-        }
+        eprintln!("nanoprobe: scheduled backup failed: {why}");
+        self.backup_failure = Some((job.at_ms, why));
     }
 
     /// Write every event log's appended events.
@@ -2574,7 +2600,7 @@ fn ms(d: Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 
-fn timestamp_ms(ms: u64) -> prost_types::Timestamp {
+pub(crate) fn timestamp_ms(ms: u64) -> prost_types::Timestamp {
     prost_types::Timestamp {
         seconds: i64::try_from(ms / 1000).unwrap_or(i64::MAX),
         nanos: i32::try_from((ms % 1000) * 1_000_000).unwrap_or(0),
@@ -2712,7 +2738,8 @@ impl Hub {
                 files: None,
                 next_checkpoint_ms: 0,
                 next_backup_ms: 0,
-                backup_error: String::new(),
+                last_backup_ms: None,
+                backup_failure: None,
                 unreadable: Vec::new(),
                 epoch_floor: 0,
                 next_retention_ms: 0,
@@ -5788,6 +5815,82 @@ mod tests {
         assert_eq!(start(&g), None, "used by the Afghanistan shell");
     }
 
+    /// The status reports the last scheduled backup that succeeded and the
+    /// last that failed, with why; a failure leaves the health as it was
+    /// (spec/persistence.md, "Backups").
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_status_reports_the_last_scheduled_backup_and_the_last_failure() {
+        use nanoprobe_proto::v1alpha1::campaign_service_client::CampaignServiceClient;
+        use nanoprobe_proto::v1alpha1::mission_service_client::MissionServiceClient;
+        let s = served_folder().await;
+        let lease = lease_of(&s.channel).await;
+        let mut campaigns = CampaignServiceClient::new(s.channel.clone());
+        let mission = MissionServiceClient::new(s.channel.clone());
+        let a = campaigns
+            .create_campaign(create(&lease, "a", "Caucasus", true))
+            .await
+            .expect("a")
+            .into_inner()
+            .campaign
+            .expect("campaign")
+            .id;
+        let status = || {
+            let mut m = mission.clone();
+            async move {
+                m.get_server_status(pb::GetServerStatusRequest {})
+                    .await
+                    .expect("status")
+                    .into_inner()
+                    .status
+                    .expect("status")
+            }
+        };
+        let before = status().await;
+        assert!(before.last_backup.is_none() && before.last_backup_failure.is_none());
+        assert!(before.backup_error.is_empty());
+        let scheduled = || {
+            let cfg = s.hub.cfg.clone();
+            let mut g = s.hub.lock();
+            g.next_backup_ms = 0;
+            g.timers(&cfg);
+            assert!(g.backup_job.is_some(), "a scheduled backup started");
+            g.collect_backup(true);
+        };
+        scheduled();
+        let ok = status().await;
+        assert!(ok.last_backup.is_some(), "the success is reported");
+        assert!(ok.last_backup_failure.is_none() && ok.backup_error.is_empty());
+        // The backup counter's path taken by a folder: the next backup
+        // cannot number itself.
+        let next = s
+            .hub
+            .lock()
+            .files()
+            .expect("files")
+            .folder(CampaignId(a))
+            .join("backups")
+            .join("next");
+        std::fs::remove_file(&next).expect("the counter");
+        std::fs::create_dir(&next).expect("a folder in its place");
+        scheduled();
+        let failed = status().await;
+        assert!(
+            failed.last_backup_failure.is_some(),
+            "the failure is reported"
+        );
+        assert!(
+            failed
+                .backup_error
+                .starts_with(&format!("campaign {a}: store: ")),
+            "{}",
+            failed.backup_error
+        );
+        assert_eq!(failed.last_backup, ok.last_backup, "the success stays");
+        assert_eq!(failed.health, ok.health, "not part of health");
+        let _ = s.stop.send(());
+        s.task.await.expect("join").expect("serve");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_full_file_system_refuses_a_backup_and_shows_in_the_health() {
         use nanoprobe_proto::v1alpha1::campaign_service_client::CampaignServiceClient;
@@ -5845,6 +5948,13 @@ mod tests {
             g.timers(&cfg);
             assert!(g.backup_job.is_none(), "no scheduled backup was started");
             assert!(g.next_backup_ms > wall_ms(), "the next one waits");
+            assert!(
+                g.backup_failure
+                    .as_ref()
+                    .is_some_and(|(_, why)| why.contains("skipped")),
+                "the skip is reported: {:?}",
+                g.backup_failure
+            );
             let files = g.files().expect("files");
             assert!(files.backups(CampaignId(a)).expect("backups").is_empty());
         }

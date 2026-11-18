@@ -155,10 +155,11 @@ entries with one hash are errors: the sidecar refuses to start.
 
 `nanoprobe-sidecar health --config <path>` asks the running sidecar for its verdict
 (spec/errors.md), prints it with the seconds since the last heartbeat, and exits with
-the code below. It calls `GetServerStatus` on `[api] listen`, or on loopback at that
-port when the listener's address is unspecified. When the listener needs a token, the
-command reads one with the `observer` role or higher from the `NANOPROBE_TOKEN`
-environment variable.
+the code below. While the last scheduled backup failed it also prints why; that does
+not change the exit code (spec/persistence.md, "Backups"). It calls `GetServerStatus`
+on `[api] listen`, or on loopback at that port when the listener's address is
+unspecified. When the listener needs a token, the command reads one with the
+`observer` role or higher from the `NANOPROBE_TOKEN` environment variable.
 
 | Exit code | Verdict |
 |---|---|

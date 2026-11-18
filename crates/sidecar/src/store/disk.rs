@@ -78,9 +78,124 @@ pub enum DiskError {
     TooLarge(String),
 }
 
+/// The name of SQLite's result code `code`, primary or extended, for a log
+/// line that names its cause (`SQLITE_IOERR_GETTEMPPATH` where the message
+/// says only "disk I/O error").
+pub fn sqlite_code_name(code: i32) -> Option<&'static str> {
+    use rusqlite::ffi;
+    macro_rules! names {
+        ($($n:ident),* $(,)?) => {
+            $(if code == ffi::$n { return Some(stringify!($n)); })*
+        };
+    }
+    names!(
+        SQLITE_ERROR,
+        SQLITE_INTERNAL,
+        SQLITE_PERM,
+        SQLITE_ABORT,
+        SQLITE_BUSY,
+        SQLITE_LOCKED,
+        SQLITE_NOMEM,
+        SQLITE_READONLY,
+        SQLITE_INTERRUPT,
+        SQLITE_IOERR,
+        SQLITE_CORRUPT,
+        SQLITE_NOTFOUND,
+        SQLITE_FULL,
+        SQLITE_CANTOPEN,
+        SQLITE_PROTOCOL,
+        SQLITE_EMPTY,
+        SQLITE_SCHEMA,
+        SQLITE_TOOBIG,
+        SQLITE_CONSTRAINT,
+        SQLITE_MISMATCH,
+        SQLITE_MISUSE,
+        SQLITE_NOLFS,
+        SQLITE_AUTH,
+        SQLITE_FORMAT,
+        SQLITE_RANGE,
+        SQLITE_NOTADB,
+        SQLITE_ERROR_MISSING_COLLSEQ,
+        SQLITE_ERROR_RETRY,
+        SQLITE_ERROR_SNAPSHOT,
+        SQLITE_IOERR_READ,
+        SQLITE_IOERR_SHORT_READ,
+        SQLITE_IOERR_WRITE,
+        SQLITE_IOERR_FSYNC,
+        SQLITE_IOERR_DIR_FSYNC,
+        SQLITE_IOERR_TRUNCATE,
+        SQLITE_IOERR_FSTAT,
+        SQLITE_IOERR_UNLOCK,
+        SQLITE_IOERR_RDLOCK,
+        SQLITE_IOERR_DELETE,
+        SQLITE_IOERR_BLOCKED,
+        SQLITE_IOERR_NOMEM,
+        SQLITE_IOERR_ACCESS,
+        SQLITE_IOERR_CHECKRESERVEDLOCK,
+        SQLITE_IOERR_LOCK,
+        SQLITE_IOERR_CLOSE,
+        SQLITE_IOERR_DIR_CLOSE,
+        SQLITE_IOERR_SHMOPEN,
+        SQLITE_IOERR_SHMSIZE,
+        SQLITE_IOERR_SHMLOCK,
+        SQLITE_IOERR_SHMMAP,
+        SQLITE_IOERR_SEEK,
+        SQLITE_IOERR_DELETE_NOENT,
+        SQLITE_IOERR_MMAP,
+        SQLITE_IOERR_GETTEMPPATH,
+        SQLITE_IOERR_CONVPATH,
+        SQLITE_IOERR_VNODE,
+        SQLITE_IOERR_AUTH,
+        SQLITE_IOERR_BEGIN_ATOMIC,
+        SQLITE_IOERR_COMMIT_ATOMIC,
+        SQLITE_IOERR_ROLLBACK_ATOMIC,
+        SQLITE_IOERR_DATA,
+        SQLITE_IOERR_CORRUPTFS,
+        SQLITE_IOERR_IN_PAGE,
+        SQLITE_LOCKED_SHAREDCACHE,
+        SQLITE_LOCKED_VTAB,
+        SQLITE_BUSY_RECOVERY,
+        SQLITE_BUSY_SNAPSHOT,
+        SQLITE_BUSY_TIMEOUT,
+        SQLITE_CANTOPEN_NOTEMPDIR,
+        SQLITE_CANTOPEN_ISDIR,
+        SQLITE_CANTOPEN_FULLPATH,
+        SQLITE_CANTOPEN_CONVPATH,
+        SQLITE_CANTOPEN_DIRTYWAL,
+        SQLITE_CANTOPEN_SYMLINK,
+        SQLITE_CORRUPT_VTAB,
+        SQLITE_CORRUPT_SEQUENCE,
+        SQLITE_CORRUPT_INDEX,
+        SQLITE_READONLY_RECOVERY,
+        SQLITE_READONLY_CANTLOCK,
+        SQLITE_READONLY_ROLLBACK,
+        SQLITE_READONLY_DBMOVED,
+        SQLITE_READONLY_CANTINIT,
+        SQLITE_READONLY_DIRECTORY,
+        SQLITE_ABORT_ROLLBACK,
+        SQLITE_CONSTRAINT_CHECK,
+        SQLITE_CONSTRAINT_COMMITHOOK,
+        SQLITE_CONSTRAINT_FOREIGNKEY,
+        SQLITE_CONSTRAINT_FUNCTION,
+        SQLITE_CONSTRAINT_NOTNULL,
+        SQLITE_CONSTRAINT_PRIMARYKEY,
+        SQLITE_CONSTRAINT_TRIGGER,
+        SQLITE_CONSTRAINT_UNIQUE,
+        SQLITE_CONSTRAINT_VTAB,
+        SQLITE_CONSTRAINT_ROWID,
+        SQLITE_CONSTRAINT_PINNED,
+        SQLITE_CONSTRAINT_DATATYPE,
+    );
+    None
+}
+
 impl fmt::Display for DiskError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            DiskError::Sql(e @ rusqlite::Error::SqliteFailure(c, _)) => {
+                let name = sqlite_code_name(c.extended_code).unwrap_or("unnamed");
+                write!(f, "store: {e} ({name}, code {})", c.extended_code)
+            }
             DiskError::Sql(e) => write!(f, "store: {e}"),
             DiskError::Corrupt(m) => write!(f, "store: a row does not decode: {m}"),
             DiskError::Newer { found, known } => write!(
@@ -3423,6 +3538,22 @@ mod tests {
             rows.push((format!("entry.created.{i}"), encode(&enc_entry(e))));
         }
         rows
+    }
+
+    /// A SQLite failure names its extended code, which its message does
+    /// not: "disk I/O error" is every `SQLITE_IOERR_*`.
+    #[test]
+    fn a_sqlite_failure_names_its_extended_code() {
+        let e = DiskError::Sql(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR_GETTEMPPATH),
+            Some("disk I/O error".into()),
+        ));
+        assert_eq!(
+            e.to_string(),
+            "store: disk I/O error (SQLITE_IOERR_GETTEMPPATH, code 6410)"
+        );
+        assert_eq!(sqlite_code_name(5), Some("SQLITE_BUSY"));
+        assert_eq!(sqlite_code_name(9_999), None);
     }
 
     /// A unit's asked spawn life reads back; a row without it reads None.

@@ -75,6 +75,17 @@ message ServerStatus {
   bool store_space_low = 19;
   // How big the active campaign's store is; unset with no active campaign.
   StoreSize store_size = 20;
+  // When the last scheduled backup that succeeded was taken, since the
+  // sidecar started; unset for none.
+  google.protobuf.Timestamp last_backup = 21;
+  // When the last scheduled backup that failed, or was skipped for low free
+  // space, was due, since the sidecar started; unset for none. A failed
+  // backup is taken again at the next interval. Not part of health: a
+  // watchdog must not restart DCS for it.
+  google.protobuf.Timestamp last_backup_failure = 22;
+  // Why that backup failed or was skipped, naming the store, with SQLite's
+  // extended result code when SQLite failed; empty for none.
+  string backup_error = 23;
 }
 
 // What the active campaign's store holds and how fast it is bounded

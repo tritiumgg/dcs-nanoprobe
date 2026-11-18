@@ -300,6 +300,20 @@ backup is taken every `backup_interval_h` while the campaign is active (reason
 (`pre_migration`). Suspend and finish take none: their final checkpoint is in the store
 itself. One backup of a campaign runs at a time; a request while one runs waits for it.
 
+A scheduled backup that fails is logged, naming the store that failed and, when SQLite
+failed, its extended result code, and is taken again one interval later. One skipped for
+low free space (see "Free space") counts as failed. `GetServerStatus` reports, since the
+sidecar started, when the last scheduled backup that succeeded was taken
+(`last_backup`), when the last one that failed was due (`last_backup_failure`), and why
+(`backup_error`). A failed backup does not change the health verdict or the health
+command's exit code, as low free space does not: a watchdog must not restart DCS for
+it.
+
+No file operation of the store needs a temporary file: backups, the read copy, the
+export, a restore, the journal's, the event history's and the idempotency keys'
+retention and the purge run on a host with no writable temporary folder, such as a
+container image with none run as a user.
+
 Retention: after each backup the sidecar keeps the newest `backup_keep` scheduled and
 manual backups of the campaign and deletes the older ones. It keeps, in addition, the
 newest `pre_migration` backup of each schema version, outside `backup_keep`; older
@@ -312,7 +326,9 @@ The event history is not copied into each backup: `backups/events.sqlite` is one
 extended at each backup with the events it lacks (`INSERT ... WHERE seq > ` its newest
 sequence number). Events the retention deleted from the history since are deleted from
 the copy too, so `backup_keep` does not multiply the history. The copy's `meta.bytes`
-(below) is the sum over its own rows, written after each extension.
+(below) is the sum over its own rows: it is removed before the extension, which runs
+outside a transaction, and written in the transaction that deletes the copy's old rows.
+A copy stopped between the two has no `bytes` and gets it at its next open.
 
 ## Event history
 
@@ -320,7 +336,7 @@ the copy too, so `backup_keep` does not multiply the history. The copy's `meta.b
 
 | Table | Columns | Rows |
 |---|---|---|
-| `meta` | `key TEXT PRIMARY KEY`, `value BLOB` | `format` (1, a number), `campaign_id` (decimal text; 0 for the server log), `package` (the Protobuf package of the bodies, `nanoprobe.v1alpha1`), `bytes` (decimal text: the bytes of the bodies of the event rows; written in the transaction that adds rows and in the one that deletes them; a file without it gets it at open, from one sum over the table) |
+| `meta` | `key TEXT PRIMARY KEY`, `value BLOB` | `format` (1, a number), `campaign_id` (decimal text; 0 for the server log), `package` (the Protobuf package of the bodies, `nanoprobe.v1alpha1`), `bytes` (decimal text: the bytes of the bodies of the event rows; written in the transaction that adds rows and in the one that deletes them, except in the backups' copy (see "Backups"); a file without it gets it at open, from one sum over the table) |
 | `event` | `seq INTEGER PRIMARY KEY`, `wall_ms INTEGER`, `source TEXT`, `body BLOB` | One per event |
 
 `source` names what the event was made from, so an event made again after a crash is

@@ -377,6 +377,17 @@ impl EventFile {
     /// Make `dest` a copy of the committed events: append the rows it lacks
     /// and delete the rows this file no longer holds (spec/persistence.md,
     /// "Backups"). Runs through a connection of its own.
+    ///
+    /// Nothing here may need a temporary file: a host with no writable
+    /// temporary folder (a `FROM scratch` image run as a user) fails one
+    /// with `SQLITE_IOERR_GETTEMPPATH`. The append's bound is read first,
+    /// because an `INSERT ... SELECT` that reads its own table buffers every
+    /// selected row in a temporary table; and the append is a statement of
+    /// its own, outside a transaction, where SQLite keeps no statement
+    /// journal (inside one it goes to a temporary file past 64 KiB). The
+    /// byte count is removed before the append and written after the
+    /// delete, so a copy stopped between them has none and counts its rows
+    /// at its next open.
     pub fn copy_into(src: &Path, dest: &Path, campaign: u64) -> Result<(), DiskError> {
         // Made if missing, and checked to be this campaign's.
         drop(EventFile::open(src, campaign)?);
@@ -386,17 +397,25 @@ impl EventFile {
             .ok_or_else(|| DiskError::Corrupt(format!("path {} is not UTF-8", src.display())))?;
         d.conn.execute("ATTACH DATABASE ?1 AS src", [src])?;
         let r = (|| {
-            let tx = d.conn.unchecked_transaction()?;
-            tx.execute(
+            d.conn
+                .execute("DELETE FROM main.meta WHERE key = 'bytes'", [])?;
+            let newest: i64 =
+                d.conn
+                    .query_row("SELECT coalesce(max(seq), 0) FROM main.event", [], |r| {
+                        r.get(0)
+                    })?;
+            d.conn.execute(
                 "INSERT INTO main.event (seq, wall_ms, source, body) \
-                 SELECT seq, wall_ms, source, body FROM src.event \
-                 WHERE seq > (SELECT coalesce(max(seq), 0) FROM main.event)",
-                [],
+                 SELECT seq, wall_ms, source, body FROM src.event WHERE seq > ?1",
+                [newest],
             )?;
-            tx.execute(
-                "DELETE FROM main.event WHERE seq < (SELECT coalesce(min(seq), 0) FROM src.event)",
-                [],
-            )?;
+            let oldest: i64 =
+                d.conn
+                    .query_row("SELECT coalesce(min(seq), 0) FROM src.event", [], |r| {
+                        r.get(0)
+                    })?;
+            let tx = d.conn.unchecked_transaction()?;
+            tx.execute("DELETE FROM main.event WHERE seq < ?1", [oldest])?;
             let bytes: i64 = tx.query_row(
                 "SELECT coalesce(sum(length(body)), 0) FROM main.event",
                 [],

@@ -78,13 +78,15 @@ use crate::profile::Target as Profile;
 use crate::sampling::live::{self, Run};
 use crate::soak::series;
 
-const USAGE: &str = "usage: cargo xtask soak campaign <name> [--hours H | --minutes M] [--control <folder>] [--detach]
+const USAGE: &str = "usage: cargo xtask soak campaign <name> [--hours H | --minutes M] [--control <folder>]
+           [--store-toml '<key = value>']... [--leave-dead] [--reattach] [--detach]
        cargo xtask soak control <name> [--hours H | --minutes M] [--detach]
        cargo xtask soak pilot <name> [--minutes M] [--detach]
        cargo xtask soak rehearse [--minutes M] [--leak-kib-per-s N [--baseline <folder>]] [--restart-at S] [--stall-at S] [--detach]
        cargo xtask soak status
        cargo xtask soak stop <folder>
-       cargo xtask soak judge <folder> [--control <folder>]";
+       cargo xtask soak judge <folder> [--control <folder>]
+       cargo xtask soak fit <folder> [--from-minute 75] [--block-minutes 5]";
 
 /// The store's files and their keys in a record's `store`.
 pub(super) const STORE_FILES: [(&str, &str); 4] = [
@@ -153,6 +155,18 @@ pub(super) struct Plan {
     stall_for_s: f64,
     /// Rehearsal: kibibytes the fake sidecar leaks each second.
     leak_kib_per_s: u64,
+    /// A killed group is left dead, for its expiry (spec/world.md,
+    /// "Expiry"), and a new group is put at its place (`--leave-dead`).
+    /// Without it a dead group is removed and created again, as S21's churn.
+    leave_dead: bool,
+    /// Lines for the sidecar's `[store]` (`--store-toml`, once per line);
+    /// a key given here replaces the run's own default for it.
+    store_toml: Vec<String>,
+    /// After the churn, start the sidecar again once from its store and
+    /// count the live units that have no life value 10 s and 60 s after it
+    /// attaches (`--reattach`). The sidecar's memory starts again there,
+    /// after the records.
+    reattach: bool,
 }
 
 impl Plan {
@@ -176,6 +190,9 @@ impl Plan {
             stall_at_s: None,
             stall_for_s: 0.0,
             leak_kib_per_s: 0,
+            leave_dead: false,
+            store_toml: Vec::new(),
+            reattach: false,
         }
     }
 
@@ -219,6 +236,8 @@ impl Plan {
             "kill_every_steps": self.kill_every, "fps_window_s": self.fps_s,
             "restart_at_s": self.restart_at_s, "stall_at_s": self.stall_at_s,
             "stall_for_s": self.stall_for_s, "leak_kib_per_s": self.leak_kib_per_s,
+            "leave_dead": self.leave_dead, "store_toml": self.store_toml,
+            "reattach": self.reattach,
         })
     }
 
@@ -829,6 +848,8 @@ struct Campaign<'a, 'r> {
     next_in: usize,
     /// The place killed and whether a step has looked at it since.
     killed: Option<(usize, bool)>,
+    /// Groups left dead (`Plan::leave_dead`), with their units.
+    left_dead: Vec<(u64, Vec<u64>)>,
     order_next: usize,
     reports_seen: usize,
     spawned_units: u64,
@@ -874,6 +895,7 @@ impl<'a, 'r> Campaign<'a, 'r> {
             window: VecDeque::new(),
             next_in: plan.live % plan.world,
             killed: None,
+            left_dead: Vec::new(),
             order_next: 0,
             reports_seen: 0,
             spawned_units: 0,
@@ -970,6 +992,21 @@ impl<'a, 'r> Campaign<'a, 'r> {
         let old = self.slots[place].group;
         self.api.remove_entity(self.c, old)?;
         self.place_of.remove(&old);
+        self.put_at(place, units)
+    }
+
+    /// Leave the dead group of a place as it is, for its expiry, and create
+    /// a new one there, in DCS.
+    fn renew(&mut self, place: usize, units: usize, members: Vec<u64>) -> Result<(), String> {
+        let old = self.slots[place].group;
+        self.put_at(place, units)?;
+        self.place_of.remove(&old);
+        self.left_dead.push((old, members));
+        Ok(())
+    }
+
+    /// Create the next generation's group at a place, in DCS.
+    fn put_at(&mut self, place: usize, units: usize) -> Result<(), String> {
         let generation = self.slots[place].generation + 1;
         let spec = self.spec(place, generation, units, false);
         let id = self.api.put_group(self.c, spec, None)?.group_id;
@@ -1062,6 +1099,19 @@ impl Subject for Campaign<'_, '_> {
             .take(REPLACE_CAP)
             .collect();
         for (place, was) in gone {
+            if plan.leave_dead && was == EntityState::Dead {
+                let members: Vec<u64> = groups[&self.slots[place].group]
+                    .units
+                    .iter()
+                    .map(|u| u.id)
+                    .collect();
+                let r = self.renew(place, units, members);
+                if note(&mut errors, "dead_left", r) {
+                    *d.entry("dead_left").or_default() += 1;
+                    *d.entry("put").or_default() += 1;
+                }
+                continue;
+            }
             let key = match was {
                 EntityState::Dead => "dead_replaced",
                 EntityState::Lost => "lost_replaced",
@@ -1304,7 +1354,13 @@ impl Subject for Campaign<'_, '_> {
                     "heartbeat_age_s": s.heartbeat_age.map(|d| d.seconds as f64 + f64::from(d.nanos) / 1e9),
                     "commands_queued": s.commands_queued, "event_gaps": s.event_gaps,
                     "store_free_bytes": s.store_free_bytes,
+                    "last_backup_s": s.last_backup.map(|t| t.seconds),
+                    "last_backup_failure_s": s.last_backup_failure.map(|t| t.seconds),
+                    "backup_error": s.backup_error,
                 });
+                if let Some(z) = &s.store_size {
+                    v["store_size"] = store_size_json(z);
+                }
             }
             Err(e) => errors.push(json!(format!("GetServerStatus: {e}"))),
         }
@@ -1374,8 +1430,215 @@ fn run_campaign(
     let mut s = Campaign::setup(t, rt, plan, tag)?;
     let ended = drive(&mut s, plan, folder, st);
     s.streams = None;
+    let end = end_checks(&mut s, plan, &ended);
+    println!("== end checks: {end}");
+    let _ = std::fs::write(
+        folder.join("end.json"),
+        serde_json::to_vec_pretty(&end).unwrap_or_default(),
+    );
     s.api.release();
     Ok(ended)
+}
+
+/// What a record keeps of the status's `store_size` (spec/persistence.md,
+/// "Size"); times in seconds since the Unix epoch, and `entities_held`, the
+/// groups and statics the store holds in any state.
+fn store_size_json(z: &pb::StoreSize) -> Value {
+    json!({
+        "groups_live": z.groups_live, "groups_dead": z.groups_dead, "ruins": z.ruins,
+        "awaiting_purge": z.awaiting_purge, "units": z.units,
+        "entities_held": z.groups_live + z.groups_dead + z.ruins + z.awaiting_purge,
+        "oldest_removal_s": z.oldest_removal.map(|t| t.seconds),
+        "journal_rows": z.journal_rows, "journal_bytes": z.journal_bytes,
+        "oldest_journal_entry_s": z.oldest_journal_entry.map(|t| t.seconds),
+        "event_rows": z.event_rows, "event_bytes": z.event_bytes,
+        "oldest_event_s": z.oldest_event.map(|t| t.seconds),
+        "store_file_bytes": z.store_file_bytes, "events_file_bytes": z.events_file_bytes,
+        "purged": z.purged, "expired": z.expired, "purged_deaths": z.purged_deaths,
+        "orphan_destroys": z.orphan_destroys, "work_set": z.work_set,
+    })
+}
+
+/// After the churn: what DCS holds against what the store says, that no
+/// member of a group left dead is in DCS again, and with
+/// `Plan::reattach` the units without a life value after the sidecar
+/// starts again over the campaign. Every check is a count; a failure to
+/// read is in `errors`.
+fn end_checks(s: &mut Campaign<'_, '_>, plan: &Plan, ended: &str) -> Value {
+    let mut out = json!({});
+    let mut errors: Vec<Value> = Vec::new();
+    // The last step's handovers finish before the snapshot.
+    std::thread::sleep(Duration::from_secs_f64(plan.interval_s.min(30.0)));
+    match s.api.server_status() {
+        Ok(st) => {
+            out["status"] = json!({
+                "store_size": st.store_size.as_ref().map(store_size_json),
+                "last_backup_s": st.last_backup.map(|t| t.seconds),
+                "last_backup_failure_s": st.last_backup_failure.map(|t| t.seconds),
+                "backup_error": st.backup_error,
+            });
+        }
+        Err(e) => errors.push(json!(format!("GetServerStatus: {e}"))),
+    }
+    let groups = match s.api.groups(s.c) {
+        Ok(g) => g,
+        Err(e) => {
+            errors.push(json!(format!("ListWorld: {e}")));
+            out["errors"] = json!(errors);
+            return out;
+        }
+    };
+    let tag = names::tag_of(s.c);
+    let dead_names: Vec<String> = s
+        .left_dead
+        .iter()
+        .flat_map(|(_, units)| units.iter().map(|u| names::name(Kind::Unit, tag, *u)))
+        .collect();
+    out["left_dead"] = json!({
+        "groups": s.left_dead.len(),
+        "still_listed": s.left_dead.iter().filter(|(g, _)| groups.contains_key(g)).count(),
+    });
+    out["dcs"] = dcs_now(s, &groups, &dead_names, &mut errors);
+    // A run stopped by hand or by the memory guard is left as it is.
+    if plan.reattach {
+        out["reattach"] = if ended == "completed" {
+            reattach(s, plan, &dead_names, &mut errors)
+        } else {
+            json!(format!("skipped: the run ended {ended}"))
+        };
+    }
+    out["errors"] = json!(errors);
+    out
+}
+
+/// The units of the groups in DCS that are alive, and those of them with no
+/// life value.
+fn lives(s: &mut Campaign<'_, '_>) -> Result<Value, String> {
+    let g = s.api.groups(s.c)?;
+    let units: Vec<&pb::Unit> = g
+        .values()
+        .filter(|g| in_dcs(g))
+        .flat_map(|g| g.units.iter())
+        .filter(|u| u.alive)
+        .collect();
+    Ok(json!({
+        "units_alive": units.len(),
+        "without_life": units.iter().filter(|u| u.life.is_none()).count(),
+    }))
+}
+
+/// Start the sidecar again from its store, by the recovery path, and count
+/// the units of the groups in DCS that are alive with no life value just
+/// before, and 10 s and 60 s after it attached.
+fn reattach(
+    s: &mut Campaign<'_, '_>,
+    plan: &Plan,
+    dead_names: &[String],
+    errors: &mut Vec<Value>,
+) -> Value {
+    let before = lives(s).unwrap_or_else(|e| json!(format!("ListWorld: {e}")));
+    let t0 = Instant::now();
+    if let Err(e) = s.recover(plan) {
+        errors.push(json!(format!("restart: {e}")));
+        return json!(null);
+    }
+    let deadline = Instant::now() + Duration::from_secs(300);
+    let attached = loop {
+        if s.api.server_status().is_ok_and(|st| st.attached) {
+            break Instant::now();
+        }
+        if Instant::now() > deadline {
+            errors.push(json!("the sidecar did not attach within 300 s"));
+            return json!({ "attached": false });
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    };
+    let mut out = json!({
+        "before": before,
+        "restart_to_attach_s": (attached - t0).as_secs_f64(),
+    });
+    for at in [10u64, 60] {
+        let due = attached + Duration::from_secs(at);
+        if let Some(wait) = due.checked_duration_since(Instant::now()) {
+            std::thread::sleep(wait);
+        }
+        match lives(s) {
+            Ok(v) => out[format!("after_{at}_s")] = v,
+            Err(e) => errors.push(json!(format!("ListWorld after {at} s: {e}"))),
+        }
+    }
+    // The recovery path reconciles the store against DCS: what it holds
+    // after, a dead group spawned again included.
+    match s.api.groups(s.c) {
+        Ok(g) => out["dcs"] = dcs_now(s, &g, dead_names, errors),
+        Err(e) => errors.push(json!(format!("ListWorld after the restart: {e}"))),
+    }
+    out
+}
+
+/// DCS's groups against the store's, as [`compare_dcs`] counts them.
+fn dcs_now(
+    s: &mut Campaign<'_, '_>,
+    groups: &BTreeMap<u64, pb::Group>,
+    dead_names: &[String],
+    errors: &mut Vec<Value>,
+) -> Value {
+    match s.t.dcs_groups() {
+        Ok(Some(dcs)) => compare_dcs(groups, &dcs, names::tag_of(s.c), dead_names),
+        Ok(None) => json!("not read on this target"),
+        Err(e) => {
+            errors.push(json!(format!("DCS groups: {e}")));
+            json!(null)
+        }
+    }
+}
+
+/// The campaign's groups DCS holds against what `ListWorld` says: those
+/// with no row, those listed in a state out of DCS, live groups DCS does
+/// not hold, and units of groups left dead that DCS holds again. Groups of
+/// other campaigns and of no campaign are left out.
+fn compare_dcs(
+    groups: &BTreeMap<u64, pb::Group>,
+    dcs: &[scenarios::DcsGroup],
+    tag: names::Tag,
+    dead_names: &[String],
+) -> Value {
+    let mine: Vec<(u64, &scenarios::DcsGroup)> = dcs
+        .iter()
+        .filter_map(|g| {
+            names::parse(&g.name)
+                .filter(|p| p.tag == tag && p.kind == Kind::Group)
+                .map(|p| (p.entity, g))
+        })
+        .collect();
+    let held: std::collections::BTreeSet<u64> = mine.iter().map(|(id, _)| *id).collect();
+    let no_row: Vec<u64> = held
+        .iter()
+        .copied()
+        .filter(|id| !groups.contains_key(id))
+        .collect();
+    let out_of_dcs: Vec<u64> = held
+        .iter()
+        .copied()
+        .filter(|id| groups.get(id).is_some_and(|g| !in_dcs(g)))
+        .collect();
+    let live_missing: Vec<u64> = groups
+        .iter()
+        .filter(|(id, g)| scenarios::live(g) && !held.contains(id))
+        .map(|(id, _)| *id)
+        .collect();
+    let respawned = mine
+        .iter()
+        .flat_map(|(_, g)| g.units.iter())
+        .filter(|u| dead_names.contains(&u.name))
+        .count();
+    json!({
+        "groups_of_the_campaign": held.len(),
+        "without_a_row": no_row,
+        "listed_out_of_dcs": out_of_dcs,
+        "live_not_in_dcs": live_missing,
+        "dead_members_in_dcs": respawned,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2075,7 +2338,7 @@ fn campaign_on_server(
     // the backup's worker and its copy of the store are part of the run.
     let options = ServerOptions {
         share_pid: true,
-        store_toml: "backup_interval_h = 3\n".into(),
+        store_toml: store_lines("backup_interval_h = 3", &plan.store_toml),
     };
     let r = on_server_with(
         repository,
@@ -2131,10 +2394,24 @@ fn rehearse(repository: &Path, plan: &Plan, baseline: Option<&Path>) -> Result<u
         log: folder.join("fake-sidecar.log"),
         port,
         child: None,
-        extra: if plan.leak_kib_per_s > 0 {
-            vec!["--leak-kib-per-s".into(), plan.leak_kib_per_s.to_string()]
-        } else {
-            Vec::new()
+        extra: {
+            // The keep windows and the backup interval in seconds: the
+            // purge follows each removal, and the run takes three
+            // scheduled backups.
+            let mut x: Vec<String> = [
+                "--removed-keep-s",
+                "0",
+                "--dead-keep-s",
+                "30",
+                "--backup-interval-s",
+            ]
+            .map(String::from)
+            .to_vec();
+            x.push(((plan.duration_s / 3.0).max(30.0) as u64).to_string());
+            if plan.leak_kib_per_s > 0 {
+                x.extend(["--leak-kib-per-s".into(), plan.leak_kib_per_s.to_string()]);
+            }
+            x
         },
     };
     t.start_sidecar()?;
@@ -2372,6 +2649,234 @@ fn duration(args: &[&str], default: f64) -> Result<f64, String> {
     Ok(seconds)
 }
 
+/// Refuse an argument that is not one of `flags`, or one of `valued` with
+/// its value, before a target is touched.
+fn known(args: &[&str], flags: &[&str], valued: &[&str]) -> Result<(), String> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if *a == "--detach" || flags.contains(a) {
+            continue;
+        }
+        if valued.contains(a) {
+            it.next()
+                .ok_or_else(|| format!("{a} needs a value\n{USAGE}"))?;
+            continue;
+        }
+        return Err(format!("unknown argument `{a}`\n{USAGE}"));
+    }
+    Ok(())
+}
+
+/// Every value given after `flag`, in order.
+fn values(args: &[&str], flag: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if *a == flag {
+            let v = it
+                .next()
+                .ok_or_else(|| format!("{flag} needs a value\n{USAGE}"))?;
+            out.push((*v).to_owned());
+        }
+    }
+    Ok(out)
+}
+
+/// The `[store]` lines of a run: `defaults` (one `key = value` a line)
+/// less the keys `extra` sets, then `extra`. TOML refuses a key twice.
+fn store_lines(defaults: &str, extra: &[String]) -> String {
+    let key = |l: &str| l.split('=').next().unwrap_or("").trim().to_owned();
+    let set: Vec<String> = extra.iter().map(|l| key(l)).collect();
+    let mut out = String::new();
+    for l in defaults.lines().filter(|l| !set.contains(&key(l))) {
+        out.push_str(l);
+        out.push('\n');
+    }
+    for l in extra {
+        out.push_str(l.trim());
+        out.push('\n');
+    }
+    out
+}
+
+/// How `soak fit` judges a series (docs/results/2026-11-18-sidecar-bound.md,
+/// "Method and limits").
+#[derive(Clone, Copy, Debug)]
+enum Rule {
+    /// Slope plus noise at most this, per hour.
+    Slope(f64),
+    /// Slope plus noise at most this share of the mean, per hour.
+    Share(f64),
+    /// Every value at most this.
+    Max(f64),
+    /// Slope within this share of this rate per hour, from the run's start
+    /// when `whole`.
+    Rate {
+        per_h: f64,
+        within: f64,
+        whole: bool,
+    },
+    /// Fitted and reported, not judged.
+    Report,
+}
+
+/// The series of a campaign soak with the sidecar's bounds, by record
+/// pointer.
+const FIT_SERIES: &[(&str, Rule)] = &[
+    ("/sidecar/rss_kb", Rule::Slope(1_024.0)),
+    ("/sidecar/cpu_percent", Rule::Slope(1.0)),
+    ("/store_size/entities_held", Rule::Slope(10.0)),
+    ("/store_size/units", Rule::Slope(40.0)),
+    ("/store_size/work_set", Rule::Share(0.05)),
+    // 30 an hour kept an hour, one step's kill, and a death or an expiry
+    // that lands a step late.
+    ("/store_size/groups_dead", Rule::Max(34.0)),
+    ("/store_size/awaiting_purge", Rule::Max(10.0)),
+    (
+        "/store_size/purged",
+        Rule::Rate {
+            per_h: 150.0,
+            within: 0.2,
+            whole: false,
+        },
+    ),
+    (
+        "/store_size/expired",
+        Rule::Rate {
+            per_h: 30.0,
+            within: 0.2,
+            whole: false,
+        },
+    ),
+    (
+        "/streams/deaths",
+        Rule::Rate {
+            per_h: 120.0,
+            within: 0.2,
+            whole: true,
+        },
+    ),
+    (
+        "/churn/kills",
+        Rule::Rate {
+            per_h: 30.0,
+            within: 0.2,
+            whole: true,
+        },
+    ),
+    ("/agent/pending_destroy", Rule::Slope(1.0)),
+    ("/agent/pending_deaths", Rule::Slope(1.0)),
+    ("/agent/loadouts_waiting", Rule::Slope(1.0)),
+    ("/agent/births", Rule::Slope(1.0)),
+    ("/store_size/journal_rows", Rule::Report),
+    ("/store_size/event_rows", Rule::Report),
+    ("/store_size/journal_bytes", Rule::Report),
+    ("/store_size/event_bytes", Rule::Report),
+    ("/store_size/store_file_bytes", Rule::Report),
+    ("/store_size/events_file_bytes", Rule::Report),
+];
+
+/// Fit each series of [`FIT_SERIES`] by least squares over the medians of
+/// `block_s` blocks of `t_s` from `from_s` (from 0 for a whole-run rate),
+/// with twice the slope's standard error as its noise, and judge it; count
+/// the scheduled backups the status reported, and read the owner's targets
+/// from the last record. `pass` is every judged series, two backups or
+/// more, no failed backup and the targets.
+fn fit_run(records: &[Value], from_s: f64, block_s: f64) -> Value {
+    let mut series = serde_json::Map::new();
+    let mut pass = true;
+    for (ptr, rule) in FIT_SERIES {
+        let start = match rule {
+            Rule::Rate { whole: true, .. } => 0.0,
+            _ => from_s,
+        };
+        let pts: Vec<(f64, f64)> = records
+            .iter()
+            .filter_map(|r| Some((r["t_s"].as_f64()?, r.pointer(ptr)?.as_f64()?)))
+            .filter(|(t, _)| *t >= start)
+            .collect();
+        let mut blocks: BTreeMap<i64, Vec<(f64, f64)>> = BTreeMap::new();
+        for p in &pts {
+            blocks
+                .entry(((p.0 - start) / block_s.max(1.0)).floor() as i64)
+                .or_default()
+                .push(*p);
+        }
+        let fitted: Vec<(f64, f64)> = blocks
+            .values()
+            .map(|b| {
+                let x = b.iter().map(|p| p.0).sum::<f64>() / b.len() as f64;
+                let mut ys: Vec<f64> = b.iter().map(|p| p.1).collect();
+                ys.sort_by(f64::total_cmp);
+                let n = ys.len();
+                let y = if n % 2 == 1 {
+                    ys[n / 2]
+                } else {
+                    (ys[n / 2 - 1] + ys[n / 2]) / 2.0
+                };
+                (x, y)
+            })
+            .collect();
+        let line = crate::soak::fit(&fitted);
+        let max = pts.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
+        let (slope, noise, mean) = line.as_ref().map_or((None, None, None), |l| {
+            (
+                Some(l.slope * 3600.0),
+                Some(2.0 * l.stderr * 3600.0),
+                Some(l.mean_y),
+            )
+        });
+        let ok = match (rule, slope, noise, mean) {
+            (Rule::Report, ..) => None,
+            (Rule::Max(m), ..) => Some(!pts.is_empty() && max <= *m),
+            (Rule::Slope(l), Some(sl), Some(n), _) => Some(sl + n <= *l),
+            (Rule::Share(f), Some(sl), Some(n), Some(m)) => Some(sl + n <= f * m.abs()),
+            (Rule::Rate { per_h, within, .. }, Some(sl), ..) => {
+                Some((sl - per_h).abs() <= within * per_h)
+            }
+            _ => Some(false),
+        };
+        if ok == Some(false) {
+            pass = false;
+        }
+        series.insert(
+            ptr.trim_start_matches('/').replace('/', "."),
+            json!({
+                "rule": format!("{rule:?}"), "points": pts.len(), "blocks": fitted.len(),
+                "slope_per_h": slope, "noise_per_h": noise, "mean": mean,
+                "max": (!pts.is_empty()).then_some(max), "ok": ok,
+            }),
+        );
+    }
+    let distinct = |ptr: &str| -> Vec<i64> {
+        let mut v: Vec<i64> = records
+            .iter()
+            .filter_map(|r| r.pointer(ptr)?.as_i64())
+            .collect();
+        v.dedup();
+        v
+    };
+    let backups = distinct("/api/last_backup_s");
+    let failures = distinct("/api/last_backup_failure_s");
+    let last = records.last().cloned().unwrap_or(Value::Null);
+    let share = last
+        .pointer("/agent_whole/share_percent")
+        .and_then(Value::as_f64);
+    let over = last
+        .pointer("/agent_whole/frames_over_250_percent")
+        .and_then(Value::as_f64);
+    let targets = share.is_some_and(|s| s <= 0.3) && over.is_some_and(|o| o <= 1.0);
+    pass = pass && backups.len() >= 2 && failures.is_empty() && targets;
+    json!({
+        "from_s": from_s, "block_s": block_s, "records": records.len(),
+        "series": series,
+        "backups": { "taken_s": backups, "failed_s": failures,
+                     "last_error": last.pointer("/api/backup_error") },
+        "owner_targets": { "share_percent": share, "frames_over_250_percent": over, "ok": targets },
+        "pass": pass,
+    })
+}
+
 fn number(args: &[&str], flag: &str) -> Result<Option<f64>, String> {
     match args.iter().position(|a| *a == flag) {
         None => Ok(None),
@@ -2448,7 +2953,7 @@ fn judge(folder: &Path, control: Option<&Path>) -> Result<u8, String> {
 pub(crate) fn is_command(word: &str) -> bool {
     matches!(
         word,
-        "campaign" | "control" | "pilot" | "rehearse" | "status" | "stop" | "judge"
+        "campaign" | "control" | "pilot" | "rehearse" | "status" | "stop" | "judge" | "fit"
     )
 }
 
@@ -2458,7 +2963,15 @@ pub(crate) fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, Stri
     }
     let code = match args {
         ["campaign", name, rest @ ..] => {
-            let plan = Plan::live(duration(rest, 8.0 * 3600.0)?);
+            known(
+                rest,
+                &["--leave-dead", "--reattach"],
+                &["--hours", "--minutes", "--control", "--store-toml"],
+            )?;
+            let mut plan = Plan::live(duration(rest, 8.0 * 3600.0)?);
+            plan.leave_dead = rest.contains(&"--leave-dead");
+            plan.reattach = rest.contains(&"--reattach");
+            plan.store_toml = values(rest, "--store-toml")?;
             let control = match rest.iter().position(|a| *a == "--control") {
                 Some(i) => Some(PathBuf::from(rest.get(i + 1).ok_or(USAGE)?)),
                 None => None,
@@ -2479,7 +2992,20 @@ pub(crate) fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, Stri
             campaign_on_server(repository, name, &plan, Some(&control))?.1
         }
         ["rehearse", rest @ ..] => {
+            known(
+                rest,
+                &[],
+                &[
+                    "--hours",
+                    "--minutes",
+                    "--leak-kib-per-s",
+                    "--baseline",
+                    "--restart-at",
+                    "--stall-at",
+                ],
+            )?;
             let mut plan = Plan::rehearsal(duration(rest, 6.0 * 60.0)?);
+            plan.reattach = true;
             plan.leak_kib_per_s = number(rest, "--leak-kib-per-s")?.unwrap_or(0.0) as u64;
             plan.restart_at_s = number(rest, "--restart-at")?;
             plan.stall_at_s = number(rest, "--stall-at")?;
@@ -2489,6 +3015,20 @@ pub(crate) fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, Stri
                 None => None,
             };
             rehearse(repository, &plan, baseline.as_deref())?
+        }
+        ["fit", folder, rest @ ..] => {
+            known(rest, &[], &["--from-minute", "--block-minutes"])?;
+            let from_s = number(rest, "--from-minute")?.unwrap_or(75.0) * 60.0;
+            let block_s = number(rest, "--block-minutes")?.unwrap_or(5.0) * 60.0;
+            let records = read_jsonl(&Path::new(folder).join("records.jsonl"));
+            let v = fit_run(&records, from_s, block_s);
+            std::fs::write(
+                Path::new(folder).join("fit.json"),
+                serde_json::to_vec_pretty(&v).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| format!("{folder}: {e}"))?;
+            println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+            u8::from(v["pass"] != json!(true))
         }
         ["status"] => status(repository)?,
         ["stop", folder] => {
@@ -2513,6 +3053,142 @@ pub(crate) fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn group(id: u64, state: EntityState) -> pb::Group {
+        pb::Group {
+            id,
+            state: state as i32,
+            ..pb::Group::default()
+        }
+    }
+
+    #[test]
+    fn dcs_is_compared_with_the_store_for_this_campaign_only() {
+        let tag = names::tag_of(5);
+        let other = names::tag_of(6);
+        let g = |id: u64, units: &[u64], t: names::Tag| scenarios::DcsGroup {
+            name: names::name(Kind::Group, t, id),
+            units: units
+                .iter()
+                .map(|u| scenarios::DcsUnit {
+                    name: names::name(Kind::Unit, t, *u),
+                    north: 0.0,
+                    east: 0.0,
+                    alt: 0.0,
+                    in_air: false,
+                })
+                .collect(),
+        };
+        let groups: BTreeMap<u64, pb::Group> = [
+            (1, group(1, EntityState::Live)),
+            (2, group(2, EntityState::Live)),
+            (3, group(3, EntityState::Virtual)),
+        ]
+        .into();
+        let dcs = vec![
+            g(1, &[11], tag),
+            g(3, &[31], tag),
+            g(4, &[41, 42], tag),
+            g(9, &[91], other),
+            scenarios::DcsGroup {
+                name: "Ground-1".into(),
+                units: Vec::new(),
+            },
+        ];
+        let dead = vec![names::name(Kind::Unit, tag, 42)];
+        let v = compare_dcs(&groups, &dcs, tag, &dead);
+        assert_eq!(v["groups_of_the_campaign"], json!(3));
+        assert_eq!(v["without_a_row"], json!([4]));
+        assert_eq!(v["listed_out_of_dcs"], json!([3]));
+        assert_eq!(v["live_not_in_dcs"], json!([2]));
+        assert_eq!(v["dead_members_in_dcs"], json!(1));
+    }
+
+    /// Records of a 2-hour run: a flat memory and a growing one, counters
+    /// at their rates, two backups, the targets met.
+    fn records(rss_kb_per_h: f64, purged_per_h: f64) -> Vec<Value> {
+        (0..120)
+            .map(|k| {
+                let t = k as f64 * 60.0;
+                let h = t / 3600.0;
+                let wiggle = if k % 2 == 0 { 50.0 } else { -50.0 };
+                json!({
+                    "t_s": t,
+                    "sidecar": { "rss_kb": 60_000.0 + rss_kb_per_h * h + wiggle, "cpu_percent": 25.0 },
+                    "store_size": {
+                        "entities_held": 1_030, "units": 4_120, "work_set": 40, "groups_dead": 30,
+                        "awaiting_purge": 2, "purged": (purged_per_h * h) as u64,
+                        "expired": (30.0 * h) as u64,
+                    },
+                    "streams": { "deaths": (120.0 * h) as u64 },
+                    "churn": { "kills": (30.0 * h) as u64 },
+                    "agent": { "pending_destroy": 0, "pending_deaths": 0, "loadouts_waiting": 0, "births": 0 },
+                    "api": {
+                        "last_backup_s": if k >= 60 { Some(1_000 + i64::from(k >= 119)) } else { None },
+                        "last_backup_failure_s": null,
+                    },
+                    "agent_whole": { "share_percent": 0.2, "frames_over_250_percent": 0.1 },
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_plateau_passes_the_fit_and_a_growth_or_a_wrong_rate_fails_it() {
+        let ok = fit_run(&records(0.0, 150.0), 4_500.0, 300.0);
+        assert_eq!(ok["pass"], json!(true), "{ok:#}");
+        let grows = fit_run(&records(3_000.0, 150.0), 4_500.0, 300.0);
+        assert_eq!(grows["series"]["sidecar.rss_kb"]["ok"], json!(false));
+        assert_eq!(grows["pass"], json!(false));
+        let slow = fit_run(&records(0.0, 100.0), 4_500.0, 300.0);
+        assert_eq!(slow["series"]["store_size.purged"]["ok"], json!(false));
+        let mut one = records(0.0, 150.0);
+        for r in &mut one {
+            r["api"]["last_backup_s"] = json!(1_000);
+        }
+        assert_eq!(
+            fit_run(&one, 4_500.0, 300.0)["pass"],
+            json!(false),
+            "one backup"
+        );
+    }
+
+    #[test]
+    fn an_unknown_soak_argument_is_refused() {
+        let v = &["--minutes", "120", "--store-toml", "a = 1", "--leave-dead"];
+        assert!(known(v, &["--leave-dead"], &["--minutes", "--store-toml"]).is_ok());
+        assert!(known(&["--leave_dead"], &["--leave-dead"], &[]).is_err());
+        assert!(known(&["--minutes"], &[], &["--minutes"]).is_err());
+    }
+
+    #[test]
+    fn store_toml_lines_replace_the_defaults_they_name() {
+        let extra = values(
+            &[
+                "--minutes",
+                "120",
+                "--store-toml",
+                "removed_keep_h = 0",
+                "--store-toml",
+                "backup_interval_h=1",
+            ],
+            "--store-toml",
+        )
+        .expect("values");
+        assert_eq!(
+            store_lines("backup_interval_h = 3", &extra),
+            "removed_keep_h = 0\nbackup_interval_h=1\n"
+        );
+        assert_eq!(
+            store_lines("backup_interval_h = 3", &[]),
+            "backup_interval_h = 3\n"
+        );
+        assert!(values(&["--store-toml"], "--store-toml").is_err());
+        assert_eq!(
+            duration(&["--store-toml", "a = 1", "--minutes", "5"], 0.0).unwrap(),
+            300.0
+        );
+    }
 
     #[test]
     fn the_process_lines_become_nested_numbers() {

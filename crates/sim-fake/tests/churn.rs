@@ -12,7 +12,9 @@
 //! store, and no `EntityId` given before it is given again.
 //!
 //! The heap is measured with a counting allocator, so this file holds one
-//! test, which runs its two cases one after the other.
+//! test, which runs its two cases one after the other. SQLite runs with no
+//! temporary folder (`common/notemp.rs`): the purge, the expiry and the
+//! retention on disk must need no temporary file.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::BTreeMap;
@@ -28,6 +30,9 @@ use nanoprobe_sidecar::store::{
 };
 use nanoprobe_sim_fake::Config;
 use nanoprobe_sim_fake::harness::{THEATER, World, new_store};
+
+#[path = "common/notemp.rs"]
+mod notemp;
 
 struct Counting;
 
@@ -461,8 +466,13 @@ fn check_flat(on_disk: bool, s: &[Sample]) {
 
 #[test]
 fn a_long_churn_levels_off_on_disk_and_in_memory() {
+    notemp::install();
+    let control = tempfile::tempdir().expect("dir");
+    notemp::assert_refusing(control.path());
     for on_disk in [true, false] {
         let s = run(on_disk);
         check_flat(on_disk, &s);
     }
+    let refused = notemp::take_refused();
+    assert!(refused.is_empty(), "temporary files refused: {refused:?}");
 }
