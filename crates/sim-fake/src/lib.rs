@@ -737,7 +737,9 @@ impl FakeSim {
 
     /// Leave a dead static at a DCS point. One whose name starts with `np#`
     /// is the platform's and stays through every clear (spec/commands.md,
-    /// "Layout: CLEAR_DEBRIS").
+    /// "Layout: CLEAR_DEBRIS"). The fake copies that rule from the agent's
+    /// handler, so a test on the fake shows nothing of the handler's own
+    /// rule; `lua/tests/dispatch.lua clear-debris` tests that.
     pub fn place_dead_static(&mut self, name: &str, at: [f64; 3]) {
         self.junk.push(Junk {
             name: name.into(),

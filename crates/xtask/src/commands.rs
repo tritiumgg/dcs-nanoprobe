@@ -85,6 +85,9 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
     if !rest.is_empty() {
         return Err(USAGE.into());
     }
+    if part != "debris" && (template.is_some() || min_ground.is_some()) {
+        return Err("--template and --min-ground go with --part debris only".into());
+    }
     match part {
         "world" => {
             if groups == 0 || units == 0 || units > 50 {
@@ -111,9 +114,11 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
             return moderation::run(repository, name, client, miz.map(Path::new));
         }
         "debris" => {
-            if groups < 4 || units == 0 || units > 50 {
+            // At most 5 units: the probe's column must stay 50 m clear of the
+            // next group on its 150 m grid (`command-probe`'s own check).
+            if groups < 4 || units == 0 || units > 5 {
                 return Err(
-                    "--part debris needs --groups 4 or more and --units between 1 and 50".into(),
+                    "--part debris needs --groups 4 or more and --units between 1 and 5".into(),
                 );
             }
             return world::run_debris(
@@ -351,6 +356,26 @@ mod tests {
         assert!(!meets_exit_test(&v(true, 999, 9), 1000, 100));
         assert!(!meets_exit_test(&v(false, 1000, 9), 1000, 100));
         assert!(!meets_exit_test(&json!({"pass": true}), 1000, 100));
+    }
+
+    /// Arguments refused before anything is built or a target is opened.
+    #[test]
+    fn the_debris_flags_are_refused_where_they_do_nothing() {
+        let run = |args: &[&str]| command(Path::new("."), args).map(|_| ()).unwrap_err();
+        for part in ["world", "names", "commands"] {
+            let e = run(&["t", "--part", part, "--min-ground", "500"]);
+            assert!(e.contains("--part debris only"), "{part}: {e}");
+            let e = run(&["t", "--part", part, "--template", "x.miz"]);
+            assert!(e.contains("--part debris only"), "{part}: {e}");
+        }
+        let e = run(&["t", "--min-ground", "500"]);
+        assert!(e.contains("--part debris only"), "{e}");
+        let e = run(&["t", "--part", "debris", "--units", "6"]);
+        assert!(e.contains("--units between 1 and 5"), "{e}");
+        let e = run(&["t", "--part", "debris", "--groups", "3"]);
+        assert!(e.contains("--groups 4 or more"), "{e}");
+        let e = run(&["t", "--part", "debris", "--min-ground", "high"]);
+        assert!(e.contains("--min-ground"), "{e}");
     }
 
     #[test]

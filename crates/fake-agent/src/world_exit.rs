@@ -498,6 +498,26 @@ struct Opts {
     trace: bool,
 }
 
+/// The debris scenario's column reaches this far past each end of its row,
+/// meters.
+const COLUMN_MARGIN: f64 = 20.0;
+/// The least distance from the column's edge to the next group, meters. A
+/// clear's edge is not exact: an 8 m sphere took wrecks 30 m from its
+/// center, 22 m past its edge (LIVE, docs/results/2026-11-16-clear-debris.md,
+/// run 2), so the next group stands farther off than that.
+const COLUMN_GAP_MIN: f64 = 50.0;
+
+/// A row's length, meters: its units stand 20 m apart.
+fn row_len(o: &Opts) -> f64 {
+    (o.units.max(1) - 1) as f64 * 20.0
+}
+
+/// From the debris scenario's column to the nearest unit of the next group
+/// along a row, meters.
+fn column_gap(o: &Opts) -> f64 {
+    o.spacing - row_len(o) - COLUMN_MARGIN
+}
+
 fn num<T: std::str::FromStr>(args: &[String], flag: &str, default: T) -> Result<T, String> {
     arg(args, flag).map_or(Ok(default), |v| {
         v.parse().map_err(|_| format!("{flag} takes a number"))
@@ -536,6 +556,13 @@ fn opts(args: &[String]) -> Result<Opts, String> {
     }
     if o.scenario == "debris" && o.groups < 4 {
         return Err("--scenario debris needs --groups 4 or more".into());
+    }
+    if o.scenario == "debris" && column_gap(&o) < COLUMN_GAP_MIN {
+        return Err(format!(
+            "--scenario debris needs {COLUMN_GAP_MIN} m or more between the column and the next \
+             group: fewer --units or a wider --spacing ({} m now)",
+            column_gap(&o)
+        ));
     }
     Ok(o)
 }
@@ -1324,13 +1351,12 @@ fn debris(c: &mut Ctx) -> Result<bool, String> {
     }
     let control = row_group(c, &theater, ox - 1_500.0, oz, "debris control".into())?;
     // The column: a square round the third group's row. Its half width is
-    // half the row and 20 m, so every wreck of the row is 20 m inside it and
-    // the nearest other group, a grid step away, is far outside: a clear's
-    // edge is not exact, and a small sphere took wrecks 30 m from it (LIVE,
-    // docs/results/2026-11-16-clear-debris.md).
+    // half the row and `COLUMN_MARGIN`, so every wreck of the row is that
+    // far inside it, and the nearest unit of another group is
+    // `COLUMN_GAP_MIN` or more outside it, which `opts` checked.
     const COLUMN: usize = 2;
-    let len = (c.o.units.max(1) - 1) as f64 * 20.0;
-    let half_width = len / 2.0 + 20.0;
+    let len = row_len(&c.o);
+    let half_width = len / 2.0 + COLUMN_MARGIN;
     let (cx, cz) = (grid[COLUMN].1.0, grid[COLUMN].1.1 + len / 2.0);
     // The grid's group farthest from the column: its wrecks must stay.
     let far = (0..grid.len())
@@ -1923,6 +1949,39 @@ fn paused(c: &mut Ctx) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The debris scenario refuses a layout that puts another group within
+    /// `COLUMN_GAP_MIN` of its column, and fewer than 4 groups.
+    #[test]
+    fn the_debris_layout_keeps_the_next_group_clear_of_the_column() {
+        let parse = |extra: &[&str]| {
+            let mut args: Vec<String> = ["--scenario", "debris", "--control-dir", "d"]
+                .iter()
+                .map(|a| (*a).to_owned())
+                .collect();
+            args.extend(extra.iter().map(|a| (*a).to_owned()));
+            opts(&args).map(|o| column_gap(&o))
+        };
+        // The defaults, 4 units on a 150 m grid: 70 m. 5 units: the least
+        // gap allowed, which is why `cargo xtask commands --part debris`
+        // takes 5 units at most.
+        assert_eq!(parse(&[]), Ok(70.0));
+        assert_eq!(parse(&["--units", "5"]), Ok(COLUMN_GAP_MIN));
+        assert_eq!(parse(&["--units", "8", "--spacing", "300"]), Ok(140.0));
+        let refused = |extra: &[&str]| parse(extra).unwrap_err();
+        assert!(refused(&["--units", "6"]).contains("between the column and the next group"));
+        assert!(
+            refused(&["--units", "4", "--spacing", "100"])
+                .contains("between the column and the next group")
+        );
+        assert!(refused(&["--groups", "3"]).contains("--groups 4 or more"));
+        // Another scenario takes any layout.
+        let args: Vec<String> = ["--scenario", "groups", "--units", "50"]
+            .iter()
+            .map(|a| (*a).to_owned())
+            .collect();
+        assert!(opts(&args).is_ok());
+    }
 
     fn st(frame: u64, seq: u64, cost_us: u32) -> Stamped {
         Stamped {
