@@ -52,11 +52,16 @@
 //!   process group of its own, with its output in a log under `bundles/`.
 //!   `soak status` lists the runs and `soak stop <folder>` ends one at its
 //!   next step, with its verdict and its cleanup.
+//! - The churn falls short of its plan: each record carries the churn's
+//!   totals by kind (`churn`), and a kind under 80 % of its planned rate for
+//!   90 minutes takes the verdict away (`churn_short`, EXTEND).
 //!
 //! Everything goes under `bundles/soak-<name>-<time>/`: `state.json`,
 //! `records.jsonl`, `events.jsonl`, the sidecar's log, and at the end
 //! `soak.json`, `verdict.json` and `verdict.md`. `soak judge <folder>
-//! [--control <folder>]` writes the verdict again, against a control.
+//! [--control <folder>]` writes the verdict again, against a control, and
+//! keeps the run's provenance; with `--from <s>` and `--to <s>` it judges
+//! that window of the records alone, into `verdict-window-<from>-<to>.*`.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io::Write as _;
@@ -71,7 +76,7 @@ use tokio::runtime::Runtime;
 
 use super::api::{Api, Streams, at, route};
 use super::scenarios::{self, COUNTRY, GROUND, ORIGIN, Target, state};
-use super::virtualization::{SPACING, places};
+use super::virtualization::{LAND_CHUNK, SPACING, places};
 use super::{FakeTarget, Host, ServerOptions, on_server_with};
 use crate::bundle;
 use crate::profile::Target as Profile;
@@ -84,7 +89,7 @@ const USAGE: &str = "usage: cargo xtask soak campaign <name> [--hours H | --minu
        cargo xtask soak rehearse [--minutes M] [--leak-kib-per-s N [--baseline <folder>]] [--restart-at S] [--stall-at S] [--detach]
        cargo xtask soak status
        cargo xtask soak stop <folder>
-       cargo xtask soak judge <folder> [--control <folder>]";
+       cargo xtask soak judge <folder> [--control <folder>] [--from <s>] [--to <s>]";
 
 /// The store's files and their keys in a record's `store`.
 pub(super) const STORE_FILES: [(&str, &str); 4] = [
@@ -153,6 +158,9 @@ pub(super) struct Plan {
     stall_for_s: f64,
     /// Rehearsal: kibibytes the fake sidecar leaks each second.
     leak_kib_per_s: u64,
+    /// Seconds of uptime before which nothing is fitted, when a later window
+    /// of a run is judged (`soak judge --from`); the warm-up otherwise.
+    fit_from_s: Option<f64>,
 }
 
 impl Plan {
@@ -176,6 +184,7 @@ impl Plan {
             stall_at_s: None,
             stall_for_s: 0.0,
             leak_kib_per_s: 0,
+            fit_from_s: None,
         }
     }
 
@@ -228,7 +237,8 @@ impl Plan {
     /// step flatten after 80, so an hour covers what was seen to settle; a
     /// shorter run gives up a quarter and says less.
     fn warmup_s(&self) -> f64 {
-        (self.duration_s / 4.0).min(3_600.0)
+        self.fit_from_s
+            .unwrap_or((self.duration_s / 4.0).min(3_600.0))
     }
 
     /// The block length of the fit (`series`, "Blocks"): ten records, and
@@ -810,8 +820,19 @@ pub(super) fn local_process(pid: u32) -> Value {
 struct Slot {
     group: u64,
     generation: u32,
-    /// Whether this group was given a route.
-    routed: bool,
+    /// The step this group was last given a route, if it was.
+    routed: Option<u64>,
+}
+
+/// Seconds a route of [`Campaign::lap_order`] takes: 16 legs of two thirds
+/// of [`SPACING`] at 5 m/s.
+const ROUTE_S: f64 = 16.0 * SPACING * 2.0 / 3.0 / 5.0;
+
+/// Whether a group given a route at step `routed` still drives it at step
+/// `n`. A group whose route has ended can be given another, or be killed.
+fn driving(routed: Option<u64>, n: u64, plan: &Plan) -> bool {
+    let steps = (ROUTE_S / plan.tick_s).ceil() as u64 + 1;
+    routed.is_some_and(|at| n < at.saturating_add(steps))
 }
 
 struct Campaign<'a, 'r> {
@@ -890,7 +911,7 @@ impl<'a, 'r> Campaign<'a, 'r> {
             s.slots.push(Slot {
                 group: id,
                 generation: 0,
-                routed: false,
+                routed: None,
             });
             s.place_of.insert(id, place);
             if live {
@@ -976,7 +997,7 @@ impl<'a, 'r> Campaign<'a, 'r> {
         self.slots[place] = Slot {
             group: id,
             generation,
-            routed: false,
+            routed: None,
         };
         self.place_of.insert(id, place);
         self.window.retain(|p| *p != place);
@@ -1151,12 +1172,12 @@ impl Subject for Campaign<'_, '_> {
         if begin.elapsed() > slot {
             return counted(d, errors, Some("orders"));
         }
-        // Orders: live groups without a route get one, round the window.
+        // Orders: live groups not driving a route get one, round the window.
         let candidates: Vec<usize> = self
             .window
             .iter()
             .copied()
-            .filter(|p| !self.slots[*p].routed)
+            .filter(|p| !driving(self.slots[*p].routed, n, plan))
             .filter(|p| {
                 groups
                     .get(&self.slots[*p].group)
@@ -1168,7 +1189,7 @@ impl Subject for Campaign<'_, '_> {
             let order = self.lap_order(place);
             let r = self.api.set_order(self.c, self.slots[place].group, order);
             if note(&mut errors, "SetOrder", r) {
-                self.slots[place].routed = true;
+                self.slots[place].routed = Some(n);
                 *d.entry("orders").or_default() += 1;
             }
         }
@@ -1203,7 +1224,7 @@ impl Subject for Campaign<'_, '_> {
         // as DCS's own events either way.
         if plan.kill_every > 0 && n.is_multiple_of(plan.kill_every) && self.killed.is_none() {
             let target = self.window.iter().copied().find(|p| {
-                !self.slots[*p].routed
+                !driving(self.slots[*p].routed, n, plan)
                     && groups
                         .get(&self.slots[*p].group)
                         .is_some_and(|g| scenarios::live(g) && g.units.iter().all(|u| u.alive))
@@ -1391,6 +1412,10 @@ struct Control<'a> {
     agent_log_lines: usize,
 }
 
+/// DCS's frame rate without the agent (`lua/sampling/fps-control.lua`),
+/// with `@MEASURE@` to fill in.
+const CONTROL_FPS: &str = include_str!("../../../../lua/sampling/fps-control.lua");
+
 /// The agent log's line count: it stays where it was while no agent runs.
 fn agent_log_lines(run: &Run) -> usize {
     let log = run.remote.full_path("nanoprobe/logs/agent.log");
@@ -1487,8 +1512,24 @@ impl Subject for Control<'_> {
     }
 
     fn record(&mut self, collect: bool, _export: bool, plan: &Plan) -> Value {
-        let mut v = probe(self.run, "", "ctl-", plan.fps_s, &mut self.cpu_before);
+        // `lua/sampling/fps.lua` counts the agent's frames and so loads the
+        // agent: the control reads its frame rate without it.
+        let mut v = probe(self.run, "", "ctl-", 0, &mut self.cpu_before);
         let mut errors = v["errors"].as_array().cloned().unwrap_or_default();
+        if plan.fps_s > 0 {
+            let source = CONTROL_FPS.replace("@MEASURE@", &plan.fps_s.to_string());
+            match self
+                .run
+                .eval("hook", "soak-fps", &source, u64::from(plan.fps_s) + 180)
+            {
+                Ok(f) => {
+                    for key in ["fps", "p5_fps", "model_per_real"] {
+                        v["dcs"][key] = f[key].clone();
+                    }
+                }
+                Err(e) => errors.push(json!(format!("fps: {e}"))),
+            }
+        }
         match self.run.eval(
             "server",
             "soak-stats",
@@ -1632,14 +1673,17 @@ fn control_places(run: &Run, n: usize) -> Result<Vec<(f64, f64)>, String> {
             )
         })
         .collect();
-    let land = super::on_land(run, &cand)?;
-    let out: Vec<(f64, f64)> = cand
-        .into_iter()
-        .zip(land)
-        .filter(|(_, l)| *l)
-        .map(|(p, _)| p)
-        .take(n)
-        .collect();
+    // In chunks, as `virtualization::places` asks: the eval channel's reply
+    // holds at most 2,000 entries of an array (spec/eval.md).
+    let mut out = Vec::with_capacity(n);
+    for chunk in cand.chunks(LAND_CHUNK) {
+        let land = super::on_land(run, chunk)?;
+        out.extend(chunk.iter().zip(land).filter(|(_, l)| *l).map(|(p, _)| *p));
+        if out.len() >= n {
+            out.truncate(n);
+            return Ok(out);
+        }
+    }
     if out.len() < n {
         return Err(format!("only {} of {n} grid places are on land", out.len()));
     }
@@ -1711,6 +1755,107 @@ fn per_hour(records: &[Value], pointer: &str, after_s: f64) -> Option<f64> {
         .collect();
     let (first, last) = (v.first()?, v.last()?);
     (last.0 > first.0).then(|| (last.1 - first.1) / (last.0 - first.0) * 3600.0)
+}
+
+/// The churn a step of a run of `kind` plans, by counter of the records'
+/// `churn` totals. The control's Lua churn counts units, not groups, so it is
+/// checked by its steps and routes.
+fn planned_churn(kind: &str, plan: &Plan) -> Vec<(&'static str, f64)> {
+    let kill = if plan.kill_every > 0 {
+        1.0 / plan.kill_every as f64
+    } else {
+        0.0
+    };
+    let (handover, replace) = (plan.handover as f64, plan.replace as f64);
+    let per_step = match kind {
+        "campaign" | "rehearsal" => vec![
+            ("steps", 1.0),
+            ("dematerialized", handover),
+            ("materialized", handover),
+            ("removed", replace),
+            ("put", replace),
+            ("orders", plan.orders as f64),
+            ("effects", plan.effects as f64),
+            ("queries", 1.0),
+            ("kills", kill),
+        ],
+        "control" => vec![("steps", 1.0), ("orders", plan.orders as f64)],
+        _ => Vec::new(),
+    };
+    per_step.into_iter().filter(|(_, r)| *r > 0.0).collect()
+}
+
+/// The span the achieved churn is counted over, seconds.
+const CHURN_BLOCK_S: f64 = 1_800.0;
+/// The share of the planned rate a block must reach.
+const CHURN_SHARE: f64 = 0.8;
+/// Consecutive short blocks that make a stretch. A stall or a DCS restart
+/// of up to 30 minutes touches at most two half hours and the run rides
+/// through it; 90 minutes under the plan is a churn that no longer runs as
+/// planned.
+const CHURN_SHORT_BLOCKS: usize = 3;
+
+/// Where the churn a run achieved fell short of its plan: each kind's count
+/// over consecutive half hours against the planned rate, and the stretches of
+/// at least [`CHURN_SHORT_BLOCKS`] blocks under [`CHURN_SHARE`] of it. A kind
+/// the plan has and no record counts is short too. A run shorter than
+/// [`CHURN_SHORT_BLOCKS`] blocks (90 minutes) is not checked.
+fn churn_short(kind: &str, plan: &Plan, records: &[Value]) -> Vec<Value> {
+    let times: Vec<f64> = records.iter().filter_map(|r| r["t_s"].as_f64()).collect();
+    let (Some(&t0), Some(&t1)) = (times.first(), times.last()) else {
+        return Vec::new();
+    };
+    let blocks = ((t1 - t0) / CHURN_BLOCK_S).floor() as usize;
+    if blocks < CHURN_SHORT_BLOCKS {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (counter, per_step) in planned_churn(kind, plan) {
+        let planned = per_step * 3600.0 / plan.tick_s;
+        let points: Vec<(f64, f64)> = records
+            .iter()
+            .filter_map(|r| Some((r["t_s"].as_f64()?, r["churn"][counter].as_f64()?)))
+            .collect();
+        if points.is_empty() {
+            out.push(
+                json!({ "kind": counter, "planned_per_hour": planned, "achieved_per_hour": null,
+                "from_s": t0, "to_s": t1, "why": "no record counts it" }),
+            );
+            continue;
+        }
+        // The count at time t: the last record at or before it, else 0.
+        let at = |t: f64| {
+            points
+                .iter()
+                .take_while(|p| p.0 <= t + 1e-6)
+                .last()
+                .map_or(0.0, |p| p.1)
+        };
+        let mut run: Option<(f64, f64, usize)> = None;
+        let close = |run: &mut Option<(f64, f64, usize)>, out: &mut Vec<Value>| {
+            if let Some((from, count, n)) = run.take()
+                && n >= CHURN_SHORT_BLOCKS
+            {
+                let to = from + n as f64 * CHURN_BLOCK_S;
+                out.push(json!({ "kind": counter, "planned_per_hour": planned,
+                    "achieved_per_hour": count / (to - from) * 3600.0, "from_s": from, "to_s": to,
+                    "why": format!("under {:.0} % of the plan for {} half hours", CHURN_SHARE * 100.0, n) }));
+            }
+        };
+        for b in 0..blocks {
+            let a = t0 + b as f64 * CHURN_BLOCK_S;
+            let count = at(a + CHURN_BLOCK_S) - at(a);
+            if count / CHURN_BLOCK_S * 3600.0 < CHURN_SHARE * planned {
+                let r = run.get_or_insert((a, 0.0, 0));
+                r.1 += count;
+                r.2 += 1;
+            } else {
+                close(&mut run, &mut out);
+            }
+        }
+        close(&mut run, &mut out);
+    }
+    out
 }
 
 /// The verdict of a run's records, against a control's when there is one.
@@ -1841,9 +1986,19 @@ fn verdict(
     // kills DCS: that is a failure, whatever the fitted line projects.
     let memory_guard = ended == "memory guard";
     let ok = growing.is_empty() && !over_cap && !memory_guard && targets["met"] == json!(true);
+    // A churn that fell short of its plan for 90 minutes or more did not test
+    // what the run was planned to test, so the run is no verdict and extends
+    // (EXTEND, not FAIL): the records show nothing wrong with the platform,
+    // only that part of the load was missing. The stretches are listed.
+    let churn = churn_short(kind, plan, records);
     v["conclusive"] = json!(
-        v["extend"] == json!(false) && missing.is_empty() && needs_control.is_empty() && !short_run
+        v["extend"] == json!(false)
+            && missing.is_empty()
+            && needs_control.is_empty()
+            && !short_run
+            && churn.is_empty()
     );
+    v["churn_short"] = json!(churn);
     v["growing"] = json!(growing);
     v["needs_control"] = json!(needs_control);
     v["settled"] = json!(settled);
@@ -1855,7 +2010,8 @@ fn verdict(
 }
 
 /// PASS, FAIL, or EXTEND when nothing failed and a series is unresolved,
-/// rising, has no data or lacks its control, or the run was short.
+/// rising, has no data or lacks its control, the run was short, or its churn
+/// fell short of the plan.
 fn outcome(v: &Value) -> (&'static str, u8) {
     match (v["ok"] == json!(true), v["conclusive"] == json!(true)) {
         (false, _) => ("FAIL", 1),
@@ -1960,6 +2116,35 @@ fn control_check(folder: &Path, target: &str, kind: &str) -> (bool, Vec<String>)
     (usable, faults)
 }
 
+/// The verdict's churn stretches as lines for `verdict.md`, or nothing.
+fn churn_lines(v: &Value) -> String {
+    let lines: Vec<String> = v["churn_short"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|s| {
+            format!(
+                "- churn short: `{}` from {} s to {} s, {} an hour against {} planned ({})\n",
+                s["kind"].as_str().unwrap_or("?"),
+                s["from_s"],
+                s["to_s"],
+                s["achieved_per_hour"]
+                    .as_f64()
+                    .map_or("none".to_owned(), |a| format!("{a:.0}")),
+                s["planned_per_hour"]
+                    .as_f64()
+                    .map_or("?".to_owned(), |p| format!("{p:.0}")),
+                s["why"].as_str().unwrap_or(""),
+            )
+        })
+        .collect();
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", lines.concat())
+    }
+}
+
 /// Write the run's verdict and `soak.json` from its records.
 fn finish(
     folder: &Path,
@@ -2011,23 +2196,42 @@ fn finish(
     write(
         "verdict.md",
         format!(
-            "{word}: {kind} on {name}, {} records, ended: {ended}\n\n{}\n",
+            "{word}: {kind} on {name}, {} records, ended: {ended}\n\n{}{}\n",
             records.len(),
+            churn_lines(&v),
             series::table(&v)
         ),
     )?;
     let timings = commit_timings(folder);
-    let provenance = if kind == "rehearsal" {
-        json!({ "platform": "fake sidecar on this host" })
-    } else {
-        crate::soak::provenance(name)
+    // A run judged again (`soak judge`) keeps what its first verdict wrote of
+    // the run itself: the build, DCS and the times are the run's, not those
+    // of the host or the target when it is judged again.
+    let before: Option<Value> = std::fs::read_to_string(folder.join("soak.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok());
+    let (provenance, ended_at, judged_at) = match &before {
+        Some(b) if !b["provenance"].is_null() => (
+            b["provenance"].clone(),
+            b["ended_at"].clone(),
+            json!(bundle::utc_now()),
+        ),
+        _ => (
+            if kind == "rehearsal" {
+                json!({ "platform": "fake sidecar on this host" })
+            } else {
+                crate::soak::provenance(name)
+            },
+            json!(bundle::utc_now()),
+            Value::Null,
+        ),
     };
     write(
         "soak.json",
         serde_json::to_string_pretty(&json!({
             "kind": kind, "target": name, "provenance": provenance, "plan": plan.json(),
-            "started": st.v["started"], "ended_at": bundle::utc_now(), "ended": ended,
-            "records": records.len(), "control": control.map(|c| c.display().to_string()),
+            "started": st.v["started"], "ended_at": ended_at, "judged_again_at": judged_at,
+            "ended": ended, "records": records.len(),
+            "control": control.map(|c| c.display().to_string()),
             "outcome": word, "verdict": v, "commit_timings": timings,
             "events": read_jsonl(&folder.join("events.jsonl")),
         }))
@@ -2443,6 +2647,104 @@ fn judge(folder: &Path, control: Option<&Path>) -> Result<u8, String> {
     )
 }
 
+/// The verdict of a window of a run, from `from_s` to `to_s`: a part of a
+/// run whose load changed partway, judged on its own. The records after
+/// `to_s` are left out; those before `from_s` keep the run's clock, so
+/// uptime and the 24-hour projections count from the run's start, but are
+/// not fitted. It writes `verdict-window-<from>-<to>.json` and `.md` beside
+/// the run's verdict, which it leaves as it is. The control is used only
+/// for a window that starts with the run, because the control's fit is
+/// matched to the soak's first hours of uptime; a later window is judged
+/// without it, so the series DCS itself moves read their slopes with no
+/// verdict on the platform. A window is shorter than a soak, so its outcome
+/// is never PASS: read its series.
+fn judge_window(
+    folder: &Path,
+    control: Option<&Path>,
+    from_s: f64,
+    to_s: f64,
+) -> Result<u8, String> {
+    let read = |file: &str| -> Option<Value> {
+        std::fs::read_to_string(folder.join(file))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+    };
+    let from = read("soak.json")
+        .or_else(|| read("state.json"))
+        .ok_or_else(|| {
+            format!(
+                "{} holds neither soak.json nor state.json",
+                folder.display()
+            )
+        })?;
+    let kind = from["kind"].as_str().unwrap_or("campaign").to_owned();
+    let name = from["target"].as_str().unwrap_or("?").to_owned();
+    let records: Vec<Value> = read_jsonl(&folder.join("records.jsonl"))
+        .into_iter()
+        .filter(|r| r["t_s"].as_f64().is_some_and(|t| t <= to_s))
+        .collect();
+    let times: Vec<f64> = records.iter().filter_map(|r| r["t_s"].as_f64()).collect();
+    let (Some(&start), Some(&last)) = (times.first(), times.last()) else {
+        return Err(format!("no record up to {to_s} s"));
+    };
+    let Some(&first) = times.iter().find(|t| **t >= from_s) else {
+        return Err(format!("no record from {from_s} s to {to_s} s"));
+    };
+    let interval_s = from["plan"]["interval_s"].as_f64().unwrap_or(60.0);
+    // The run's first record is due one interval after the churn begins: a
+    // window that holds it starts with the run and keeps the warm-up.
+    let with_control = first <= start + 1e-6;
+    let plan = Plan {
+        interval_s,
+        // Uptime counts from the first record; a later window's first is
+        // fitted, the records before it are not.
+        fit_from_s: (!with_control).then(|| first - start - interval_s / 2.0),
+        ..Plan::live(last + interval_s)
+    };
+    let control_records = control.filter(|_| with_control).and_then(|c| {
+        control_check(c, &name, &kind)
+            .0
+            .then(|| read_jsonl(&c.join("records.jsonl")))
+    });
+    let mut v = verdict(&kind, &plan, &records, control_records.as_deref(), "window");
+    let in_window = times.iter().filter(|t| **t >= first).count();
+    v["window"] = json!({
+        "from_s": first, "to_s": last, "records": in_window,
+        "control_used": control_records.is_some(),
+        "warmup_s": plan.warmup_s(),
+    });
+    let (word, code) = outcome(&v);
+    let stem = format!("verdict-window-{}-{}", first as u64, last as u64);
+    let write = |file: String, text: String| {
+        let path = folder.join(&file);
+        std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))
+    };
+    write(
+        format!("{stem}.json"),
+        serde_json::to_string_pretty(&v).unwrap_or_default(),
+    )?;
+    let table = series::table(&v);
+    write(
+        format!("{stem}.md"),
+        format!(
+            "{word} (a window, not the run's verdict): {kind} on {name}, records from {first} s to {last} s, {} records, control {}\n\n{}{table}\n",
+            in_window,
+            if control_records.is_some() {
+                "used"
+            } else {
+                "not used"
+            },
+            churn_lines(&v),
+        ),
+    )?;
+    println!("{table}");
+    println!(
+        "== {word} (window): {}",
+        folder.join(format!("{stem}.md")).display()
+    );
+    Ok(code)
+}
+
 /// Whether `word` is one of this module's commands, which `soak` takes
 /// where its older form takes a target's name.
 pub(crate) fn is_command(word: &str) -> bool {
@@ -2498,12 +2800,28 @@ pub(crate) fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, Stri
             0
         }
         ["judge", folder, rest @ ..] => {
-            let control = match rest {
-                [] => None,
-                ["--control", c] => Some(PathBuf::from(c)),
-                _ => return Err(USAGE.into()),
-            };
-            judge(Path::new(folder), control.as_deref())?
+            let mut control = None;
+            let (mut from, mut to) = (None, None);
+            let mut it = rest.iter();
+            while let Some(a) = it.next() {
+                let value = it.next().ok_or(USAGE)?;
+                match *a {
+                    "--control" => control = Some(PathBuf::from(value)),
+                    "--from" => from = Some(value.parse::<f64>().map_err(|_| USAGE)?),
+                    "--to" => to = Some(value.parse::<f64>().map_err(|_| USAGE)?),
+                    _ => return Err(USAGE.into()),
+                }
+            }
+            if from.is_some() || to.is_some() {
+                judge_window(
+                    Path::new(folder),
+                    control.as_deref(),
+                    from.unwrap_or(0.0),
+                    to.unwrap_or(f64::INFINITY),
+                )?
+            } else {
+                judge(Path::new(folder), control.as_deref())?
+            }
         }
         _ => return Err(USAGE.into()),
     };
@@ -2513,6 +2831,32 @@ pub(crate) fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_route_ends_after_its_laps_so_its_group_can_be_routed_or_killed_again() {
+        let plan = Plan::live(8.0 * 3600.0);
+        // 3,200 m at 5 m/s is 640 s: 22 steps of 30 s, and one more.
+        assert_eq!(ROUTE_S, 640.0);
+        assert!(!driving(None, 0, &plan));
+        assert!(driving(Some(100), 100, &plan));
+        assert!(driving(Some(100), 122, &plan));
+        assert!(!driving(Some(100), 123, &plan));
+        // Over 8 hours every slot of the window keeps being routed and the
+        // kills keep finding a target: no step runs out of candidates.
+        let steps = (plan.duration_s / plan.tick_s) as u64;
+        let mut routed: Vec<Option<u64>> = vec![None; plan.live];
+        let mut next = 0;
+        for n in 0..steps {
+            let free: Vec<usize> = (0..plan.live)
+                .filter(|p| !driving(routed[*p], n, &plan))
+                .collect();
+            assert!(free.len() > plan.orders, "step {n}: {} free", free.len());
+            for i in 0..plan.orders {
+                routed[free[(next + i) % free.len()]] = Some(n);
+            }
+            next += plan.orders;
+        }
+    }
 
     #[test]
     fn the_process_lines_become_nested_numbers() {
@@ -2892,9 +3236,123 @@ mod tests {
                 }
                 set(&mut r, "/ids/spawned_units", json!(1000.0 + 20.0 * k as f64));
                 set(&mut r, "/container/limit_kb", json!(2.0e7));
+                r["churn"] = planned_totals(k);
                 r
             })
             .collect()
+    }
+
+    /// The live plan's churn totals after `k` records of a minute: two steps
+    /// a record.
+    fn planned_totals(k: u64) -> Value {
+        let s = 2.0 * k as f64;
+        json!({ "steps": s, "dematerialized": 4.0 * s, "materialized": 4.0 * s,
+            "removed": s, "put": s, "orders": 3.0 * s, "effects": 2.0 * s, "queries": s,
+            "kills": s / 4.0 })
+    }
+
+    #[test]
+    fn a_run_judged_again_keeps_its_provenance_and_end() {
+        let folder = scratch("rejudge");
+        let plan = Plan::live(4.0 * 3600.0);
+        let lines: Vec<String> = flat_records(240, 0.0)
+            .iter()
+            .map(|r| r.to_string())
+            .collect();
+        std::fs::write(folder.join("records.jsonl"), lines.join("\n") + "\n").unwrap();
+        let mut st = State::new(&folder, "rehearsal", "none", &plan);
+        // The first verdict writes the provenance and the end.
+        finish(
+            &folder,
+            "none",
+            "rehearsal",
+            &plan,
+            "completed",
+            None,
+            &mut st,
+        )
+        .unwrap();
+        let first: Value =
+            serde_json::from_str(&std::fs::read_to_string(folder.join("soak.json")).unwrap())
+                .unwrap();
+        assert!(first["judged_again_at"].is_null());
+        // The run's own figures, as a live run would have written them.
+        let mut run = first.clone();
+        run["provenance"] = json!({ "agent_build": "the run's build" });
+        run["ended_at"] = json!("the run's end");
+        std::fs::write(folder.join("soak.json"), run.to_string()).unwrap();
+        finish(
+            &folder,
+            "none",
+            "rehearsal",
+            &plan,
+            "completed",
+            None,
+            &mut st,
+        )
+        .unwrap();
+        let again: Value =
+            serde_json::from_str(&std::fs::read_to_string(folder.join("soak.json")).unwrap())
+                .unwrap();
+        assert_eq!(again["provenance"]["agent_build"], json!("the run's build"));
+        assert_eq!(again["ended_at"], json!("the run's end"));
+        assert!(again["judged_again_at"].is_string());
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn a_churn_that_falls_short_of_its_plan_takes_the_verdict_away() {
+        let plan = Plan::live(8.0 * 3600.0);
+        let control = full_records(120, |_| 0);
+        let steady = full_records(480, |_| 0);
+        assert_eq!(churn_short("campaign", &plan, &steady), Vec::<Value>::new());
+        // The soak of 2026-11-18: kills stop after 3.7 hours and routes fall
+        // to a third.
+        let mut degraded = full_records(480, |_| 0);
+        for (i, r) in degraded.iter_mut().enumerate() {
+            let k = i as u64 + 1;
+            if k > 222 {
+                r["churn"]["kills"] = json!(planned_totals(222)["kills"]);
+                let orders =
+                    planned_totals(222)["orders"].as_f64().unwrap() + 2.0 * (k - 222) as f64;
+                r["churn"]["orders"] = json!(orders);
+            }
+        }
+        let short = churn_short("campaign", &plan, &degraded);
+        let kinds: Vec<&str> = short.iter().filter_map(|s| s["kind"].as_str()).collect();
+        assert_eq!(kinds, ["orders", "kills"], "{short:?}");
+        let kills = &short[1];
+        // The stretch begins with the half hour the kills stopped in.
+        assert!(
+            kills["achieved_per_hour"].as_f64().unwrap() < 3.0,
+            "{kills}"
+        );
+        assert_eq!(kills["planned_per_hour"], json!(30.0));
+        // The stretch starts at the first whole half hour after the stop.
+        assert!(kills["from_s"].as_f64().unwrap() >= 222.0 * 60.0 - 1800.0);
+        let v = verdict("campaign", &plan, &degraded, Some(&control), "completed");
+        assert_eq!(v["conclusive"], json!(false));
+        assert_eq!(outcome(&v).0, "EXTEND", "{}", series::table(&v));
+        // A stall of 30 minutes across two half hours, which the run rides
+        // through, is not a stretch.
+        let mut stall = full_records(480, |_| 0);
+        for (i, r) in stall.iter_mut().enumerate() {
+            let k = i as u64 + 1;
+            if (100..130).contains(&k) {
+                r["churn"] = planned_totals(100);
+            } else if k >= 130 {
+                r["churn"] = planned_totals(k - 30);
+            }
+        }
+        assert_eq!(churn_short("campaign", &plan, &stall), Vec::<Value>::new());
+        // A counter the plan has and no record carries is short.
+        let mut silent = full_records(480, |_| 0);
+        for r in &mut silent {
+            r["churn"].as_object_mut().unwrap().remove("kills");
+        }
+        let short = churn_short("campaign", &plan, &silent);
+        assert_eq!(short.len(), 1);
+        assert_eq!(short[0]["why"], json!("no record counts it"));
     }
 
     #[test]
