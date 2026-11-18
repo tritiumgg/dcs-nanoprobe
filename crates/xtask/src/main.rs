@@ -187,7 +187,8 @@ commands:
                             The S18 live tests on a docker-wine target, the sidecar
                             as `sidecar` runs it with its store on disk: reload and
                             DCS kill, paused burst, switch, death pending, tables,
-                            owed load, write cost. `rehearse` runs them against
+                            owed load, write cost, spawn state, virtualization,
+                            ruins. `rehearse` runs them against
                             the fake sidecar here. Refuses a server with players.
   hello [<name>]            Run the Rust hello campaign against the API server
                             over the fake sim: here, or built for the target and

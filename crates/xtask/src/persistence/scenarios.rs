@@ -87,6 +87,15 @@ pub trait Target {
     fn remove_unit(&mut self, unit: &str) -> Result<(), String>;
     /// Kill one unit by name with an explosion on it.
     fn kill_unit(&mut self, unit: &str) -> Result<(), String>;
+    /// Kill a static with an explosion at its place.
+    fn kill_static(&mut self, _name: &str) -> Result<(), String> {
+        Err("a kill needs DCS".into())
+    }
+    /// What DCS holds of each static named, by name: `found`, `life` and
+    /// `exists` (lua/live/ruins-read.lua). None where DCS cannot be read.
+    fn static_state(&mut self, _names: &[String]) -> Result<Option<Value>, String> {
+        Ok(None)
+    }
     /// String keys that look like integers in the DCS tables the restore
     /// path carries, for the units named.
     fn integer_keys(&mut self, units: &[String]) -> Result<Value, String>;
@@ -1125,6 +1134,199 @@ pub fn owed_load(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Value, 
     }))
 }
 
+/// A static type whose dead spawn shows destroyed on a client, and which an
+/// explosion of power 1,000 kills (LIVE,
+/// docs/results/2026-11-17-person-fixes.md).
+const RUIN_TYPE: &str = "FARP Fuel Depot";
+
+/// 10. Ruins (spec/world.md, "Ruins"): a managed static is killed, and one
+///     is created destroyed. After the kill, after a mission reload and
+///     after a DCS restart, DCS holds each under its name with life 0 or
+///     less and the World service lists it `dead`, not alive. A removal then
+///     takes both out. On the fake nothing is killed and DCS is not read:
+///     the static created destroyed goes through the same steps.
+pub fn ruins(t: &mut dyn Target, api: &mut Api, tag: &str) -> Result<Value, String> {
+    let theater = t.theater();
+    let c = campaign(t, api, &format!("ruins-{tag}"))?;
+    let places = land_grid(t, (ORIGIN.0 + 12_000.0, ORIGIN.1), 2, 1500.0)?;
+    let killed = api.put_static(
+        c,
+        "killed",
+        RUIN_TYPE,
+        at(&theater, places[0].0, places[0].1, 0.0),
+        false,
+    )?;
+    let born = api.put_static(
+        c,
+        "born dead",
+        RUIN_TYPE,
+        at(&theater, places[1].0, places[1].1, 0.0),
+        true,
+    )?;
+    let name = |id: u64| names::name(Kind::Static, names::tag_of(c), id);
+    let dcs_names = vec![name(killed), name(born)];
+    let state_of =
+        |s: &pb::Static| EntityState::try_from(s.state).unwrap_or(EntityState::Unspecified);
+    // What the store and DCS say of the two statics now.
+    let read = |api: &mut Api, t: &mut dyn Target| -> Result<Value, String> {
+        let store = api.statics(c)?;
+        let dcs = t.static_state(&dcs_names)?;
+        let row = |id: u64| {
+            let s = store.get(&id);
+            let d = dcs.as_ref().map(|d| d[name(id).as_str()].clone());
+            json!({
+                "listed": s.is_some(),
+                "state": s.map(|s| state_of(s).as_str_name()),
+                "alive": s.map(|s| s.alive),
+                "last_error": s.map(|s| s.last_error.clone()),
+                "dcs": d,
+            })
+        };
+        Ok(json!({ "killed": row(killed), "born": row(born) }))
+    };
+    // A ruin: listed `dead` and not alive, with no error from its spawn,
+    // and DCS finds it with life 0 or less. Where DCS cannot be read, the
+    // store's half decides.
+    let is_ruin = |row: &Value| {
+        row["state"] == json!(EntityState::Dead.as_str_name())
+            && row["alive"] == json!(false)
+            && row["last_error"] == json!("")
+            && (row["dcs"].is_null()
+                || (row["dcs"]["found"] == json!(true)
+                    && row["dcs"]["life"].as_f64().is_some_and(|l| l <= 0.0)))
+    };
+    let mut out = json!({
+        "campaign": c, "killed": killed, "born": born, "type": RUIN_TYPE,
+        "names": dcs_names, "places": [[places[0].0, places[0].1], [places[1].0, places[1].1]],
+    });
+    let mut phases = Vec::new();
+
+    // The live static spawns alive; the one created destroyed is a ruin
+    // from the start.
+    let first = wait(t, api, "the statics in DCS", 300.0, 5.0, true, |api, t| {
+        let r = read(api, t)?;
+        let live = r["killed"]["state"] == json!(EntityState::Live.as_str_name())
+            && (r["killed"]["dcs"].is_null()
+                || r["killed"]["dcs"]["life"].as_f64().is_some_and(|l| l > 0.0));
+        Ok((live && is_ruin(&r["born"])).then_some(r))
+    })?;
+    phases.push(json!({ "phase": "spawned", "read": first, "pass": true }));
+
+    // The kill, where DCS can be killed in.
+    let live = t.live();
+    let mut kill_ok = true;
+    if live {
+        t.kill_static(&dcs_names[0])?;
+        let after = wait(
+            t,
+            api,
+            "the killed static dead",
+            180.0,
+            5.0,
+            true,
+            |api, t| {
+                let r = read(api, t)?;
+                Ok(is_ruin(&r["killed"]).then_some(r))
+            },
+        );
+        kill_ok = after.is_ok();
+        phases.push(json!({
+            "phase": "killed", "pass": kill_ok,
+            "read": match after { Ok(r) => r, Err(e) => json!({ "error": e, "last": read(api, t)? }) },
+        }));
+    }
+    // Which statics must be ruins from here on.
+    let want: Vec<&str> = if live {
+        vec!["killed", "born"]
+    } else {
+        vec!["born"]
+    };
+    // A kill that failed fails the scenario: the reload and the DCS restart
+    // would wait their limits for a ruin that cannot come.
+    let restores: &[&str] = if kill_ok {
+        &["reload", "dcs_restart"]
+    } else {
+        &[]
+    };
+    for phase in restores.iter().copied() {
+        match phase {
+            "reload" => reload(t, api)?,
+            _ => {
+                t.kill_dcs()?;
+                *api = reconnect(t, api)?;
+            }
+        }
+        // The mission starts paused: the restore spawns the ruins.
+        t.pause_wait(5.0);
+        let after = wait(t, api, "the ruins restored", 600.0, 5.0, false, |api, t| {
+            let r = read(api, t)?;
+            Ok(want.iter().all(|w| is_ruin(&r[*w])).then_some(r))
+        });
+        let pass = after.is_ok();
+        phases.push(json!({
+            "phase": phase, "pass": pass, "paused": t.paused()?,
+            "read": match after { Ok(r) => r, Err(e) => json!({ "error": e, "last": read(api, t)? }) },
+        }));
+    }
+    if kill_ok {
+        // The simulation runs for a while: the ruins stay as they are.
+        t.hold(10.0)?;
+        let running = read(api, t)?;
+        phases.push(json!({
+            "phase": "running", "pass": want.iter().all(|w| is_ruin(&running[*w])), "read": running,
+        }));
+        // A clear of debris over each ruin leaves it: one is a static added
+        // dead, the other too after the restores. Each box reaches from
+        // 500 m below sea level to 5,000 m above it, so it holds the ground
+        // whatever its height.
+        let mut clears = Vec::new();
+        for p in &places {
+            let (outcome, removed) = api.clear_debris_box(
+                c,
+                at(&theater, p.0 - 200.0, p.1 - 200.0, -500.0),
+                at(&theater, p.0 + 200.0, p.1 + 200.0, 5000.0),
+            )?;
+            clears.push(json!({
+                "applied": outcome == pb::Outcome::Applied as i32, "debris_removed": removed,
+            }));
+        }
+        t.hold(5.0)?;
+        let cleared = read(api, t)?;
+        phases.push(json!({
+            "phase": "cleared", "clears": clears, "read": cleared,
+            "pass": clears.iter().all(|x| x["applied"] == json!(true))
+                && want.iter().all(|w| is_ruin(&cleared[*w])),
+        }));
+    }
+    // Only a removal takes a ruin out: the World service no longer lists
+    // it, and DCS no longer finds it by its name. The simulation runs
+    // while waiting: a destroy made while paused is pending until a resume.
+    api.remove_entity(c, killed)?;
+    api.remove_entity(c, born)?;
+    let removed = wait(t, api, "the ruins removed", 60.0, 5.0, true, |api, t| {
+        let r = read(api, t)?;
+        let gone = |row: &Value| {
+            row["listed"] == json!(false)
+                && (row["dcs"].is_null() || row["dcs"]["found"] == json!(false))
+        };
+        Ok((gone(&r["killed"]) && gone(&r["born"])).then_some(r))
+    });
+    // Whether DCS still finds a destroyed dead static by name is recorded,
+    // not judged: the store's half is the rule.
+    let last = read(api, t)?;
+    let unlisted =
+        last["killed"]["listed"] == json!(false) && last["born"]["listed"] == json!(false);
+    phases.push(json!({
+        "phase": "removed", "pass": unlisted,
+        "gone_from_dcs_by_name": removed.is_ok(), "read": last,
+    }));
+    let pass = phases.iter().all(|p| p["pass"] == json!(true));
+    out["phases"] = json!(phases);
+    out["killed_in_dcs"] = json!(live);
+    out["pass"] = json!(pass);
+    Ok(out)
+}
+
 /// Reload, and connect again when that restarted the sidecar.
 fn reload(t: &mut dyn Target, api: &mut Api) -> Result<(), String> {
     t.reload()?;
@@ -1141,8 +1343,8 @@ fn reconnect<'r>(t: &mut dyn Target, api: &Api<'r>) -> Result<Api<'r>, String> {
 }
 
 /// The scenarios by name, in the order `all` runs them.
-pub const ALL: [&str; 9] = [
-    "reload", "burst", "switch", "death", "tables", "owed", "cost", "state", "virtual",
+pub const ALL: [&str; 10] = [
+    "reload", "burst", "switch", "death", "tables", "owed", "cost", "state", "virtual", "ruins",
 ];
 
 /// Run the scenarios named, each with its own connection, recording each
@@ -1177,6 +1379,7 @@ pub fn run(
             "cost" => write_cost(t, &mut api, tag, 200, 120.0),
             "state" => spawn_state(t, &mut api, tag),
             "virtual" => super::virtualization::run(t, &mut api, tag),
+            "ruins" => ruins(t, &mut api, tag),
             other => Err(format!("no scenario {other}")),
         };
         api.release();

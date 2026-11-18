@@ -315,6 +315,14 @@ pub struct Group {
     /// The agent boot, generation and order revision of the last order
     /// written for it.
     pub order_sent_in: Option<(u64, u32, u64)>,
+    /// For a static in state `dead`: the agent boot and generation in which
+    /// a spawn of its ruin was written. DCS may hold the ruin
+    /// (spec/world.md, "Ruins").
+    pub ruin_sent_in: Option<(u64, u32)>,
+    /// For a static in state `dead`: the agent boot and generation in which
+    /// DCS holds its dead object, the static that died or the ruin spawned
+    /// for it.
+    pub ruin_in: Option<(u64, u32)>,
 }
 
 /// The mission DCS has loaded, as last seen.
@@ -1313,10 +1321,97 @@ impl Store {
                 destroy_failures: 0,
                 unknown_spawn_in: None,
                 order_sent_in: None,
+                ruin_sent_in: None,
+                ruin_in: None,
             },
         );
         self.touch(id);
         Ok(id)
+    }
+
+    /// Create a static destroyed: its member has a death fact and it is
+    /// `dead` from the start, so DCS only ever shows its ruin
+    /// (spec/world.md, "Ruins").
+    pub fn create_ruin(&mut self, spec: NewGroup) -> Result<EntityId, StoreError> {
+        let id = self.create_static(spec)?;
+        self.death(id)?;
+        self.transition(id, Trigger::AllDead)?;
+        Ok(id)
+    }
+
+    /// Whether the entity is a static in state `dead` that the controller
+    /// has not removed: the reconciler keeps its ruin in DCS.
+    pub fn is_ruin(&self, id: EntityId) -> bool {
+        self.group(id)
+            .is_some_and(|g| g.kind == Kind::Static && g.state == State::Dead && !g.removed)
+    }
+
+    /// Record that a spawn of a dead static's ruin is written in a
+    /// generation: DCS may hold the ruin from now on.
+    pub fn ruin_sent(
+        &mut self,
+        id: EntityId,
+        agent_boot: u64,
+        mission_gen: u32,
+    ) -> Result<(), StoreError> {
+        self.group_mut(id)?.ruin_sent_in = Some((agent_boot, mission_gen));
+        Ok(())
+    }
+
+    /// Record that DCS holds a dead static's object in a generation: the
+    /// static died there, or the spawn of its ruin applied.
+    pub fn ruin_held(
+        &mut self,
+        id: EntityId,
+        agent_boot: u64,
+        mission_gen: u32,
+    ) -> Result<(), StoreError> {
+        if self
+            .group(id)
+            .is_some_and(|g| g.ruin_in != Some((agent_boot, mission_gen)))
+        {
+            self.group_mut(id)?.ruin_in = Some((agent_boot, mission_gen));
+        }
+        Ok(())
+    }
+
+    /// Record that DCS holds no object of a dead static: a destroy applied.
+    pub fn ruin_gone(&mut self, id: EntityId) -> Result<(), StoreError> {
+        if self
+            .group(id)
+            .is_some_and(|g| g.ruin_in.is_some() || g.ruin_sent_in.is_some())
+        {
+            let g = self.group_mut(id)?;
+            g.ruin_in = None;
+            g.ruin_sent_in = None;
+        }
+        Ok(())
+    }
+
+    /// Record that DCS may hold a dead static's object and may not: a
+    /// destroy of it was taken and its result lost. The mark that DCS holds
+    /// it becomes the mark that it may. A mark of an earlier generation says
+    /// nothing of the loaded one: it is dropped, and a spawn written in the
+    /// loaded generation keeps its own mark.
+    pub fn ruin_unsure(&mut self, id: EntityId) -> Result<(), StoreError> {
+        let now = self.loaded().map(|l| (l.agent_boot, l.mission_gen));
+        if let Some(held) = self.group(id).and_then(|g| g.ruin_in) {
+            let g = self.group_mut(id)?;
+            g.ruin_in = None;
+            if Some(held) == now {
+                g.ruin_sent_in = Some(held);
+            }
+        }
+        Ok(())
+    }
+
+    /// Forget a spawn's error: a later spawn applied.
+    pub fn clear_error(&mut self, id: EntityId) -> Result<(), StoreError> {
+        if self.group(id).is_some_and(|g| g.error.is_some()) {
+            self.group_mut(id)?.error = None;
+            self.touch(id);
+        }
+        Ok(())
     }
 
     /// A group or static.
@@ -1641,10 +1736,16 @@ impl Store {
         u.removed = false;
         u.left_logged = false;
         let gid = u.group;
+        let mut ruin = false;
         if let Some(g) = self.groups.get_mut(&gid) {
             g.last_lead = None;
+            ruin = g.kind == Kind::Static;
         }
-        self.grid.remove(unit);
+        // A dead static is a ruin where it stood: an area query finds it
+        // (spec/world.md, "Ruins").
+        if !ruin {
+            self.grid.remove(unit);
+        }
         self.journal(Entry::Death { unit });
         self.touch(unit);
         Ok(true)
