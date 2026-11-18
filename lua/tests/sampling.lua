@@ -338,7 +338,7 @@ local function main()
   -- attach. The new sidecar's mirror holds no such row yet and drops the
   -- VITALS. The row's next life read is the slow sweep's, up to a minute
   -- later, past the time the compare gives a new row. On the mock, with no
-  -- load, 8 of 84 attaches showed it (2026-11-18, main ac84a53).
+  -- load, 10 of 120 attaches showed it (2026-11-18, main ac84a53).
   --
   -- The recording tells this case from every other mismatch. It returns a
   -- text only when the verdict fails on rows without vitals and on nothing

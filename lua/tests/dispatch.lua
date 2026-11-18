@@ -550,6 +550,9 @@ scenario('begin-only-pump', BEGIN_ONLY_SHIM, function(ctx)
   -- took that time, not the agent. Another window is then measured, four at
   -- most, and one window within the bound is needed to pass. A window over
   -- the bound with less time away fails at once.
+  -- A wait inside the agent's own part of a frame would read as time away
+  -- too; the agent's calls there do not block, and the one window within the
+  -- bound is needed all the same.
   --
   -- A window's frames are known exactly: the agent counts a frame for every
   -- frame of the mock, each report carries its window's count, and the
