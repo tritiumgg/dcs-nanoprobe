@@ -394,6 +394,34 @@ async fn a_switch_suspends_the_old_store_and_a_suspended_campaign_takes_writes()
     assert_eq!(rb.state, CampaignState::Active);
 }
 
+/// A running server that is stopped when this value goes, on a failed assert
+/// too. A temp folder declared before it is then removed with nothing
+/// writing into it. For a test whose timers write all the time, on a
+/// multi-thread runtime.
+struct Stopped(Option<Running>);
+
+impl Stopped {
+    fn server(&self) -> &Running {
+        self.0.as_ref().expect("a running server")
+    }
+
+    /// Stop the server and wait for it, as [`Running::stop`] does.
+    async fn stop(mut self) -> Result<(), String> {
+        self.0.take().expect("a running server").stop().await
+    }
+}
+
+impl Drop for Stopped {
+    fn drop(&mut self) {
+        // Only a failed assert comes here with the server still running.
+        if let Some(server) = self.0.take() {
+            let _ = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(server.stop())
+            });
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_timers_take_checkpoints_and_backups_and_keep_backup_keep() {
     let d = tempfile::tempdir().expect("dir");
@@ -403,7 +431,12 @@ async fn the_timers_take_checkpoints_and_backups_and_keep_backup_keep() {
         sf.backup_interval = Duration::from_millis(150);
         sf.backup_keep = 2;
     }
-    let (hub, ch) = in_process(c, fake_config()).await.expect("server");
+    // The timers write into `d` for as long as the server runs, so the
+    // server stops before `d` goes, pass or fail: a folder removed under a
+    // checkpoint or a backup worker stays behind, half full.
+    let server = Stopped(Some(start(c, fake_config()).await.expect("server")));
+    let ch = connect(server.server()).await;
+    let hub = &server.server().hub;
     let l = lease(&ch).await;
     let a = create(&ch, &l, "a", true).await;
     let mut camp = CampaignServiceClient::new(ch.clone());
@@ -474,6 +507,7 @@ async fn the_timers_take_checkpoints_and_backups_and_keep_backup_keep() {
         stamp,
         "no checkpoint while the revision stands still"
     );
+    server.stop().await.expect("stop");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

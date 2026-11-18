@@ -138,7 +138,8 @@ local function scenario(name, shim, body, extra_toml, hook_text)
   end
   S.copy(MODULE, version .. 'nanoprobe_agent_' .. BUILD .. '.dll')
   S.write(profile .. 'nanoprobe/manifest.txt', 'active=' .. BUILD .. '\n')
-  local port = 20000 + math.floor(os.clock() * 1e6 + os.time()) % 20000
+  local port = S.port(PROBE)
+  S.started(COMMAND_SCRIPT)
   S.write(profile .. 'nanoprobe/agent.toml', string.format(
     "[transport]\nmap_path = '%s'\nport = %d\nout_ring_kib = 256\nin_ring_kib = 256\n" .. (extra_toml or ''), map, port))
   S.write(profile .. 'nanoprobe/token', TOKEN)
@@ -456,7 +457,9 @@ end, '\n[lua]\nraw = true\n')
 -- close, so no frame is forced and the command is never taken.
 local BEGIN_ONLY_SHIM = [[
 local agent = ...
-local M = { pumps = 0, forced = 0 }
+-- `clock` is the agent's own clock, wall seconds: the test times its frames
+-- with it.
+local M = { pumps = 0, forced = 0, clock = agent.clock }
 function M.start()
   return 'begin-only start'
 end
@@ -507,25 +510,107 @@ local function never_reached(shim)
   end
 end
 scenario('begin-only-pump', BEGIN_ONLY_SHIM, function(ctx)
+  -- The agent's share is wall time. When the system takes the processor from
+  -- this process inside a frame, the agent counts that time as its own, and
+  -- one such pause of 30 ms fills a 10 s window's whole share. So the agent's
+  -- part of every frame is timed here on both clocks, the agent's (wall) and
+  -- the process's (os.clock): the difference is the time the process did not
+  -- run. The part starts where the hook reads the real time, its last step
+  -- before it calls the agent's `frame`, and ends with the frame.
+  local host = ctx.host
+  local away, frames = {}, 0
+  do
+    local wall, from_wall, from_cpu
+    local dcs = host.states.hook.DCS
+    local real = dcs.getRealTime
+    rawset(dcs, 'getRealTime', function(...)
+      if wall and not from_wall then
+        from_wall, from_cpu = wall(), now()
+      end
+      return real(...)
+    end)
+    local frame = host.frame
+    host.frame = function(self, ...)
+      local shim = rawget(self.states.server or {}, '__nanoprobe_shim')
+      wall, from_wall = shim and shim.clock, nil
+      frame(self, ...)
+      frames = frames + 1
+      away[frames] = from_wall and math.max(0, (wall() - from_wall) - (now() - from_cpu)) or 0
+    end
+  end
   never_reached(BEGIN_ONLY_SHIM)(ctx)
   -- With no row owed, births and the enumeration take a batch only on a
   -- balance that pays it (spec/sampling.md, "Tiers"): the 2 ms pumps keep the
   -- share and nothing is forgiven. 11 s more gives one 10 s `sampling` window.
   -- The 2 % on the share is the carry across a window's edges: the 250 µs
   -- balance and the 150 µs credit, 400 µs in 10 s, 1.3 % of 0.3 %.
-  ctx.run(11)
-  local windows = 0
-  for _, line in ipairs(S.lines(ctx.profile .. 'nanoprobe/logs/agent.log')) do
-    local ok, e = pcall(S.json, line)
-    local d = ok and type(e) == 'table' and e.msg == 'sampling' and e.data
-    if d then
-      windows = windows + 1
-      assert(d.maintenance_forgiven_us == 0,
-        'the balance forgave ' .. tostring(d.maintenance_forgiven_us) .. ' µs with no stall')
-      assert(d.share <= 0.003 * 1.02, 'share ' .. tostring(d.share) .. ' against 0.003')
+  --
+  -- A window over the bound is not judged when the time this process did not
+  -- run inside the window's frames covers what it is over by: the machine
+  -- took that time, not the agent. Another window is then measured, four at
+  -- most, and one window within the bound is needed to pass. A window over
+  -- the bound with less time away fails at once.
+  -- A wait inside the agent's own part of a frame would read as time away
+  -- too; the agent's calls there do not block, and the one window within the
+  -- bound is needed all the same.
+  --
+  -- A window's frames are known exactly: the agent counts a frame for every
+  -- frame of the mock, each report carries its window's count, and the
+  -- windows follow one another, so a window ends at the sum of the counts so
+  -- far. The report reaches the log at the next system-call frame, which is
+  -- how far the frames run may be ahead of that sum.
+  local BOUND = 0.003 * 1.02
+  local log = ctx.profile .. 'nanoprobe/logs/agent.log'
+  local windows, within, ended = 0, 0, 0
+  local function judge()
+    local n = 0
+    for _, line in ipairs(S.lines(log)) do
+      local ok, e = pcall(S.json, line)
+      local d = ok and type(e) == 'table' and e.msg == 'sampling' and e.data
+      if d then
+        n = n + 1
+        if n > windows then
+          windows = n
+          ended = ended + d.frames
+          assert(ended <= frames, 'the agent counted ' .. ended .. ' frames and the mock ran ' .. frames)
+          assert(d.maintenance_forgiven_us == 0,
+            'the balance forgave ' .. tostring(d.maintenance_forgiven_us) .. ' µs with no stall')
+          if d.share <= BOUND then
+            within = within + 1
+          else
+            local gone = 0
+            for i = ended - d.frames + 1, ended do
+              gone = gone + away[i]
+            end
+            assert(gone >= (d.share - BOUND) * d.window_s, string.format(
+              'share %s against 0.003, with this process %.1f ms off the processor in the window\'s frames',
+              tostring(d.share), gone * 1e3))
+          end
+        end
+      end
     end
   end
+  -- The log is read once a second.
+  local function measure(seconds)
+    local next_read = now() + 1
+    ctx.run(seconds, function()
+      if now() >= next_read then
+        next_read = now() + 1
+        judge()
+      end
+    end)
+    judge()
+  end
+  measure(11)
+  for _ = 1, 3 do
+    if within >= 1 then
+      break
+    end
+    measure(10.5)
+  end
   assert(windows >= 1, 'no sampling report in the agent log')
+  assert(within >= 1, 'no window within the share in ' .. windows
+    .. ': the machine took the processor in each')
   S.ok('a forced pump that calls pump_begin and no command() leaves the head command NOT_READY, once, '
     .. 'within the share and with nothing forgiven')
 end)
@@ -1281,13 +1366,15 @@ scenario('destroyed-overflow', MANY, function(ctx)
     { op = 'STATIC_SPAWN', gen = gen, entity = 9, rev = 1, country = 2, name = S1,
       static = { name = S1, type = 'Barrier', x = 500, y = 600, heading = 0 } },
     { op = 'STATIC_DESTROY', gen = gen, entity = 9, wait_result = true },
-  } }), 3000)
+    { op = 'MESSAGE', gen = gen, payload_hex = MESSAGE_HEX, wait_file = ctx.profile .. 'checked' },
+  } }))
   -- `checks` runs only on a sampling frame with the sidecar attached. The
-  -- sidecar stays 3 s after its last RESULT, and the test steps frames until
-  -- the hook has run, not for a time.
+  -- sidecar holds its last command, a message nobody reads, until the hook
+  -- has run: the test steps frames to that state, not for a time.
   assert(ctx.run(30, function()
     return held ~= nil
   end), 'the checks hook did not run after the command:\n' .. dump(ctx))
+  S.write(ctx.profile .. 'checked', '')
   finish(ctx, 'a destroy of 4,100 IDs')
   assert(taken == 4096, 'command_done took ' .. tostring(taken) .. ' IDs, not 4096')
   assert(seen.pending_overflow == 4 and seen.pending_destroy == 4096,
@@ -2743,15 +2830,24 @@ scenario('emit-objects', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   local function eval(source)
     return with('EVAL', {}, PACK.lv(source))
   end
-  -- The sidecar enumerates, and the agent's table holds the unit.
+  -- The sidecar enumerates, and the agent's table holds the unit. The
+  -- enumeration runs on the agent's own clock, under the sampling share, so
+  -- the EVAL is held until the shim has the unit's slot, not for a time.
+  local enumerated = ctx.profile .. 'enumerated'
   ctx.script(json({ campaign = 7, commands = {
     { op = 'ENUMERATE' },
-    { op = 'EVAL', wait_ms = 1500, payload_hex = hexof(PACK.lv(
+    { op = 'EVAL', wait_file = enumerated, payload_hex = hexof(PACK.lv(
       "local u = Unit.getByName('np.hGx2') local ok, why = emit('with unit', { n = 1 }, { u }) "
       .. "local ok2, why2 = emit('with id', 2, { u.id_ }) "
       .. "local ok3, why3 = emit('missing', 2, { u, 99 }) "
       .. "return { ok, tostring(why), ok2, tostring(why2), ok3, tostring(why3), u.id_ }")) },
   } }))
+  local unit_id = sim.by_name['np.hGx2'].id
+  local T = server.__nanoprobe_shim.T
+  assert(ctx.run(30, function()
+    return T.slot_of[unit_id] ~= nil
+  end), 'the enumeration did not put the unit in the agent\'s table:\n' .. dump(ctx))
+  S.write(enumerated, '')
   finish(ctx, 'emit with units')
   local v = ctx.result(1).value
   assert(v[1] == true and v[3] == true, 'emit with a unit answered ' .. tostring(v[1]) .. ' ' .. tostring(v[2])
@@ -2809,8 +2905,11 @@ local function ext_set(name, rev, source)
   return { op = 'EXTENSION_SET', name = name, rev = rev, source = source }
 end
 
-local function ext_invoke(name, wait_ms)
-  return { op = 'EXTENSION_INVOKE', name = name, args = {}, wait_ms = wait_ms }
+-- `wait_file`, when given, holds the invoke until the test creates the file:
+-- the sidecar's `wait_ms` is wall time, in which a loaded machine runs few
+-- frames, so a test that needs frames between two invokes counts them itself.
+local function ext_invoke(name, wait_ms, wait_file)
+  return { op = 'EXTENSION_INVOKE', name = name, args = {}, wait_ms = wait_ms, wait_file = wait_file }
 end
 
 -- A running mission: the world, and the pause taken off.
@@ -2839,7 +2938,17 @@ scenario('extension-hooks', SHIM, function(ctx)
     }
   ]]
   local fired, source_event = 0, nil
-  play(ctx, { ext_set('f', 1, source), ext_invoke('f', 800), ext_invoke('f', 0) }, function()
+  -- The first invoke goes once 80 frames have run with the extension set,
+  -- 0.8 s of frames at the mock's pace.
+  local ran_80, with_f = ctx.profile .. 'ran-80', 0
+  play(ctx, { ext_set('f', 1, source), ext_invoke('f', 0, ran_80), ext_invoke('f', 0) }, function()
+    if shim.extensions.f then
+      -- This call comes before its frame: the 81st finds 80 frames run.
+      with_f = with_f + 1
+      if with_f == 81 then
+        S.write(ran_80, '')
+      end
+    end
     if shim.extensions.f and fired < 5 then
       fired = fired + 1
       source_event = { id = shot, time = fired, text = 'shot ' .. fired, extra = { 1 } }
@@ -2848,7 +2957,7 @@ scenario('extension-hooks', SHIM, function(ctx)
   end, 'on_event and on_frame')
   local v = ctx.result(3).value
   assert(v.events == 5 and v.id == shot and v.text == 'shot 5' and v.time == 5, 'on_event saw ' .. json(v))
-  assert(v.frames >= 20, 'on_frame ran ' .. tostring(v.frames) .. ' times in 0.8 s of frames')
+  assert(v.frames >= 20, 'on_frame ran ' .. tostring(v.frames) .. ' times in 80 frames')
   local e = shim.extensions.f
   assert(e.calls >= 25 and e.skipped == 0 and e.errors == 0 and not e.stopped, 'the counters differ')
   S.ok('on_event gets each event once, with its fields copied, and on_frame runs every frame of a running mission')
@@ -2857,10 +2966,19 @@ scenario('extension-hooks', SHIM, function(ctx)
   host:set_pause(true, { silent = true })
   local before = ctx.result(3).value.frames
   fired = 0
-  play(ctx, { ext_invoke('f', 0), ext_invoke('f', 500), ext_invoke('f', 0) }, function()
+  -- The second invoke goes once 50 frames have run since the first was
+  -- answered, 0.5 s of frames, and the two events have been handed over.
+  local ran_50, first_at, released = ctx.profile .. 'ran-50', nil, false
+  play(ctx, { ext_invoke('f', 0), ext_invoke('f', 0, ran_50), ext_invoke('f', 0) }, function(n)
     if fired < 2 then
       fired = fired + 1
       host:event({ id = shot, time = 100 + fired, text = 'paused' })
+    end
+    first_at = first_at or (ctx.result(1) and n)
+    local f = shim.extensions.f
+    if not released and first_at and n - first_at >= 50 and f.q_head > f.q_tail then
+      released = true
+      S.write(ran_50, '')
     end
   end, 'a paused mission')
   local a, b = ctx.result(1).value, ctx.result(3).value
@@ -2873,21 +2991,28 @@ scenario('extension-hooks', SHIM, function(ctx)
   -- so on_frame runs on the frames that follow without a sampling pump.
   host:set_pause(false, { silent = true })
   local frames_at = {}
-  -- The sidecar's wait_ms is wall time, so a loaded machine can hand it two
-  -- frames. Count the frames the host ran between the two results instead,
-  -- and measure again when they were too few to judge.
+  -- The frames the host ran between the two results are counted, and the
+  -- second invoke goes once 20 have run since the first was answered: the
+  -- sidecar's own wait is wall time, in which a loaded machine runs too few
+  -- to judge. A try is measured again when it lacks a mark.
   local gap, ran = 0, 0
-  for _ = 1, 10 do
+  for try = 1, 10 do
     local seen_at = {}
+    local ran_20 = ctx.profile .. 'ran-20-' .. try
+    released = false
     -- Each try starts at an unpause, the state under test.
     host:set_pause(true, { silent = true })
     host:frame(0.01)
     host:set_pause(false, { silent = true })
-    play(ctx, { ext_invoke('f', 0), ext_invoke('f', 200), ext_invoke('f', 0) }, function(n)
+    play(ctx, { ext_invoke('f', 0), ext_invoke('f', 0, ran_20), ext_invoke('f', 0) }, function(n)
       for _, seq in ipairs({ 1, 3 }) do
         if not seen_at[seq] and ctx.result(seq) then
           seen_at[seq] = n
         end
+      end
+      if not released and seen_at[1] and n - seen_at[1] >= 20 then
+        released = true
+        S.write(ran_20, '')
       end
     end, 'after the unpause')
     frames_at.first, frames_at.last = ctx.result(1).value.frames, ctx.result(3).value.frames
@@ -2907,11 +3032,22 @@ scenario('extension-hooks', SHIM, function(ctx)
 
   -- The queue holds 256 events: the oldest are dropped and counted.
   fired = 0
-  play(ctx, { ext_invoke('f', 0), ext_invoke('f', 300), ext_invoke('f', 0) }, function(n)
+  -- The second invoke goes once the extension has been handed every event
+  -- its queue kept: the hand-over takes as many frames as the budget needs.
+  local drained, burst = ctx.profile .. 'drained', false
+  released = false
+  play(ctx, { ext_invoke('f', 0), ext_invoke('f', 0, drained), ext_invoke('f', 0) }, function(n)
     if n == 3 then
       for i = 1, 300 do
         host:event({ id = shot, time = i, text = 'burst ' .. i })
       end
+      burst = true
+      return
+    end
+    local f = shim.extensions.f
+    if burst and not released and f.q_head > f.q_tail then
+      released = true
+      S.write(drained, '')
     end
   end, 'a burst of events')
   local c = ctx.result(3).value

@@ -2,7 +2,11 @@
 //! [--short-command] [--bad-record past-tail|over-limit|misaligned|past-capacity|padding]
 //! [--record FILE] [--stop-file FILE] [--mirror FILE [--subscribe N]]`,
 //! or `link-probe --now-ms`, which prints the wall clock as the probe's `t`
-//! reads it and exits, so a test can compare its own times with the probe's.
+//! reads it and exits, so a test can compare its own times with the probe's,
+//! or `link-probe --free-port`, which prints a loopback TCP port the system
+//! found free and exits: the port a test gives its agent to listen on. A port
+//! a test derives from its own clock is taken, now and then, by a test that
+//! another checkout runs at the same time.
 //!
 //! It runs for `--seconds`, until one second after the status block reads
 //! `DISABLED`, or until the `--stop-file` exists, whichever comes first.
@@ -797,6 +801,18 @@ fn main() -> ExitCode {
     if args.iter().any(|a| a == "--now-ms") {
         println!("{}", content::now_ms());
         return ExitCode::SUCCESS;
+    }
+    if args.iter().any(|a| a == "--free-port") {
+        return match std::net::TcpListener::bind("127.0.0.1:0").and_then(|l| l.local_addr()) {
+            Ok(a) => {
+                println!("{}", a.port());
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("--free-port: {e}");
+                ExitCode::from(2)
+            }
+        };
     }
     let need = |name: &str| arg(&args, name).ok_or(format!("{name} is required"));
     let run = || -> Result<(), String> {
