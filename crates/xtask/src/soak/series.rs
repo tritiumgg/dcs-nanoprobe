@@ -655,8 +655,8 @@ fn judge_series(
 
     // A series is rising when its slope increases beyond what noise explains
     // and by more than [`RISING_SHARE`] of the early slope, and the late
-    // slope is clear of the limit, or of the early slope when the series has
-    // no limit. For a series the control also has, DCS's own slope is the
+    // slope is clear of the limit, or, when the series has no limit, of the
+    // early slope and of zero. For a series the control also has, DCS's own slope is the
     // control's: the late slope must be clear of that slope plus the limit,
     // and without a control nothing says what DCS's own slope is, so the
     // series is not called rising.
@@ -672,7 +672,16 @@ fn judge_series(
                     late_low > p.control.fit.slope + p.control.noise() + lim.max(0.0)
                 }
                 (Some(lim), None) => late_low > lim.max(0.0),
-                (None, _) => late_low > e.slope + SIGMAS * e.stderr,
+                // Without a limit the late slope must clear the early slope
+                // and zero, so a series that fell and then went flat is not
+                // rising; with a control it must also clear DCS's own slope.
+                (None, Some(p)) => {
+                    late_low
+                        > (e.slope + SIGMAS * e.stderr)
+                            .max(p.control.fit.slope + p.control.noise())
+                            .max(0.0)
+                }
+                (None, None) => late_low > (e.slope + SIGMAS * e.stderr).max(0.0),
             };
             accelerates && clear
         }
@@ -1141,6 +1150,18 @@ mod tests {
     }
 
     #[test]
+    fn a_shape_series_with_a_control_is_rising_only_past_the_controls_slope() {
+        let d = [def(Limit::Shape, true, None)];
+        let control = run(0.0, 2.0, 0, |h| 100.0 + 10.0 * h);
+        // The late slope (6) is past the early one (2) and zero, but under
+        // DCS's own slope in the control (10).
+        let under = run(0.0, 8.0, 0, |h| 100.0 + 2.0 * h + 4.0 * (h - 4.0).max(0.0));
+        assert_eq!(one(&d, &under, Some(&control), &options())["rising"], false);
+        let past = run(0.0, 8.0, 0, |h| 100.0 + 2.0 * h + 14.0 * (h - 4.0).max(0.0));
+        assert_eq!(one(&d, &past, Some(&control), &options())["rising"], true);
+    }
+
+    #[test]
     fn rising_is_judged_against_the_controls_slope_and_never_without_a_control() {
         let d = [def(Limit::Slope(1.0), true, None)];
         let control = run(0.0, 2.0, 0, |h| 100.0 + 7.0 * h);
@@ -1220,9 +1241,13 @@ mod tests {
     fn a_shape_series_that_flattens_is_not_rising_and_one_that_accelerates_is() {
         let flat = run(0.0, 6.0, 0, |h| 450.0 + 700.0 * h.min(1.5) / 1.5);
         let accel = run(0.0, 6.0, 0, |h| 450.0 + 20.0 * h * h * h);
+        // Falling, then flat: the live soak's slowest birth step and share.
+        let mut n = Noise(3);
+        let fall = run(0.0, 6.0, 0, |h| 9.0 - 2.0 * h.min(3.0) + 0.05 * n.next());
         let d = [def(Limit::Shape, false, None)];
         assert_eq!(one(&d, &flat, None, &options())["rising"], false);
         assert_eq!(one(&d, &accel, None, &options())["rising"], true);
+        assert_eq!(one(&d, &fall, None, &options())["rising"], false);
     }
 
     #[test]
