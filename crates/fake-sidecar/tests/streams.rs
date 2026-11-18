@@ -831,6 +831,7 @@ async fn refusals_before_any_write() {
                 r#type: "Tent".into(),
                 position: at(10.0, 10.0),
                 heading: 0.0,
+                dead: false,
                 extra: Some(prost_types::Struct {
                     fields: [(
                         "note".to_owned(),

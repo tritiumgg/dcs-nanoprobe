@@ -298,7 +298,11 @@ do
   assert(srv.StaticObject.getLife(sid) > 0 and srv.Object.isExist(sid))
   h.sim:shoot(depot, shooter)
   assert(not srv.Object.isExist(sid) and srv.StaticObject.getLife(sid) <= 0, 'a killed static still exists')
-  assert(srv.Object.getCategory(sid) == 3 and srv.StaticObject.getByName('st3') == nil)
+  -- A killed static is still found by its name (LIVE,
+  -- docs/results/2026-11-17-person-fixes.md).
+  local found = srv.StaticObject.getByName('st3')
+  assert(srv.Object.getCategory(sid) == 3 and found ~= nil and found.id_ == depot.id,
+    'a killed static is not found by its name')
   h:frame(1 / 60)
   assert(names() == 'HIT,BDA', names())
   assert(events[1].target.id_ == depot.id and events[1].target_data.object_category == 3)

@@ -407,11 +407,13 @@ impl Filter {
     }
 
     /// Whether a store group or static passes: its kind and coalition, and
-    /// a live member inside the area.
+    /// a live member inside the area. A dead static is a ruin where it
+    /// stood, and passes there (spec/world.md, "Ruins").
     pub fn passes(&self, store: &Store, g: &Group) -> bool {
         if !self.kind_passes(store, g) {
             return false;
         }
+        let ruin = g.kind == Kind::Static;
         match &self.area {
             None => true,
             Some((theater, ..)) => {
@@ -419,7 +421,7 @@ impl Filter {
                     && g.members
                         .iter()
                         .filter_map(|m| store.unit(*m))
-                        .any(|u| !u.dead && self.unit_in_area(u))
+                        .any(|u| (ruin || !u.dead) && self.unit_in_area(u))
             }
         }
     }

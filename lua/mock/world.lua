@@ -405,7 +405,26 @@ function Sim:add_static(country, data)
     -- A static of the `Cargos` category can move (LIVE).
     cargo = data.category == 'Cargos',
   }
-  self.statics[static.name] = static
+  -- A new object under a taken name removes the old holder with no event
+  -- (LIVE for a live holder, docs/results/2026-11-15-s15-world-commands.md;
+  -- UNVERIFIED for a dead one).
+  for id, old in pairs(self.dead_statics) do
+    if old.name == static.name then
+      self.dead_statics[id] = nil
+      self.gone_statics[id] = old
+    end
+  end
+  if data.dead == true then
+    -- Added dead: it reads life 0 and `isExist` false from the start, and
+    -- `StaticObject.getByName` finds it (LIVE,
+    -- docs/results/2026-11-17-person-fixes.md). Whether DCS sends a birth
+    -- event for it is UNVERIFIED; the mock sends one, the harder case.
+    static.alive = false
+    self.statics[static.name] = nil
+    self.dead_statics[static.id] = static
+  else
+    self.statics[static.name] = static
+  end
   self.queue[#self.queue + 1] = { event = 'S_EVENT_BIRTH', initiator = static }
   return static
 end
@@ -878,6 +897,16 @@ local function scripting(host, name)
   state.StaticObject = ns(name, 'StaticObject', {
     getByName = function(static_name)
       local static = sim.statics[static_name]
+      if not static then
+        -- A dead static is found by its name too (LIVE,
+        -- docs/results/2026-11-17-person-fixes.md).
+        for _, dead in pairs(sim.dead_statics) do
+          if dead.name == static_name then
+            static = dead
+            break
+          end
+        end
+      end
       return static and handle(STATIC, static.id) or nil
     end,
     getName = function(self)

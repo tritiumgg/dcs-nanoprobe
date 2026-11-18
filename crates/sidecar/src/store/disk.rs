@@ -1516,7 +1516,8 @@ fn load(path: &Path, conn: Connection, changes_keep: usize) -> Result<Store, Dis
         )));
     }
     for un in units.values() {
-        if !un.dead {
+        // A dead static stays in the grid: it is a ruin where it stood.
+        if !un.dead || groups[&un.group].kind == Kind::Static {
             let g = &groups[&un.group];
             store
                 .grid
@@ -2130,6 +2131,8 @@ fn enc_group(v: &Group) -> Lv {
         removed,
         options,
         last_lead,
+        ruin_sent_in,
+        ruin_in,
     } = v;
     let kind = match kind {
         Kind::Group => "group",
@@ -2172,6 +2175,8 @@ fn enc_group(v: &Group) -> Lv {
         ("spawned_in", opt_pair(*spawned_in)),
         ("destroy_failures", u(u64::from(*destroy_failures))),
         ("unknown_spawn_in", opt_pair(*unknown_spawn_in)),
+        ("ruin_sent_in", opt_pair(*ruin_sent_in)),
+        ("ruin_in", opt_pair(*ruin_in)),
         (
             "order_sent_in",
             order_sent_in.map_or(Lv::Nil, |(a, g, r)| {
@@ -2298,6 +2303,8 @@ fn dec_group(v: &Lv) -> Result<Group, DiskError> {
         spawned_in: r.pair("spawned_in")?,
         destroy_failures: r.u32("destroy_failures")?,
         unknown_spawn_in: r.pair("unknown_spawn_in")?,
+        ruin_sent_in: r.pair("ruin_sent_in")?,
+        ruin_in: r.pair("ruin_in")?,
         order_sent_in,
         observed_coalition: match r.list("observed_coalition")?.as_slice() {
             [] => None,
@@ -3119,6 +3126,52 @@ mod tests {
         let back = dec_unit(&decode(&encode(&enc_unit(&asked))).expect("decode")).expect("unit");
         assert_eq!(back, asked);
         assert_eq!(back.captured.life_percent, Some(42.5));
+    }
+
+    /// A dead static's ruin marks read back; a row without them, as an older
+    /// store has, reads None, and a dead static stays in the grid.
+    #[test]
+    fn a_ruins_marks_round_trip_and_are_absent_by_default() {
+        let mut s = Store::new(CampaignId(7), 10);
+        let spec = |x: f64| super::super::NewGroup {
+            theater: "Caucasus".into(),
+            country: 2,
+            category: 0,
+            coalition: 2,
+            units: vec![super::super::NewUnit::new(
+                "Tent",
+                UnitState {
+                    at: Point { x, y: 0.0, z: 0.0 },
+                    ..UnitState::default()
+                },
+            )],
+            authority: Authority::Sim,
+            label: "s".into(),
+            extra: Lv::Nil,
+        };
+        let live = s.create_static(spec(10.0)).expect("static");
+        let plain = s.group(live).expect("g").clone();
+        let back = dec_group(&decode(&encode(&enc_group(&plain))).expect("decode")).expect("group");
+        assert_eq!((back.ruin_sent_in, back.ruin_in), (None, None));
+        let id = s.create_ruin(spec(20.0)).expect("ruin");
+        assert!(s.is_ruin(id) && !s.is_ruin(live));
+        assert_eq!(s.grid().within("Caucasus", 20.0, 0.0, 1.0), vec![id]);
+        s.ruin_sent(id, 11, 2).expect("sent");
+        s.ruin_held(id, 11, 3).expect("held");
+        let marked = s.group(id).expect("g").clone();
+        let back =
+            dec_group(&decode(&encode(&enc_group(&marked))).expect("decode")).expect("group");
+        assert_eq!(back, marked);
+        assert_eq!(
+            (back.ruin_sent_in, back.ruin_in),
+            (Some((11, 2)), Some((11, 3)))
+        );
+        s.ruin_gone(id).expect("gone");
+        let g = s.group(id).expect("g");
+        assert_eq!((g.ruin_sent_in, g.ruin_in), (None, None));
+        // The removal ends it: no ruin is kept for a removed static.
+        s.remove_entity(id).expect("remove");
+        assert!(!s.is_ruin(id));
     }
 
     #[test]

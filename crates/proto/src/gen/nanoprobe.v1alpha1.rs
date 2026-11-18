@@ -1230,6 +1230,9 @@ pub struct Static {
     pub coalition: i32,
     #[prost(uint32, tag = "6")]
     pub country: u32,
+    /// False for a destroyed static. A destroyed managed static stays listed,
+    /// in state `dead`, where it stood: DCS shows its ruin (spec/world.md,
+    /// "Ruins"). Only RemoveEntity takes it out.
     #[prost(bool, tag = "7")]
     pub alive: bool,
     #[prost(message, optional, tag = "8")]
@@ -1240,7 +1243,9 @@ pub struct Static {
     pub life: ::core::option::Option<f64>,
     #[prost(enumeration = "EntityState", tag = "11")]
     pub state: i32,
-    /// The engine's error for an unspawnable static.
+    /// The engine's error for an unspawnable static, or for a dead static
+    /// whose ruin DCS refused, until a spawn of the ruin applies
+    /// (spec/world.md, "Ruins").
     #[prost(string, tag = "12")]
     pub last_error: ::prost::alloc::string::String,
     /// Changes when the spec changes, and when a lost static is spawned again,
@@ -5132,8 +5137,16 @@ pub struct StaticSpec {
     pub position: ::core::option::Option<Position>,
     #[prost(double, tag = "5")]
     pub heading: f64,
+    /// Further keys of the DCS static table. A `dead` key is refused: use the
+    /// field below.
     #[prost(message, optional, tag = "6")]
     pub extra: ::core::option::Option<::prost_types::Struct>,
+    /// Create the static destroyed. It is in state `dead` from the start, and
+    /// DCS shows its ruin, spawned with `dead = true`, wherever a live static
+    /// would be in DCS. Some types have no destroyed model and show intact
+    /// (spec/world.md, "Ruins").
+    #[prost(bool, tag = "7")]
+    pub dead: bool,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Waypoint {

@@ -405,6 +405,7 @@ async fn damage_capture_and_attacks_on_units_and_statics() {
                     alt: 0.0,
                 }),
                 heading: 0.0,
+                dead: false,
                 extra: None,
             }),
         })

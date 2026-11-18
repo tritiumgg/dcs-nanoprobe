@@ -35,6 +35,7 @@ use crate::stock::{Item, Stock};
 mod adopt;
 mod debris;
 mod players;
+mod ruins;
 
 use crate::store::{
     Authority, CapturedMore, Entry, Journalled, Kind, LeftAs, Loaded, LostPolicy, Outcome, Point,
@@ -145,6 +146,14 @@ pub struct Counters {
     /// Those that DCS did not apply, or that could not be sent: the unit
     /// runs at the life DCS gave it, and the next life sample says so.
     pub lives_lost: u64,
+    /// Ruins DCS spawned: `STATIC_SPAWN`s with `dead = true` answered
+    /// `APPLIED` (spec/world.md, "Ruins").
+    pub ruins_spawned: u64,
+    /// Ruin spawns DCS refused, or the agent rejected for good: not sent
+    /// again in that generation.
+    pub ruins_refused: u64,
+    /// Destroys written for a live object bound to a dead static.
+    pub ruins_revived: u64,
 }
 
 impl Counters {
@@ -171,6 +180,9 @@ impl Counters {
         self.coalition_disagreements += o.coalition_disagreements;
         self.lives_restored += o.lives_restored;
         self.lives_lost += o.lives_lost;
+        self.ruins_spawned += o.ruins_spawned;
+        self.ruins_refused += o.ruins_refused;
+        self.ruins_revived += o.ruins_revived;
     }
 }
 
@@ -294,6 +306,9 @@ pub struct Reconciler {
     /// unit whose life is the percentage a `PutGroup` asked for: the store
     /// keeps that percentage until the `DAMAGE` is applied.
     life_held: HashMap<EntityId, (Option<f32>, (u64, u64))>,
+    /// The DCS object ID of the ruin spawned for each dead static in the
+    /// loaded generation, from the spawn's `RESULT` (`ruins.rs`).
+    ruin_object: HashMap<EntityId, u64>,
     /// The controller options the current spawn of each group applied.
     option_held: HashMap<EntityId, BTreeMap<u32, Lv>>,
     /// An option value DCS refused, by group and option; not sent again until
@@ -459,6 +474,7 @@ impl Reconciler {
             spawn_rejected: HashMap::new(),
             spawn_applied: HashMap::new(),
             life_held: HashMap::new(),
+            ruin_object: HashMap::new(),
             option_held: HashMap::new(),
             option_refused: HashMap::new(),
             opt_sent: HashMap::new(),
@@ -758,6 +774,7 @@ impl Reconciler {
         self.spawn_rejected.clear();
         self.spawn_applied.clear();
         self.life_held.clear();
+        self.ruin_object.clear();
         self.drift_destroy_failures.clear();
         self.held.clear();
         self.run = None;
@@ -977,6 +994,13 @@ impl Reconciler {
             }
             return;
         }
+        if c.opcode == opcode::STATIC_SPAWN && c.units.is_empty() {
+            // The spawn of a ruin: it names no unit it brings to life.
+            if state == State::Dead && gen_now {
+                self.ruin_spawn_resolved(store, c, outcome, res);
+            }
+            return;
+        }
         if state == State::Dead {
             self.counters.after_dead += 1;
             return;
@@ -1153,6 +1177,7 @@ impl Reconciler {
             self.forget_options(id);
             unbind_group(&mut self.binding, id);
             self.drift_destroy_failures.remove(&id);
+            self.ruin_destroyed(store, id);
             if state == State::Dematerializing && captured {
                 store
                     .transition(id, Trigger::CaptureDone)
@@ -1178,6 +1203,11 @@ impl Reconciler {
                 }
             } else {
                 *self.drift_destroy_failures.entry(id).or_default() += 1;
+                if outcome == Outcome::Unknown {
+                    // The destroy may have run: DCS may hold the ruin no
+                    // more (`ruins.rs`).
+                    self.ruin_destroy_unknown(store, id);
+                }
             }
         }
     }
@@ -1477,6 +1507,9 @@ impl Reconciler {
                 };
                 if store.transition(group, Trigger::AllDead).is_ok() {
                     self.held.remove(&group);
+                    // A static that dies leaves its dead object in DCS:
+                    // that is its ruin for this generation.
+                    self.ruin_died(store, group);
                     for c in pending {
                         self.inflight.remove(&(c.epoch, c.seq));
                         store.journal(Entry::Outcome {
@@ -1589,6 +1622,8 @@ impl Reconciler {
         };
         let units = match &body {
             Body::GroupSpawn { group, .. } => unit_names(group, store.campaign(), "units"),
+            // A ruin's spawn brings no unit to life.
+            Body::StaticSpawn { table, .. } if ruins::spawns_dead(table) => Vec::new(),
             Body::StaticSpawn { .. } => vec![entity],
             _ => Vec::new(),
         };
@@ -1779,9 +1814,11 @@ impl Reconciler {
         let waiting = store
             .groups()
             .filter(|g| {
-                g.state == State::Materializing
+                (g.state == State::Materializing
                     && g.theater == loaded.theater
-                    && g.authority == Authority::Sim
+                    && g.authority == Authority::Sim)
+                    // A ruin owed a spawn waits like a group to materialize.
+                    || self.ruin_owed(g, loaded)
             })
             .count();
         let want =
@@ -1863,6 +1900,13 @@ impl Reconciler {
             let g = store.group(id).expect("group");
             let here = g.theater == loaded.theater;
             let has_objects = bound.contains_key(&id);
+            if g.kind == Kind::Static && g.state == State::Dead {
+                // `dead` is final; its ruin is kept in DCS (`ruins.rs`).
+                if self.ruin_plan(store, sim, id, &loaded, has_objects, spawns > 0) {
+                    spawns -= 1;
+                }
+                continue;
+            }
             match g.state {
                 State::Virtual | State::Dead | State::Unspawnable if has_objects => {
                     // Drift: DCS holds objects of an entity it should not.
@@ -2001,7 +2045,9 @@ impl Reconciler {
         self.bases_plan(store, sim);
     }
 
-    fn destroy(&mut self, store: &mut Store, sim: &mut dyn SimAdapter, id: EntityId) {
+    /// Write a destroy of the entity, unless one is unanswered, held, or
+    /// given up. Returns whether one was written.
+    fn destroy(&mut self, store: &mut Store, sim: &mut dyn SimAdapter, id: EntityId) -> bool {
         let ops = [opcode::GROUP_DESTROY, opcode::STATIC_DESTROY];
         let given_up = self.drift_destroy_failures.get(&id).copied().unwrap_or(0)
             >= self.cfg.destroy_retries.max(1);
@@ -2009,13 +2055,13 @@ impl Reconciler {
             || self.inflight_for(store, id, &ops)
             || self.is_held(self.cmd_not_ready.get(&(id, HOLD_DESTROY)), 0)
         {
-            return;
+            return false;
         }
         let body = match store.group(id).expect("group").kind {
             Kind::Group => Body::GroupDestroy,
             Kind::Static => Body::StaticDestroy,
         };
-        self.send(store, sim, id, 0, body);
+        self.send(store, sim, id, 0, body)
     }
 
     fn dematerialize(&mut self, store: &mut Store, sim: &mut dyn SimAdapter, id: EntityId) {
@@ -2104,7 +2150,9 @@ impl Reconciler {
                             ("y", lv::n(u.state.at.z)),
                             ("heading", lv::n(u.state.heading)),
                         ]),
-                        &u.extra,
+                        // A live static never spawns destroyed, whatever
+                        // its further keys say.
+                        &ruins::without_dead(&u.extra),
                     ),
                     name,
                 }
