@@ -399,6 +399,35 @@ With persistence off (spec/config.md) the stores are in memory. They last as lon
 the sidecar process. The author reads state with the capture call and writes it back
 as specs after a restart.
 
+## Authority
+
+Each managed group and static is simulated by DCS (materialized) or by the campaign
+(virtual): its authority. Only the controller changes it, with `Materialize` and
+`Dematerialize`; a `PutGroup` with `virtual` starts it under the campaign. The sidecar
+never changes it and holds no rule on when to: hysteresis and every other policy are the
+controller's. The lifecycle above carries a change out.
+
+**Interest queries.** `QueryArea`, or a `WorldFilter` with a center and a radius, gives
+every group with a unit within the radius, and every static within it, virtual or not,
+from the store's grid. A virtual unit is where the store last held it.
+
+**Handover.** A dematerialize captures each unit in the frame that destroys it
+(`GROUP_CAPTURE_DESTROY`; for a static, a `CAPTURE`, then a destroy), so the store holds
+the position, heading and life DCS had at that moment. A materialize spawns from the
+state the store holds (see "Spawn state"). A capture that fails takes the last
+checkpointed state instead (spec/commands.md, `GROUP_CAPTURE_DESTROY`).
+
+**Materialization budget.** Outside the restore burst (spec/persistence.md), at most
+`materialize_per_frame` spawns (`GROUP_SPAWN`, `STATIC_SPAWN`) are unanswered at a
+time: from the write to the ring until the sidecar reads the spawn's `RESULT`, or the
+spawn resolves `unknown` or `not_sent`. The next spawn is written in the step that reads
+a result. So at most that many reach DCS in one frame, whatever waits in the ring before
+them, and a larger value pipelines spawns. Destroys have no such limit: the agent's
+commanded-work budget (`commanded_ms`, spec/config.md) spreads them over frames like any
+command. The burst turns on when more groups are already `materializing` than the
+budget, as a mission load leaves every live group; a group the controller moves to DCS
+while paused leaves `virtual` within the budget.
+
 ## Spawn state
 
 Every spawn of a unit, a first materialization, a restore after a mission load or a DCS

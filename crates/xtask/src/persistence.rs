@@ -25,6 +25,7 @@
 
 mod api;
 mod scenarios;
+mod virtualization;
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Stdio};
@@ -705,6 +706,23 @@ impl Target for LiveTarget<'_> {
         Ok(timing_lines(&text))
     }
 
+    fn agent_reports(&mut self) -> Result<Option<Vec<Value>>, String> {
+        let log = self.run.remote.full_path("nanoprobe/logs/agent.log");
+        let o = self.run.remote.shell(
+            "grep -F '\"msg\":\"sampling\"' \"$1\" 2>/dev/null || true",
+            &[&log],
+            b"",
+        )?;
+        Ok(Some(
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .filter(|l| l["msg"] == "sampling")
+                .map(|l| l["data"].clone())
+                .collect(),
+        ))
+    }
+
     fn on_land(&mut self, points: &[(f64, f64)]) -> Result<Vec<bool>, String> {
         let pts = points
             .iter()
@@ -773,6 +791,11 @@ for _, n in ipairs({ __UNITS__ }) do
   if u then
     local okc, cs = pcall(u.getCallsign, u)
     out[n] = { callsign = okc and cs or nil, life = u:getLife(), life0 = u:getLife0() }
+    local okp, p = pcall(u.getPosition, u)
+    if okp and p then
+      out[n].north, out[n].east = p.p.x, p.p.z
+      out[n].heading = math.atan2(p.x.z, p.x.x)
+    end
   end
 end
 return out

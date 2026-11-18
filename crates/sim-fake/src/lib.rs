@@ -223,6 +223,23 @@ struct FAirbase {
     stock: Stock,
 }
 
+/// What DCS holds of one unit object ([`FakeSim::unit_states`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UnitTruth {
+    /// The unit entity its name gives.
+    pub entity: u64,
+    /// The campaign its name gives.
+    pub campaign: u64,
+    /// DCS `x` (north), meters.
+    pub x: f64,
+    /// DCS `y` (altitude), meters.
+    pub y: f64,
+    /// DCS `z` (east), meters.
+    pub z: f64,
+    /// The heading it was spawned with, radians.
+    pub heading: f64,
+}
+
 /// Ground truth for the tests.
 #[derive(Clone, Debug, Default)]
 pub struct Ledger {
@@ -481,6 +498,9 @@ pub struct FakeSim {
     options: BTreeMap<u64, BTreeMap<u32, Lv>>,
     /// Life of a unit object as a percentage of its initial life, when set.
     life: BTreeMap<u64, f64>,
+    /// The heading each unit object was spawned with, radians, which a
+    /// capture reads back.
+    heading: BTreeMap<u64, f64>,
     /// The sample rates last received.
     rates: Rates,
     rates_received: u32,
@@ -594,6 +614,7 @@ impl FakeSim {
             airbases: BTreeMap::new(),
             options: BTreeMap::new(),
             life: BTreeMap::new(),
+            heading: BTreeMap::new(),
             rates: Rates::default(),
             rates_received: 0,
             binds_received: 0,
@@ -655,6 +676,33 @@ impl FakeSim {
     pub fn life_percent_of(&self, entity: u64) -> Option<f64> {
         let (o, _) = self.objects.iter().find(|(_, x)| x.entity == entity)?;
         self.life.get(o).copied()
+    }
+
+    /// Turn a unit entity's object to `heading`, radians, as DCS would when
+    /// it drives. False when DCS holds no object of it.
+    pub fn set_heading(&mut self, entity: u64, heading: f64) -> bool {
+        let Some(o) = self.object_of_entity(entity) else {
+            return false;
+        };
+        self.heading.insert(o, heading);
+        true
+    }
+
+    /// Set a unit entity's life, as a percentage of its initial life, as a
+    /// hit in DCS would. False when DCS holds no object of it.
+    pub fn set_life_percent(&mut self, entity: u64, percent: f64) -> bool {
+        let Some(o) = self.object_of_entity(entity) else {
+            return false;
+        };
+        self.life.insert(o, percent);
+        true
+    }
+
+    fn object_of_entity(&self, entity: u64) -> Option<u64> {
+        self.objects
+            .iter()
+            .find(|(_, x)| x.entity == entity && entity != 0)
+            .map(|(o, _)| *o)
     }
 
     /// The unit entities in DCS that a `DAMAGE` set, with the percentage of
@@ -1152,6 +1200,24 @@ impl FakeSim {
     /// for a row it does not bind or does not hold.
     pub fn binding(&self, object: u64) -> (u64, u64) {
         self.table.get(&object).copied().unwrap_or((0, 0))
+    }
+
+    /// Each unit object alive in the world, keyed by its unit entity (0
+    /// for unmanaged ones left out): its campaign, position and spawn
+    /// heading.
+    pub fn unit_states(&self) -> Vec<UnitTruth> {
+        self.objects
+            .iter()
+            .filter(|(_, x)| x.entity != 0)
+            .map(|(o, x)| UnitTruth {
+                entity: x.entity,
+                campaign: x.campaign,
+                x: x.at.x,
+                y: x.at.y,
+                z: x.at.z,
+                heading: self.heading.get(o).copied().unwrap_or(0.0),
+            })
+            .collect()
     }
 
     /// The DCS objects alive in the world: object ID, the campaign its name
@@ -2592,7 +2658,7 @@ impl FakeSim {
         }
         match &cmd.body {
             Body::GroupSpawn { name, group, .. } => {
-                let units: Vec<(String, String, Position)> = lv::get(group, "units")
+                let units: Vec<(String, String, Position, f64)> = lv::get(group, "units")
                     .map(|u| {
                         lv::items(u)
                             .into_iter()
@@ -2606,12 +2672,13 @@ impl FakeSim {
                                         y: lv::num_at(t, "alt").unwrap_or(0.0),
                                         z: lv::num_at(t, "y").unwrap_or(0.0),
                                     },
+                                    lv::num_at(t, "heading").unwrap_or(0.0),
                                 )
                             })
                             .collect()
                     })
                     .unwrap_or_default();
-                if units.is_empty() || units.iter().any(|(_, t, _)| t.starts_with("Unknown")) {
+                if units.is_empty() || units.iter().any(|(_, t, _, _)| t.starts_with("Unknown")) {
                     return self.result(&cmd, rc::DCS_REFUSED, 0, "unknown unit type", Lv::Nil);
                 }
                 self.spawn(&cmd, name, units, false);
@@ -2627,7 +2694,8 @@ impl FakeSim {
                     y: 0.0,
                     z: lv::num_at(table, "y").unwrap_or(0.0),
                 };
-                self.spawn(&cmd, name, vec![(name.clone(), t, at)], true);
+                let heading = lv::num_at(table, "heading").unwrap_or(0.0);
+                self.spawn(&cmd, name, vec![(name.clone(), t, at, heading)], true);
             }
             Body::GroupOrder(task) => {
                 let Some(gid) = self.group_of(h.entity) else {
@@ -2999,7 +3067,7 @@ impl FakeSim {
         &mut self,
         cmd: &Command,
         name: &str,
-        units: Vec<(String, String, Position)>,
+        units: Vec<(String, String, Position, f64)>,
         is_static: bool,
     ) {
         let h = &cmd.header;
@@ -3022,13 +3090,14 @@ impl FakeSim {
         let mut members = Vec::new();
         let mut entities = Vec::new();
         self.next_object += 1;
-        for (i, (uname, t, at)) in units.into_iter().enumerate() {
+        for (i, (uname, t, at, heading)) in units.into_iter().enumerate() {
             let id = if is_static { gid } else { self.next_object };
             if !is_static {
                 self.next_object += 1;
             }
             let entity = ids::parse(&uname).map_or(0, |p| p.entity.0);
             entities.push(entity);
+            self.heading.insert(id, heading);
             self.objects.insert(
                 id,
                 FObject {
@@ -3130,7 +3199,10 @@ impl FakeSim {
                     ("x", lv::n(o.at.x)),
                     ("y", lv::n(o.at.y)),
                     ("z", lv::n(o.at.z)),
-                    ("heading", lv::n(0.0)),
+                    (
+                        "heading",
+                        lv::n(self.heading.get(m).copied().unwrap_or(0.0)),
+                    ),
                     ("life", lv::n(self.life.get(m).map_or(1.0, |p| p / 100.0))),
                     ("life0", lv::n(1.0)),
                 ])

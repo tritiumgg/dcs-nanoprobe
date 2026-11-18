@@ -9,7 +9,7 @@
 //! The codec destructures every struct it writes without `..`: a field added
 //! to the store does not compile until it is persisted here too.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -671,6 +671,8 @@ impl Store {
     /// Drop the journal entries and idempotency rows written, unless the
     /// store keeps its journal ([`Store::keep_journal`]).
     fn drain_journal(&mut self) {
+        self.dirty.clear();
+        self.dirty_all = false;
         self.idempotency.clear();
         self.templates_dirty.clear();
         if self.keep_journal {
@@ -944,57 +946,49 @@ impl Disk {
             route_events,
             disk: _,
             markers: _,
+            dirty: _,
+            dirty_all: _,
         } = store;
         let _ = take_overflow();
         let at_ms = now_ms();
+        let full = cp.is_some();
+        // A step's commit compares only the groups marked since the last
+        // write, with their members; a checkpoint, a new file, and a write
+        // after a bulk change compare every row.
+        let scan_all = full || init || store.dirty_all;
+        let rows = if scan_all {
+            self.rows_all(groups, units, full)
+        } else {
+            let marked = self.rows_marked(groups, units, &store.dirty);
+            if cfg!(debug_assertions) {
+                // Every change the marks missed would be written only at
+                // the next checkpoint: the tests check that none is missed.
+                let every = self.rows_all(groups, units, false);
+                assert_eq!(
+                    marked, every,
+                    "a store change was made without marking its row"
+                );
+            }
+            marked
+        };
+        let Rows {
+            changed_groups,
+            changed_units,
+            gone_groups,
+            gone_units,
+        } = rows;
         let tx = self.conn.transaction()?;
         if init {
             tx.execute_batch(TABLES)?;
             put_meta(&tx, "schema", &Lv::Number(f64::from(SCHEMA)))?;
             put_meta(&tx, "campaign_id", &u(campaign.0))?;
         }
-        let full = cp.is_some();
-        let mut changed_groups = Vec::new();
-        for (id, g) in groups {
-            let differs = match self.groups.get(id) {
-                None => true,
-                Some(w) if full => w != g,
-                // The lead position is sampled bookkeeping.
-                Some(w) => {
-                    let mut same = g.clone();
-                    same.last_lead = w.last_lead;
-                    *w != same
-                }
-            };
-            if differs {
-                put_entity(&tx, *id, "group", &enc_group(g))?;
-                changed_groups.push(*id);
-            }
+        for id in &changed_groups {
+            put_entity(&tx, *id, "group", &enc_group(&groups[id]))?;
         }
-        let mut changed_units = Vec::new();
-        for (id, un) in units {
-            let differs = match self.units.get(id) {
-                None => true,
-                Some(w) if full => w != un,
-                Some(w) => !durable_eq(w, un),
-            };
-            if differs {
-                put_entity(&tx, *id, "unit", &enc_unit(un))?;
-                changed_units.push(*id);
-            }
+        for id in &changed_units {
+            put_entity(&tx, *id, "unit", &enc_unit(&units[id]))?;
         }
-        let gone_groups: Vec<EntityId> = self
-            .groups
-            .keys()
-            .filter(|id| !groups.contains_key(id))
-            .copied()
-            .collect();
-        let gone_units: Vec<EntityId> = self
-            .units
-            .keys()
-            .filter(|id| !units.contains_key(id))
-            .copied()
-            .collect();
         for (ids, kind) in [(&gone_groups, "group"), (&gone_units, "unit")] {
             for id in ids {
                 tx.execute(
@@ -1159,6 +1153,108 @@ impl Disk {
         self.sample_time = sample_time;
         self.record_written = true;
         Ok(())
+    }
+}
+
+/// The entity rows one write puts or deletes, each list in ID order.
+#[derive(Debug, Default, PartialEq)]
+struct Rows {
+    changed_groups: Vec<EntityId>,
+    changed_units: Vec<EntityId>,
+    gone_groups: Vec<EntityId>,
+    gone_units: Vec<EntityId>,
+}
+
+impl Disk {
+    fn group_differs(&self, g: &Group, full: bool) -> bool {
+        match self.groups.get(&g.id) {
+            None => true,
+            Some(w) if full => w != g,
+            // The lead position is sampled bookkeeping.
+            Some(w) if w.last_lead == g.last_lead => w != g,
+            Some(w) => {
+                let mut same = g.clone();
+                same.last_lead = w.last_lead;
+                *w != same
+            }
+        }
+    }
+
+    fn unit_differs(&self, un: &Unit, full: bool) -> bool {
+        match self.units.get(&un.id) {
+            None => true,
+            Some(w) if full => w != un,
+            Some(w) => !durable_eq(w, un),
+        }
+    }
+
+    /// Every row that differs from what the file holds.
+    fn rows_all(
+        &self,
+        groups: &BTreeMap<EntityId, Group>,
+        units: &BTreeMap<EntityId, Unit>,
+        full: bool,
+    ) -> Rows {
+        Rows {
+            changed_groups: groups
+                .values()
+                .filter(|g| self.group_differs(g, full))
+                .map(|g| g.id)
+                .collect(),
+            changed_units: units
+                .values()
+                .filter(|u| self.unit_differs(u, full))
+                .map(|u| u.id)
+                .collect(),
+            gone_groups: self
+                .groups
+                .keys()
+                .filter(|id| !groups.contains_key(id))
+                .copied()
+                .collect(),
+            gone_units: self
+                .units
+                .keys()
+                .filter(|id| !units.contains_key(id))
+                .copied()
+                .collect(),
+        }
+    }
+
+    /// The rows of the marked groups and of their members, now and as
+    /// written, that differ from what the file holds, durable fields only.
+    fn rows_marked(
+        &self,
+        groups: &BTreeMap<EntityId, Group>,
+        units: &BTreeMap<EntityId, Unit>,
+        marked: &BTreeSet<EntityId>,
+    ) -> Rows {
+        let mut member_ids = BTreeSet::new();
+        let mut rows = Rows::default();
+        for id in marked {
+            match groups.get(id) {
+                Some(g) => {
+                    if self.group_differs(g, false) {
+                        rows.changed_groups.push(*id);
+                    }
+                    member_ids.extend(g.members.iter().copied());
+                }
+                None if self.groups.contains_key(id) => rows.gone_groups.push(*id),
+                None => {}
+            }
+            if let Some(w) = self.groups.get(id) {
+                member_ids.extend(w.members.iter().copied());
+            }
+        }
+        for id in member_ids {
+            match units.get(&id) {
+                Some(u) if self.unit_differs(u, false) => rows.changed_units.push(id),
+                Some(_) => {}
+                None if self.units.contains_key(&id) => rows.gone_units.push(id),
+                None => {}
+            }
+        }
+        rows
     }
 }
 

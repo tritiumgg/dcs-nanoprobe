@@ -19,6 +19,8 @@ struct Rec {
     boot: u64,
     slice: f64,
     periods: [f64; 4],
+    /// The commanded work the last frame handed on, µs.
+    commanded: f64,
 }
 
 impl Rec {
@@ -34,6 +36,7 @@ impl Rec {
             boot: 1,
             slice: 0.0,
             periods: [0.0; 4],
+            commanded: 0.0,
         }
     }
 
@@ -81,6 +84,9 @@ impl Port for Rec {
     fn set_sampling(&mut self, slice_us: f64, periods: [f64; 4], _rows_per_clock: u64) {
         self.slice = slice_us;
         self.periods = periods;
+    }
+    fn set_frame_commanded(&mut self, us: f64) {
+        self.commanded = us;
     }
 }
 
@@ -5000,4 +5006,23 @@ fn the_sweep_waits_for_the_attitude_pump_only_without_births_or_an_enumeration()
         assert_ne!(why, Some(SweepWait::Subscribed), "{what}");
         assert!(read > 0, "{what}: the sweep read no row");
     }
+}
+
+/// A frame hands its commanded work to the link, for the frame tail, and
+/// the next frame starts from none.
+#[test]
+fn a_frame_hands_its_commanded_work_to_the_link() {
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(0.003, 1e6 / 110.0);
+    let t = Instant::now();
+    rec.began = t;
+    s.excuse_commanded(Duration::from_micros(300));
+    s.end_frame(&mut rec, t + Duration::from_micros(400));
+    assert!((rec.commanded - 300.0).abs() < 1e-9, "{}", rec.commanded);
+    rec.began = t + Duration::from_millis(9);
+    s.end_frame(
+        &mut rec,
+        t + Duration::from_millis(9) + Duration::from_micros(20),
+    );
+    assert_eq!(rec.commanded, 0.0);
 }

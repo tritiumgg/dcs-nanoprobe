@@ -135,6 +135,13 @@ A commit writes:
 | The idempotency rows of calls answered | Every commit |
 | Positions, life, warehouse stock: the sampled state | Only at a checkpoint |
 
+A commit finds the changed rows from marks: a change to a group, or to one of its
+units, marks the group, and the commit compares only the marked groups and their
+members with what the file holds. A checkpoint, a new store file and the first commit
+after a new mission generation compare every row, so a change that missed its mark is
+written at the latest by the next checkpoint taken after the revision moves. Debug
+builds compare every row at every commit and fail when the marks missed one.
+
 A checkpoint is a commit that also writes every row whose sampled state changed, and
 replaces the checkpoint row. It is taken every `checkpoint_s` while the campaign is
 active, skipped when the store revision did not move since the last one, and taken at
@@ -501,7 +508,8 @@ leaves no reported mark, and that member is spawned again.
 
 While the lifecycle state is `PAUSED` and more groups are waiting to materialize than
 `materialize_per_frame`, the reconciler sends `BURST` on (spec/commands.md) and spawns
-every waiting group in the next frame, without the per-frame limit. It sends `BURST`
+every waiting group in the next frame, without the materialization budget
+(spec/world.md, "Authority"). It sends `BURST`
 off when no group is waiting or the state leaves `PAUSED`; the agent also turns it off
 by itself when the state leaves `PAUSED`.
 

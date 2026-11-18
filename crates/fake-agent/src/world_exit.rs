@@ -15,7 +15,8 @@
 //! `--groups` (100) managed ground groups of `--units` (4) `M-113`s each go
 //! into the store on a grid of `--spacing` meters around `--origin-x` and
 //! `--origin-z`, under DCS authority, and the reconciler spawns them, at most
-//! `--per-step` (10) a step so that one frame can hold several commands. The
+//! `--per-step` (10) unanswered at a time (`materialize_per_frame`) so that
+//! one frame can hold several commands. The
 //! run waits until every group is `live` and every unit's `OBJECT` came, then
 //! sends `DAMAGE` 50 % to the first unit of every group (the reconciler's damage
 //! effect, which the hook dispatches) and reads each unit's life back from a

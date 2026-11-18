@@ -100,13 +100,18 @@ pub trait Target {
     fn timings(&mut self) -> Result<Vec<Value>, String>;
     /// Which points are on land.
     fn on_land(&mut self, points: &[(f64, f64)]) -> Result<Vec<bool>, String>;
+    /// The agent's `sampling` reports in its log so far, each report's
+    /// `data`. `None` on the fake.
+    fn agent_reports(&mut self) -> Result<Option<Vec<Value>>, String> {
+        Ok(None)
+    }
 }
 
 /// Where the scenarios spawn: the hello's start, which is land on Caucasus
 /// (docs/results/2026-11-15-s17-api-on-real-dcs.md).
 pub const ORIGIN: (f64, f64) = (-290_000.0, 680_000.0);
 /// A ground unit type every server has.
-const GROUND: &str = "M-113";
+pub(super) const GROUND: &str = "M-113";
 /// An aircraft type the server spawns, and its launchers, named as
 /// `get_weapon_display_name_by_wstype` names their weapons (LIVE, E39):
 /// the 610-gallon tank and AIM-120B.
@@ -114,13 +119,13 @@ const AIRCRAFT: &str = "F-15C";
 const TANK610: &str = "{E1F29B21-F291-4589-9FD8-3272EEC69506}";
 const AIM120B: &str = "{C8E06185-7CD6-4C90-959F-044679E90751}";
 /// USA.
-const COUNTRY: u32 = 2;
+pub(super) const COUNTRY: u32 = 2;
 
-fn state(g: &pb::Group) -> EntityState {
+pub(super) fn state(g: &pb::Group) -> EntityState {
     EntityState::try_from(g.state).unwrap_or(EntityState::Unspecified)
 }
 
-fn live(g: &pb::Group) -> bool {
+pub(super) fn live(g: &pb::Group) -> bool {
     state(g) == EntityState::Live
 }
 
@@ -195,7 +200,7 @@ fn orbit(theater: &str, c: (f64, f64), alt: f64) -> pb::Order {
 
 /// Run until `f` gives a value, holding model time `step` at a time, for
 /// at most `limit` model seconds (real seconds on a paused wait).
-fn wait<T>(
+pub(super) fn wait<T>(
     t: &mut dyn Target,
     api: &mut Api,
     what: &str,
@@ -260,7 +265,11 @@ fn dcs_of(groups: &[DcsGroup], campaign: u64) -> BTreeMap<u64, (usize, Vec<DcsUn
 /// One group per entity: every live group of the store is in DCS once
 /// with one unit per living member, and DCS has no other group of the
 /// campaign. Also every other platform group, of any campaign, counted.
-fn one_per_entity(t: &mut dyn Target, api: &mut Api, campaign: u64) -> Result<Value, String> {
+pub(super) fn one_per_entity(
+    t: &mut dyn Target,
+    api: &mut Api,
+    campaign: u64,
+) -> Result<Value, String> {
     let store = api.groups(campaign)?;
     let Some(groups) = t.dcs_groups()? else {
         let ok = store
@@ -364,7 +373,7 @@ fn land_grid(
 }
 
 /// Create and activate a campaign, and wait for its mission to load.
-fn campaign(t: &mut dyn Target, api: &mut Api, name: &str) -> Result<u64, String> {
+pub(super) fn campaign(t: &mut dyn Target, api: &mut Api, name: &str) -> Result<u64, String> {
     // Activation loads the campaign's mission.
     t.no_players()?;
     let c = api.create(name, &t.theater())?;
@@ -1129,8 +1138,8 @@ fn reconnect<'r>(t: &mut dyn Target, api: &Api<'r>) -> Result<Api<'r>, String> {
 }
 
 /// The scenarios by name, in the order `all` runs them.
-pub const ALL: [&str; 8] = [
-    "reload", "burst", "switch", "death", "tables", "owed", "cost", "state",
+pub const ALL: [&str; 9] = [
+    "reload", "burst", "switch", "death", "tables", "owed", "cost", "state", "virtual",
 ];
 
 /// Run the scenarios named, each with its own connection, recording each
@@ -1164,6 +1173,7 @@ pub fn run(
             "owed" => owed_load(t, &mut api, tag),
             "cost" => write_cost(t, &mut api, tag, 200, 120.0),
             "state" => spawn_state(t, &mut api, tag),
+            "virtual" => super::virtualization::run(t, &mut api, tag),
             other => Err(format!("no scenario {other}")),
         };
         api.release();

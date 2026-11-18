@@ -67,6 +67,9 @@ jobs:
       - name: Test
         run: cargo test --workspace --no-default-features
 
+      - name: Virtualization at full size, in release
+        run: cargo test -p nanoprobe-sim-fake --release --test virtualization -- --ignored
+
       - name: Open the host build with Lua 5.1
         run: sh tools/luatest.sh
 

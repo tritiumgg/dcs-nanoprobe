@@ -30,7 +30,8 @@ pub struct Config {
     pub events_keep: usize,
     /// `[world] position_period_min_s`: the cap on position rates.
     pub position_period_min: Duration,
-    /// `[world] materialize_per_frame`.
+    /// `[world] materialize_per_frame`: spawns unanswered at a time outside
+    /// the restore burst.
     pub materialize_per_frame: usize,
     /// `[world] destroy_retries`.
     pub destroy_retries: u32,

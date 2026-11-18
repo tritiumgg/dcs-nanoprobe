@@ -644,6 +644,12 @@ pub struct Store {
     countries: Option<BTreeMap<u32, u32>>,
     sample_time: f64,
     route_events: Vec<RouteEvent>,
+    /// Groups changed since the last write, a unit by its group: the step
+    /// commits compare only these with what the file holds. A checkpoint
+    /// compares every row (spec/persistence.md, "Writes").
+    dirty: BTreeSet<EntityId>,
+    /// Every row may have changed since the last write.
+    dirty_all: bool,
     disk: disk::Slot,
 }
 
@@ -769,6 +775,8 @@ impl Store {
             countries: None,
             sample_time: 0.0,
             route_events: Vec::new(),
+            dirty: BTreeSet::new(),
+            dirty_all: true,
             disk: disk::Slot::default(),
         }
     }
@@ -1126,11 +1134,19 @@ impl Store {
     }
 
     fn touch(&mut self, id: EntityId) {
+        self.mark(id);
         self.rev += 1;
         self.changes.push_back((self.rev, id));
         while self.changes.len() > self.changes_keep {
             self.changes.pop_front();
         }
+    }
+
+    /// Mark an entity's row as changed for the next write: a unit marks its
+    /// group, whose members are compared with it.
+    fn mark(&mut self, id: EntityId) {
+        let g = self.units.get(&id).map_or(id, |u| u.group);
+        self.dirty.insert(g);
     }
 
     /// Append an entry to the journal. The driver writes it with the rest
@@ -1330,7 +1346,11 @@ impl Store {
         &self.grid
     }
 
+    /// A group to change, marked for the next write.
     fn group_mut(&mut self, id: EntityId) -> Result<&mut Group, StoreError> {
+        if self.groups.contains_key(&id) {
+            self.dirty.insert(id);
+        }
         self.groups.get_mut(&id).ok_or(StoreError::NoSuchEntity(id))
     }
 
@@ -1703,6 +1723,7 @@ impl Store {
             && u.object != object
         {
             u.object = object;
+            self.mark(unit);
         }
     }
 
@@ -1761,6 +1782,7 @@ impl Store {
     /// enumeration's end clears: it can name a member DCS never bound.
     pub fn new_generation(&mut self) {
         self.break_samples();
+        self.dirty_all = true;
         let mut cleared = Vec::new();
         for u in self.units.values_mut() {
             u.object = 0;
