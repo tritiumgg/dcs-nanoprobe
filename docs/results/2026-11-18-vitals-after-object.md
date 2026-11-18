@@ -4,12 +4,12 @@
 |---|---|
 | Step | After a sidecar of a new boot attached, the agent wrote some rows' `VITALS` before their first `OBJECT` after its `HELLO`. That sidecar dropped those samples, and the rows had no life for up to 60 s. With the fix the agent writes no `VITALS` row for an object before that `OBJECT` (spec/records.md, "Samples"; spec/sampling.md, "Tiers") |
 | Date | 2026-11-18 |
-| DCS | Host: none, the sampler on its simulated shim and the agent on the Lua mock. Live: see "Live run" |
-| Platform | Host: macOS 26.6.2 on arm64; Rust 1.99.1; Lua 5.1.5 |
+| DCS | Host: none, the sampler on its simulated shim and the agent on the Lua mock. Live: 2.9.31.29434 dedicated server |
+| Platform | Host: macOS 26.6.2 on arm64; Rust 1.99.1; Lua 5.1.5. Live: Linux, Wine in Docker ("Live run") |
 | Script | `mise exec -- cargo test -p nanoprobe-agent-link --lib after_a_` runs both order tests; the figures of "Agent time" print with `mise exec -- cargo test -p nanoprobe-agent-link --lib agent_time_around_an_attach_at_live_costs -- --ignored --nocapture` and `... with_live_attitude_costs_every_tier_holds_and_the_pump_bound_holds -- --nocapture`; the sweep part runs as `tools/luatest.sh` runs `lua/tests/sampling.lua ... sweep` |
 | Code | The commit that adds this document. "Main" is `75cb671` with this commit's `crates/agent-link/src/sampler_tests.rs` (and, for the sweep part, its `lua/tests/sampling.lua`) and nothing else; the test files build on main unchanged |
 | Tests | `crates/agent-link/src/sampler_tests.rs`: `after_a_new_sidecar_attaches_no_vitals_precede_the_object` and `after_a_resync_subscribed_rows_keep_their_life` (new), `agent_time_around_an_attach_at_live_costs` (new, ignored, a measurement); `lua/tests/sampling.lua`, part `sweep`, its new check `vitals_after_object` |
-| Result | The new-boot test fails on main (217 rows' `VITALS` before their `OBJECT` at the first attach) and passes with the fix. At live costs, 516 to 552 of 2,000 rows had no kept life 10 s after their `OBJECT` on main, and none with the fix; the agent's share is 0.197 % on both. The resync test passes on both. Every other agent-link test passes unchanged, the band tests at all four start offsets. The sweep part: see "Sweep part" |
+| Result | The new-boot test fails on main (217 rows' `VITALS` before their `OBJECT` at the first attach) and passes with the fix. At live costs, 516 to 552 of 2,000 rows had no kept life 10 s after their `OBJECT` on main, and none with the fix; the agent's share is 0.197 % on both. The resync test passes on both. Every other agent-link test passes unchanged, the band tests at all four start offsets. The sweep part: see "Sweep part". Live at 2,000: the owner's targets hold (mean share 0.243 % and 0.245 %, 0.27 % of frames over 250 µs), and every compare finds no row without life; the tool's verdict is FAIL only on two parked ruled bounds |
 
 ## The cause
 
@@ -153,7 +153,34 @@ after another, each in a fresh scratch folder.
 
 ## Live run
 
-LIVE_RESULTS
+`cargo xtask sampling <target> --part mirror` (`crates/xtask/src/sampling_live.rs`), on
+2026-11-18: DCS 2.9.31.29434 dedicated server (LIVE, the hook's `link open` record), on
+Linux under Wine in Docker, `wine-10.0 (Debian 10.0~repack-6)` (PRIOR, checked on
+2026-11-10); agent release build `411f862d569a9c63` from this branch with main merged
+(`50bd646`). One run, no retry. The part attaches its probe as a sidecar of a new boot
+to a fresh shell mission, spawns 500 objects with every ground group moving, clears
+them, spawns 1,200 with one ground group in five moving, then 800 more, and compares
+the mirror with the oracle at 500, 1,200 and 2,000.
+
+| Measure | Result | Owner target or rule |
+|---|---|---|
+| Agent share of real time, mean | 0.243 % and 0.245 %, in the tool's two measured spans (143 s and 102 s) | ≤ 0.3 %: met |
+| Largest 10 s window's share | 0.397 % | Not an owner target |
+| Frames over 250 µs | 116 of 42,621 (0.27 %) | p99 ≤ 250 µs: met |
+| Compare at 500, 1,200, 2,000 | Matches each time; rows without life (`unvital`) 0, 0, 0 | No row without life |
+| Mirror's samples of an unknown object | 0, 0, 0 | — |
+| Vitals as a rate | 4.05 s (4,121 rows of 3,339 due in 102 s) | Band 4.5-6.5 s: missed, parked |
+| Pump bound | Passed in 5 windows, by 6 to 19 % | Ruled bound: missed, parked |
+| DCS frame rate | 112.8, 112.0 and 75.6 fps; 5th percentile at 2,000 4.4 fps | — |
+
+All LIVE. The tool's verdict is FAIL on the two ruled bounds that are parked sampler
+work, as on the live run of docs/results/2026-11-15-sampler-live-costs.md (vitals 4.20 s
+as a rate, the pump bound passed by 3 to 8 %). The owner's targets hold.
+
+This part attaches its probe once, before any object exists, so every row is added
+after the `HELLO` and gets its `OBJECT` and its mark together. It does not run an
+attach over existing rows; the host test of the new boot and the Lua sweep part do.
+The recording and dumps are in the run's bundle, which is not committed.
 
 ## Limits
 
