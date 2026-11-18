@@ -55,7 +55,7 @@ const WORLD: usize = 10_000;
 /// Meters between grid places.
 pub(super) const SPACING: f64 = 300.0;
 /// Points checked against land in one eval.
-const LAND_CHUNK: usize = 2_000;
+pub(super) const LAND_CHUNK: usize = 2_000;
 /// Groups each materialize or dematerialize call names.
 const CALL_CHUNK: usize = 500;
 /// Groups per direction whose state is read from DCS at each point.
