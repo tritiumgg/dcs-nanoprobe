@@ -51,10 +51,10 @@ pub fn tiles() -> Vec<Debris> {
 }
 
 /// The box a column sends: a square on the map centered at `north`, `east`,
-/// `half_width` to each edge, with the tiles' floor and ceiling. A tall box
-/// clears the ground of a place whatever its height (LIVE,
-/// docs/results/2026-11-16-clear-debris.md, run 3), so no caller and no
-/// handler reads the terrain.
+/// `half_width` to each edge, with the tiles' floor and ceiling. The box
+/// spans every ground height, so no caller and no handler reads the terrain.
+/// It cleared the wrecks under it on ground 970 m up (LIVE,
+/// docs/results/2026-11-18-clear-debris-column.md).
 pub fn column(north: f64, east: f64, half_width: f64) -> Debris {
     Debris::Box {
         min: [north - half_width, FLOOR_M, east - half_width],
