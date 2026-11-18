@@ -114,6 +114,19 @@ local function main()
     rawset(dcs, 'getUnitPositionByObjectId', function(id)
       getter.calls = getter.calls + 1
       getter.ids[id] = true
+      -- In `tenth` a tenth of the budget must be short for the positions, or
+      -- the order of the tiers is not tested. Whether it is depended on the
+      -- machine: with nothing else running the mock read a position so fast
+      -- that the positions kept 0.84 to 0.88 of their rate (the bound is
+      -- 0.85) and 21 to 25 % of the pumps planned no row, and the part
+      -- passed only beside other work. So a read costs at least 2 µs here,
+      -- on the agent's clock, at k = 1 and at k = 0.1 alike: the positions
+      -- then keep about 0.15 on an idle machine, and less on a loaded one.
+      if MODE == 'tenth' then
+        local t = A.clock()
+        while A.clock() - t < 2e-6 do
+        end
+      end
       if id == getter.raise then
         getter.raised = getter.raised + 1
         error('the test\'s getter raises for ' .. tostring(id), 0)
