@@ -49,6 +49,11 @@ pub struct Config {
     pub template_dirs: Vec<PathBuf>,
 }
 
+/// The default of `[store] journal_retention_days` (spec/config.md): the
+/// whole-day journal retention. Zero keeps the journal for the life of the
+/// campaign.
+pub const JOURNAL_RETENTION_DEFAULT: Duration = Duration::ZERO;
+
 /// The `[store]` keys of a store on disk (spec/config.md,
 /// spec/persistence.md).
 #[derive(Clone, Debug)]
@@ -63,6 +68,8 @@ pub struct StoreFiles {
     pub backup_keep: usize,
     /// `[store] event_retention_days`; zero keeps every event.
     pub event_retention: Duration,
+    /// `[store] journal_retention_days`; zero keeps every journal entry.
+    pub journal_retention: Duration,
     /// `[store] server_log_days`.
     pub server_log_retention: Duration,
 }
@@ -76,6 +83,7 @@ impl StoreFiles {
             backup_interval: Duration::from_secs(24 * 3600),
             backup_keep: 7,
             event_retention: Duration::ZERO,
+            journal_retention: JOURNAL_RETENTION_DEFAULT,
             server_log_retention: Duration::from_secs(30 * 24 * 3600),
         }
     }
