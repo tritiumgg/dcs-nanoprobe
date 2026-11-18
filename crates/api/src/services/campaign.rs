@@ -449,6 +449,23 @@ impl CampaignService for Campaigns {
         if let Some(h) = hashed.write.as_mut() {
             h.lease = None;
         }
+        // The file is read here, on a worker thread and without the lock:
+        // a slow disk does not hold the driver. A refusal of the path is
+        // given inside the call, after the lease and the campaign are
+        // checked, so a repeat under an answered key gets its first answer
+        // whatever has become of the file.
+        let file = if r.path.is_empty() {
+            None
+        } else {
+            let dirs = self.0.cfg.template_dirs.clone();
+            let path = r.path.clone();
+            Some(
+                tokio::task::spawn_blocking(move || crate::template_file::read(&dirs, &path))
+                    .await
+                    .unwrap_or_else(|_| Err(format!("{:?} could not be read", r.path)))
+                    .map_err(|e| crate::convert::invalid("path", e)),
+            )
+        };
         let resp = self
             .0
             .write(
@@ -461,7 +478,8 @@ impl CampaignService for Campaigns {
                 },
                 &hashed,
                 |g: &mut Inner, id| {
-                    g.set_template(id, &r.theater, &r.miz)?;
+                    g.template_theater(id, &r.theater)?;
+                    g.set_template(id, &r.theater, file.transpose()?)?;
                     Ok((
                         SetCampaignTemplateResponse {
                             campaign: Some(shown(g, id)),

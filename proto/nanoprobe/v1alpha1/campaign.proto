@@ -38,9 +38,11 @@ service CampaignService {
   // The backups kept, oldest first. Needs no lease.
   rpc ListCampaignBackups(ListCampaignBackupsRequest) returns (ListCampaignBackupsResponse);
   // Set or remove the campaign's own template for one of its theaters: a
-  // mission the author saved in the Mission Editor, used in place of the
-  // shared one in [missions] dir. Its units stay unmanaged. Kept in the
-  // campaign's store, so a backup or a copy of the campaign carries it.
+  // mission saved in the Mission Editor, used in place of the shared one in
+  // [missions] dir. Its units stay unmanaged. The sidecar copies the file
+  // into the campaign's store when the call is made, so a backup or a copy
+  // of the campaign carries it, and a later edit of the file takes effect
+  // when the template is set again.
   rpc SetCampaignTemplate(SetCampaignTemplateRequest) returns (SetCampaignTemplateResponse);
 }
 
@@ -209,8 +211,13 @@ message SetCampaignTemplateRequest {
   // One of the campaign's theaters; the template's `theatre` member must
   // name it exactly.
   string theater = 2;
-  // The .miz file, at most 16 MiB. Empty removes the campaign's template.
-  bytes miz = 3;
+  // The .miz file, at most 16 MiB, as the sidecar opens it: an absolute
+  // path that resolves, after symbolic links and `..`, to a file inside a
+  // folder that [missions] template_dirs lists (spec/config.md). Empty
+  // removes the campaign's template.
+  string path = 4;
+  reserved 3;
+  reserved "miz";
 }
 
 message SetCampaignTemplateResponse {

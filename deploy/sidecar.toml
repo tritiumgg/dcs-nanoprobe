@@ -26,3 +26,7 @@ dir = "/var/lib/nanoprobe/campaigns"
 # loads the shells by this path.
 dir = "/missions"
 dcs_dir = '<Windows path of the DCS profile>\nanoprobe\missions'
+# The folders a controller may name a campaign's own template in
+# (SetCampaignTemplate), as the container sees them. None by default: mount a
+# folder read-only into the container and list it here.
+#   template_dirs = ["/templates"]
