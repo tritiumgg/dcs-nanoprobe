@@ -43,6 +43,9 @@ services:
       # The mission folder: `<theater>.miz` for each theater, and `shells/`,
       # which the sidecar writes.
       - "<host path of the DCS profile>/nanoprobe/missions:/missions"
+      # For campaigns with their own template: a folder sidecar.toml lists in
+      # `[missions] template_dirs`, read-only.
+      # - "<host path of the templates folder>:/templates:ro"
       # The campaign stores: a folder on the host owned by the DCS user.
       - ./nanoprobe/data:/var/lib/nanoprobe
       # For a listener off loopback: the tokens file sidecar.toml names.

@@ -30,6 +30,7 @@ struct File {
 struct MissionsToml {
     dir: String,
     dcs_dir: String,
+    template_dirs: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -236,6 +237,10 @@ impl SidecarToml {
             dcs_dir: f.missions.dcs_dir,
         };
         missions.check()?;
+        if f.missions.template_dirs.iter().any(String::is_empty) {
+            return Err("[missions] template_dirs: an entry is empty".into());
+        }
+        let template_dirs = f.missions.template_dirs.iter().map(|d| rel(d)).collect();
         let token_path = rel(&f.agent.token_path);
         let token = std::fs::read_to_string(&token_path)
             .map_err(|e| format!("[agent] token_path {}: {e}", token_path.display()))?
@@ -266,6 +271,7 @@ impl SidecarToml {
             on_lost,
             step: poll,
             store,
+            template_dirs,
             ..Config::default()
         };
         let _ = (f.agent.command_queue, f.log.dir, f.log.level);
@@ -358,6 +364,18 @@ mod tests {
             ),
             (&format!("{ok}[missions]\ntheaters = 1\n"), "unknown field"),
             (
+                &format!("{ok}[missions]\ntemplate_dir = [\"t\"]\n"),
+                "unknown field",
+            ),
+            (
+                &format!("{ok}[missions]\ntemplate_dirs = \"t\"\n"),
+                "template_dirs",
+            ),
+            (
+                &format!("{ok}[missions]\ntemplate_dirs = [\"t\", \"\"]\n"),
+                "template_dirs",
+            ),
+            (
                 &format!("{ok}[missions]\ndcs_dir = \"{}\"\n", "x".repeat(1000)),
                 "1024",
             ),
@@ -365,6 +383,28 @@ mod tests {
             let e = SidecarToml::parse(text, d.path()).expect_err(why);
             assert!(e.contains(why), "{why}: {e}");
         }
+    }
+
+    #[test]
+    fn the_template_folders_are_listed_and_empty_by_default() {
+        let d = dir_with_token();
+        let ok = "[agent]\nmap_path = \"m\"\ntoken_path = \"token\"\n";
+        let t = SidecarToml::parse(ok, d.path()).expect("parse");
+        assert!(t.api.template_dirs.is_empty(), "no folder unless listed");
+        // `[missions] dir` is not one of them unless it is listed.
+        let t =
+            SidecarToml::parse(&format!("{ok}[missions]\ndir = \"m\"\n"), d.path()).expect("parse");
+        assert!(t.api.template_dirs.is_empty());
+        let abs = d.path().join("abs");
+        let t = SidecarToml::parse(
+            &format!(
+                "{ok}[missions]\ntemplate_dirs = [\"templates\", '{}']\n",
+                abs.display()
+            ),
+            d.path(),
+        )
+        .expect("parse");
+        assert_eq!(t.api.template_dirs, [d.path().join("templates"), abs]);
     }
 
     #[test]
