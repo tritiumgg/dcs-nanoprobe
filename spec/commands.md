@@ -604,6 +604,34 @@ A dynamic spawn there takes an aircraft and fuel from the FARP's warehouse, whic
 empty: the controller stocks it with `SetWarehouseStock` under the static's name (LIVE,
 a stocked FARP was offered and a spawn worked).
 
+The sidecar adds one key itself, and only to the table of a static in state `dead`
+(spec/world.md, "Ruins"):
+
+| Key | Effect |
+|---|---|
+| `dead` | `true`: DCS adds the static destroyed. It reads life 0 and `isExist` false from the start, and `StaticObject.getByName` finds it (LIVE, docs/results/2026-11-17-person-fixes.md) |
+
+A `dead` key in `StaticSpec.extra` is refused by `PutStatic`, and the sidecar leaves one
+out of a live static's table. The handler treats the table as any other. A static added
+dead by the handler is in DCS at once, also while the simulation is paused, and its
+spawn is not refused (LIVE, docs/results/2026-11-18-ruins.md); the handler refuses
+unless DCS returns an object with an ID, so the `RESULT` is `APPLIED` with that ID as
+its `object` (inferred from the handler; the runs recorded no result code). A live
+static under the name is replaced (LIVE,
+docs/results/2026-11-15-s15-world-commands.md); that a dead one is replaced is
+UNVERIFIED. The shim adds no row for an object that does not exist, so no `OBJECT`
+follows a dead spawn (host-tested on the mock, which models the LIVE reads above).
+The spawn's journal entry names no unit: it brings none to life. `STATIC_DESTROY` finds
+a dead static by its name and calls `destroy` on it. For a static added with
+`dead = true`, a later `StaticObject.getByName` then finds nothing (LIVE,
+docs/results/2026-11-18-ruins.md). For a static an explosion killed, one run still
+found it by name after `destroy` (LIVE, docs/results/2026-11-16-person-tests-2.md)
+and another did not (LIVE, docs/results/2026-11-16-clear-debris.md), so that case is
+not settled. That
+`Object.destroy` removes a dead static's ruin from a client is LIVE for a handle from
+`world.searchObjects` (docs/results/2026-11-17-person-fixes.md).
+What a client sees of a static added dead depends on its type: spec/world.md, "Ruins".
+
 ### Layout: AIRBASE_OWNER
 
 | Offset | Type | Field | Meaning |
@@ -902,11 +930,14 @@ lists the statics in the same volume with `world.searchObjects` and collects eac
 start with `np#`; a static whose name cannot be read stays (spec/world.md, "Names"). After the
 search returns it calls `destroy` on each, under `pcall`: `world.removeJunk` leaves a
 destroyed static, and a client keeps showing its ruin until `Object.destroy` removes it
-(LIVE, docs/results/2026-11-16-person-tests-2.md). A destroy that raises is skipped and
-not counted. A static the platform manages, dead or alive, is never destroyed, so a
-controller can keep its wreck or ruin on purpose: its record and death fact are
-unchanged. Only the dead statics nobody manages, placed by the mission or by a script,
-go.
+(LIVE, docs/results/2026-11-16-person-tests-2.md, for a static an explosion killed).
+`world.removeJunk` leaves a static added with `dead = true` as well: a box clear over
+each of two returned 0 and both still read life 0 under their names (LIVE,
+docs/results/2026-11-18-ruins.md). A destroy that raises is skipped and
+not counted. A static the platform manages, dead or alive, is never destroyed: a dead
+one is a ruin the campaign keeps (spec/world.md, "Ruins"), and its record and death
+fact are unchanged. Only the dead statics nobody manages, placed by the mission or by a
+script, go.
 
 The value is the number `world.removeJunk` returns, how many junk objects it removed
 (craters and debris as well as wrecks), plus the statics destroyed. A static a destroy
@@ -922,8 +953,8 @@ What DCS removes (LIVE, docs/results/2026-11-16-clear-debris.md): the wrecks of 
 units that have stopped burning. A clear on open ground where an explosion struck
 returns 1, so a crater counts as junk (inferred from the count). `world.removeJunk`
 leaves every live unit and static, a wreck that is still burning, a dead static's object
-(which the handler then destroys), and destroyed scenery. A clear around a dead aircraft
-or a dead static returns a count above 0; what it removes there is UNVERIFIED. A burning wreck it leaves still explodes and sends its death
+(which the handler then destroys), and destroyed scenery. A clear around a dead aircraft,
+or around a static an explosion killed while it still burns, returned a count above 0; what it removes there is UNVERIFIED. A clear of a box around a static added dead, with no explosion near it in that DCS process, returned 0, and the static kept its reads (LIVE, docs/results/2026-11-18-ruins.md). A burning wreck it leaves still explodes and sends its death
 events, so a clear changes nothing in spec/records.md. A wreck it removes reads as a
 removed object: `isDead`, `getLife` and `getPoint` raise. The volume's edge is not exact
 to an object's position. A 2,000 km sphere removed the wrecks of a whole run in one

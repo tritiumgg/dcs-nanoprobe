@@ -94,7 +94,9 @@ registration of the name after a reopen gets a revision above it.
 An entity body carries every field of its row in spec/world.md: for a group or static
 its spec, order and revisions, lifecycle state, authority, lost policy, error, and the
 reconciler's per-generation bookkeeping (spawned, spawn unknown, order sent, destroy
-failures); for a unit its spec, last observed state, death fact, missing or removed
+failures, and for a dead static the generation its ruin's spawn was written in and the
+generation DCS holds its dead object in; a body without those two reads them as
+absent); for a unit its spec, last observed state, death fact, missing or removed
 mark, whether the agent reported that mark in an `OBJECT_GONE` (only a reported mark
 outlives a mission generation, spec/world.md "Respawn gate"), and DCS object ID. A
 group's body records whether it is a `group` or a `static`.
@@ -515,10 +517,19 @@ tell a member a script removed from one whose death event is late, so neither co
 back. A kill whose `OBJECT_GONE` was lost with DCS (a crash before the sidecar read it)
 leaves no reported mark, and that member is spawned again.
 
+A static in state `dead` is restored as a ruin: under DCS authority and on the loaded
+theater, the reconciler spawns it with `dead = true` in the new generation, never alive
+(spec/world.md, "Ruins"). The store's two ruin marks name an agent boot and a
+generation, so a new generation or a new DCS process owes the spawn again. A sidecar
+restart within a generation owes nothing for a ruin whose spawn was answered or whose
+static died there. A ruin's spawn left unanswered is sent again, and answered
+`AT_REVISION` if it ran (spec/world.md, "Ruins").
+
 ### Restore burst
 
 While the lifecycle state is `PAUSED` and more groups are waiting to materialize than
-`materialize_per_frame`, the reconciler sends `BURST` on (spec/commands.md) and spawns
+`materialize_per_frame`, a ruin owed its spawn counting as one, the reconciler sends
+`BURST` on (spec/commands.md) and spawns
 every waiting group in the next frame, without the materialization budget
 (spec/world.md, "Authority"). It sends `BURST`
 off when no group is waiting or the state leaves `PAUSED`; the agent also turns it off

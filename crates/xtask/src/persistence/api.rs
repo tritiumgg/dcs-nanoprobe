@@ -382,6 +382,77 @@ impl<'r> Api<'r> {
         })
     }
 
+    /// Put a static of `type_name` at a place, alive or destroyed.
+    pub fn put_static(
+        &mut self,
+        campaign: u64,
+        label: &str,
+        type_name: &str,
+        position: pb::Position,
+        dead: bool,
+    ) -> Result<u64, String> {
+        let req = pb::PutStaticRequest {
+            write: self.write(campaign, "put-static"),
+            static_id: 0,
+            spec: Some(pb::StaticSpec {
+                label: label.into(),
+                country: super::scenarios::COUNTRY,
+                r#type: type_name.into(),
+                position: Some(position),
+                heading: 0.0,
+                extra: None,
+                dead,
+            }),
+        };
+        let mut c = self.commands.clone();
+        Ok(self
+            .rt
+            .block_on(c.put_static(req))
+            .map_err(fail("PutStatic"))?
+            .into_inner()
+            .static_id)
+    }
+
+    /// Remove a managed group or static from the campaign.
+    pub fn remove_entity(&mut self, campaign: u64, id: u64) -> Result<(), String> {
+        let req = pb::RemoveEntityRequest {
+            write: self.write(campaign, "remove"),
+            entity_id: id,
+        };
+        let mut c = self.commands.clone();
+        self.rt
+            .block_on(c.remove_entity(req))
+            .map_err(fail("RemoveEntity"))?;
+        Ok(())
+    }
+
+    /// Every static of `campaign` the sidecar lists, by ID.
+    pub fn statics(&mut self, campaign: u64) -> Result<BTreeMap<u64, pb::Static>, String> {
+        let mut w = self.world.clone();
+        let filter = pb::WorldFilter {
+            campaign_id: campaign,
+            ..pb::WorldFilter::default()
+        };
+        self.rt.block_on(async move {
+            let mut s = w
+                .list_world(pb::ListWorldRequest {
+                    filter: Some(filter),
+                })
+                .await
+                .map_err(fail("ListWorld"))?
+                .into_inner();
+            let mut out = BTreeMap::new();
+            while let Some(page) = s.message().await.map_err(fail("ListWorld"))? {
+                for e in page.entities {
+                    if let Some(entity::Kind::Static(x)) = e.kind {
+                        out.insert(x.id, x);
+                    }
+                }
+            }
+            Ok(out)
+        })
+    }
+
     /// The groups of `campaign` with a unit within `radius` meters of a
     /// point: the interest query.
     pub fn query_area(
@@ -444,6 +515,34 @@ impl<'r> Api<'r> {
             .into_inner()
             .result
             .map_or(0, |r| r.outcome))
+    }
+
+    /// Clear debris in a box from `min` to `max`. Returns the outcome and
+    /// how many objects DCS and the handler removed.
+    pub fn clear_debris_box(
+        &mut self,
+        campaign: u64,
+        min: pb::Position,
+        max: pb::Position,
+    ) -> Result<(i32, Option<u64>), String> {
+        let req = pb::DoEffectRequest {
+            write: self.write(campaign, "clear-debris"),
+            effect: Some(pb::Effect {
+                effect: Some(pb::effect::Effect::ClearDebris(pb::ClearDebris {
+                    volume: Some(pb::clear_debris::Volume::Box(pb::Box {
+                        min: Some(min),
+                        max: Some(max),
+                    })),
+                })),
+            }),
+        };
+        let mut c = self.commands.clone();
+        let r = self
+            .rt
+            .block_on(c.do_effect(req))
+            .map_err(fail("DoEffect"))?
+            .into_inner();
+        Ok((r.result.map_or(0, |x| x.outcome), r.debris_removed))
     }
 
     /// The campaign's events after `after`, at most `limit`.
