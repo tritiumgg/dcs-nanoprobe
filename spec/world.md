@@ -449,7 +449,7 @@ bound does:
 
 | Call | On an entity DCS holds no object of |
 |---|---|
-| `DoEffect` with a unit or a group as its scope, a damage effect, `Capture` | Refused: `FAILED_PRECONDITION`, reason `EntityNotFound`. A group counts as bound when one of its units is |
+| `DoEffect` with a unit or a group as its scope, a damage effect, `Capture` | Refused: `FAILED_PRECONDITION`, reason `ENTITY_NOT_FOUND`. A group counts as bound when one of its units is |
 | An attack order whose target is not bound | Kept: the order is compiled and sent when the target binds |
 | Any other order or option of the group | Sent: the agent finds the group by its name |
 
