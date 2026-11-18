@@ -673,8 +673,9 @@ The sidecar adds `dx` to the anchor's `north` and `dy` to its `east`, on these f
   docs/results/2026-11-15-s18-persistence-live.md).
 - The API names DCS `x` `north` and DCS `z` `east` ("Positions and theaters").
 
-Where a unit made by this call stands on DCS is UNVERIFIED; the live part of
-docs/results/2026-11-18-spawn-template.md reads it back.
+A unit made by this call stood on DCS within 3 mm of the place the request and the
+file give, without a turn and with a quarter turn (LIVE, DCS 2.9.31.29434 dedicated
+server under Wine 10.0, docs/results/2026-11-18-spawn-template.md).
 
 The editor also saves a `payload` for a unit that has one, and its script names the
 group types `"plane"` and `"helicopter"` (ED-CODE); the `type` it saves for them is

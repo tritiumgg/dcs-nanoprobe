@@ -22,6 +22,16 @@ const TEMPLATE: &str = "np live one";
 /// The unit's offsets, meters. They differ, so a place tells them apart.
 const DX: f64 = 120.0;
 const DY: f64 = 50.0;
+/// The anchor, north of the hello campaigns' start: 50 m south and 120 m
+/// east of that start, where the turned unit would stand, is water (LIVE,
+/// `land.getSurfaceType`; docs/results/2026-11-18-spawn-template.md).
+const ANCHOR_NORTH_M: f64 = 200.0;
+
+/// The anchor both groups are made at.
+fn anchor() -> (f64, f64) {
+    let (north, east) = crate::sidecar::HELLO_POINTS[0];
+    (north + ANCHOR_NORTH_M, east)
+}
 /// How far a unit may be read from where the call placed it, meters. A
 /// ground unit spawns where its table says; this allows for the read's
 /// rounding only.
@@ -115,7 +125,7 @@ fn put(
 pub fn drive(run: &Run, endpoint: &str, token: &str, results: &mut Value) -> Result<(), String> {
     let mut api = Api::connect(endpoint, token)?;
     let generation = api.status()?.now.map_or(0, |n| n.mission_generation);
-    let (north, east) = crate::sidecar::HELLO_POINTS[0];
+    let (north, east) = anchor();
 
     println!("== template: a campaign on Caucasus");
     let c = api.create("template-live", &["Caucasus"], true)?;
@@ -327,7 +337,7 @@ mod tests {
         assert!(t.dropped.is_empty());
         // The places the verdict expects are the ones the call's own
         // conversion gives.
-        let (n, e) = crate::sidecar::HELLO_POINTS[0];
+        let (n, e) = anchor();
         for (heading, want) in [0.0, FRAC_PI_2].into_iter().zip(expected(n, e)) {
             let s = nanoprobe_api::group_template::spec(&t, &caucasus(n, e), heading, None, "")
                 .expect("spec");

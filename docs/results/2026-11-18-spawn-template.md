@@ -8,8 +8,8 @@ as data, and keeps the converted spec (spec/world.md, "Group templates").
 
 Read on 2026-11-18 in the install of a DCS dedicated server on Linux under Wine 10.0,
 with `ls`, `wc`, `grep`, `awk` and `head`; nothing was written and no file was copied.
-The server's build was 2.9.31.29434 when it was last read, on 2026-11-10 (PRIOR; not
-read again on the day). `templates.lua` is dated 19 September.
+The server's build is 2.9.31.29434 (`dcs_server.release`), read by the live part's run
+on the same day. `templates.lua` is dated 19 September.
 
 | Fact | Tag | Where |
 |---|---|---|
@@ -29,8 +29,7 @@ read again on the day). `templates.lua` is dated 19 September.
 So `dx` is on the mission's `x` and `dy` on its `y` (ED-CODE). The API names the
 world's `x` `north` and its `z` `east` (spec/world.md, "Positions and theaters"), so
 the sidecar adds `dx` to the anchor's `north` and `dy` to its `east`, and its turn is
-the editor's own. Where a unit made by the call stands on DCS is UNVERIFIED until the
-live part runs.
+the editor's own. Where a unit made by the call stands on DCS is LIVE, under "Live".
 
 The commands, run in the install's folder with `T=MissionEditor/data/scripts/templates.lua`
 and `M=MissionEditor/modules/me_template.lua`:
@@ -97,14 +96,42 @@ A refusal changes nothing. Its reason, field and message are in spec/errors.md.
 
 ## Live
 
-Not run. The live part is built: `cargo xtask sidecar <name> --part template` writes a
-one-unit template file into the listed folder, with `dx` 120 and `dy` 50, makes two
-groups from it at one anchor, the second turned a quarter turn, reads each unit back
-with `Unit.getByName`, and removes the groups and the file, also when a step fails.
-Its verdict is tested on the host: a unit at the place the axes exchanged would give,
-a `dy` dropped or of the wrong sign, and a turn to the left each fail it. It shows
-where the call puts a unit on DCS; the meaning of `dx` and `dy` comes from the editor's
-script above.
+`cargo xtask sidecar <name> --part template` (`crates/xtask/src/shell_live/template.rs`)
+on a DCS 2.9.31.29434 dedicated server (`dcs_server.release`) on Linux under Wine 10.0
+(`wine-10.0 (Debian 10.0~repack-6)`), agent build `d7945ecf8b1c2a72`, 2026-11-18. The
+sidecar ran in its own container beside DCS, as the hello part runs it.
+
+The run writes a one-unit template file into the listed folder, with `dx` 120, `dy` 50,
+the type `M-113`, country 2 and heading 0. It makes two groups from it at one anchor
+on Caucasus, north -289,800 and east 680,000, the second turned a quarter turn. It
+reads each unit from DCS by its platform name with `Unit.getByName` and `getPosition`,
+then removes the groups and the file, also when a step fails.
+
+| Group | Asked: north, east, heading | Read from DCS: north, east, heading |
+|---|---|---|
+| Heading 0 | -289,680, 680,050, 0 | -289,679.999999, 680,049.999999, 0.0 |
+| Heading π/2 | -289,850, 680,120, 1.5707963 | -289,849.999998, 680,119.999997, 1.5707964 |
+
+| Check | Result |
+|---|---|
+| Each unit within 1 m of its place | Yes: within 3 mm. `dx` went north and `dy` east; the quarter turn put north to the east and east to the south. Neither unit stood where exchanged axes would put it |
+| Type and country, from `getTypeName` and `getCountry` | `M-113`, 2, both |
+| Heading within 0.1 rad, recorded and not part of the verdict | Yes, both |
+| `land.getSurfaceType` at the two places, before the groups were made | 1 (land), both |
+| A path outside the listed folder, the sidecar's own `sidecar.toml` | Refused: `is not a file in a folder that [missions] template_dirs lists` |
+| The groups removed, the file removed | No unit of either name left; the file gone |
+| The sidecar's exit code after a stop | 0 |
+
+The verdict's rule is the place, the type and the country; its tolerances are this
+step's. It is tested on the host: a unit at the place the axes exchanged would give, a
+`dy` dropped or of the wrong sign, and a turn to the left each fail it. The run shows
+where the call puts a unit on DCS; what the editor means by `dx` and `dy` comes from
+its script, above.
+
+An earlier run the same day, with the anchor at the hello campaigns' start (north
+-290,000, east 680,000), stopped before it made a group: `land.getSurfaceType` gave 3
+(water) at the turned unit's place, north -290,050 and east 680,120 (LIVE). The anchor
+is 200 m north of that start for this reason.
 
 ## Runs
 
@@ -115,7 +142,9 @@ macOS (aarch64), the working tree of this commit, 2026-11-18.
 | `cargo test -p nanoprobe-api --lib -- group_template template_file` | 23 passed: the converter's 14, three of them property tests of 2,000 cases each, the service test, and the file read's 8. |
 | `cargo test -p nanoprobe-fake-sidecar --test api` | 11 passed. |
 | `cargo test -p xtask template` | 6 passed, 2 of them the live part's file and verdict. |
-| `buf lint`, `sh tools/protobreak.sh`, `cargo xtask proto --check` | Pass: the call and its two messages are additions. |
+| `mise run check` | Every step passes up to `tools/luatest.sh`: the Windows check of every crate, `cargo fmt`, both `cargo clippy` runs, `tools/tmpleak.sh` (the workspace tests: 1,268 passed, 0 failed, 6 ignored), the virtualization test and both hello examples. `tools/luatest.sh` fails in one scenario this change does not touch, with the machine at a load average of 26: `lua/tests/sampling.lua:262`, `k = 1: the mirror does not match the oracle`, `interval_off` `positions`, a median of 1.367 s between position rows against 0.999 s reported. |
+| `sh tools/luatest.sh`, run again alone | Passes. |
+| `buf lint`, `sh tools/protobreak.sh`, `sh tools/protobreak-test.sh`, `cargo xtask proto --check`, `sh tools/stage-schema-test.sh`, `sh tools/secretscan-test.sh` | The steps `mise run check` lists after `tools/luatest.sh`, run one by one: each passes. The call and its two messages are additions. |
 
 ## Tests
 
@@ -133,7 +162,6 @@ macOS (aarch64), the working tree of this commit, 2026-11-18.
 
 ## Open
 
-- The live part has not run on a server.
 - The reader has not run on a file from a DCS install: none may be copied into the
   repository. The tests' file is written in the shipped form.
 - A file saved by a user's editor has not been read. One in another form is refused.
