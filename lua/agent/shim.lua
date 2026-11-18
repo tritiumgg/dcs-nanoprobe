@@ -2022,7 +2022,8 @@ local HANDLERS = {
     T.cleared = T.cleared or {}
     pcall(world.searchObjects, Object.Category.STATIC, volume, function(s)
       -- A dead static's `isExist` reads false (LIVE); one that raises is
-      -- taken as no longer existing too.
+      -- taken as no longer existing too (UNVERIFIED in DCS). A static whose
+      -- name cannot be read stays.
       local got, life = pcall(s.getLife, s)
       local known, exists = pcall(s.isExist, s)
       local named, name = pcall(s.getName, s)

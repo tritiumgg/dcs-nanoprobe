@@ -634,10 +634,11 @@ number (0 jet fuel, 1 gasoline, 2 MW-50, 3 diesel) to an amount, set with
 On a limited warehouse each set reads back as set, for items and liquids (LIVE, E6,
 step S15). An unlimited warehouse ignores a set without an error (LIVE, E6), so `APPLIED`
 says only that DCS took the call. What it reads depends on the call (LIVE,
-docs/results/2026-11-17-person-fixes.md): `getItemCount` and `getLiquidAmount` read
-1,000,000 for every item and liquid of a kind the mission marks unlimited, while
-`getInventory`, which the sampler reads, lists no weapon or aircraft of an unlimited
-kind and each liquid of unlimited fuel at 100,000. An `addItem` on an unlimited warehouse
+docs/results/2026-11-17-person-fixes.md, on the 26 airports the template file marks
+unlimited): `getItemCount` of `weapons.bombs.Mk_82` and of `F-15C`, and
+`getLiquidAmount` of liquids 0 to 3, read 1,000,000, while `getInventory`, which the
+sampler reads, lists no weapon or aircraft of an unlimited kind and each liquid of
+unlimited fuel at 100,000. Other items are UNVERIFIED. An `addItem` on an unlimited warehouse
 adds an entry of its count to `getInventory` that a `removeItem` of the same count does
 not take away; `getItemCount` stays at 1,000,000. Whether a `setItem` does the same is
 UNVERIFIED. The reconciler then sees a sample that differs from the desired count; it
@@ -897,7 +898,8 @@ and unit values are UNVERIFIED.
 The handler calls `world.removeJunk` with a DCS volume of the code's shape. It then
 lists the statics in the same volume with `world.searchObjects` and collects each whose
 `getLife()` reads 0 or less and whose `isExist()` reads false, as a dead static's do
-(LIVE), or raises, and whose name does not start with `np#` (spec/world.md, "Names"). After the
+(LIVE), or raises (UNVERIFIED in DCS; host-tested), and whose name reads and does not
+start with `np#`; a static whose name cannot be read stays (spec/world.md, "Names"). After the
 search returns it calls `destroy` on each, under `pcall`: `world.removeJunk` leaves a
 destroyed static, and a client keeps showing its ruin until `Object.destroy` removes it
 (LIVE, docs/results/2026-11-16-person-tests-2.md). A destroy that raises is skipped and
@@ -969,8 +971,10 @@ What the setter does (LIVE, E16, step S15): at 50 % an aircraft, a helicopter an
 ground unit read back half their initial life. At 0 they leave DCS; only an airborne
 aircraft logged an event (`UNIT_LOST`, `EJECTION`). The one ship type tried, a
 speedboat, left DCS at 50 % and stayed at 80 %; a PERRY frigate read back 80 % and 50 %
-(LIVE, E39). The setter does nothing to a static, which is why `DAMAGE` takes only a
-unit. The sidecar also queues a `DAMAGE` right after a `GROUP_SPAWN` to give a unit
+(LIVE, E39). At 50 % the setter did nothing to a static (LIVE, E16), which is why
+`DAMAGE` takes only a unit. At 0 it killed a `BRDM-2` static on the server, and a
+connected client kept showing it alive (LIVE, docs/results/2026-11-17-person-fixes.md);
+what it does to a static at other settings and for other types is UNVERIFIED. The sidecar also queues a `DAMAGE` right after a `GROUP_SPAWN` to give a unit
 its stored life (spec/world.md, "Spawn state"); E39 found it applies in the spawn's
 frame while paused, and later with the simulation running; the running same-frame case
 is UNVERIFIED. On a dedicated server a setting of 10 killed a ground unit and the

@@ -6,11 +6,11 @@
 | Date | 2026-11-17 |
 | DCS | Server: 2.9.31.29434, branch `dcs_server.release`, dedicated server. Client: the same build, a client install, with the owner at the controls |
 | Platform | Server: Linux, Wine `wine-10.0 (Debian 10.0~repack-6)` in Docker. Client: Windows |
-| Builds | Branch: agent `9813a3d3bf40fc71`, built from `5126ca6`; its shim lacks the `isExist` guard of `16e3cac`. Main: agent `40cb4700d957857f` (`e05737d`) for the overhead A/B |
-| Scripts | `cargo xtask sampling <target> --part mirror` (A/B, run 1 main and run 2 branch). `NP_SHELL_PERSON=<stop> cargo xtask sidecar <target> --part shell --template tests/fixtures/templates/afghanistan.miz` (runs 3 and 4, the hold). `cargo xtask eval <target> server lua/experiments/warehouse/unlimited-read.lua` during run 4. The scripts in `lua/experiments/person-fixes/` during run 4, at the owner's request |
+| Builds | Branch: agent `9813a3d3bf40fc71`, built from `5126ca6`; its shim lacks the `isExist` guard of `16e3cac`. The xtask of run 3 is `5126ca6`'s; of run 4, `d1e7a8f`'s. Later commits changed the hold: `16e3cac` (spheres at ground height), and the commit after this document's first version (the box clear runs last, per-static errors recorded, the dead statics stated west). Main: agent `40cb4700d957857f` (`e05737d`) for the overhead A/B |
+| Scripts | `cargo xtask sampling <target> --part mirror` (A/B, run 1 main and run 2 branch). `NP_SHELL_PERSON=<stop> cargo xtask sidecar <target> --part shell --template tests/fixtures/templates/afghanistan.miz` (runs 3 and 4, the hold). `cargo xtask eval <target> server lua/experiments/warehouse/unlimited-read.lua` during run 4. The scripts in `lua/experiments/person-fixes/` after run 3 and during run 4, at the owner's request. The template's flags: `unzip -p tests/fixtures/templates/afghanistan.miz warehouses`, counting `unlimitedMunitions` and `unlimitedFuel` set true under `airports` |
 | Rehearsal | `lua/tests/warehouse_experiments.lua` (unlimited-read), `lua/tests/dispatch.lua` (`clear-debris`, `world`), the shell and sim-fake host tests. The `person-fixes/` scripts ran only live: they were written during the hold |
 | Raw results | Bundles `sampling-<target>-20261118T001245Z` (main), `...T002330Z` (branch), `sidecar-<target>-20261118T003402Z` (run 3), `...T004112Z` (run 4) |
-| Result | The shell offers dynamic spawn at the stocked airport and at the spawned FARP. An unlimited warehouse lists no item and 100,000 of each liquid in `getInventory`. A dead static nobody manages is cleared from clients by `Object.destroy`. Statics and aircraft added with `dead = true` show destroyed; a BRDM-2 does not. Overhead is unchanged |
+| Result | The shell offers dynamic spawn at the stocked airport and at the spawned FARP. An unlimited warehouse lists no item and 100,000 of each liquid in `getInventory`. A dead static nobody manages is cleared from clients by `Object.destroy`. Added with `dead = true`, a FARP Fuel Depot, a Shelter, a FARP Ammo Dump Coating, an F-15C and a UH-1H show destroyed; a Windsock shows intact and a BRDM-2 alive, then not at all after a rejoin. Overhead is unchanged |
 
 Every figure is LIVE on these builds unless tagged.
 
@@ -45,7 +45,8 @@ The hold made Herat (airport 1) blue with `SetAirbaseOwner`, stocked it with 4
 - The FARP's stock read 0 just after `SetWarehouseStock` and 4 AH-64D and 50,000 kg a
   little later, once the reconciler had sent it.
 - A spawned FARP is not in `coalition.getStaticObjects`; `world.getAirbases` lists its
-  airbase, and `StaticObject.getByName` finds its static, alive, with the airbase's ID.
+  airbase, and `StaticObject.getByName` finds its static, alive, with the airbase's ID
+  (run 3's FARP `np#eIQ1`, read after run 3 with `farp-find.lua` and `farp-static.lua`).
   Run 3 failed on the first point: the hold looked for the FARP among the statics.
 
 ## What an unlimited warehouse reads
@@ -61,8 +62,9 @@ The control on Herat (munitions unlimited): `addItem` of 5 Mk-82 made `getInvent
 5 while `getItemCount` stayed 1,000,000; `removeItem` of 5 left the listing at 5.
 
 The experiment's rule returned `inconclusive`: `env.mission.warehouses` is not readable
-in the server state, so it checked no flag. The spec text rests on the reads and on the
-template's own flags.
+in the server state, so it checked no flag. Which airports are unlimited comes from the
+template file (the Scripts row), not from DCS. Items other than the three tried are
+UNVERIFIED.
 
 ## Ruins and CLEAR_DEBRIS
 
@@ -72,7 +74,7 @@ template's own flags.
   `person-fixes/` and the fixed hold print it as read.
 - The hold's first clear failed: its 30 m sphere was at altitude 0, and Herat lies about
   900 m above sea level, so the sphere held nothing (`debris_removed` 0, cost 43 µs). The
-  hold now centers its spheres at the ground's height.
+  hold now centers its spheres at the ground's height; that version has not run live.
 - A 250 km box clear around the FARP took 161 µs and removed 8 objects. After it, the
   ruin and the five statics added dead were gone by name. The shim's static step takes
   each of the six as dead, and 8 fits six statics and two other junk objects; which call
@@ -83,8 +85,12 @@ template's own flags.
 
 ## Statics added dead
 
-Added with `coalition.addStaticObject`, `dead = true` and `hidden = false`, in a line east
-of the FARP. Each read life 0 and `isExist` false on the server. What the owner saw:
+Two sets, each added with `coalition.addStaticObject`, `dead = true` and `hidden = false`:
+the hold's `person-fixes dead *`, 300 to 600 m west of the FARP, which the 250 km box
+clear removed before the owner looked; and `dead-east.lua`'s `person-fixes east *`, 100 to
+260 m east, with the Shelter and the ammo dump at 650 and 750 m from `struct-dead.lua`
+and `ammo-dead.lua`. Each read life 0 and `isExist` false on the server. What the owner
+saw of the east set:
 
 | Type | First look | After leaving and rejoining | F10 |
 |---|---|---|---|
@@ -106,8 +112,9 @@ Three BRDM-2s, to see how the death reaches a client:
 | B | added alive (life 3), an explosion of power 100 | life 0, `isExist` false | dead, burning | dead, burning |
 | C | added alive, `a_unit_set_life_percentage(id, 0)` in the mission state | life 0, `isExist` false | alive | gone |
 
-So structures and aircraft can be restored as ruins with `dead = true`; the one ground
-vehicle tried cannot, and its death reaches a client only from an explosion. Whether
+So the structures with a destroyed model and the two aircraft types tried can be restored
+as ruins with `dead = true`. A Windsock stays intact, and the one ground vehicle tried
+cannot be restored this way: its death reaches a client only from an explosion. Whether
 every ground vehicle behaves as the BRDM-2 does, and whether a `category` in the table
 changes it, is UNVERIFIED. The setter killed static C, which spec/commands.md
 ("Layout: DAMAGE") records as doing nothing to a static (E16); E16's case was not
@@ -124,6 +131,9 @@ option `allow_server_screenshots` defaults to false. The server setting is in
 
 - Whether other ground vehicles, and ships, can be added dead and shown as wrecks; a
   `category` in the static table may matter.
+- Which structure types have no destroyed model, so that `dead = true` leaves them
+  intact, as it did the Windsock.
+- The hold's ground-height spheres and the shim's `isExist` guard have not run live.
 - E16 against the setter killing a static at 0.
 - The warehouse tier's added `StaticObject.getByName` and `isExist` for a FARP were not in
   the A/B; price them on a mission with FARPs.

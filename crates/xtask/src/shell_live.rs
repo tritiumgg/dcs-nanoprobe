@@ -425,7 +425,9 @@ fn person(
         println!("   dead statics: {e}");
         Vec::new()
     });
-    let start = run.eval("hook", "s19-person-start", &read, 60)?;
+    let start = run
+        .eval("hook", "s19-person-start", &read, 60)
+        .unwrap_or_else(|e| json!({ "error": e }));
     println!("   held: {start}");
     // A stop file left from an earlier hold would end this one at once.
     let stop = std::path::Path::new(stop);
@@ -457,8 +459,11 @@ fn person(
     }
     // An error in a step after the hold is recorded, so the hold's record
     // is written.
-    let dead =
-        dead_static_clear(run, api, c, &theater, dead).unwrap_or_else(|e| json!({ "error": e }));
+    let dead = dead_static_clear(run, api, c, &theater, dead);
+    // The box clear's cost runs last: it removes every dead static nobody
+    // manages, the ones above included.
+    let box_clear =
+        box_clear(run, api, c, &theater, &farp).unwrap_or_else(|e| json!({ "error": e }));
     let ended = if stop.exists() {
         "stop_file"
     } else {
@@ -481,24 +486,25 @@ fn person(
         "stock": stocks,
         "ruin": ruin,
         "dead_statics": dead,
+        "box_clear": box_clear,
     });
     println!("== HELD ({ended}); the verdict is the person's, recorded by hand");
     Ok(())
 }
 
 /// The statics `dead_static` adds with `dead = true`: name, type, and the
-/// offset east of the FARP in metres.
+/// distance west of the FARP in meters.
 /// The types: a structure with a destroyed shape, a vehicle, a ship (on
 /// land here), an aircraft, a helicopter, and a structure that may have no
 /// destroyed shape (UNVERIFIED for the windsock). 60 m apart, so each
 /// clear's 30 m sphere holds one.
 const DEAD_STATICS: [(&str, &str, f64); 6] = [
-    ("person-fixes dead depot", "FARP Fuel Depot", -300.0),
-    ("person-fixes dead brdm", "BRDM-2", -360.0),
-    ("person-fixes dead boat", "speedboat", -420.0),
-    ("person-fixes dead f15", "F-15C", -480.0),
-    ("person-fixes dead huey", "UH-1H", -540.0),
-    ("person-fixes dead sock", "Windsock", -600.0),
+    ("person-fixes dead depot", "FARP Fuel Depot", 300.0),
+    ("person-fixes dead brdm", "BRDM-2", 360.0),
+    ("person-fixes dead boat", "speedboat", 420.0),
+    ("person-fixes dead f15", "F-15C", 480.0),
+    ("person-fixes dead huey", "UH-1H", 540.0),
+    ("person-fixes dead sock", "Windsock", 600.0),
 ];
 
 /// A read of a static by name at `x`, `z`: found by name, `isExist`,
@@ -509,12 +515,12 @@ fn static_read(name: &str, x: f64, z: f64) -> String {
     )
 }
 
-/// Statics added by script near the FARP with `dead = true`, for the
+/// Statics added by script west of the FARP with `dead = true`, for the
 /// owner's question whether a static added dead shows its destroyed model on
 /// a client and reads as dead, for a structure and for a vehicle type.
-/// Records what the server state reads of each. What a client shows is
-/// recorded by hand.
-/// Returns each static's name, point and read.
+/// Records what the server state reads of each; a step that fails is
+/// recorded in that static's value. What a client shows is recorded by hand.
+/// Returns each static's name, point and record.
 fn dead_static(run: &Run, farp: &str) -> Result<Vec<(String, f64, f64, Value)>, String> {
     let at = run.eval(
         "server",
@@ -529,8 +535,8 @@ fn dead_static(run: &Run, farp: &str) -> Result<Vec<(String, f64, f64, Value)>, 
         at["z"].as_f64().ok_or("no FARP point")?,
     );
     let mut out = Vec::new();
-    for (name, kind, east) in DEAD_STATICS {
-        let (x, z) = (fx, fz + east);
+    for (name, kind, west) in DEAD_STATICS {
+        let (x, z) = (fx, fz - west);
         let added = run.eval(
             "server",
             "s19-person-dead-add",
@@ -538,74 +544,88 @@ fn dead_static(run: &Run, farp: &str) -> Result<Vec<(String, f64, f64, Value)>, 
                 "local ok, s = pcall(coalition.addStaticObject, country.id.USA, {{ name = {name:?}, type = {kind:?}, x = {x}, y = {z}, heading = 0, dead = true, hidden = false }})\nreturn {{ ok = ok and s ~= nil, error = not ok and tostring(s) or nil }}\n"
             ),
             60,
-        )?;
+        );
         let read = run.eval(
             "server",
             "s19-person-dead-read",
             &static_read(name, x, z),
             60,
-        )?;
-        let v = json!({ "type": kind, "added": added, "read": read });
-        println!("   dead {kind} ({name}, {} m east of the FARP): {v}", east);
+        );
+        let v = json!({
+            "type": kind,
+            "west_m": west,
+            "added": added.unwrap_or_else(|e| json!({ "error": e })),
+            "read": read.unwrap_or_else(|e| json!({ "error": e })),
+        });
+        println!("   dead {kind} ({name}, {west} m west of the FARP): {v}");
         out.push((name.to_string(), x, z, v));
     }
     Ok(out)
 }
 
-/// After the hold: a `ClearDebris` 30 m sphere over each static
-/// `dead_static` added, the reads after it, then a destroy of whatever is
-/// left, so the mission is as before.
+/// After the hold: a `ClearDebris` 30 m sphere at the ground over each
+/// static `dead_static` added, the read after it, then a destroy by name of
+/// every static in `DEAD_STATICS`, so the mission is as before. A step that
+/// fails is recorded in that static's value, and the rest still run.
 fn dead_static_clear(
     run: &Run,
     api: &mut Api,
     campaign: u64,
     theater: &str,
     added: Vec<(String, f64, f64, Value)>,
-) -> Result<Value, String> {
+) -> Value {
     let mut out = Vec::new();
     for (name, x, z, mut v) in added {
-        let req = pb::DoEffectRequest {
-            write: api.write("clear-dead", campaign),
-            effect: Some(pb::Effect {
-                effect: Some(pb::effect::Effect::ClearDebris(pb::ClearDebris {
-                    volume: Some(pb::clear_debris::Volume::Sphere(pb::Sphere {
-                        center: Some(pb::Position {
-                            theater: theater.to_string(),
-                            north: x,
-                            east: z,
-                            alt: ground(run, x, z)?,
-                        }),
-                        radius: 30.0,
+        let cleared = (|| -> Result<Value, String> {
+            let req = pb::DoEffectRequest {
+                write: api.write("clear-dead", campaign),
+                effect: Some(pb::Effect {
+                    effect: Some(pb::effect::Effect::ClearDebris(pb::ClearDebris {
+                        volume: Some(pb::clear_debris::Volume::Sphere(pb::Sphere {
+                            center: Some(pb::Position {
+                                theater: theater.to_string(),
+                                north: x,
+                                east: z,
+                                alt: ground(run, x, z)?,
+                            }),
+                            radius: 30.0,
+                        })),
                     })),
-                })),
-            }),
-        };
-        let r = api
-            .rt
-            .block_on(api.commands.do_effect(req))
-            .map_err(status_text("DoEffect"))?
-            .into_inner();
-        let after = run.eval(
-            "server",
-            "s19-person-dead-after",
-            &static_read(&name, x, z),
-            60,
-        )?;
-        let removed = run.eval(
+                }),
+            };
+            let r = api
+                .rt
+                .block_on(api.commands.do_effect(req))
+                .map_err(status_text("DoEffect"))?
+                .into_inner();
+            let after = run.eval(
+                "server",
+                "s19-person-dead-after",
+                &static_read(&name, x, z),
+                60,
+            )?;
+            Ok(json!({
+                "outcome": r.result.as_ref().map(|c| c.outcome),
+                "removed": r.debris_removed,
+                "after": after,
+            }))
+        })();
+        v["clear"] = cleared.unwrap_or_else(|e| json!({ "error": e }));
+        out.push(v);
+    }
+    let names: Vec<&str> = DEAD_STATICS.iter().map(|d| d.0).collect();
+    let removed = run
+        .eval(
             "server",
             "s19-person-dead-remove",
             &format!(
-                "local s = StaticObject.getByName({name:?}) if s then pcall(s.destroy, s) end\nreturn StaticObject.getByName({name:?}) == nil\n"
+                "local left = {{}}\nfor _, n in ipairs({{ {} }}) do local s = StaticObject.getByName(n) if s then pcall(s.destroy, s) end if StaticObject.getByName(n) then left[#left + 1] = n end end\nreturn left\n",
+                names.iter().map(|n| format!("{n:?}")).collect::<Vec<_>>().join(", ")
             ),
             60,
-        )?;
-        v["clear_outcome"] = json!(r.result.as_ref().map(|c| c.outcome));
-        v["clear_removed"] = json!(r.debris_removed);
-        v["after_clear"] = after;
-        v["removed_at_end"] = removed;
-        out.push(v);
-    }
-    Ok(Value::Array(out))
+        )
+        .unwrap_or_else(|e| json!({ "error": e }));
+    json!({ "statics": out, "left_after_destroy": removed })
 }
 
 /// The aircraft the hold stocks: `NP_SHELL_AIRCRAFT`, a comma-separated
@@ -734,7 +754,61 @@ fn owned_and_stocked(
     Ok(farp)
 }
 
-/// The ground's height in metres above sea level at `x`, `z`: a sphere's
+/// The cost of one 250 km `ClearDebris` box, as a whole-map clear sends,
+/// centered on the FARP: the static search runs over every static in it.
+fn box_clear(
+    run: &Run,
+    api: &mut Api,
+    campaign: u64,
+    theater: &str,
+    farp: &str,
+) -> Result<Value, String> {
+    let at = run.eval(
+        "server",
+        "s19-person-box-at",
+        &format!(
+            "local p = Airbase.getByName({farp:?}):getPoint() return {{ x = p.x, z = p.z }}\n"
+        ),
+        60,
+    )?;
+    let (x, z) = (
+        at["x"].as_f64().ok_or("no FARP point")?,
+        at["z"].as_f64().ok_or("no FARP point")?,
+    );
+    let req = pb::DoEffectRequest {
+        write: api.write("clear-box", campaign),
+        effect: Some(pb::Effect {
+            effect: Some(pb::effect::Effect::ClearDebris(pb::ClearDebris {
+                volume: Some(pb::clear_debris::Volume::Box(pb::Box {
+                    min: Some(pb::Position {
+                        theater: theater.to_string(),
+                        north: x - 125_000.0,
+                        east: z - 125_000.0,
+                        alt: -10_000.0,
+                    }),
+                    max: Some(pb::Position {
+                        theater: theater.to_string(),
+                        north: x + 125_000.0,
+                        east: z + 125_000.0,
+                        alt: 100_000.0,
+                    }),
+                })),
+            })),
+        }),
+    };
+    let b = api
+        .rt
+        .block_on(api.commands.do_effect(req))
+        .map_err(status_text("DoEffect box"))?
+        .into_inner();
+    Ok(json!({
+        "outcome": b.result.as_ref().map(|c| c.outcome),
+        "cost_us": b.result.as_ref().map(|c| c.cost_us),
+        "removed": b.debris_removed,
+    }))
+}
+
+/// The ground's height in meters above sea level at `x`, `z`: a sphere's
 /// `alt` is above sea level, so one centered at 0 sits under high ground.
 fn ground(run: &Run, x: f64, z: f64) -> Result<f64, String> {
     run.eval(
@@ -832,34 +906,6 @@ fn ruin_check(
     let after = run.eval("server", "s19-person-ruin-after", &read, 60)?;
     let _ = run.hold(5.0);
     let later = run.eval("server", "s19-person-ruin-later", &read, 60)?;
-    // The cost of one 250 km box, as a whole-map clear sends, centered on
-    // the FARP: the static search runs over every static in it.
-    let req = pb::DoEffectRequest {
-        write: api.write("clear-box", campaign),
-        effect: Some(pb::Effect {
-            effect: Some(pb::effect::Effect::ClearDebris(pb::ClearDebris {
-                volume: Some(pb::clear_debris::Volume::Box(pb::Box {
-                    min: Some(pb::Position {
-                        theater: theater.to_string(),
-                        north: x - 125_000.0,
-                        east: z - 125_000.0,
-                        alt: -10_000.0,
-                    }),
-                    max: Some(pb::Position {
-                        theater: theater.to_string(),
-                        north: x + 125_000.0,
-                        east: z + 125_000.0,
-                        alt: 100_000.0,
-                    }),
-                })),
-            })),
-        }),
-    };
-    let b = api
-        .rt
-        .block_on(api.commands.do_effect(req))
-        .map_err(status_text("DoEffect box"))?
-        .into_inner();
     let v = json!({
         "static": name,
         "players": players,
@@ -870,9 +916,6 @@ fn ruin_check(
         "debris_removed": r.debris_removed,
         "after": after,
         "after_5s": later,
-        "box_outcome": b.result.as_ref().map(|c| c.outcome),
-        "box_cost_us": b.result.as_ref().map(|c| c.cost_us),
-        "box_removed": b.debris_removed,
     });
     // The server-side verdict: the clear applied, found the dead static
     // before it, counted at least one removal, and the static is gone from

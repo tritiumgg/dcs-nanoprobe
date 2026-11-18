@@ -1,4 +1,4 @@
--- Person-fixes live run 4 (docs/results/2026-11-17-person-fixes.md): The platform statics and airbases named np#: a spawned FARP is an airbase and is not in coalition.getStaticObjects.
+-- Person-fixes, after live run 3 failed (docs/results/2026-11-17-person-fixes.md): The platform statics and airbases named np#: a spawned FARP is an airbase and is not in coalition.getStaticObjects.
 -- states: server
 local out = { mission = env.mission and env.mission.theatre, statics = {}, bases = {} }
 for side = 0, 2 do
