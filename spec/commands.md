@@ -522,8 +522,11 @@ the command: their time is in its `cost_us` and counts as commanded work, not as
 agent's overhead. The later `S_EVENT_BIRTH` of a unit the handler added costs the births
 tier one `wants` check and writes nothing.
 
-That the units can be read inside the handler, right after `coalition.addGroup`
-returns, is UNVERIFIED. A late-activated group's units are UNVERIFIED.
+The units can be read inside the handler, right after `coalition.addGroup` returns
+(LIVE, docs/results/2026-11-17-bind-lag.md: each of 2,740 one-unit ground groups had its
+`OBJECT` ahead of its spawn's `RESULT`, DCS 2.9.31.29434 dedicated server under Wine
+10.0, 2026-11-18). A group of several units, an aircraft or a ship read there, and a
+late-activated group's units, are UNVERIFIED.
 
 ### Layout: GROUP_ORDER
 
