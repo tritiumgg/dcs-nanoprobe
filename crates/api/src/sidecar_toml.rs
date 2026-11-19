@@ -322,12 +322,21 @@ mod tests {
         let text = std::fs::read_to_string(root.join("deploy/sidecar.toml")).expect("read");
         let d = dir_with_token();
         let token = d.path().join("token");
+        // A literal string: a Windows path's backslashes are escapes in a
+        // basic one.
         let text = text
-            .replace("/etc/nanoprobe/agent-token", token.to_str().expect("utf-8"))
+            .replace(
+                "\"/etc/nanoprobe/agent-token\"",
+                &format!("'{}'", token.to_str().expect("utf-8")),
+            )
             .replace("<Windows path of the DCS profile>", "Z:\\p");
         let t = SidecarToml::parse(&text, d.path()).expect("parse");
         assert_eq!(t.api.listen, "127.0.0.1:47311".parse().unwrap());
-        assert_eq!(t.missions.dir, Some(PathBuf::from("/missions")));
+        // `/missions` on Unix; on Windows it has no drive, is relative, and
+        // takes the base's drive.
+        #[expect(clippy::join_absolute_paths, reason = "the parser joins it so")]
+        let missions = d.path().join("/missions");
+        assert_eq!(t.missions.dir, Some(missions));
     }
 
     fn dir_with_token() -> tempfile::TempDir {
