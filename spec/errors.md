@@ -184,15 +184,27 @@ matches decides:
 | 1 | The file is ready, its lifecycle state is `DISABLED`, and a TCP connect to the handshake port is not refused | `disabled` |
 | 2 | The heartbeat advanced within `heartbeat_stale_s` | `healthy` |
 | 3 | The lifecycle state is `LOADING` and the heartbeat advanced within `loading_limit_s` | `healthy` |
-| 4 | A TCP connect to the handshake port is refused | `gone` |
-| 5 | Otherwise | `hung` |
+| 4 | No connect to the handshake port tried in this stall has finished, and no session is attached | the verdict before; `gone` before the sidecar's first verdict |
+| 5 | A TCP connect to the handshake port is refused | `gone` |
+| 6 | Otherwise | `hung` |
 
-- A connect to the handshake port that gets no answer before the probe's timeout counts
-  as not refused.
+- A stall begins when the sidecar reads a heartbeat that advanced, or finds a session
+  attached, and lasts until the next such read. Rows 1 and 4 to 6 use only the
+  connects tried in the current stall.
+- A connect finishes when it is refused, accepted, or reaches the probe's timeout. One
+  that reaches the timeout counts as not refused. A try whose connect was never made
+  is no connect; the sidecar tries again a second later and logs repeated failures.
+- The probe's timeout is 100 ms on Unix and 5 s on Windows (`REFUSAL_WAIT` in the
+  sidecar), whatever `handshake_timeout_s` says. Windows reports a refusal only after
+  about 2 s (PRIOR).
+- The verdict can read `healthy` while the heartbeat's age is past
+  `heartbeat_stale_s`, until a connect of the new stall finishes. Operators act on the
+  verdict, not on the heartbeat's age.
 - `heartbeat_stale_s` applies in every lifecycle state but `LOADING`. No frame runs
   during a load, so the heartbeat stands still and the agent answers no handshake;
   only `loading_limit_s` bounds a load.
-- Being attached is not part of the verdict. A DCS whose heartbeat advances is
+- Being attached decides no verdict of its own; it only keeps row 4 from holding the
+  verdict before. A DCS whose heartbeat advances is
   `healthy` even when the sidecar cannot attach to it. The status reports that apart:
   whether the sidecar is attached, and why the last attach failed: one of the agent's
   reasons (`version`, `token`, `disabled`, `no_file`) or one of the sidecar's own

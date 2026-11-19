@@ -63,27 +63,40 @@ const PROBE_EVERY: Duration = Duration::from_secs(1);
 /// How long [`RealSim::watch`] waits for a try of the handshake port it
 /// started. A try that takes longer runs on, on its own thread, and a later
 /// call reads its result, so the driver's step never waits longer than this.
+/// On Unix it is [`PROBE_TIMEOUT`] and 50 ms for the thread to start and
+/// send its result, so a try that times out settles in the call that starts
+/// it, and the verdict does not hold for a second on a hung agent. That
+/// costs the driver's step at most 150 ms, once a second, while the agent
+/// does not answer. On Windows a refused try outlasts any wait the step can
+/// afford, so the step waits 100 ms and a later call reads the result.
+#[cfg(not(windows))]
+const PROBE_WAIT: Duration = Duration::from_millis(150);
+#[cfg(windows)]
 const PROBE_WAIT: Duration = Duration::from_millis(100);
 /// How long one try of the handshake port waits for an answer before it
 /// counts as not refused: a hung agent's full accept queue drops the
-/// connect, and that is no refusal. On Unix, loopback refuses a closed port
-/// at once, so 100 ms is ample. Windows answers a closed port's reset by
-/// sending the connect again, and reports it refused only after about 2 s
-/// (PRIOR: widely reported Windows behavior, not measured by this project);
-/// [`link::REFUSAL_WAIT`] is over that.
+/// connect, and that is no refusal. On Unix, loopback refuses or accepts a
+/// connect inside the connect call, so 100 ms is ample. Windows answers a
+/// closed port's reset by sending the connect again, and reports it refused
+/// only after about 2 s (PRIOR: widely reported Windows behavior, not
+/// measured by this project); [`link::REFUSAL_WAIT`] is over that.
+/// It does not depend on `handshake_timeout_s` (spec/errors.md, "Health").
 #[cfg(not(windows))]
 const PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 #[cfg(windows)]
 const PROBE_TIMEOUT: Duration = link::REFUSAL_WAIT;
+/// How often repeated tries whose connect was never made are logged.
+const PROBE_FAILED_LOG_EVERY: Duration = Duration::from_secs(60);
 
 /// The health verdict (spec/errors.md, "Health").
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Verdict {
     /// The heartbeat advances.
     Healthy,
     /// The heartbeat stands still and something listens.
     Hung,
-    /// Nothing listens.
+    /// Nothing listens. The sidecar's first verdict.
+    #[default]
     Gone,
     /// The kill switch holds the agent.
     Disabled,
@@ -177,6 +190,12 @@ struct Watch {
     refused: Option<bool>,
     /// Whether a session was attached at the last read.
     attached: bool,
+    /// The verdict of the last read; `Gone` before the first.
+    verdict: Verdict,
+    /// Tries whose connect was never made, since the last one logged.
+    probe_failures: u64,
+    /// When a try whose connect was never made was last logged.
+    probe_failure_logged_at: Option<Instant>,
 }
 
 /// The adapter over the real link. Dropping it stops the link thread.
@@ -343,38 +362,27 @@ impl RealSim {
         let needs_probe = !w.attached
             && (u64::from(w.lifecycle) == lc::DISABLED || !beat_within(w, now, &self.limits));
         // One try at a time: a try that outlasts PROBE_WAIT is read by a
-        // later call. Until a try of this stall finishes, the verdict has no
-        // result to read.
+        // later call. A try whose connect was never made is tried again at
+        // the next PROBE_EVERY.
         if w.probe.is_some() {
             settle_probe(w, Duration::ZERO);
         } else if needs_probe && w.probe_at.is_none_or(|t| now - t >= PROBE_EVERY) {
             w.probe_at = Some(now);
             match start_probe(self.cfg.handshake) {
-                Some(rx) => {
+                Ok(rx) => {
                     w.probe = Some((w.stall, rx));
                     settle_probe(w, PROBE_WAIT);
                 }
-                None => w.refused = Some(false),
+                Err(e) => probe_not_made(w, &format!("no thread: {e}")),
             }
         }
+        w.verdict = decide(w, now, &self.limits);
     }
 
-    /// The verdict from what [`RealSim::watch`] read last. Until a try of
-    /// the handshake port finishes in this stall, the verdict is the one
-    /// before any try: neither `Disabled` nor `Hung` by a probe, so `Gone`.
+    /// The verdict [`RealSim::watch`] decided at its last read
+    /// (spec/errors.md, "Health"); `Gone` before the first.
     pub fn verdict(&self) -> Verdict {
-        let w = &self.watch;
-        let now = Instant::now();
-        if u64::from(w.lifecycle) == lc::DISABLED && w.refused == Some(false) {
-            return Verdict::Disabled;
-        }
-        if beat_within(w, now, &self.limits) {
-            return Verdict::Healthy;
-        }
-        if w.attached || w.refused == Some(false) {
-            return Verdict::Hung;
-        }
-        Verdict::Gone
+        self.watch.verdict
     }
 
     /// The time since the agent's heartbeat last advanced; `None` before one
@@ -416,22 +424,41 @@ fn beat_within(w: &Watch, now: Instant, limits: &Limits) -> bool {
     w.beat_at.is_some_and(|t| now - t < limit)
 }
 
+/// The verdict (spec/errors.md, "Health"), from what [`RealSim::watch`] read
+/// and the tries of the handshake port that finished in this stall.
+fn decide(w: &Watch, now: Instant, limits: &Limits) -> Verdict {
+    if u64::from(w.lifecycle) == lc::DISABLED && w.refused == Some(false) {
+        return Verdict::Disabled;
+    }
+    if beat_within(w, now, limits) {
+        return Verdict::Healthy;
+    }
+    // No try of this stall has finished and no session is attached: the
+    // verdict before stands.
+    if !w.attached && w.refused.is_none() {
+        return w.verdict;
+    }
+    if w.refused == Some(true) {
+        return Verdict::Gone;
+    }
+    Verdict::Hung
+}
+
 /// Try the handshake port on a thread of its own, which sends whether the
-/// connect was refused; `None` when the thread does not start.
-fn start_probe(addr: SocketAddr) -> Option<Receiver<bool>> {
+/// connect was refused.
+fn start_probe(addr: SocketAddr) -> std::io::Result<Receiver<bool>> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::Builder::new()
         .name("nanoprobe-probe".into())
         .spawn(move || {
             let _ = tx.send(refused(addr));
-        })
-        .ok()?;
-    Some(rx)
+        })?;
+    Ok(rx)
 }
 
 /// Take the result of the try in flight, waiting up to `wait` for it. A try
-/// whose thread ended without a result counts as not refused. A result of a
-/// stall that has ended is dropped.
+/// whose thread ended without a result made no connect, and gives no
+/// result. A result of a stall that has ended is dropped.
 fn settle_probe(w: &mut Watch, wait: Duration) {
     let Some((stall, rx)) = &w.probe else {
         return;
@@ -443,15 +470,33 @@ fn settle_probe(w: &mut Watch, wait: Duration) {
         rx.recv_timeout(wait)
             .map_err(|e| matches!(e, RecvTimeoutError::Disconnected))
     };
-    let refused = match got {
-        Ok(refused) => refused,
-        Err(true) => false,
+    match got {
+        Ok(refused) => {
+            if *stall == w.stall {
+                w.refused = Some(refused);
+            }
+        }
+        Err(true) => probe_not_made(w, "the thread ended without a result"),
         Err(false) => return,
-    };
-    if *stall == w.stall {
-        w.refused = Some(refused);
     }
     w.probe = None;
+}
+
+/// A try whose connect was never made: no result. The first is logged, then
+/// at most one line with the count every [`PROBE_FAILED_LOG_EVERY`].
+fn probe_not_made(w: &mut Watch, why: &str) {
+    let now = Instant::now();
+    w.probe_failures += 1;
+    if w.probe_failure_logged_at
+        .is_none_or(|t| now - t >= PROBE_FAILED_LOG_EVERY)
+    {
+        eprintln!(
+            "nanoprobe: {} tries of the handshake port for the health verdict made no connect; the last: {why}",
+            w.probe_failures
+        );
+        w.probe_failures = 0;
+        w.probe_failure_logged_at = Some(now);
+    }
 }
 
 /// Whether a connect to `addr` is refused. A connect that is accepted is
@@ -706,17 +751,27 @@ mod tests {
         settle(sim);
     }
 
-    /// Wait for the try of the handshake port in flight to end. On Windows
-    /// a refused try takes about 2 s.
+    /// Watch until the try of the handshake port in flight has ended and
+    /// the verdict is decided with its result. On Windows a refused try
+    /// takes about 2 s.
     fn settle(sim: &mut RealSim) {
         let deadline = Instant::now() + PROBE_TIMEOUT + Duration::from_secs(5);
         while sim.watch.probe.is_some() && Instant::now() < deadline {
-            settle_probe(&mut sim.watch, Duration::from_millis(50));
+            std::thread::sleep(Duration::from_millis(10));
+            sim.watch.read_at = None;
+            sim.watch();
         }
         assert!(
             sim.watch.probe.is_none(),
             "the try of the handshake port ended"
         );
+    }
+
+    /// Read the status block now, past the 100 ms read interval. It starts
+    /// no try within a second of the last.
+    fn read_now(sim: &mut RealSim) {
+        sim.watch.read_at = None;
+        sim.watch();
     }
 
     #[test]
@@ -787,26 +842,136 @@ mod tests {
             assert_eq!(sim.watch.refused, Some(false), "something listens");
             // The heartbeat advances: that stall's result goes with it.
             m.store(s::FRAME, 1, std::sync::atomic::Ordering::Release);
-            sim.watch.read_at = None;
-            sim.watch();
+            read_now(&mut sim);
             assert_eq!(sim.watch.refused, None);
+            assert_eq!(sim.verdict(), Verdict::Healthy);
             // The agent dies: the heartbeat goes stale, nothing listens, and
             // the new stall's try has not answered yet.
             std::thread::sleep(Duration::from_millis(350));
             drop(listener);
             let (tx, rx) = std::sync::mpsc::channel();
             sim.watch.probe = Some((sim.watch.stall, rx));
-            sim.watch.read_at = None;
-            sim.watch();
+            read_now(&mut sim);
             assert!(sim.watch.probe.is_some(), "the try is still in flight");
             let v = sim.verdict();
             assert_ne!(v, Verdict::Hung, "lifecycle {lifecycle}");
             assert_ne!(v, Verdict::Disabled, "lifecycle {lifecycle}");
             tx.send(true).expect("send");
-            sim.watch.read_at = None;
-            sim.watch();
+            read_now(&mut sim);
             assert_eq!(sim.verdict(), Verdict::Gone, "lifecycle {lifecycle}");
         }
+    }
+
+    #[test]
+    fn the_verdict_holds_while_the_try_is_undecided() {
+        // A dead agent, whose try is refused, and a hung one, whose try is
+        // not.
+        for listening in [false, true] {
+            let dir = tempfile::tempdir().expect("dir");
+            let path = dir.path().join("a.map");
+            let m = status_file(&path, lc::RUNNING);
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            let mut sim = sim_for(&path, listener.local_addr().expect("addr"), 300);
+            watch_now(&mut sim);
+            m.store(s::FRAME, 1, std::sync::atomic::Ordering::Release);
+            read_now(&mut sim);
+            assert_eq!(sim.verdict(), Verdict::Healthy);
+            std::thread::sleep(Duration::from_millis(350));
+            let (tx, rx) = std::sync::mpsc::channel();
+            sim.watch.probe = Some((sim.watch.stall, rx));
+            for _ in 0..3 {
+                read_now(&mut sim);
+                assert_eq!(
+                    sim.verdict(),
+                    Verdict::Healthy,
+                    "stale, the try undecided: the verdict holds (listening {listening})"
+                );
+            }
+            tx.send(!listening).expect("send");
+            read_now(&mut sim);
+            let decided = if listening {
+                Verdict::Hung
+            } else {
+                Verdict::Gone
+            };
+            assert_eq!(sim.verdict(), decided, "listening {listening}");
+            drop(listener);
+        }
+    }
+
+    #[test]
+    fn the_first_verdict_is_gone_until_a_try_answers() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("a.map");
+        let _m = status_file(&path, lc::RUNNING);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let mut sim = sim_for(&path, listener.local_addr().expect("addr"), 300);
+        assert_eq!(sim.verdict(), Verdict::Gone, "before the first read");
+        let (tx, rx) = std::sync::mpsc::channel();
+        sim.watch.probe = Some((sim.watch.stall, rx));
+        sim.watch();
+        assert_eq!(sim.verdict(), Verdict::Gone, "the try is undecided");
+        tx.send(false).expect("send");
+        read_now(&mut sim);
+        assert_eq!(sim.verdict(), Verdict::Hung, "something listens");
+    }
+
+    #[test]
+    fn a_try_settles_within_its_timeout_and_the_wait() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("a.map");
+        let _m = status_file(&path, lc::RUNNING);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let mut sim = sim_for(&path, listener.local_addr().expect("addr"), 300);
+        // An accepted try, then a refused one. Neither times out here: a
+        // connect that gets no answer needs a full accept queue, which no
+        // portable test makes.
+        for (listening, decided) in [(true, Verdict::Hung), (false, Verdict::Gone)] {
+            if !listening {
+                // A port bound and closed again: nothing listens there.
+                sim.cfg.handshake = std::net::TcpListener::bind("127.0.0.1:0")
+                    .and_then(|l| l.local_addr())
+                    .expect("a closed port");
+            }
+            let started = Instant::now();
+            watch_now(&mut sim);
+            let took = started.elapsed();
+            assert!(
+                took < PROBE_TIMEOUT + PROBE_WAIT + Duration::from_millis(100),
+                "settled in {took:?} (listening {listening})"
+            );
+            assert_eq!(sim.verdict(), decided, "listening {listening}");
+        }
+        drop(listener);
+    }
+
+    #[test]
+    fn an_attach_ends_the_stall_and_drops_its_try() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("a.map");
+        let m = status_file(&path, lc::RUNNING);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let mut sim = sim_for(&path, listener.local_addr().expect("addr"), 300);
+        watch_now(&mut sim);
+        m.store(s::FRAME, 1, std::sync::atomic::Ordering::Release);
+        read_now(&mut sim);
+        assert_eq!(sim.verdict(), Verdict::Healthy);
+        let (tx, rx) = std::sync::mpsc::channel();
+        sim.watch.probe = Some((sim.watch.stall, rx));
+        lock(&sim.shared.0).attached = true;
+        read_now(&mut sim);
+        lock(&sim.shared.0).attached = false;
+        std::thread::sleep(Duration::from_millis(350));
+        tx.send(false).expect("send");
+        read_now(&mut sim);
+        assert!(sim.watch.probe.is_none(), "the try ended");
+        assert_eq!(sim.watch.refused, None, "its result was dropped");
+        assert_eq!(
+            sim.verdict(),
+            Verdict::Healthy,
+            "not hung by a try of the stall before the attach"
+        );
+        drop(listener);
     }
 
     #[test]
