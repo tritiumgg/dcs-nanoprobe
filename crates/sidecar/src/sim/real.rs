@@ -39,6 +39,7 @@ use std::collections::{HashMap, VecDeque};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -59,8 +60,21 @@ const STATUS_EVERY: Duration = Duration::from_millis(100);
 /// How often the handshake port is tried for the verdict, when the verdict
 /// needs it.
 const PROBE_EVERY: Duration = Duration::from_secs(1);
-/// How long one try of the handshake port waits.
+/// How long [`RealSim::watch`] waits for a try of the handshake port it
+/// started. A try that takes longer runs on, on its own thread, and a later
+/// call reads its result, so the driver's step never waits longer than this.
+const PROBE_WAIT: Duration = Duration::from_millis(100);
+/// How long one try of the handshake port waits for an answer before it
+/// counts as not refused: a hung agent's full accept queue drops the
+/// connect, and that is no refusal. On Unix, loopback refuses a closed port
+/// at once, so 100 ms is ample. Windows answers a closed port's reset by
+/// sending the connect again, and reports it refused only after about 2 s
+/// (PRIOR: widely reported Windows behavior, not measured by this project);
+/// [`link::REFUSAL_WAIT`] is over that.
+#[cfg(not(windows))]
 const PROBE_TIMEOUT: Duration = Duration::from_millis(100);
+#[cfg(windows)]
+const PROBE_TIMEOUT: Duration = link::REFUSAL_WAIT;
 
 /// The health verdict (spec/errors.md, "Health").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -148,8 +162,12 @@ struct Watch {
     flags: u32,
     in_capacity: u64,
     periods: Option<[f64; 4]>,
+    /// When the last try of the handshake port started.
     probe_at: Option<Instant>,
-    /// Whether the last connect to the handshake port was refused.
+    /// The try of the handshake port in flight: it sends whether the
+    /// connect was refused.
+    probe: Option<Receiver<bool>>,
+    /// Whether the last finished connect to the handshake port was refused.
     refused: bool,
     /// Whether a session was attached at the last read.
     attached: bool,
@@ -310,9 +328,17 @@ impl RealSim {
         w.attached = lock(&self.shared.0).attached;
         let needs_probe = !w.attached
             && (u64::from(w.lifecycle) == lc::DISABLED || !beat_within(w, now, &self.limits));
-        if needs_probe && w.probe_at.is_none_or(|t| now - t >= PROBE_EVERY) {
+        // One try at a time: a try that outlasts PROBE_WAIT is read by a
+        // later call, and the verdict keeps the last result until then.
+        if w.probe.is_some() {
+            settle_probe(w, Duration::ZERO);
+        } else if needs_probe && w.probe_at.is_none_or(|t| now - t >= PROBE_EVERY) {
             w.probe_at = Some(now);
-            w.refused = refused(self.cfg.handshake);
+            w.probe = start_probe(self.cfg.handshake);
+            if w.probe.is_none() {
+                w.refused = false;
+            }
+            settle_probe(w, PROBE_WAIT);
         }
     }
 
@@ -372,6 +398,40 @@ fn beat_within(w: &Watch, now: Instant, limits: &Limits) -> bool {
         limits.heartbeat_stale
     };
     w.beat_at.is_some_and(|t| now - t < limit)
+}
+
+/// Try the handshake port on a thread of its own, which sends whether the
+/// connect was refused; `None` when the thread does not start.
+fn start_probe(addr: SocketAddr) -> Option<Receiver<bool>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("nanoprobe-probe".into())
+        .spawn(move || {
+            let _ = tx.send(refused(addr));
+        })
+        .ok()?;
+    Some(rx)
+}
+
+/// Take the result of the try in flight, waiting up to `wait` for it. A try
+/// whose thread ended without a result counts as not refused.
+fn settle_probe(w: &mut Watch, wait: Duration) {
+    let Some(rx) = &w.probe else {
+        return;
+    };
+    let got = if wait.is_zero() {
+        rx.try_recv()
+            .map_err(|e| matches!(e, TryRecvError::Disconnected))
+    } else {
+        rx.recv_timeout(wait)
+            .map_err(|e| matches!(e, RecvTimeoutError::Disconnected))
+    };
+    match got {
+        Ok(refused) => w.refused = refused,
+        Err(true) => w.refused = false,
+        Err(false) => return,
+    }
+    w.probe = None;
 }
 
 /// Whether a connect to `addr` is refused. A connect that is accepted is
@@ -617,11 +677,26 @@ mod tests {
         )
     }
 
-    /// Read the status block now, past the 100 ms read interval.
+    /// Read the status block now, past the 100 ms read interval, and wait
+    /// for the try of the handshake port it starts.
     fn watch_now(sim: &mut RealSim) {
         sim.watch.read_at = None;
         sim.watch.probe_at = None;
         sim.watch();
+        settle(sim);
+    }
+
+    /// Wait for the try of the handshake port in flight to end. On Windows
+    /// a refused try takes about 2 s.
+    fn settle(sim: &mut RealSim) {
+        let deadline = Instant::now() + PROBE_TIMEOUT + Duration::from_secs(5);
+        while sim.watch.probe.is_some() && Instant::now() < deadline {
+            settle_probe(&mut sim.watch, Duration::from_millis(50));
+        }
+        assert!(
+            sim.watch.probe.is_none(),
+            "the try of the handshake port ended"
+        );
     }
 
     #[test]
@@ -644,6 +719,36 @@ mod tests {
         drop(listener);
         watch_now(&mut sim);
         assert_eq!(sim.verdict(), Verdict::Gone, "stale, and nothing listens");
+    }
+
+    #[test]
+    fn a_slow_try_of_the_port_does_not_hold_the_watch_and_lands_later() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("a.map");
+        let _m = status_file(&path, lc::RUNNING);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let mut sim = sim_for(&path, listener.local_addr().expect("addr"), 300);
+        watch_now(&mut sim);
+        assert_eq!(sim.verdict(), Verdict::Hung);
+        // A try still waiting for its answer, as a refused one does on
+        // Windows.
+        let (tx, rx) = std::sync::mpsc::channel();
+        sim.watch.probe = Some(rx);
+        sim.watch.read_at = None;
+        sim.watch.probe_at = Some(Instant::now() - PROBE_EVERY);
+        let started = Instant::now();
+        sim.watch();
+        assert!(started.elapsed() < PROBE_WAIT, "the watch did not wait");
+        assert!(
+            sim.watch.probe.is_some(),
+            "no second try while one is in flight"
+        );
+        assert_eq!(sim.verdict(), Verdict::Hung, "the last result stands");
+        tx.send(true).expect("send");
+        sim.watch.read_at = None;
+        sim.watch();
+        assert!(sim.watch.probe.is_none());
+        assert_eq!(sim.verdict(), Verdict::Gone);
     }
 
     #[test]
@@ -844,6 +949,7 @@ mod tests {
             Limits::default(),
         );
         sim.watch();
+        settle(&mut sim);
         assert_eq!(sim.verdict(), Verdict::Gone);
         assert_eq!(sim.heartbeat_age(), None);
         assert!(sim.send(1, &[]).is_err());

@@ -21,6 +21,24 @@ use nanoprobe_transport::records::{Frame, Hello};
 use nanoprobe_transport::ring::{Consumer, Producer, Ring};
 use nanoprobe_transport::status::{self, Geometry, Snapshot};
 
+/// How long a connect to the handshake port must be allowed to run on
+/// Windows to learn that it is refused. Windows answers a closed port's reset
+/// by sending the connect again, and reports it refused only after about 2 s
+/// (PRIOR: widely reported Windows behavior, not measured by this project).
+/// A shorter wait ends as a timeout, which is no refusal, so a dead agent
+/// would never count as gone. 5 s leaves room for a loaded machine.
+pub const REFUSAL_WAIT: Duration = Duration::from_secs(5);
+
+/// How long one connect to the handshake port waits, for a handshake
+/// timeout of `timeout`: on Windows at least [`REFUSAL_WAIT`].
+fn connect_wait(timeout: Duration) -> Duration {
+    if cfg!(windows) {
+        timeout.max(REFUSAL_WAIT)
+    } else {
+        timeout
+    }
+}
+
 /// How the sidecar reaches the agent.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -184,14 +202,16 @@ fn now_ms() -> u64 {
 impl Session<'_> {
     fn run(&mut self, sink: &mut impl Sink, stop: &AtomicBool, last_boot: &mut Option<u64>) -> End {
         let retry = |why: String| End::Retry(why);
-        let mut stream =
-            match TcpStream::connect_timeout(&self.cfg.handshake, self.cfg.handshake_timeout) {
-                Ok(s) => s,
-                Err(e) => {
-                    self.refused = e.kind() == ErrorKind::ConnectionRefused;
-                    return retry(format!("connect {}: {e}", self.cfg.handshake));
-                }
-            };
+        let mut stream = match TcpStream::connect_timeout(
+            &self.cfg.handshake,
+            connect_wait(self.cfg.handshake_timeout),
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                self.refused = e.kind() == ErrorKind::ConnectionRefused;
+                return retry(format!("connect {}: {e}", self.cfg.handshake));
+            }
+        };
         let (agent_boot, attach_id) = match self.handshake(&mut stream, stop) {
             Ok(v) => v,
             Err(end) => return end,
