@@ -1433,9 +1433,18 @@ pub struct PositionBatch {
     #[prost(message, optional, tag = "6")]
     pub sampled: ::core::option::Option<Stamp>,
 }
+/// A group or static the watcher held was removed. It follows the upsert of
+/// the entity's last state.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Removal {
+    #[prost(uint64, tag = "1")]
+    pub id: u64,
+    #[prost(enumeration = "RemovalCause", tag = "2")]
+    pub cause: i32,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct WorldChange {
-    #[prost(oneof = "world_change::Change", tags = "1, 2, 3")]
+    #[prost(oneof = "world_change::Change", tags = "1, 2, 3, 4")]
     pub change: ::core::option::Option<world_change::Change>,
 }
 /// Nested message and enum types in `WorldChange`.
@@ -1445,11 +1454,14 @@ pub mod world_change {
         /// An entity appeared or changed anything but a position.
         #[prost(message, tag = "1")]
         Upsert(super::Entity),
-        /// An entity left the store.
+        /// An entity the watcher held left the store (its rows were purged)
+        /// before the watch read its removal.
         #[prost(uint64, tag = "2")]
         RemovedId(u64),
         #[prost(message, tag = "3")]
         Positions(super::PositionBatch),
+        #[prost(message, tag = "4")]
+        Removal(super::Removal),
     }
 }
 /// A watch that names campaign 0 follows the campaign active when it starts
@@ -1619,6 +1631,38 @@ impl UnitLeft {
             "UNIT_LEFT_UNSPECIFIED" => Some(Self::Unspecified),
             "UNIT_LEFT_MISSING" => Some(Self::Missing),
             "UNIT_LEFT_REMOVED" => Some(Self::Removed),
+            _ => None,
+        }
+    }
+}
+/// Who removed an entity (spec/world.md, "Removal" and "Expiry").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum RemovalCause {
+    Unspecified = 0,
+    /// The controller, with RemoveEntity.
+    Controller = 1,
+    /// The sidecar: a dead group past dead_keep_h.
+    Expired = 2,
+}
+impl RemovalCause {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "REMOVAL_CAUSE_UNSPECIFIED",
+            Self::Controller => "REMOVAL_CAUSE_CONTROLLER",
+            Self::Expired => "REMOVAL_CAUSE_EXPIRED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "REMOVAL_CAUSE_UNSPECIFIED" => Some(Self::Unspecified),
+            "REMOVAL_CAUSE_CONTROLLER" => Some(Self::Controller),
+            "REMOVAL_CAUSE_EXPIRED" => Some(Self::Expired),
             _ => None,
         }
     }
@@ -3056,6 +3100,89 @@ pub struct ServerStatus {
     /// backups are refused. Not part of health.
     #[prost(bool, tag = "19")]
     pub store_space_low: bool,
+    /// How big the active campaign's store is; unset with no active campaign.
+    #[prost(message, optional, tag = "20")]
+    pub store_size: ::core::option::Option<StoreSize>,
+    /// When the last scheduled backup that succeeded was taken, since the
+    /// sidecar started; unset for none.
+    #[prost(message, optional, tag = "21")]
+    pub last_backup: ::core::option::Option<::prost_types::Timestamp>,
+    /// When the last scheduled backup that failed, or was skipped for low free
+    /// space, was due, since the sidecar started; unset for none. A failed
+    /// backup is taken again at the next interval. Not part of health: a
+    /// watchdog must not restart DCS for it.
+    #[prost(message, optional, tag = "22")]
+    pub last_backup_failure: ::core::option::Option<::prost_types::Timestamp>,
+    /// Why that backup failed or was skipped, naming the store, with SQLite's
+    /// extended result code when SQLite failed; empty for none.
+    #[prost(string, tag = "23")]
+    pub backup_error: ::prost::alloc::string::String,
+}
+/// What the active campaign's store holds and how fast it is bounded
+/// (spec/persistence.md, "Size"). The counters count since the campaign's
+/// store was opened: its activation, or the sidecar's start with it active;
+/// with the store off, since the campaign was made.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StoreSize {
+    /// Groups and statics held that are neither dead nor removed.
+    #[prost(uint64, tag = "1")]
+    pub groups_live: u64,
+    /// Dead groups, not statics, not removed: they expire after `dead_keep_h`.
+    #[prost(uint64, tag = "2")]
+    pub groups_dead: u64,
+    /// Dead statics, not removed.
+    #[prost(uint64, tag = "3")]
+    pub ruins: u64,
+    /// Removed groups and statics whose rows are still kept.
+    #[prost(uint64, tag = "4")]
+    pub awaiting_purge: u64,
+    /// Unit rows held.
+    #[prost(uint64, tag = "5")]
+    pub units: u64,
+    /// The removal time of the oldest entity awaiting purge; unset for none.
+    #[prost(message, optional, tag = "6")]
+    pub oldest_removal: ::core::option::Option<::prost_types::Timestamp>,
+    /// Journal rows held.
+    #[prost(uint64, tag = "7")]
+    pub journal_rows: u64,
+    /// The time of the oldest journal entry; unset for none.
+    #[prost(message, optional, tag = "8")]
+    pub oldest_journal_entry: ::core::option::Option<::prost_types::Timestamp>,
+    /// Event rows held.
+    #[prost(uint64, tag = "9")]
+    pub event_rows: u64,
+    /// The time of the oldest event; unset for none.
+    #[prost(message, optional, tag = "10")]
+    pub oldest_event: ::core::option::Option<::prost_types::Timestamp>,
+    /// Size of store.sqlite and its WAL; 0 with the store off.
+    #[prost(uint64, tag = "11")]
+    pub store_file_bytes: u64,
+    /// Size of events.sqlite and its WAL; 0 with the store off.
+    #[prost(uint64, tag = "12")]
+    pub events_file_bytes: u64,
+    /// Removed entities purged.
+    #[prost(uint64, tag = "13")]
+    pub purged: u64,
+    /// Dead groups expired.
+    #[prost(uint64, tag = "14")]
+    pub expired: u64,
+    /// Late deaths dropped because their unit was purged.
+    #[prost(uint64, tag = "15")]
+    pub purged_deaths: u64,
+    /// Drift destroys sent for objects named for entities the store does not
+    /// hold.
+    #[prost(uint64, tag = "16")]
+    pub orphan_destroys: u64,
+    /// The groups in the reconciler's work set: those the plan has something to
+    /// do for. The plan also visits every group with an object bound.
+    #[prost(uint64, tag = "17")]
+    pub work_set: u64,
+    /// The bytes of the journal's entries kept, as journal_max_mb counts them.
+    #[prost(uint64, tag = "18")]
+    pub journal_bytes: u64,
+    /// The bytes of the events kept, as events_max_mb counts them.
+    #[prost(uint64, tag = "19")]
+    pub event_bytes: u64,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetServerStatusRequest {}

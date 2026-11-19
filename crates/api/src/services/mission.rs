@@ -58,6 +58,17 @@ impl MissionService for Mission {
                 agent_interface: g.link.agent_interface,
                 store_free_bytes: space.map(|(free, _)| free),
                 store_space_low: space.is_some_and(|(free, held)| free < held),
+                store_size: g.store_size(),
+                last_backup: g.last_backup_ms.map(crate::hub::timestamp_ms),
+                last_backup_failure: g
+                    .backup_failure
+                    .as_ref()
+                    .map(|(at, _)| crate::hub::timestamp_ms(*at)),
+                backup_error: g
+                    .backup_failure
+                    .as_ref()
+                    .map(|(_, why)| why.clone())
+                    .unwrap_or_default(),
                 ..ServerStatus::default()
             }),
         }))

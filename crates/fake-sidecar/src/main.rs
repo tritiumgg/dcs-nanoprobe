@@ -10,7 +10,9 @@ use nanoprobe_sim_fake::FakeSim;
 const USAGE: &str = "\
 Usage: nanoprobe-fake-sidecar [--listen ADDR] [--tokens PATH] [--frame-ms MS]
                               [--store DIR] [--theater NAME]
-                              [--leak-kib-per-s N] [--run PROGRAM [ARGS...]]
+                              [--leak-kib-per-s N] [--removed-keep-s S]
+                              [--dead-keep-s S] [--backup-interval-s S]
+                              [--run PROGRAM [ARGS...]]
 
 Serve the nanoprobe API over a fake DCS, for development and tests.
 
@@ -25,6 +27,11 @@ Serve the nanoprobe API over a fake DCS, for development and tests.
 --leak-kib-per-s N
                 Leak N KiB of memory each second, for a test that a drift
                 check catches a leak (`cargo xtask soak rehearse`).
+--removed-keep-s S, --dead-keep-s S, --backup-interval-s S
+                `removed_keep_h`, `dead_keep_h` and `backup_interval_h`
+                (spec/config.md) in seconds, so a rehearsal of minutes
+                sees the purge, the expiry and scheduled backups. The
+                backup interval needs --store.
 --run PROGRAM   Run PROGRAM with NANOPROBE_ADDR set to the server's URL, then
                 stop and exit with its exit code. Without it, serve until
                 Ctrl-C.
@@ -46,6 +53,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
     let mut run = Vec::new();
     let mut theater = None;
     let mut leak_kib_per_s = 0;
+    let mut backup_interval = None;
     let mut i = 0;
     while i < args.len() {
         let value = |i: usize| {
@@ -84,6 +92,18 @@ fn parse(args: &[String]) -> Result<Args, String> {
                     .map_err(|e| format!("--leak-kib-per-s: {e}"))?;
                 i += 2;
             }
+            // Seconds where sidecar.toml has hours, so a rehearsal of
+            // minutes sees the purge, the expiry and scheduled backups.
+            "--removed-keep-s" | "--dead-keep-s" | "--backup-interval-s" => {
+                let s: u64 = value(i)?.parse().map_err(|e| format!("{}: {e}", args[i]))?;
+                let d = Duration::from_secs(s);
+                match args[i].as_str() {
+                    "--removed-keep-s" => cfg.removed_keep = d,
+                    "--dead-keep-s" => cfg.dead_keep = d,
+                    _ => backup_interval = Some(d),
+                }
+                i += 2;
+            }
             "--run" => {
                 run = args[i + 1..].to_vec();
                 if run.is_empty() {
@@ -94,6 +114,12 @@ fn parse(args: &[String]) -> Result<Args, String> {
             "-h" | "--help" => return Err(String::new()),
             other => return Err(format!("unknown argument `{other}`")),
         }
+    }
+    if let Some(d) = backup_interval {
+        let Some(store) = cfg.store.as_mut() else {
+            return Err("--backup-interval-s needs --store".into());
+        };
+        store.backup_interval = d;
     }
     Ok(Args {
         cfg,
@@ -203,4 +229,39 @@ async fn main() -> ExitCode {
         return ExitCode::from(1);
     }
     code
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(a: &[&str]) -> Result<Args, String> {
+        parse(&a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn the_keep_windows_and_the_backup_interval_are_set_in_seconds() {
+        let a = args(&[
+            "--store",
+            "d",
+            "--removed-keep-s",
+            "0",
+            "--dead-keep-s",
+            "7",
+            "--backup-interval-s",
+            "5",
+        ])
+        .expect("args");
+        assert_eq!(a.cfg.removed_keep, Duration::ZERO);
+        assert_eq!(a.cfg.dead_keep, Duration::from_secs(7));
+        assert_eq!(
+            a.cfg.store.expect("store").backup_interval,
+            Duration::from_secs(5)
+        );
+        assert!(
+            args(&["--backup-interval-s", "5"]).is_err(),
+            "needs --store"
+        );
+        assert!(args(&["--dead-keep-s", "x"]).is_err());
+    }
 }

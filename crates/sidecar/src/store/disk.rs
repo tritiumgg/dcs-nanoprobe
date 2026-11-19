@@ -20,8 +20,8 @@ use nanoprobe_transport::records::Rates;
 
 use super::{
     Authority, CapturedMore, DesiredOwner, DesiredStock, Entry, Extension, Group, IdemRow,
-    Journalled, Kind, LeftAs, Loaded, LostPolicy, Outcome, OwedLoad, Point, RouteEvent, Store,
-    Unit, UnitState, check_lv,
+    Journalled, Kind, LeftAs, Loaded, LostPolicy, Outcome, OwedLoad, Point, RemoveCause,
+    RouteEvent, Store, Unit, UnitState, check_lv,
 };
 use crate::ids::{CampaignId, EntityId};
 use crate::intents::{Intent, Waypoint};
@@ -78,9 +78,124 @@ pub enum DiskError {
     TooLarge(String),
 }
 
+/// The name of SQLite's result code `code`, primary or extended, for a log
+/// line that names its cause (`SQLITE_IOERR_GETTEMPPATH` where the message
+/// says only "disk I/O error").
+pub fn sqlite_code_name(code: i32) -> Option<&'static str> {
+    use rusqlite::ffi;
+    macro_rules! names {
+        ($($n:ident),* $(,)?) => {
+            $(if code == ffi::$n { return Some(stringify!($n)); })*
+        };
+    }
+    names!(
+        SQLITE_ERROR,
+        SQLITE_INTERNAL,
+        SQLITE_PERM,
+        SQLITE_ABORT,
+        SQLITE_BUSY,
+        SQLITE_LOCKED,
+        SQLITE_NOMEM,
+        SQLITE_READONLY,
+        SQLITE_INTERRUPT,
+        SQLITE_IOERR,
+        SQLITE_CORRUPT,
+        SQLITE_NOTFOUND,
+        SQLITE_FULL,
+        SQLITE_CANTOPEN,
+        SQLITE_PROTOCOL,
+        SQLITE_EMPTY,
+        SQLITE_SCHEMA,
+        SQLITE_TOOBIG,
+        SQLITE_CONSTRAINT,
+        SQLITE_MISMATCH,
+        SQLITE_MISUSE,
+        SQLITE_NOLFS,
+        SQLITE_AUTH,
+        SQLITE_FORMAT,
+        SQLITE_RANGE,
+        SQLITE_NOTADB,
+        SQLITE_ERROR_MISSING_COLLSEQ,
+        SQLITE_ERROR_RETRY,
+        SQLITE_ERROR_SNAPSHOT,
+        SQLITE_IOERR_READ,
+        SQLITE_IOERR_SHORT_READ,
+        SQLITE_IOERR_WRITE,
+        SQLITE_IOERR_FSYNC,
+        SQLITE_IOERR_DIR_FSYNC,
+        SQLITE_IOERR_TRUNCATE,
+        SQLITE_IOERR_FSTAT,
+        SQLITE_IOERR_UNLOCK,
+        SQLITE_IOERR_RDLOCK,
+        SQLITE_IOERR_DELETE,
+        SQLITE_IOERR_BLOCKED,
+        SQLITE_IOERR_NOMEM,
+        SQLITE_IOERR_ACCESS,
+        SQLITE_IOERR_CHECKRESERVEDLOCK,
+        SQLITE_IOERR_LOCK,
+        SQLITE_IOERR_CLOSE,
+        SQLITE_IOERR_DIR_CLOSE,
+        SQLITE_IOERR_SHMOPEN,
+        SQLITE_IOERR_SHMSIZE,
+        SQLITE_IOERR_SHMLOCK,
+        SQLITE_IOERR_SHMMAP,
+        SQLITE_IOERR_SEEK,
+        SQLITE_IOERR_DELETE_NOENT,
+        SQLITE_IOERR_MMAP,
+        SQLITE_IOERR_GETTEMPPATH,
+        SQLITE_IOERR_CONVPATH,
+        SQLITE_IOERR_VNODE,
+        SQLITE_IOERR_AUTH,
+        SQLITE_IOERR_BEGIN_ATOMIC,
+        SQLITE_IOERR_COMMIT_ATOMIC,
+        SQLITE_IOERR_ROLLBACK_ATOMIC,
+        SQLITE_IOERR_DATA,
+        SQLITE_IOERR_CORRUPTFS,
+        SQLITE_IOERR_IN_PAGE,
+        SQLITE_LOCKED_SHAREDCACHE,
+        SQLITE_LOCKED_VTAB,
+        SQLITE_BUSY_RECOVERY,
+        SQLITE_BUSY_SNAPSHOT,
+        SQLITE_BUSY_TIMEOUT,
+        SQLITE_CANTOPEN_NOTEMPDIR,
+        SQLITE_CANTOPEN_ISDIR,
+        SQLITE_CANTOPEN_FULLPATH,
+        SQLITE_CANTOPEN_CONVPATH,
+        SQLITE_CANTOPEN_DIRTYWAL,
+        SQLITE_CANTOPEN_SYMLINK,
+        SQLITE_CORRUPT_VTAB,
+        SQLITE_CORRUPT_SEQUENCE,
+        SQLITE_CORRUPT_INDEX,
+        SQLITE_READONLY_RECOVERY,
+        SQLITE_READONLY_CANTLOCK,
+        SQLITE_READONLY_ROLLBACK,
+        SQLITE_READONLY_DBMOVED,
+        SQLITE_READONLY_CANTINIT,
+        SQLITE_READONLY_DIRECTORY,
+        SQLITE_ABORT_ROLLBACK,
+        SQLITE_CONSTRAINT_CHECK,
+        SQLITE_CONSTRAINT_COMMITHOOK,
+        SQLITE_CONSTRAINT_FOREIGNKEY,
+        SQLITE_CONSTRAINT_FUNCTION,
+        SQLITE_CONSTRAINT_NOTNULL,
+        SQLITE_CONSTRAINT_PRIMARYKEY,
+        SQLITE_CONSTRAINT_TRIGGER,
+        SQLITE_CONSTRAINT_UNIQUE,
+        SQLITE_CONSTRAINT_VTAB,
+        SQLITE_CONSTRAINT_ROWID,
+        SQLITE_CONSTRAINT_PINNED,
+        SQLITE_CONSTRAINT_DATATYPE,
+    );
+    None
+}
+
 impl fmt::Display for DiskError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            DiskError::Sql(e @ rusqlite::Error::SqliteFailure(c, _)) => {
+                let name = sqlite_code_name(c.extended_code).unwrap_or("unnamed");
+                write!(f, "store: {e} ({name}, code {})", c.extended_code)
+            }
             DiskError::Sql(e) => write!(f, "store: {e}"),
             DiskError::Corrupt(m) => write!(f, "store: a row does not decode: {m}"),
             DiskError::Newer { found, known } => write!(
@@ -195,6 +310,11 @@ pub struct Disk {
     journal_written: usize,
     /// The last journal row's `seq`.
     journal_seq: u64,
+    /// The bytes of the bodies of the journal rows in the file, as
+    /// `meta.journal_bytes` holds them.
+    journal_bytes: u64,
+    /// `meta.journal_bytes` is missing from the file: the next write adds it.
+    journal_bytes_unwritten: bool,
     world: Vec<u8>,
     /// The model time of the samples last written, by a checkpoint.
     sample_time: f64,
@@ -580,6 +700,9 @@ impl Store {
         changes_keep: usize,
     ) -> Result<Store, DiskError> {
         let mut store = Store::new(campaign, changes_keep);
+        // A store linked to a file holds only the entries it has not
+        // written. `Store::new` keeps them all, for a store in memory.
+        store.keep_journal = false;
         store.save_as(path, record)?;
         Ok(store)
     }
@@ -587,7 +710,11 @@ impl Store {
     /// Write this store, as it is, to a new store file at `path` and keep it
     /// linked. A store already on disk is unlinked from its old file. The
     /// file is made under a temporary name in one transaction, flushed and
-    /// renamed into place, so a crash leaves no file or a whole one.
+    /// renamed into place, so a crash leaves no file or a whole one. It keeps
+    /// the store's `keep_journal` setting: a store from [`Store::new`] still
+    /// holds every entry, for the tests that read them; a campaign's store is
+    /// made with [`Store::create_on_disk`], which holds only what it has not
+    /// written.
     pub fn save_as(&mut self, path: &Path, record: CampaignRecord) -> Result<(), DiskError> {
         if path.exists() {
             return Err(DiskError::Exists(path.to_owned()));
@@ -608,6 +735,8 @@ impl Store {
             floors: BTreeMap::new(),
             journal_written: 0,
             journal_seq: 0,
+            journal_bytes: 0,
+            journal_bytes_unwritten: true,
             world: Vec::new(),
             sample_time: 0.0,
             record,
@@ -678,9 +807,13 @@ impl Store {
     }
 
     /// Write every change since the last write to the file, in one
-    /// transaction. Nothing to do for a store in memory.
+    /// transaction. A store in memory writes nothing and forgets its marks.
     pub fn commit(&mut self) -> Result<(), DiskError> {
         let Some(mut d) = self.disk.0.take() else {
+            // Nothing compares the marks of a store with no file.
+            self.since_checkpoint.clear();
+            self.checkpoint_all = false;
+            self.drain_journal();
             return Ok(());
         };
         let r = d.write(self);
@@ -703,6 +836,12 @@ impl Store {
         }
         if let Some(d) = self.disk.0.as_mut() {
             self.journal.drain(..d.journal_written);
+            let gone: u64 = self
+                .journal_at
+                .drain(..d.journal_written)
+                .map(|a| a.1)
+                .sum();
+            self.journal_mem_bytes -= gone;
             d.journal_written = 0;
         }
     }
@@ -718,6 +857,9 @@ impl Store {
         let model_time = self.sample_time;
         let mission_gen = self.loaded.as_ref().map_or(0, |l| l.mission_gen);
         let Some(mut d) = self.disk.0.take() else {
+            self.since_checkpoint.clear();
+            self.checkpoint_all = false;
+            self.drain_journal();
             return Ok(Checkpoint {
                 seq: 0,
                 at_ms,
@@ -753,6 +895,8 @@ impl Store {
         })();
         self.disk.0 = Some(d);
         if r.is_ok() {
+            self.since_checkpoint.clear();
+            self.checkpoint_all = false;
             self.drain_journal();
         }
         r
@@ -803,6 +947,8 @@ impl Store {
         }
         self.disk.0 = Some(d);
         r.map(|()| {
+            self.since_checkpoint.clear();
+            self.checkpoint_all = false;
             self.drain_journal();
             c
         })
@@ -879,26 +1025,60 @@ impl Store {
         )?)
     }
 
-    /// Delete the oldest journal entries that are older than `retention_ms`,
-    /// at most `max_rows` of them (spec/persistence.md, "Journal
-    /// retention"). The cutoff is the earlier of `now_ms` and the newest
+    /// The journal's body bytes the file holds, from the running count.
+    pub(super) fn disk_journal_bytes(&self) -> u64 {
+        self.disk.0.as_ref().map_or(0, |d| d.journal_bytes)
+    }
+
+    /// The journal rows written to the file and the time of the oldest.
+    /// The journal is contiguous, so the rows are the span of `seq`.
+    pub(super) fn disk_journal_extent(&self) -> (u64, Option<u64>) {
+        let Some(d) = self.disk.0.as_ref() else {
+            return (0, None);
+        };
+        let first: Option<(i64, i64)> = d
+            .conn
+            .query_row(
+                "SELECT seq, at_ms FROM journal ORDER BY seq LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .ok()
+            .flatten();
+        let Some((min, at)) = first else {
+            return (0, None);
+        };
+        let max = i64::try_from(d.journal_seq).unwrap_or(i64::MAX);
+        let rows = u64::try_from(max - min + 1).unwrap_or(0);
+        (rows, u64::try_from(at).ok())
+    }
+
+    /// Delete the oldest journal entries, at most `max_rows` of them
+    /// (spec/persistence.md, "Journal retention"): those older than
+    /// `retention_ms`, and while the bytes of the bodies kept are over
+    /// `max_bytes`. The time cutoff is the earlier of `now_ms` and the newest
     /// entry's `at_ms`, less the retention. The delete takes a prefix in
-    /// `seq` order: it ends at the first entry inside the retention, even if
-    /// later entries are older. The newest entry is always kept, so `seq`
-    /// goes on from it after a reopen. Nothing is deleted when the clock is
-    /// behind the newest entry, when the retention or `max_rows` is 0, or in
-    /// a store in memory. No other table is touched, and entries not yet
-    /// written are not affected.
+    /// `seq` order ([`crate::retention::cut`]): the time rule ends at the
+    /// first entry inside the retention, even if later entries are older;
+    /// the size rule goes on past it. The newest entry is always kept, so
+    /// `seq` goes on from it after a reopen. A retention of 0 turns the time
+    /// rule off and a `max_bytes` of 0 turns the size rule off; with both
+    /// off, with `max_rows` 0, or in a store in memory nothing is deleted.
+    /// When the clock is behind the newest entry the time rule is skipped
+    /// and the size rule applies. No other table is touched, and entries not
+    /// yet written are not affected.
     pub fn prune_journal(
         &mut self,
         retention_ms: u64,
         now_ms: u64,
         max_rows: usize,
+        max_bytes: u64,
     ) -> Result<JournalPrune, DiskError> {
-        let Some(d) = self.disk.0.as_ref() else {
+        let Some(d) = self.disk.0.as_mut() else {
             return Ok(JournalPrune::Kept);
         };
-        if retention_ms == 0 || max_rows == 0 {
+        if (retention_ms == 0 && max_bytes == 0) || max_rows == 0 {
             return Ok(JournalPrune::Kept);
         }
         let newest: Option<(i64, i64)> = d
@@ -913,40 +1093,61 @@ impl Store {
             return Ok(JournalPrune::Kept);
         };
         let newest_ms = u64::try_from(newest_ms).unwrap_or(0);
-        if now_ms < newest_ms {
-            return Ok(JournalPrune::ClockBehind { now_ms, newest_ms });
+        let behind = retention_ms != 0 && now_ms < newest_ms;
+        let cutoff = (retention_ms != 0 && !behind)
+            .then(|| now_ms.min(newest_ms).saturating_sub(retention_ms));
+        let excess = if max_bytes == 0 {
+            0
+        } else {
+            d.journal_bytes.saturating_sub(max_bytes)
+        };
+        if cutoff.is_none() && excess == 0 {
+            return Ok(if behind {
+                JournalPrune::ClockBehind { now_ms, newest_ms }
+            } else {
+                JournalPrune::Kept
+            });
         }
-        let cutoff =
-            i64::try_from(now_ms.min(newest_ms).saturating_sub(retention_ms)).unwrap_or(i64::MAX);
         let mut st = d
             .conn
-            .prepare("SELECT seq, at_ms FROM journal ORDER BY seq LIMIT ?1")?;
-        let rows = st.query_map([i64::try_from(max_rows).unwrap_or(i64::MAX)], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
-        })?;
-        let mut last = None;
-        let mut count = 0usize;
-        let mut read = 0usize;
-        for r in rows {
-            let (seq, at_ms) = r?;
-            read += 1;
-            if at_ms >= cutoff || seq >= newest_seq {
-                break;
-            }
-            last = Some(seq);
-            count += 1;
-        }
+            .prepare("SELECT seq, at_ms, length(body) FROM journal ORDER BY seq LIMIT ?1")?;
+        let rows = st
+            .query_map([i64::try_from(max_rows).unwrap_or(i64::MAX)], |r| {
+                Ok((
+                    u64::try_from(r.get::<_, i64>(0)?).unwrap_or(0),
+                    u64::try_from(r.get::<_, i64>(1)?).unwrap_or(0),
+                    u64::try_from(r.get::<_, i64>(2)?).unwrap_or(0),
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
         drop(st);
-        let Some(last) = last else {
-            return Ok(JournalPrune::Kept);
+        let cut = crate::retention::cut(
+            &rows,
+            max_rows,
+            u64::try_from(newest_seq).unwrap_or(0),
+            cutoff,
+            excess,
+        );
+        let Some(last) = cut.last else {
+            return Ok(if behind {
+                JournalPrune::ClockBehind { now_ms, newest_ms }
+            } else {
+                JournalPrune::Kept
+            });
         };
-        let n = d
-            .conn
-            .execute("DELETE FROM journal WHERE seq <= ?1", [last])?;
+        let kept = d.journal_bytes.saturating_sub(cut.bytes);
+        let tx = d.conn.unchecked_transaction()?;
+        let n = tx.execute(
+            "DELETE FROM journal WHERE seq <= ?1",
+            [i64::try_from(last).unwrap_or(i64::MAX)],
+        )?;
+        put_meta_raw(&tx, "journal_bytes", kept.to_string().as_bytes())?;
+        tx.commit()?;
+        d.journal_bytes = kept;
+        d.journal_bytes_unwritten = false;
         Ok(JournalPrune::Deleted {
             rows: n as u64,
-            // The batch was full and every row in it was old.
-            more: count == max_rows && read == count,
+            more: cut.more,
         })
     }
 
@@ -1042,22 +1243,50 @@ impl Disk {
             markers: _,
             dirty: _,
             dirty_all: _,
+            since_checkpoint: _,
+            checkpoint_all: _,
+            touched: _,
+            touched_all: _,
+            now_ms: _,
+            removed_ids: _,
+            purged_recent: _,
+            dead_ids: _,
+            journal_at: _,
+            journal_mem_bytes: _,
+            purged: _,
+            expired: _,
+            purged_deaths: _,
+            orphan_destroys: _,
         } = store;
         let _ = take_overflow();
-        let at_ms = now_ms();
+        // The step's clock when the driver set one, so the journal's times
+        // and the purge read one clock.
+        let at_ms = if store.now_ms != 0 {
+            store.now_ms
+        } else {
+            now_ms()
+        };
         let full = cp.is_some();
         // A step's commit compares only the groups marked since the last
-        // write, with their members; a checkpoint, a new file, and a write
-        // after a bulk change compare every row.
-        let scan_all = full || init || store.dirty_all;
+        // write, with their members, durable fields only; a checkpoint
+        // compares the groups marked since the last checkpoint, sampled
+        // state too. A new file and a write after a bulk change compare
+        // every row.
+        let scan_all = init || store.dirty_all || (full && store.checkpoint_all);
         let rows = if scan_all {
             self.rows_all(groups, units, full)
         } else {
-            let marked = self.rows_marked(groups, units, &store.dirty);
+            let marks = if full {
+                &store.since_checkpoint
+            } else {
+                &store.dirty
+            };
+            let marked = self.rows_marked(groups, units, marks, full);
             if cfg!(debug_assertions) {
                 // Every change the marks missed would be written only at
-                // the next checkpoint: the tests check that none is missed.
-                let every = self.rows_all(groups, units, false);
+                // the next checkpoint, or never: the tests check that none
+                // is missed.
+                let every = self.rows_all(groups, units, full);
                 assert_eq!(
                     marked, every,
                     "a store change was made without marking its row"
@@ -1115,19 +1344,22 @@ impl Disk {
             }
         }
         let mut seq = self.journal_seq;
+        let mut added_bytes = 0u64;
         for e in journal.iter().skip(self.journal_written) {
             seq += 1;
             let body = enc_entry(e);
             let (kind, entity) = entry_key(&body);
+            let encoded = encode(&body);
+            added_bytes += encoded.len() as u64;
             tx.execute(
                 "INSERT INTO journal (seq, at_ms, kind, entity, body) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![seq as i64, at_ms as i64, kind, entity as i64, encode(&body)],
+                params![seq as i64, at_ms as i64, kind, entity as i64, encoded],
             )?;
             match e {
                 Entry::Command(c) => {
                     tx.execute(
                         "INSERT OR REPLACE INTO inflight (epoch, seq, body) VALUES (?1, ?2, ?3)",
-                        params![c.epoch as i64, c.seq as i64, encode(&body)],
+                        params![c.epoch as i64, c.seq as i64, encoded],
                     )?;
                 }
                 Entry::Outcome { epoch, seq, .. } => {
@@ -1138,6 +1370,10 @@ impl Disk {
                 }
                 _ => {}
             }
+        }
+        let journal_bytes = self.journal_bytes + added_bytes;
+        if added_bytes > 0 || self.journal_bytes_unwritten {
+            put_meta_raw(&tx, "journal_bytes", journal_bytes.to_string().as_bytes())?;
         }
         for r in idempotency {
             tx.execute(
@@ -1242,6 +1478,8 @@ impl Disk {
         self.extensions.retain(|n, _| extensions.contains_key(n));
         self.floors.extend(changed_floors);
         self.journal_seq = seq;
+        self.journal_bytes = journal_bytes;
+        self.journal_bytes_unwritten = false;
         self.journal_written = journal.len();
         self.world = world;
         self.sample_time = sample_time;
@@ -1322,13 +1560,14 @@ impl Disk {
         groups: &BTreeMap<EntityId, Group>,
         units: &BTreeMap<EntityId, Unit>,
         marked: &BTreeSet<EntityId>,
+        full: bool,
     ) -> Rows {
         let mut member_ids = BTreeSet::new();
         let mut rows = Rows::default();
         for id in marked {
             match groups.get(id) {
                 Some(g) => {
-                    if self.group_differs(g, false) {
+                    if self.group_differs(g, full) {
                         rows.changed_groups.push(*id);
                     }
                     member_ids.extend(g.members.iter().copied());
@@ -1342,7 +1581,7 @@ impl Disk {
         }
         for id in member_ids {
             match units.get(&id) {
-                Some(u) if self.unit_differs(u, false) => rows.changed_units.push(id),
+                Some(u) if self.unit_differs(u, full) => rows.changed_units.push(id),
                 Some(_) => {}
                 None if self.units.contains_key(&id) => rows.gone_units.push(id),
                 None => {}
@@ -1570,6 +1809,21 @@ fn load(path: &Path, conn: Connection, changes_keep: usize) -> Result<Store, Dis
     }
     let journal_seq: Option<i64> =
         conn.query_row("SELECT max(seq) FROM journal", [], |r| r.get(0))?;
+    let kept_bytes = get_meta_raw(&conn, "journal_bytes")?
+        .and_then(|v| String::from_utf8(v).ok())
+        .and_then(|v| v.parse::<u64>().ok());
+    let journal_bytes_unwritten = kept_bytes.is_none();
+    let journal_bytes = match kept_bytes {
+        Some(n) => n,
+        None => {
+            let n: i64 = conn.query_row(
+                "SELECT coalesce(sum(length(body)), 0) FROM journal",
+                [],
+                |r| r.get(0),
+            )?;
+            u64::try_from(n).unwrap_or(0)
+        }
+    };
     let last_checkpoint: Option<Vec<u8>> = conn
         .query_row(
             "SELECT body FROM checkpoint ORDER BY seq DESC LIMIT 1",
@@ -1610,9 +1864,10 @@ fn load(path: &Path, conn: Connection, changes_keep: usize) -> Result<Store, Dis
         )));
     }
     for un in units.values() {
-        // A dead static stays in the grid: it is a ruin where it stood.
-        if !un.dead || groups[&un.group].kind == Kind::Static {
-            let g = &groups[&un.group];
+        // A dead static stays in the grid: it is a ruin where it stood. A
+        // removed entity's units are not in it.
+        let g = &groups[&un.group];
+        if !g.removed && (!un.dead || g.kind == Kind::Static) {
             store
                 .grid
                 .set(un.id, &g.theater, un.state.at.x, un.state.at.z);
@@ -1621,6 +1876,7 @@ fn load(path: &Path, conn: Connection, changes_keep: usize) -> Result<Store, Dis
     let world = world_bytes;
     store.groups = groups.clone();
     store.units = units.clone();
+    store.reindex();
     store.extensions = extensions.clone();
     store.set_extension_floors(floors.clone());
     store.inflight = inflight;
@@ -1635,6 +1891,8 @@ fn load(path: &Path, conn: Connection, changes_keep: usize) -> Result<Store, Dis
         floors,
         journal_written: 0,
         journal_seq: u64::try_from(journal_seq.unwrap_or(0)).unwrap_or(0),
+        journal_bytes,
+        journal_bytes_unwritten,
         world,
         sample_time,
         record,
@@ -1667,6 +1925,20 @@ fn put_meta_raw(tx: &Transaction<'_>, key: &str, v: &[u8]) -> Result<(), DiskErr
         params![key, v],
     )?;
     Ok(())
+}
+
+fn get_meta_raw(conn: &Connection, key: &str) -> Result<Option<Vec<u8>>, DiskError> {
+    Ok(conn
+        .query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| {
+            r.get(0)
+        })
+        .optional()?)
+}
+
+/// The bytes of an entry's body as the journal stores it: what the size
+/// limit of the journal counts (spec/persistence.md, "Journal retention").
+pub(crate) fn entry_bytes(e: &Entry) -> u64 {
+    encode(&enc_entry(e)).len() as u64
 }
 
 fn get_meta(conn: &Connection, key: &str) -> Result<Lv, DiskError> {
@@ -2223,6 +2495,9 @@ fn enc_group(v: &Group) -> Lv {
         order_sent_in,
         observed_coalition,
         removed,
+        removed_at_ms,
+        expired,
+        dead_at_ms,
         options,
         last_lead,
         ruin_sent_in,
@@ -2286,6 +2561,9 @@ fn enc_group(v: &Group) -> Lv {
             observed_coalition.map_or(Lv::Nil, |c| list(vec![s(&c.to_string())])),
         ),
         ("removed", b(*removed)),
+        ("removed_at_ms", opt_ms(*removed_at_ms)),
+        ("expired", b(*expired)),
+        ("dead_at_ms", opt_ms(*dead_at_ms)),
         (
             "options",
             list(
@@ -2307,6 +2585,21 @@ fn enc_group(v: &Group) -> Lv {
             }),
         ),
     ])
+}
+
+/// An optional wall-clock time in milliseconds: a list of its decimal
+/// text, or nil.
+fn opt_ms(v: Option<u64>) -> Lv {
+    v.map_or(Lv::Nil, |ms| list(vec![s(&ms.to_string())]))
+}
+
+/// Read [`opt_ms`]; a body written without the key reads `None`.
+fn dec_opt_ms(r: &Rd<'_>, key: &str) -> Result<Option<u64>, DiskError> {
+    match r.list(key)?.as_slice() {
+        [] => Ok(None),
+        [v] => Ok(Some(dec_u(v, key)?)),
+        _ => Err(DiskError::Corrupt(key.into())),
+    }
 }
 
 trait OrZero {
@@ -2409,6 +2702,10 @@ fn dec_group(v: &Lv) -> Result<Group, DiskError> {
             _ => return Err(DiskError::Corrupt("observed_coalition".into())),
         },
         removed: r.b("removed")?,
+        removed_at_ms: dec_opt_ms(&r, "removed_at_ms")?,
+        // A body written without the key was removed by the controller.
+        expired: matches!(r.get("expired"), Lv::Bool(true)),
+        dead_at_ms: dec_opt_ms(&r, "dead_at_ms")?,
         options: {
             let mut out = BTreeMap::new();
             for o in r.list("options")? {
@@ -2643,7 +2940,20 @@ fn enc_entry(e: &Entry) -> Lv {
         Entry::Revived { unit, object } => {
             k("revived", vec![("unit", u(unit.0)), ("object", u(*object))])
         }
-        Entry::Removed { entity } => k("removed", vec![("entity", u(entity.0))]),
+        Entry::Removed { entity, cause } => k(
+            "removed",
+            vec![
+                ("entity", u(entity.0)),
+                (
+                    "cause",
+                    s(match cause {
+                        RemoveCause::Controller => "controller",
+                        RemoveCause::Expired => "expired",
+                    }),
+                ),
+            ],
+        ),
+        Entry::Purged { entity } => k("purged", vec![("entity", u(entity.0))]),
         Entry::Option { entity, option } => k(
             "option",
             vec![("entity", u(entity.0)), ("option", u(u64::from(*option)))],
@@ -2748,7 +3058,19 @@ fn dec_entry(v: &Lv) -> Result<Entry, DiskError> {
             unit: unit()?,
             object: r.u("object")?,
         },
-        "removed" => Entry::Removed { entity: entity()? },
+        "removed" => Entry::Removed {
+            entity: entity()?,
+            // A body written without a cause is the controller's.
+            cause: match r.get("cause") {
+                Lv::Nil => RemoveCause::Controller,
+                _ => match r.s("cause")?.as_str() {
+                    "controller" => RemoveCause::Controller,
+                    "expired" => RemoveCause::Expired,
+                    c => return Err(DiskError::Corrupt(format!("removal cause {c}"))),
+                },
+            },
+        },
+        "purged" => Entry::Purged { entity: entity()? },
         "option" => Entry::Option {
             entity: entity()?,
             option: r.u32("option")?,
@@ -3163,6 +3485,29 @@ mod tests {
                     dead: true,
                 })),
             ),
+            // A dead group the expiry removed (spec/world.md, "Expiry").
+            (
+                "group.expired".to_owned(),
+                encode(&enc_group(&Group {
+                    state: State::Dead,
+                    removed: true,
+                    removed_at_ms: Some(1_700_086_400_000),
+                    expired: true,
+                    dead_at_ms: Some(1_700_000_000_000),
+                    ..s.group(g).expect("g").clone()
+                })),
+            ),
+            (
+                "entry.removed.expired".to_owned(),
+                encode(&enc_entry(&Entry::Removed {
+                    entity: g,
+                    cause: RemoveCause::Expired,
+                })),
+            ),
+            (
+                "entry.purged".to_owned(),
+                encode(&enc_entry(&Entry::Purged { entity: g })),
+            ),
             // The S19 keys of `meta.world`, as the store writes them.
             (
                 "world.s19_keys".to_owned(),
@@ -3193,6 +3538,22 @@ mod tests {
             rows.push((format!("entry.created.{i}"), encode(&enc_entry(e))));
         }
         rows
+    }
+
+    /// A SQLite failure names its extended code, which its message does
+    /// not: "disk I/O error" is every `SQLITE_IOERR_*`.
+    #[test]
+    fn a_sqlite_failure_names_its_extended_code() {
+        let e = DiskError::Sql(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR_GETTEMPPATH),
+            Some("disk I/O error".into()),
+        ));
+        assert_eq!(
+            e.to_string(),
+            "store: disk I/O error (SQLITE_IOERR_GETTEMPPATH, code 6410)"
+        );
+        assert_eq!(sqlite_code_name(5), Some("SQLITE_BUSY"));
+        assert_eq!(sqlite_code_name(9_999), None);
     }
 
     /// A unit's asked spawn life reads back; a row without it reads None.
@@ -3555,7 +3916,7 @@ mod tests {
         let p = d.path().join("store.sqlite");
         let mut s = journalled(&p, 5);
         assert_eq!(
-            s.prune_journal(0, u64::MAX, 1_000).expect("prune"),
+            s.prune_journal(0, u64::MAX, 1_000, 0).expect("prune"),
             JournalPrune::Kept
         );
         assert_eq!(journal_seqs(&p), [1, 2, 3, 4, 5]);
@@ -3568,7 +3929,7 @@ mod tests {
         let mut s = journalled(&p, 5);
         // Cutoff 5000 - 2500: rows at 1000 and 2000 go.
         assert_eq!(
-            s.prune_journal(2_500, 1_000_000, 1_000).expect("prune"),
+            s.prune_journal(2_500, 1_000_000, 1_000, 0).expect("prune"),
             JournalPrune::Deleted {
                 rows: 2,
                 more: false
@@ -3577,7 +3938,7 @@ mod tests {
         assert_eq!(journal_seqs(&p), [3, 4, 5]);
         // Every row old: the newest still stays.
         assert_eq!(
-            s.prune_journal(1, 1_000_000_000, 1_000).expect("prune"),
+            s.prune_journal(1, 1_000_000_000, 1_000, 0).expect("prune"),
             JournalPrune::Deleted {
                 rows: 2,
                 more: false
@@ -3585,7 +3946,7 @@ mod tests {
         );
         assert_eq!(journal_seqs(&p), [5]);
         assert_eq!(
-            s.prune_journal(1, 1_000_000_000, 1_000).expect("prune"),
+            s.prune_journal(1, 1_000_000_000, 1_000, 0).expect("prune"),
             JournalPrune::Kept
         );
         assert_eq!(journal_seqs(&p), [5]);
@@ -3596,7 +3957,7 @@ mod tests {
         let d = tempfile::tempdir().expect("dir");
         let p = d.path().join("store.sqlite");
         let mut s = journalled(&p, 5);
-        s.prune_journal(1, 1_000_000, 1_000).expect("prune");
+        s.prune_journal(1, 1_000_000, 1_000, 0).expect("prune");
         drop(s);
         let mut s = Store::open(&p, 10).expect("open");
         s.journal(Entry::Spec {
@@ -3621,7 +3982,7 @@ mod tests {
                 rev: next,
             });
             s.commit().expect("commit");
-            let r = s.prune_journal(1, u64::MAX, 4).expect("prune");
+            let r = s.prune_journal(1, u64::MAX, 4, 0).expect("prune");
             let JournalPrune::Deleted { rows, more } = r else {
                 gone.push((round, 0, false));
                 continue;
@@ -3653,7 +4014,7 @@ mod tests {
         // Cutoff 6000 - 1500 = 4500: rows 1 and 2 go; row 3 stops the
         // prefix, though rows 4 and later are older than row 3.
         assert_eq!(
-            s.prune_journal(1_500, 1_000_000, 1_000).expect("prune"),
+            s.prune_journal(1_500, 1_000_000, 1_000, 0).expect("prune"),
             JournalPrune::Deleted {
                 rows: 2,
                 more: false
@@ -3662,10 +4023,94 @@ mod tests {
         assert_eq!(journal_seqs(&p), [3, 4, 5, 6]);
         // An oldest entry inside the retention ends it with nothing deleted.
         assert_eq!(
-            s.prune_journal(1_500, 1_000_000, 1_000).expect("prune"),
+            s.prune_journal(1_500, 1_000_000, 1_000, 0).expect("prune"),
             JournalPrune::Kept
         );
         assert_eq!(journal_seqs(&p), [3, 4, 5, 6]);
+    }
+
+    /// A group with a lead sample, on disk, with a checkpoint written.
+    fn with_last_lead(p: &Path) -> (Store, EntityId) {
+        let mut s = Store::create_on_disk(p, CampaignId(7), record(), 10).expect("create");
+        let g = s
+            .create_group(super::super::NewGroup {
+                theater: "Caucasus".into(),
+                country: 2,
+                category: 2,
+                coalition: 2,
+                units: vec![super::super::NewUnit::new("M-113", UnitState::default())],
+                authority: Authority::Sim,
+                label: String::new(),
+                extra: Lv::Nil,
+            })
+            .expect("group");
+        s.set_order(
+            g,
+            crate::intents::Intent::Route {
+                waypoints: vec![crate::intents::Waypoint { x: 1_000.0, z: 0.0 }],
+                speed: 5.0,
+                on_road: false,
+            },
+        )
+        .expect("order");
+        let lead = s.group(g).expect("g").members[0];
+        s.set_sample_time(10.0);
+        s.observe_position(
+            lead,
+            Point {
+                x: 500.0,
+                y: 0.0,
+                z: 0.0,
+            },
+        );
+        assert!(s.group(g).expect("g").last_lead.is_some());
+        s.commit().expect("commit");
+        s.checkpoint(1_000, Vec::new()).expect("checkpoint");
+        (s, g)
+    }
+
+    /// Break the samples, optionally move the revision, checkpoint, reopen:
+    /// the lead sample the file holds.
+    fn lead_after_break(bump_revision: bool) -> Option<(EntityId, f64, f64, f64)> {
+        let d = tempfile::tempdir().expect("dir");
+        let p = d.path().join("store.sqlite");
+        let (mut s, g) = with_last_lead(&p);
+        s.break_samples();
+        assert!(s.group(g).expect("g").last_lead.is_none());
+        if bump_revision {
+            // Another group changes, so only the break marks `g`.
+            let other = s
+                .create_group(super::super::NewGroup {
+                    theater: "Caucasus".into(),
+                    country: 2,
+                    category: 2,
+                    coalition: 2,
+                    units: vec![super::super::NewUnit::new("M-113", UnitState::default())],
+                    authority: Authority::Sim,
+                    label: String::new(),
+                    extra: Lv::Nil,
+                })
+                .expect("group");
+            s.set_label(other, "moved").expect("label");
+        }
+        // The checkpoint compares every marked row, `last_lead` too; in a
+        // debug build it asserts that no change went unmarked.
+        s.checkpoint(2_000, Vec::new()).expect("checkpoint");
+        s.close().expect("close");
+        let r = Store::open(&p, 10).expect("reopen");
+        r.group(g).expect("g").last_lead
+    }
+
+    #[test]
+    fn breaking_the_samples_is_written_at_the_next_checkpoint() {
+        assert!(lead_after_break(true).is_none(), "cleared on disk");
+    }
+
+    /// `break_samples` moves the revision, so a checkpoint with nothing else
+    /// changed still writes the cleared `last_lead`.
+    #[test]
+    fn breaking_the_samples_alone_is_written_at_the_next_checkpoint() {
+        assert!(lead_after_break(false).is_none(), "cleared on disk");
     }
 
     #[test]
@@ -3674,7 +4119,7 @@ mod tests {
         let p = d.path().join("store.sqlite");
         let mut s = journalled(&p, 5);
         assert_eq!(
-            s.prune_journal(1, 2_500, 1_000).expect("prune"),
+            s.prune_journal(1, 2_500, 1_000, 0).expect("prune"),
             JournalPrune::ClockBehind {
                 now_ms: 2_500,
                 newest_ms: 5_000
@@ -3688,7 +4133,7 @@ mod tests {
         let mut s = Store::new(CampaignId(7), 10);
         s.journal(command(1));
         assert_eq!(
-            s.prune_journal(1, u64::MAX, 1_000).expect("prune"),
+            s.prune_journal(1, u64::MAX, 1_000, 0).expect("prune"),
             JournalPrune::Kept
         );
         assert_eq!(s.entries().len(), 1);
@@ -3713,7 +4158,7 @@ mod tests {
         s.commit().expect("commit");
         stamp(&p);
         assert_eq!(
-            s.prune_journal(1, 1_000_000, 1_000).expect("prune"),
+            s.prune_journal(1, 1_000_000, 1_000, 0).expect("prune"),
             JournalPrune::Deleted {
                 rows: 3,
                 more: false
@@ -3749,7 +4194,7 @@ mod tests {
         let d = tempfile::tempdir().expect("dir");
         let p = d.path().join("store.sqlite");
         let mut s = journalled(&p, 5);
-        s.prune_journal(1_500, 1_000_000, 1_000).expect("prune");
+        s.prune_journal(1_500, 1_000_000, 1_000, 0).expect("prune");
         let dest = d.path().join("backup.sqlite");
         backup_file(&p, &dest).expect("backup");
         let seqs: Vec<i64> = {
@@ -3763,5 +4208,218 @@ mod tests {
                 .collect()
         };
         assert_eq!(seqs, [4, 5]);
+    }
+
+    /// `(sum(length(body)), meta.journal_bytes)` as the file holds them.
+    fn journal_bytes_of(p: &Path) -> (i64, Option<String>) {
+        let conn = Connection::open(p).expect("conn");
+        let sum = conn
+            .query_row(
+                "SELECT coalesce(sum(length(body)), 0) FROM journal",
+                [],
+                |r| r.get(0),
+            )
+            .expect("sum");
+        let key: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'journal_bytes'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .expect("key");
+        (sum, key.map(|k| String::from_utf8(k).expect("text")))
+    }
+
+    fn assert_count_matches(p: &Path) -> i64 {
+        let (sum, key) = journal_bytes_of(p);
+        assert_eq!(key, Some(sum.to_string()));
+        sum
+    }
+
+    /// The bytes of the bodies of rows `1..=n`.
+    fn first_bytes(p: &Path, n: i64) -> i64 {
+        Connection::open(p)
+            .expect("conn")
+            .query_row(
+                "SELECT sum(length(body)) FROM journal WHERE seq <= ?1",
+                [n],
+                |r| r.get(0),
+            )
+            .expect("sum")
+    }
+
+    #[test]
+    fn the_journal_byte_count_matches_the_rows_after_commits_prunes_and_a_reopen() {
+        let d = tempfile::tempdir().expect("dir");
+        let p = d.path().join("store.sqlite");
+        let mut s = journalled(&p, 6);
+        assert!(assert_count_matches(&p) > 0);
+        s.journal(command(1));
+        s.journal(Entry::Spec {
+            entity: EntityId(300),
+            rev: 300,
+        });
+        s.commit().expect("commit");
+        assert_count_matches(&p);
+        s.prune_journal(1_500, 1_000_000, 2, 0).expect("prune");
+        assert_count_matches(&p);
+        s.prune_journal(0, 0, 100, 40).expect("prune");
+        let kept = assert_count_matches(&p);
+        assert!(kept > 0);
+        drop(s);
+        let mut s = Store::open(&p, 10).expect("open");
+        assert_count_matches(&p);
+        s.journal(command(2));
+        s.commit().expect("commit");
+        assert_count_matches(&p);
+        s.prune_journal(0, 0, 100, 1).expect("prune");
+        assert_eq!(journal_seqs(&p).len(), 1);
+        assert_count_matches(&p);
+    }
+
+    #[test]
+    fn a_journal_size_limit_alone_deletes_the_oldest_until_under_it() {
+        let d = tempfile::tempdir().expect("dir");
+        let p = d.path().join("store.sqlite");
+        let mut s = journalled(&p, 10);
+        let total = assert_count_matches(&p);
+        let two = first_bytes(&p, 2);
+        // Retention off: the size rule deletes rows 1 and 2 and stops.
+        assert_eq!(
+            s.prune_journal(0, 0, 1_000, (total - two) as u64)
+                .expect("prune"),
+            JournalPrune::Deleted {
+                rows: 2,
+                more: false
+            }
+        );
+        assert_eq!(journal_seqs(&p), [3, 4, 5, 6, 7, 8, 9, 10]);
+        assert_count_matches(&p);
+        // Under the limit: nothing to do.
+        assert_eq!(
+            s.prune_journal(0, 0, 1_000, (total - two) as u64)
+                .expect("prune"),
+            JournalPrune::Kept
+        );
+        // A limit of 0 is no limit.
+        assert_eq!(
+            s.prune_journal(0, 0, 1_000, 0).expect("prune"),
+            JournalPrune::Kept
+        );
+    }
+
+    #[test]
+    fn a_journal_time_limit_alone_ignores_the_size() {
+        let d = tempfile::tempdir().expect("dir");
+        let p = d.path().join("store.sqlite");
+        let mut s = journalled(&p, 5);
+        // Cutoff 5000 - 2500 = 2500: rows 1 and 2 go.
+        assert_eq!(
+            s.prune_journal(2_500, 1_000_000, 1_000, 0).expect("prune"),
+            JournalPrune::Deleted {
+                rows: 2,
+                more: false
+            }
+        );
+        assert_eq!(journal_seqs(&p), [3, 4, 5]);
+        assert_count_matches(&p);
+    }
+
+    #[test]
+    fn both_journal_limits_delete_what_either_takes() {
+        let d = tempfile::tempdir().expect("dir");
+        let p = d.path().join("store.sqlite");
+        let mut s = journalled(&p, 10);
+        let total = assert_count_matches(&p);
+        let five = first_bytes(&p, 5);
+        // Time takes rows 1 and 2; the size excess takes rows 1 to 5.
+        assert_eq!(
+            s.prune_journal(7_500, 1_000_000, 1_000, (total - five) as u64)
+                .expect("prune"),
+            JournalPrune::Deleted {
+                rows: 5,
+                more: false
+            }
+        );
+        assert_eq!(journal_seqs(&p), [6, 7, 8, 9, 10]);
+        // Time takes rows 6 and 7; the size limit takes nothing more.
+        assert_eq!(
+            s.prune_journal(2_500, 1_000_000, 1_000, u64::MAX)
+                .expect("prune"),
+            JournalPrune::Deleted {
+                rows: 2,
+                more: false
+            }
+        );
+        assert_eq!(journal_seqs(&p), [8, 9, 10]);
+        assert_count_matches(&p);
+    }
+
+    #[test]
+    fn a_journal_size_limit_keeps_the_newest_row_and_applies_with_the_clock_behind() {
+        let d = tempfile::tempdir().expect("dir");
+        let p = d.path().join("store.sqlite");
+        let mut s = journalled(&p, 5);
+        // Clock behind: the time rule is skipped, the size rule applies.
+        assert_eq!(
+            s.prune_journal(1, 2_500, 1_000, 1).expect("prune"),
+            JournalPrune::Deleted {
+                rows: 4,
+                more: false
+            }
+        );
+        assert_eq!(journal_seqs(&p), [5]);
+        // The newest row stays however far over the limit it is.
+        assert_eq!(
+            s.prune_journal(0, 0, 1_000, 1).expect("prune"),
+            JournalPrune::Kept
+        );
+        // Clock behind and no size excess: the clock is reported.
+        assert!(matches!(
+            s.prune_journal(1, 2_500, 1_000, 0).expect("prune"),
+            JournalPrune::ClockBehind { .. }
+        ));
+        assert_count_matches(&p);
+    }
+
+    #[test]
+    fn a_journal_size_backlog_drains_over_several_passes() {
+        let d = tempfile::tempdir().expect("dir");
+        let p = d.path().join("store.sqlite");
+        let mut s = journalled(&p, 10);
+        let mut passes = Vec::new();
+        loop {
+            let r = s.prune_journal(0, 0, 3, 1).expect("prune");
+            let JournalPrune::Deleted { rows, more } = r else {
+                break;
+            };
+            passes.push((rows, more));
+            assert_count_matches(&p);
+            assert!(passes.len() < 10);
+        }
+        // Nine rows go in batches of 3, 3, 3; the third batch is full and
+        // all deleted, so it says more, and the next pass finds only the
+        // newest.
+        assert_eq!(passes, [(3, true), (3, true), (3, true)]);
+        assert_eq!(journal_seqs(&p), [10]);
+    }
+
+    #[test]
+    fn a_journal_file_without_the_byte_count_gets_it_at_open() {
+        let d = tempfile::tempdir().expect("dir");
+        let p = d.path().join("store.sqlite");
+        drop(journalled(&p, 5));
+        let sum = journal_bytes_of(&p).0;
+        Connection::open(&p)
+            .expect("conn")
+            .execute("DELETE FROM meta WHERE key = 'journal_bytes'", [])
+            .expect("delete");
+        assert_eq!(journal_bytes_of(&p).1, None);
+        let mut s = Store::open(&p, 10).expect("open");
+        assert_eq!(journal_bytes_of(&p), (sum, Some(sum.to_string())));
+        // The count in memory is the computed one: a prune subtracts from it.
+        s.prune_journal(0, 0, 1_000, 1).expect("prune");
+        assert_count_matches(&p);
     }
 }

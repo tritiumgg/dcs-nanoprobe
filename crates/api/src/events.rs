@@ -18,6 +18,7 @@ use nanoprobe_proto::v1alpha1::{
 };
 use nanoprobe_sidecar::eventfile::{EventFile, EventRow, Retained};
 use nanoprobe_sidecar::players::{LaunchRule, Note, Roster};
+use nanoprobe_sidecar::retention;
 use nanoprobe_sidecar::sim::RawRecord;
 use nanoprobe_sidecar::sim::wire::Input;
 use nanoprobe_sidecar::store::{DiskError, Loadout};
@@ -38,6 +39,10 @@ pub struct EventLog {
     next: u64,
     events: VecDeque<Event>,
     file: Option<EventFile>,
+    /// The encoded bytes of the events in `events`, kept for a log without
+    /// a file: the count the size limit reads. 0 for a log on disk, whose
+    /// file keeps its own.
+    bytes: u64,
 }
 
 fn wall_ms_of(e: &Event) -> u64 {
@@ -65,6 +70,7 @@ impl EventLog {
             next: 1,
             events: VecDeque::new(),
             file: None,
+            bytes: 0,
         }
     }
 
@@ -83,6 +89,7 @@ impl EventLog {
             next,
             events,
             file: Some(file),
+            bytes: 0,
         })
     }
 
@@ -112,9 +119,12 @@ impl EventLog {
             });
         }
         self.next += 1;
+        if self.file.is_none() {
+            self.bytes += e.encoded_len() as u64;
+        }
         self.events.push_back(e);
         while self.events.len() > self.keep {
-            self.events.pop_front();
+            self.pop_oldest();
         }
         sequence
     }
@@ -140,21 +150,89 @@ impl EventLog {
         }
     }
 
-    /// Apply the retention to the file (spec/persistence.md, "Event
-    /// history"), then drop from memory what it deleted.
-    pub fn retain(&mut self, retention: Duration, now_ms: u64) -> Result<Retained, DiskError> {
+    /// Drop the oldest event from memory.
+    fn pop_oldest(&mut self) {
+        if let Some(e) = self.events.pop_front()
+            && self.file.is_none()
+        {
+            self.bytes = self.bytes.saturating_sub(e.encoded_len() as u64);
+        }
+    }
+
+    /// Apply the retention (spec/persistence.md, "Event history"): the time
+    /// limit `retention` (zero is none) and the size limit `max_bytes` (zero
+    /// is none), oldest events first. A log on disk deletes at most
+    /// `max_rows` rows from its file and drops from memory what the file
+    /// deleted; [`Retained::Deleted`] says whether more may remain. A log in
+    /// memory applies both limits to every event, by its stamp's wall time
+    /// and its encoded size, and ignores `max_rows`. Either way the newest
+    /// event stays, and the time limit is skipped when the clock is behind
+    /// it.
+    pub fn retain(
+        &mut self,
+        retention: Duration,
+        now_ms: u64,
+        max_rows: usize,
+        max_bytes: u64,
+    ) -> Result<Retained, DiskError> {
+        let retention_ms = u64::try_from(retention.as_millis()).unwrap_or(u64::MAX);
         let Some(f) = self.file.as_mut() else {
-            return Ok(Retained::Kept);
+            return Ok(self.retain_memory(retention_ms, now_ms, max_bytes));
         };
-        let r = f.retain(
-            u64::try_from(retention.as_millis()).unwrap_or(u64::MAX),
-            now_ms,
-        )?;
+        let r = f.retain(retention_ms, now_ms, max_rows, max_bytes)?;
         let first = self.first();
         while self.events.front().is_some_and(|e| e.sequence < first) {
-            self.events.pop_front();
+            self.pop_oldest();
         }
         Ok(r)
+    }
+
+    /// [`EventLog::retain`] for a log without a file.
+    fn retain_memory(&mut self, retention_ms: u64, now_ms: u64, max_bytes: u64) -> Retained {
+        /// Events looked at in one call of the shared rule.
+        const CHUNK: usize = 4_096;
+        let Some(newest_ms) = self.events.back().map(wall_ms_of) else {
+            return Retained::Kept;
+        };
+        if retention_ms == 0 && max_bytes == 0 {
+            return Retained::Kept;
+        }
+        let behind = retention_ms != 0 && now_ms < newest_ms;
+        let cutoff = (retention_ms != 0 && !behind)
+            .then(|| now_ms.min(newest_ms).saturating_sub(retention_ms));
+        let newest_seq = self.last();
+        let mut excess = if max_bytes == 0 {
+            0
+        } else {
+            self.bytes.saturating_sub(max_bytes)
+        };
+        let mut n = 0;
+        loop {
+            let batch: Vec<_> = self
+                .events
+                .iter()
+                .take(CHUNK)
+                .map(|e| (e.sequence, wall_ms_of(e), e.encoded_len() as u64))
+                .collect();
+            let cut = retention::cut(&batch, CHUNK, newest_seq, cutoff, excess);
+            for _ in 0..cut.rows {
+                self.pop_oldest();
+            }
+            n += cut.rows;
+            excess = excess.saturating_sub(cut.bytes);
+            if !cut.more {
+                break;
+            }
+        }
+        if n == 0 {
+            if behind {
+                Retained::ClockBehind { now_ms, newest_ms }
+            } else {
+                Retained::Kept
+            }
+        } else {
+            Retained::Deleted { n, more: false }
+        }
     }
 
     /// The newest sequence number, 0 for none yet.
@@ -167,6 +245,28 @@ impl EventLog {
         match self.file.as_ref() {
             Some(f) => f.first_seq().unwrap_or(self.next),
             None => self.events.front().map_or(self.next, |e| e.sequence),
+        }
+    }
+
+    /// The events held, in memory or in the file.
+    pub fn rows(&self) -> u64 {
+        self.next - self.first()
+    }
+
+    /// The bytes of the events' bodies kept, as `events_max_mb` counts them.
+    pub fn bytes(&self) -> u64 {
+        match self.file.as_ref() {
+            Some(f) => f.bytes(),
+            None => self.bytes,
+        }
+    }
+
+    /// The wall-clock time of the oldest event held, milliseconds since the
+    /// Unix epoch; `None` for none.
+    pub fn oldest_ms(&self) -> Option<u64> {
+        match self.file.as_ref() {
+            Some(f) => f.first_wall_ms(),
+            None => self.events.front().map(wall_ms_of),
         }
     }
 

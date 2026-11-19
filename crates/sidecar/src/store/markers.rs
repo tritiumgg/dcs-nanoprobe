@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nanoprobe_transport::codec::Lv;
 
-use super::{Entry, Point, Store};
+use super::{Entry, Point, RemoveCause, Store};
 use crate::ids::EntityId;
 
 /// `scope` codes a marker takes (spec/commands.md, "Codes: scope").
@@ -78,6 +78,10 @@ pub struct Marker {
     pub spec_rev: u64,
     /// The controller removed it.
     pub removed: bool,
+    /// When it was removed, wall-clock milliseconds since the Unix epoch.
+    /// The reconciler purges it `removed_keep_h` later, once DCS holds it
+    /// no more (spec/world.md, "Removal").
+    pub removed_at_ms: Option<u64>,
     /// A `scope` code.
     pub scope: u32,
     /// By scope: 0, a coalition number or a group `EntityId`.
@@ -147,6 +151,19 @@ impl Store {
     /// A marker, removed ones included.
     pub fn marker(&self, id: EntityId) -> Option<&Marker> {
         self.markers.items.get(&id)
+    }
+
+    /// Take a removed marker out of the store (spec/world.md, "Removal").
+    /// The caller has checked that DCS holds it no more. Returns whether it
+    /// was a removed marker.
+    pub fn purge_marker(&mut self, id: EntityId) -> bool {
+        if !self.markers.items.get(&id).is_some_and(|m| m.removed) {
+            return false;
+        }
+        self.markers.items.remove(&id);
+        self.journal(Entry::Purged { entity: id });
+        self.touch(id);
+        true
     }
 
     /// Every marker, removed ones included, by ID.
@@ -265,6 +282,7 @@ impl Store {
                 id,
                 spec_rev: rev,
                 removed: false,
+                removed_at_ms: None,
                 scope,
                 target,
                 spec,
@@ -296,8 +314,14 @@ impl Store {
         }
         below(self, id, &mut order);
         for e in &order {
-            self.markers.items.get_mut(e).expect("marker").removed = true;
-            self.journal(Entry::Removed { entity: *e });
+            let now = self.clock_ms();
+            let m = self.markers.items.get_mut(e).expect("marker");
+            m.removed = true;
+            m.removed_at_ms = Some(now);
+            self.journal(Entry::Removed {
+                entity: *e,
+                cause: RemoveCause::Controller,
+            });
             self.touch(*e);
         }
         Ok(order)

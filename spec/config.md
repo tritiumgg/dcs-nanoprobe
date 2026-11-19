@@ -83,11 +83,15 @@ enabled = true              # false: the author stores state through capture and
 checkpoint_s = 5            # positions and life
 backup_interval_h = 24      # consistent copies of the active store
 backup_keep = 7
-event_retention_days = 0    # event history; 0 keeps it for the life of the campaign
-journal_retention_days = 0  # the store's journal; 0 keeps it for the life of the campaign
+event_retention_days = 90   # event history; 0 is no time limit
+journal_retention_days = 30 # the store's journal; 0 is no time limit
+journal_max_mb = 1024       # the journal's size limit, per campaign; 0 is no limit
+events_max_mb = 1024        # the event history's size limit, per campaign; 0 is no limit
 server_log_days = 30        # events recorded while no campaign is active
 idempotency_keep_h = 24     # how long an idempotency key is remembered
 world_changes_keep = 100000 # changes kept for a watch to resume from
+removed_keep_h = 1          # a removed entity's rows, before the purge may take them
+dead_keep_h = 24            # a dead group, before it expires; 0 never
 
 [health]
 heartbeat_stale_s = 10      # no heartbeat for this long outside a load: hung or gone (spec/errors.md)
@@ -115,7 +119,11 @@ template_dirs = []          # folders a call may name a template file in, as the
 | `[agent] map_path`, `token_path` | Paths on the sidecar's side. Under Wine with a native sidecar they are Linux paths to the same files the agent names with Windows paths. |
 | `[api] listen` | Loopback by default. A listener on any other address refuses to start without `tokens_path`. |
 | `tokens_path` | A TOML file of tokens, each with a role: `observer`, `controller` or `admin` (spec/errors.md, "Roles"). Kept outside any repository. Its layout is under "Tokens file". |
-| `[store] enabled` | With `false` the stores are in memory and last as long as the sidecar process (spec/world.md). |
+| `[store] enabled` | With `false` the stores are in memory and last as long as the sidecar process (spec/world.md). The purge, the expiry, the journal's and the event history's limits and `server_log_days` apply in memory too. |
+| `removed_keep_h`, `dead_keep_h` | Whole hours. The purge of removed entities and the expiry of dead groups (spec/world.md, "Removal" and "Expiry"). `removed_keep_h = 0` purges as soon as DCS holds nothing of the entity. |
+| `journal_retention_days`, `event_retention_days` | Whole days (spec/persistence.md, "Journal retention" and "Event history"). Each backup holds the whole journal; at a high command rate 30 days of journal are gigabytes across `backup_keep` backups, so a lower retention or fewer backups bound the disk further. To keep a whole history, set both its days key and its `_max_mb` key to 0. |
+| `journal_max_mb` | Whole megabytes of 1,048,576 bytes; 0 is no limit. The most the journal's rows hold, per campaign, counted as the bytes of the rows' bodies. The file takes more than that (row headers and pages), and the journal shares `store.sqlite` with the world. Each backup holds its own copy of the journal, so the backups take up to `backup_keep` times the limit. With the time limit, either one deletes (spec/persistence.md, "Journal retention"). |
+| `events_max_mb` | Whole megabytes of 1,048,576 bytes; 0 is no limit. The most the event history's rows hold, per campaign, counted as the bytes of the rows' bodies. The file takes more than that (row headers and pages); `events.sqlite` holds only the events, and `backups/events.sqlite` is one incremental copy. With the time limit, either one deletes (spec/persistence.md, "Event history"). The server event log keeps its time limit only (`server_log_days`). |
 | `position_period_min_s` | The only cap on subscription rates. A request for a shorter period gets this one. The agent's time slice holds whatever the period. |
 | `[health]` | Limits, not expectations (spec/errors.md, "Health"). A mission load has no fixed duration; `loading_limit_s` is only when to call a silent DCS hung. |
 | `on_lost` | An author may override it per group through the API. |
@@ -147,10 +155,11 @@ entries with one hash are errors: the sidecar refuses to start.
 
 `nanoprobe-sidecar health --config <path>` asks the running sidecar for its verdict
 (spec/errors.md), prints it with the seconds since the last heartbeat, and exits with
-the code below. It calls `GetServerStatus` on `[api] listen`, or on loopback at that
-port when the listener's address is unspecified. When the listener needs a token, the
-command reads one with the `observer` role or higher from the `NANOPROBE_TOKEN`
-environment variable.
+the code below. While the last scheduled backup failed it also prints why; that does
+not change the exit code (spec/persistence.md, "Backups"). It calls `GetServerStatus`
+on `[api] listen`, or on loopback at that port when the listener's address is
+unspecified. When the listener needs a token, the command reads one with the
+`observer` role or higher from the `NANOPROBE_TOKEN` environment variable.
 
 | Exit code | Verdict |
 |---|---|

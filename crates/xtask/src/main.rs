@@ -147,12 +147,14 @@ commands:
                             Writes bundles/routes-<name>-<time>/ with routes.json
                             and routes.txt: mean and p5 fps, model/real, DCS CPU and
                             the moving share per shape. Refuses a server with players.
-  soak campaign <name> [--hours 8 | --minutes M] [--control FOLDER] [--detach]
+  soak campaign <name> [--hours 8 | --minutes M] [--control FOLDER]
+                [--store-toml 'KEY = VALUE']... [--leave-dead] [--reattach] [--detach]
   soak control <name> [--hours 2 | --minutes M] [--detach]
   soak pilot <name> [--minutes 10] [--detach]
   soak rehearse [--minutes 6] [--leak-kib-per-s N [--baseline FOLDER]] [--restart-at S]
                 [--stall-at S] [--detach]
   soak status | soak stop <folder> | soak judge <folder> [--control FOLDER]
+  soak fit <folder> [--from-minute 75] [--block-minutes 5]
                             The long soak (S21). `campaign` runs the real sidecar
                             and a client on a docker-wine target and churns a
                             campaign through the API: handovers, groups removed
@@ -175,6 +177,12 @@ commands:
                             sidecar here, with a planted leak or an injected
                             restart; --detach runs in the background, and `status`
                             finds the run again. Exit 0 PASS, 1 FAIL, 2 EXTEND.
+                            `campaign` --store-toml adds a [store] line,
+                            --leave-dead leaves a killed group dead for its
+                            expiry, --reattach starts the sidecar again after the
+                            churn and counts units without a life value. `fit`
+                            fits the sidecar's bounds after the warm-up into
+                            fit.json (docs/results/2026-11-18-sidecar-bound.md).
   soak <name> [--minutes 30] [--units 1200] [--collect-every MIN] [--no-sidecar]
                             The S11 churn soak on a docker-wine target: deploy with
                             --dev, restart DCS, load a fresh shell, attach link-probe

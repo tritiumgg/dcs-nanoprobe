@@ -11,7 +11,7 @@ use nanoprobe_api::hub::Hub;
 use nanoprobe_api::real::Real;
 use nanoprobe_api::sidecar_toml::SidecarToml;
 use nanoprobe_proto::v1alpha1::mission_service_client::MissionServiceClient;
-use nanoprobe_proto::v1alpha1::{GetServerStatusRequest, Health};
+use nanoprobe_proto::v1alpha1::{GetServerStatusRequest, Health, ServerStatus};
 use nanoprobe_sidecar::sim::real::RealSim;
 use tokio::net::TcpListener;
 use tonic::transport::Endpoint;
@@ -23,7 +23,8 @@ Usage: nanoprobe-sidecar run --config PATH
 run      Attach to the agent in DCS and serve the API, until stopped (SIGTERM
          or Ctrl-C) or until the agent is gone after a DCS restart.
 health   Ask the running sidecar for its verdict and print it with the
-         seconds since the agent's last heartbeat. A token, if the listener
+         seconds since the agent's last heartbeat, and why scheduled backups
+         fail while the last one failed. A token, if the listener
          needs one, is read from NANOPROBE_TOKEN. Exit code: 0 healthy,
          1 hung, 2 gone, 3 disabled, 4 no answer.
 
@@ -168,7 +169,7 @@ async fn health(path: PathBuf) -> ExitCode {
         addr.set_ip(IpAddr::V4(Ipv4Addr::LOCALHOST));
     }
     match status(addr).await {
-        Ok((health, age)) => {
+        Ok((health, age, backup)) => {
             let (word, code) = match health {
                 Health::Healthy => ("healthy", 0),
                 Health::Hung => ("hung", 1),
@@ -180,6 +181,11 @@ async fn health(path: PathBuf) -> ExitCode {
                 Some(a) => println!("{word} heartbeat {:.1} s ago", a.as_secs_f64()),
                 None => println!("{word} no heartbeat seen"),
             }
+            // Reported, not part of the verdict (spec/persistence.md,
+            // "Backups").
+            if let Some(why) = backup {
+                println!("scheduled backups failing: {why}");
+            }
             ExitCode::from(code)
         }
         Err(e) => {
@@ -189,7 +195,9 @@ async fn health(path: PathBuf) -> ExitCode {
     }
 }
 
-async fn status(addr: SocketAddr) -> Result<(Health, Option<Duration>), String> {
+/// The verdict, the heartbeat's age, and why scheduled backups fail when the
+/// last one failed.
+async fn status(addr: SocketAddr) -> Result<(Health, Option<Duration>, Option<String>), String> {
     let channel = Endpoint::from_shared(format!("http://{addr}"))
         .map_err(|e| e.to_string())?
         .connect_timeout(Duration::from_secs(5))
@@ -217,5 +225,45 @@ async fn status(addr: SocketAddr) -> Result<(Health, Option<Duration>), String> 
     Ok((
         Health::try_from(s.health).unwrap_or(Health::Unspecified),
         age,
+        backup_failing(&s),
     ))
+}
+
+/// Why scheduled backups fail, when the last one failed: a failure after
+/// the last success, or with none.
+fn backup_failing(s: &ServerStatus) -> Option<String> {
+    let failing = match (&s.last_backup_failure, &s.last_backup) {
+        (Some(f), Some(ok)) => (f.seconds, f.nanos) > (ok.seconds, ok.nanos),
+        (Some(_), None) => true,
+        _ => false,
+    };
+    failing.then(|| s.backup_error.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(seconds: i64) -> Option<prost_types::Timestamp> {
+        Some(prost_types::Timestamp { seconds, nanos: 0 })
+    }
+
+    #[test]
+    fn a_backup_fails_only_while_the_last_one_failed() {
+        let s = |ok: i64, failed: i64| ServerStatus {
+            last_backup: (ok > 0).then(|| at(ok)).flatten(),
+            last_backup_failure: (failed > 0).then(|| at(failed)).flatten(),
+            backup_error: if failed > 0 {
+                "why".into()
+            } else {
+                String::new()
+            },
+            ..ServerStatus::default()
+        };
+        assert_eq!(backup_failing(&s(0, 0)), None, "no backup yet");
+        assert_eq!(backup_failing(&s(10, 0)), None, "a success only");
+        assert_eq!(backup_failing(&s(10, 20)).as_deref(), Some("why"));
+        assert_eq!(backup_failing(&s(0, 20)).as_deref(), Some("why"));
+        assert_eq!(backup_failing(&s(30, 20)), None, "a success after it");
+    }
 }

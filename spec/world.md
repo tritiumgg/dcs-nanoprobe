@@ -8,7 +8,7 @@ destroys groups; state lives on units. The model follows that.
 | Identity | Type | Assigned by | Rules |
 |---|---|---|---|
 | Campaign ID | `u64` | The sidecar, when a campaign is created | The wall-clock time of creation in milliseconds since the Unix epoch, or one more than the newest campaign's ID if that is larger, then moved forward until its tag is free ("Names"). So an ID is never used twice on a server, even when the stores are lost or in memory only. Never 0. Below 2^53. |
-| `EntityId` | `u64` | The sidecar, from one counter per campaign | Starts at 1. Never reused within a campaign. 0 means none. Below 2^53. |
+| `EntityId` | `u64` | The sidecar, from one counter per campaign | Starts at 1. Never reused within a campaign: the counter is kept in the store's own row, so an ID stays used after its entity's rows are purged ("Removal"). 0 means none. Below 2^53. |
 | DCS object ID | `u64` | DCS | The numeric ID of a unit, static or group in one DCS process. The agent and the binding use it; the public API never shows it. |
 | Mission generation | `u32` | The agent | 0 before the first mission load in the process, then one more at each load (spec/log.md, `gen`). |
 | Player key | string | The sidecar | Derived from the ID DCS gives each client. Constant across sessions, names and campaigns. |
@@ -220,11 +220,71 @@ applied revision is behind.
 
 ## Removal
 
-Removing a managed group or static takes it out of the campaign for good. The store
-keeps a removed entity, marked removed, under campaign authority: the API no longer
-reports it, its `EntityId` is never given again, and the reconciler destroys any object
-of it that DCS still holds, as drift. A removed static's ruin goes the same way
-("Ruins").
+Removing a managed group or static takes it out of the campaign for good. It goes to
+campaign authority, the API no longer reports it, its units leave the area grid, and the
+reconciler destroys any object of it that DCS still holds, as drift. A removed static's
+ruin goes the same way ("Ruins").
+
+The store keeps a removed entity's rows until it purges them. The purge takes a removed
+entity `removed_keep_h` after its removal (spec/config.md) once DCS holds nothing of it:
+
+- no object of it is bound;
+- no command written in the loaded mission generation that names it or one of its units
+  is unanswered;
+- for a dead static, the store's marks say DCS holds no ruin of it in the loaded
+  generation: it neither died there nor had a ruin spawn written there, or a destroy of
+  it applied since, which clears both marks ("Ruins"). No enumeration finds a dead
+  static, so this rests on the `STATIC_DESTROY` the reconciler sent for it;
+- for anything else, a full enumeration used by the reconciler began after the removal.
+
+The purge looks once a second and takes at most 1,000 entities in a step, each journalled
+as `purged`. A body written without a removal time counts from the first step that reads
+it. Removed marks, drawings and menu items are purged by the same time, once DCS holds
+them no more in the generation and no command naming them is unanswered.
+
+After the purge:
+
+- **IDs.** The `EntityId` is never given again ("Identities"). A restore keeps the
+  larger of the two stores' counters (spec/persistence.md, "Restore a backup").
+- **Calls.** Every call whose entity is the ID answers `NOT_FOUND`, `RemoveEntity`
+  included; an author treats a `NOT_FOUND` from `RemoveEntity` as done. An attack order
+  whose target is removed, purged or unknown is refused with `INVALID_FIELD` on
+  `order.attack.target_id` (spec/errors.md). A keyed repeat within
+  `idempotency_keep_h` still gets its first answer (spec/errors.md, "Idempotency").
+- **Late events.** World events resolve a gone object from the binding, then from the
+  memory of rows that left ("Events and the store"), never from the store, so a late
+  kill still names the purged IDs. A death fact for a purged unit is dropped and
+  counted (`purged_deaths`).
+- **Watches.** A watch that held the entity got its last state and a `Removal` when it
+  was removed. One that reads the removal only after the purge gets `removed_id`.
+- **Objects of a purged name.** An object in DCS whose platform name carries this
+  campaign's tag and names an entity the store does not hold, below the store's next
+  `EntityId`, is destroyed as drift: `GROUP_DESTROY` of the group its group's name
+  names, or `STATIC_DESTROY` of the static, up to `destroy_retries` times in a
+  generation, each counted (`orphan_destroys`). Only a platform name counts ("Names"),
+  so an adopted unit, whose `EntityId` no name carries, never makes one; only this
+  campaign's tag counts, so another campaign's objects and the server store's player
+  records are never read as one. After a restore of an older backup, the objects of
+  entities made after the backup are such objects: the restored campaign does not have
+  them, and DCS is told to destroy them.
+
+## Expiry
+
+A dead group, not a static, expires `dead_keep_h` after it became `dead`
+(spec/config.md; 0 never). The expiry is a removal by the sidecar: the group goes to
+campaign authority and leaves the API, it is journalled as `removed` with cause
+`expired`, and a watch that held it gets its last state and a `Removal` with cause
+`EXPIRED`. Nothing is sent to DCS, neither a destroy nor a `CLEAR_DEBRIS`: wrecks are the
+controller's. The purge then takes its rows by the rule of "Removal".
+
+- A group with a member held across a mission generation is `lost`, not `dead`, and
+  does not expire ("Respawn gate").
+- A ruin never expires: only a `RemoveEntity` takes it ("Ruins").
+- The expiry runs in the reconciler's plan of the active campaign, once a second, at most
+  1,000 groups in a step: a dead group expires at the first plan after `dead_keep_h`,
+  so while DCS is down or not yet ready it waits. A suspended campaign's dead groups
+  expire at its next activation.
+- A body written without a death time counts from the first step that reads it.
 
 ## Lifecycle
 
@@ -317,8 +377,9 @@ a group of one.
 
 A managed static in state `dead` is a *ruin*. The store keeps it. The World service
 reports it with `alive` false, state `dead`, and the position and heading it had. An
-area query finds it where it stood. No cleanup removes it, and it is never spawned alive
-again. A death fact clears a `MISSING` or `REMOVED` mark, so a ruin is never reported as
+area query finds it where it stood. No cleanup removes it and it never expires ("Expiry"):
+only a `RemoveEntity` does, after which its ruin is destroyed and its rows purged
+("Removal"). It is never spawned alive again. A death fact clears a `MISSING` or `REMOVED` mark, so a ruin is never reported as
 a removal (`Unit.left`).
 
 The reconciler keeps DCS holding the static's dead object wherever DCS would hold a live

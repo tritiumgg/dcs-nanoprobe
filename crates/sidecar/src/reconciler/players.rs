@@ -76,6 +76,18 @@ impl Reconciler {
         }
     }
 
+    /// Whether a removed marker is one DCS holds no more in this generation.
+    pub(super) fn pins_gone(&self, id: EntityId) -> bool {
+        self.pins.gone.contains(&id)
+    }
+
+    /// A removed marker was purged: nothing is kept of it.
+    pub(super) fn pins_purged(&mut self, id: EntityId) {
+        self.pins.gone.remove(&id);
+        self.pins.held.remove(&id);
+        self.pins.refused.remove(&id);
+    }
+
     /// The spec revision of an extension the agent applied, as far as its
     /// answers show; 0 for none.
     pub fn extension_applied(&self, name: &str) -> u64 {

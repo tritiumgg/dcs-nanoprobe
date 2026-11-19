@@ -592,9 +592,7 @@ async fn compaction_at_open_keeps_the_newest_event_and_ids_skip_unreadable_folde
 
     tokio::time::sleep(Duration::from_millis(5)).await;
     let mut c = cfg(d.path());
-    if let Some(sf) = c.store.as_mut() {
-        sf.event_retention = Duration::from_millis(20);
-    }
+    c.event_retention = Duration::from_millis(20);
     let server = start(c, fake_config()).await.expect("restart");
     let ch = connect(&server).await;
     assert_eq!(

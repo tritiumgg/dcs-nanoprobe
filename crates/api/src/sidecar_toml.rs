@@ -10,7 +10,10 @@ use nanoprobe_sidecar::sim::real::Limits;
 use nanoprobe_sidecar::store::LostPolicy;
 use serde::Deserialize;
 
-use crate::config::{Config, JOURNAL_RETENTION_DEFAULT, StoreFiles};
+use crate::config::{
+    Config, DEAD_KEEP_DEFAULT, EVENT_RETENTION_DEFAULT, EVENTS_MAX_MB_DEFAULT,
+    JOURNAL_MAX_MB_DEFAULT, JOURNAL_RETENTION_DEFAULT, MEGABYTE, REMOVED_KEEP_DEFAULT, StoreFiles,
+};
 use crate::real::Missions;
 
 #[derive(Debug, Default, Deserialize)]
@@ -91,9 +94,13 @@ struct Store {
     backup_keep: usize,
     event_retention_days: u64,
     journal_retention_days: u64,
+    journal_max_mb: u64,
+    events_max_mb: u64,
     server_log_days: u64,
     idempotency_keep_h: u64,
     world_changes_keep: usize,
+    removed_keep_h: u64,
+    dead_keep_h: u64,
 }
 
 impl Default for Store {
@@ -104,11 +111,15 @@ impl Default for Store {
             checkpoint_s: 5,
             backup_interval_h: 24,
             backup_keep: 7,
-            event_retention_days: 0,
+            event_retention_days: EVENT_RETENTION_DEFAULT.as_secs() / 86_400,
             journal_retention_days: JOURNAL_RETENTION_DEFAULT.as_secs() / 86_400,
+            journal_max_mb: JOURNAL_MAX_MB_DEFAULT,
+            events_max_mb: EVENTS_MAX_MB_DEFAULT,
             server_log_days: 30,
             idempotency_keep_h: 24,
             world_changes_keep: 100_000,
+            removed_keep_h: REMOVED_KEEP_DEFAULT.as_secs() / 3_600,
+            dead_keep_h: DEAD_KEEP_DEFAULT.as_secs() / 3_600,
         }
     }
 }
@@ -255,9 +266,6 @@ impl SidecarToml {
             checkpoint: Duration::from_secs(f.store.checkpoint_s.max(1)),
             backup_interval: hours(f.store.backup_interval_h),
             backup_keep: f.store.backup_keep,
-            event_retention: days(f.store.event_retention_days),
-            journal_retention: days(f.store.journal_retention_days),
-            server_log_retention: days(f.store.server_log_days),
         });
         let poll = Duration::from_millis(f.agent.poll_ms);
         let api = Config {
@@ -268,6 +276,13 @@ impl SidecarToml {
             result_wait: Duration::from_secs(f.api.result_wait_s),
             idempotency_keep: hours(f.store.idempotency_keep_h),
             world_changes_keep: f.store.world_changes_keep,
+            removed_keep: hours(f.store.removed_keep_h),
+            dead_keep: hours(f.store.dead_keep_h),
+            event_retention: days(f.store.event_retention_days),
+            server_log_retention: days(f.store.server_log_days),
+            journal_retention: days(f.store.journal_retention_days),
+            journal_max_bytes: f.store.journal_max_mb.saturating_mul(MEGABYTE),
+            events_max_bytes: f.store.events_max_mb.saturating_mul(MEGABYTE),
             position_period_min: Duration::from_secs_f64(f.world.position_period_min_s),
             materialize_per_frame: f.world.materialize_per_frame.max(1),
             destroy_retries: f.world.destroy_retries,
@@ -342,9 +357,13 @@ mod tests {
         );
         assert_eq!(t.on_lost, LostPolicy::Report);
         assert_eq!(t.api.on_lost, LostPolicy::Report);
-        let sf = t.api.store.as_ref().expect("store");
-        assert_eq!(sf.event_retention, Duration::ZERO);
-        assert_eq!(sf.journal_retention, JOURNAL_RETENTION_DEFAULT);
+        assert!(t.api.store.is_some());
+        assert_eq!(t.api.event_retention, Duration::from_secs(90 * 86_400));
+        assert_eq!(t.api.journal_retention, Duration::from_secs(30 * 86_400));
+        assert_eq!(t.api.journal_max_bytes, 1_024 * 1_048_576);
+        assert_eq!(t.api.events_max_bytes, 1_024 * 1_048_576);
+        assert_eq!(t.api.removed_keep, Duration::from_secs(3_600));
+        assert_eq!(t.api.dead_keep, Duration::from_secs(24 * 3_600));
         let r = SidecarToml::parse(
             "[agent]\nmap_path = \"m\"\ntoken_path = \"token\"\n[world]\non_lost = \"respawn\"\n",
             d.path(),
@@ -425,9 +444,28 @@ mod tests {
             d.path(),
         )
         .expect("parse");
-        let sf = t.api.store.as_ref().expect("store");
-        assert_eq!(sf.journal_retention, Duration::from_secs(3 * 86_400));
-        assert_eq!(sf.event_retention, Duration::ZERO);
+        assert_eq!(t.api.journal_retention, Duration::from_secs(3 * 86_400));
+        assert_eq!(t.api.event_retention, Duration::from_secs(90 * 86_400));
+        let t = SidecarToml::parse(
+            "[agent]\nmap_path = \"m\"\ntoken_path = \"token\"\n[store]\nremoved_keep_h = 2\ndead_keep_h = 0\nevent_retention_days = 0\n",
+            d.path(),
+        )
+        .expect("parse");
+        assert_eq!(t.api.removed_keep, Duration::from_secs(2 * 3_600));
+        assert_eq!(t.api.dead_keep, Duration::ZERO);
+        assert_eq!(t.api.event_retention, Duration::ZERO);
+    }
+
+    #[test]
+    fn the_size_limits_are_read_in_megabytes_and_zero_is_none() {
+        let d = dir_with_token();
+        let t = SidecarToml::parse(
+            "[agent]\nmap_path = \"m\"\ntoken_path = \"token\"\n[store]\njournal_max_mb = 2\nevents_max_mb = 0\n",
+            d.path(),
+        )
+        .expect("parse");
+        assert_eq!(t.api.journal_max_bytes, 2 * 1_048_576);
+        assert_eq!(t.api.events_max_bytes, 0);
     }
 
     #[test]

@@ -70,7 +70,7 @@ of the `Event` message of the package named in the events file's `meta`
 | Table | Columns | Rows |
 |---|---|---|
 | `meta` | `key TEXT PRIMARY KEY`, `value BLOB` | One per key below |
-| `entity` | `id INTEGER`, `kind TEXT`, `body BLOB`; the key is `id` and `kind` | One per group or static (`kind` is `group`) and one per unit (`unit`). A static is its own unit, so its `EntityId` has both rows. |
+| `entity` | `id INTEGER`, `kind TEXT`, `body BLOB`; the key is `id` and `kind` | One per group or static (`kind` is `group`) and one per unit (`unit`), until the purge takes a removed entity's rows (spec/world.md, "Removal"). A static is its own unit, so its `EntityId` has both rows. |
 | `extension` | `name TEXT PRIMARY KEY`, `body BLOB` | One per registered Lua extension, and one tombstone per removed one |
 | `journal` | `seq INTEGER PRIMARY KEY`, `at_ms INTEGER`, `kind TEXT`, `entity INTEGER`, `body BLOB` | One per journal entry, in order. The numbers start at 1; the first row is the oldest entry kept (see "Journal retention") |
 | `inflight` | `epoch INTEGER`, `seq INTEGER`, `body BLOB`; the key is `epoch` and `seq` | One per command sent with no outcome yet |
@@ -88,11 +88,14 @@ registration of the name after a reopen gets a revision above it.
 |---|---|
 | `schema` | The schema version, a number. 1 is this document. |
 | `campaign_id` | The campaign ID. It must equal the folder's name. |
+| `journal_bytes` | The bytes of the bodies of the journal rows, decimal text. The sidecar writes it in the transaction that adds journal rows and in the one that deletes them. A file without it gets it at open, from one sum over the table. |
 | `campaign` | The campaign record: ID, name, state (`active`, `suspended`, `finished`), theaters, the theater to load, clock, created time, the author's component schema versions, and the outcome of a finished campaign. Its `state` key keeps its layout in every schema version, so the state is read before a migration. The platform schema version is `schema`. |
 | `world` | The next `EntityId`, the store revision, whether the store is open, the loaded mission (agent boot, mission generation, theater), the last agent record folded in (agent boot and record number) with the stamp it was read under (agent boot, mission generation, campaign), which records delivered again before their next `FRAME` keep, the desired airbase owners and warehouse stocks with their revisions, the sample rates the controller set, the mission load an activation or a reload owes (the shell as DCS opens it, the start written into it, and the command's epoch and sequence number once sent; absent when none is owed), the start written into the running mission's shell, the model time of that generation's first sample with its agent boot and generation, the shell slot DCS may hold (the last load applied, or one sent whose outcome is unknown, left in flight, or dropped by a suspend), the next mission's settings (`SetNextMission`), the agent's country-to-coalition map, the model time of the last samples, and the route events not yet published. |
 
 An entity body carries every field of its row in spec/world.md: for a group or static
-its spec, order and revisions, lifecycle state, authority, lost policy, error, and the
+its spec, order and revisions, lifecycle state, authority, lost policy, error, whether
+it is removed, when (`removed_at_ms`) and whether by the expiry (`expired`), when it
+became `dead` (`dead_at_ms`; a body without these reads them as absent), and the
 reconciler's per-generation bookkeeping (spawned, spawn unknown, order sent, destroy
 failures, and for a dead static the generation its ruin's spawn was written in and the
 generation DCS holds its dead object in; a body without those two reads them as
@@ -102,7 +105,8 @@ outlives a mission generation, spec/world.md "Respawn gate"), and DCS object ID.
 group's body records whether it is a `group` or a `static`.
 
 The journal holds the entries spec/world.md says are journalled, each with its `kind`
-(`command`, `outcome`, `death`, and so on), the entity it names (0 for none), the wall
+(`command`, `outcome`, `death`, `removed` with its `cause`, `controller` or `expired`
+(an entry without one is the controller's), `purged`, and so on), the entity it names (0 for none), the wall
 time it was made and its fields. The journal is an audit trail: the sidecar appends to
 it and never reads an entry's body back. An `inflight` row is inserted with the `command` entry that
 sends it and deleted with the entry that gives its outcome, in the same transaction; it
@@ -114,27 +118,39 @@ checkpoint replaces it, with `seq` one more.
 
 ### Journal retention
 
-`journal_retention_days` above 0 deletes the journal entries older than the retention,
-from the active campaign's store. The delete runs when a campaign is activated, when
-the sidecar starts with one active, and once an hour while it is active. A suspended
-campaign's journal is pruned at its next activation. A finished campaign's journal is
-never deleted.
+The journal is bounded by time and by size, each from the active campaign's store. The
+time limit, `journal_retention_days` (30 by default), above 0 deletes the entries older
+than the retention. The size limit, `journal_max_mb` (1,024 by default), above 0 deletes
+the oldest entries while the bytes of the bodies kept are over it; that is the running
+count in `meta.journal_bytes`, so no pass scans the table. Either limit deletes an
+entry. The delete runs when a campaign is activated, when the sidecar starts with one
+active, and once an hour while it is active. A suspended campaign's journal is pruned
+at its next activation. A finished campaign's journal is never deleted.
 
 The cutoff is the earlier of now and the newest entry's `at_ms`, less the retention.
-The delete takes the oldest entries in sequence order, up to the first one inside the
-retention. The journal stays contiguous, and an entry whose time is out of order ends
-the delete there. The newest entry is always kept, so the sequence numbers go on from
-it after a restart. When the clock is behind the newest entry's `at_ms` the delete is
-skipped and a warning logged: a clock set back must not delete the journal.
+The delete takes the oldest entries in sequence order. The time limit takes entries up
+to the first one inside the retention, so an entry whose time is out of order ends it
+there; the size limit goes on past that entry until the bytes over the limit are
+deleted. The journal stays contiguous. The newest entry is always kept, so the sequence
+numbers go on from it after a restart. When the clock is behind the newest entry's
+`at_ms` the time limit is skipped: a clock set back must not delete the journal. The
+size limit still applies. A pass that deletes nothing for that reason logs a warning; with
+the store off the skip is silent.
 
 The delete runs in batches of at most 1,000 entries, one per driver step, with the
 step's commit between two batches. A large backlog does not hold the writer.
+
+With the store off (`[store] enabled = false`), the same limits delete entries from the
+journal each store holds in memory, once an hour, except a finished campaign's. The size
+is the bytes of each entry's body as the store file would encode it, kept as a running
+count.
 
 `inflight` is not touched, and a restart needs nothing from the journal. A command
 whose `command` entry was deleted and that has no outcome is still owed, and its
 outcome resolves it.
 
-A backup holds the journal as it was when taken. Older backups, and a `pre_migration`
+A backup holds the journal and the entity rows as they were when taken: older backups
+keep the rows of entities purged since. Older backups, and a `pre_migration`
 backup kept outside `backup_keep`, hold deleted entries until those backups are
 deleted. A delete does not shrink `store.sqlite`: the freed pages are reused by later
 writes. A backup is made with `VACUUM INTO` and is compact. An author who wants the
@@ -167,13 +183,14 @@ A commit writes:
 
 A commit finds the changed rows from marks: a change to a group, or to one of its
 units, marks the group, and the commit compares only the marked groups and their
-members with what the file holds. A checkpoint, a new store file and the first commit
-after a new mission generation compare every row, so a change that missed its mark is
-written at the latest by the next checkpoint taken after the revision moves. Debug
-builds compare every row at every commit and fail when the marks missed one.
+members with what the file holds. A new store file and the first commit after a new
+mission generation compare every row. A checkpoint compares the groups marked since the
+last checkpoint, and their members, sampled state included. Debug builds compare every
+row at every commit and checkpoint and fail when the marks missed one.
 
 A checkpoint is a commit that also writes every row whose sampled state changed, and
-replaces the checkpoint row. It is taken every `checkpoint_s` while the campaign is
+replaces the checkpoint row. Neither a commit nor a checkpoint reads the rows nothing
+changed, so their cost does not grow with the entities a campaign keeps. It is taken every `checkpoint_s` while the campaign is
 active, skipped when the store revision did not move since the last one, and taken at
 suspend and finish and at a clean stop. `Campaign.last_checkpoint` shows the last one.
 
@@ -283,6 +300,20 @@ backup is taken every `backup_interval_h` while the campaign is active (reason
 (`pre_migration`). Suspend and finish take none: their final checkpoint is in the store
 itself. One backup of a campaign runs at a time; a request while one runs waits for it.
 
+A scheduled backup that fails is logged, naming the store that failed and, when SQLite
+failed, its extended result code, and is taken again one interval later. One skipped for
+low free space (see "Free space") counts as failed. `GetServerStatus` reports, since the
+sidecar started, when the last scheduled backup that succeeded was taken
+(`last_backup`), when the last one that failed was due (`last_backup_failure`), and why
+(`backup_error`). A failed backup does not change the health verdict or the health
+command's exit code, as low free space does not: a watchdog must not restart DCS for
+it.
+
+No file operation of the store needs a temporary file: backups, the read copy, the
+export, a restore, the journal's, the event history's and the idempotency keys'
+retention and the purge run on a host with no writable temporary folder, such as a
+container image with none run as a user.
+
 Retention: after each backup the sidecar keeps the newest `backup_keep` scheduled and
 manual backups of the campaign and deletes the older ones. It keeps, in addition, the
 newest `pre_migration` backup of each schema version, outside `backup_keep`; older
@@ -294,7 +325,10 @@ There is no restore call; a backup is restored offline (see "Restore a backup").
 The event history is not copied into each backup: `backups/events.sqlite` is one copy,
 extended at each backup with the events it lacks (`INSERT ... WHERE seq > ` its newest
 sequence number). Events the retention deleted from the history since are deleted from
-the copy too, so `backup_keep` does not multiply the history.
+the copy too, so `backup_keep` does not multiply the history. The copy's `meta.bytes`
+(below) is the sum over its own rows: it is removed before the extension, which runs
+outside a transaction, and written in the transaction that deletes the copy's old rows.
+A copy stopped between the two has no `bytes` and gets it at its next open.
 
 ## Event history
 
@@ -302,7 +336,7 @@ the copy too, so `backup_keep` does not multiply the history.
 
 | Table | Columns | Rows |
 |---|---|---|
-| `meta` | `key TEXT PRIMARY KEY`, `value BLOB` | `format` (1, a number), `campaign_id` (decimal text; 0 for the server log), `package` (the Protobuf package of the bodies, `nanoprobe.v1alpha1`) |
+| `meta` | `key TEXT PRIMARY KEY`, `value BLOB` | `format` (1, a number), `campaign_id` (decimal text; 0 for the server log), `package` (the Protobuf package of the bodies, `nanoprobe.v1alpha1`), `bytes` (decimal text: the bytes of the bodies of the event rows; written in the transaction that adds rows and in the one that deletes them, except in the backups' copy (see "Backups"); a file without it gets it at open, from one sum over the table) |
 | `event` | `seq INTEGER PRIMARY KEY`, `wall_ms INTEGER`, `source TEXT`, `body BLOB` | One per event |
 
 `source` names what the event was made from, so an event made again after a crash is
@@ -320,14 +354,25 @@ Sequence numbers grow by one from row to row. The driver commits the events of a
 in one transaction before it publishes them (above), so a number a client has seen is
 on disk and is never given to another event. The Events service reads rows by `seq`.
 
-`event_retention_days` above 0 deletes the events older than the retention, at open
-and once an hour: the cutoff is the earlier of now and the newest event's `wall_ms`,
-less the retention. The newest event is always kept, so the sequence numbers go on from
-it after a restart. When the clock is behind the newest event's `wall_ms` the deletion
-is skipped and a warning logged: a clock set back must not delete the history. A
-finished campaign's history is not deleted. The Events service serves the log from the
-first sequence number it still holds; a request to read on from before it is refused
-with `SEQUENCE_EXPIRED` (spec/errors.md).
+The event history is bounded by time and by size. The time limit,
+`event_retention_days` (90 by default), above 0 deletes the events older than the
+retention: the cutoff is the earlier of now and the newest event's `wall_ms`, less the
+retention. The size limit, `events_max_mb` (1,024 by default), above 0 deletes the oldest
+events while the bytes of the bodies kept are over it; that is the running count in
+`meta.bytes`, so no pass scans the table. Either limit deletes an event. The delete runs
+at open and once an hour, and takes the oldest events in sequence order, in batches of
+at most 1,000, one per driver step, with the step's commit between two batches. The time
+limit takes events up to the first one inside the retention; the size limit goes on past
+that event until the bytes over the limit are deleted. The newest event is always kept,
+so the sequence numbers go on from it after a restart. When the clock is behind the
+newest event's `wall_ms` the time limit is skipped: a clock set back must not delete the
+history. The size limit still applies. A pass that deletes nothing for that reason logs
+a warning, once a pass for each log. A finished campaign's
+history is not deleted. With the store off, the same limits delete events from the logs
+held in memory, once an hour, by each event's encoded size. The server event log keeps
+its time limit only. The Events service serves the log from the first sequence number it
+still holds; a request to read on from before it, whether the time limit or the size
+limit deleted it, is refused with `SEQUENCE_EXPIRED` (spec/errors.md).
 
 ## The server store
 
@@ -377,6 +422,26 @@ is read for it without being opened. When a campaign's store is opened, its rows
 younger than `idempotency_keep_h` are copied into the index. A stored key older than
 `idempotency_keep_h` is forgotten: the repeat runs as a new call. Rows older than
 `idempotency_keep_h` are deleted from every open store once an hour.
+
+## Size
+
+What a long campaign keeps is bounded by time, and the journal and the event history
+also by size: removed entities by `removed_keep_h`, dead groups by `dead_keep_h`
+(spec/world.md, "Removal" and "Expiry"), the journal by `journal_retention_days` and
+`journal_max_mb`, the event history by `event_retention_days` and `events_max_mb`,
+idempotency keys by `idempotency_keep_h`. Ruins a controller makes and never removes are kept, by design
+(spec/world.md, "Ruins"). `GetServerStatus` reports the active campaign's size in
+`store_size`:
+
+| Field | What |
+|---|---|
+| `groups_live`, `groups_dead`, `ruins`, `awaiting_purge`, `units` | Rows held: groups and statics neither dead nor removed; dead groups, which expire; dead statics not removed; removed entities whose rows are kept; unit rows |
+| `oldest_removal` | The removal time of the oldest entity awaiting purge |
+| `journal_rows`, `oldest_journal_entry`, `event_rows`, `oldest_event` | The journal and the event history kept, and the time of the oldest of each |
+| `journal_bytes`, `event_bytes` | The bytes of the journal's entries and of the events kept, the numbers `journal_max_mb` and `events_max_mb` are compared with |
+| `store_file_bytes`, `events_file_bytes` | `store.sqlite` and `events.sqlite` with their WAL files; 0 with the store off |
+| `purged`, `expired`, `purged_deaths`, `orphan_destroys` | Since the campaign's store was opened (its activation, or the sidecar's start with it active; with the store off, since the campaign was made): entities purged, dead groups expired, late deaths dropped for purged units, drift destroys of objects of entities the store does not hold |
+| `work_set` | The groups in the reconciler's work set: those the plan has something to do for. The plan also visits every group with an object bound. |
 
 ## Campaign operations
 
@@ -492,8 +557,10 @@ decoded to JSON by the rule of spec/world.md, "Lua tables in the API"; a string 
 not UTF-8 is `{"bytes_b64": ...}`. The store is read in one read transaction on a
 connection of its own, so the lines come from one snapshot while the driver goes on
 writing; the events run up to the newest at the export's start. The `journal` lines
-start at the oldest entry kept (`journal_retention_days`). It works on a campaign in any
-state.
+start at the oldest entry kept ("Journal retention": `journal_retention_days` and
+`journal_max_mb`), and the `entity` lines hold
+the rows kept: a purged entity has none (spec/world.md, "Removal"). It works on a
+campaign in any state.
 
 ### Free space
 
@@ -518,6 +585,11 @@ it is marked closed, its record is `suspended` unless the backup is `finished`, 
 commands in flight, its owed mission load and a start set for the next shell are
 cleared; its shell slot is the replaced store's, since DCS may hold that file. The event
 history is not rolled back: `events.sqlite` keeps the events after the backup.
+
+An entity made after the backup has no row in the restored store and an `EntityId`
+below its counter. An object of one that DCS still holds when the campaign is next
+active is destroyed as drift (spec/world.md, "Removal"). An entity purged after the
+backup comes back with its rows, removed, and is purged again.
 
 ### Timers
 
