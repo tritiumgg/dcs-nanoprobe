@@ -145,6 +145,9 @@ pub struct Agent {
     start: Instant,
     /// Frames pumped while attached: when a frame-numbered misbehavior fires.
     attached_frames: u64,
+    /// The tail-past misbehavior fired in this attach: its bad tail is
+    /// stored after every publish until the link detaches.
+    tail_past: bool,
     frame: u64,
     event_seq: u64,
     log_seq: u64,
@@ -189,6 +192,7 @@ impl Agent {
             link,
             start: Instant::now(),
             attached_frames: 0,
+            tail_past: false,
             frame: 0,
             event_seq: 0,
             log_seq: 0,
@@ -309,17 +313,23 @@ impl Agent {
                 bad.extend([2, 0, 0xff, 0xfe, 0, 0, 0]);
                 self.link.put_raw(kind::LOG as u16, &bad);
             }
+            if self.at(|b| match b {
+                Misbehavior::BadLength(f) => Some(f),
+                _ => None,
+            }) {
+                self.bad_length();
+            }
         }
         let attached = self.link.attached();
         self.link.end();
-        if attached {
-            self.misbehave_ring();
-            if self.at(|b| match b {
+        self.misbehave_ring(attached);
+        if attached
+            && self.at(|b| match b {
                 Misbehavior::DetachAfterPublish(f) => Some(f),
                 _ => None,
-            }) {
-                self.link.detach("the detach-after-publish misbehavior");
-            }
+            })
+        {
+            self.link.detach("the detach-after-publish misbehavior");
         }
         self.take_notes();
     }
@@ -370,31 +380,54 @@ impl Agent {
         );
     }
 
-    fn misbehave_ring(&mut self) {
-        let map = self.link.map().clone();
-        let out = self.link.outbound().clone();
-        if self.at(|b| match b {
-            Misbehavior::BadLength(f) => Some(f),
-            _ => None,
-        }) {
-            let ring = out.ring();
-            let off = ring.data + (out.tail() & (ring.capacity - 1)) as usize;
-            let mut h = [0u8; 8];
-            h[..4].copy_from_slice(&u32::MAX.to_le_bytes());
-            h[4..6].copy_from_slice(&(kind::LOG as u16).to_le_bytes());
-            map.write(off, &h);
-            let tail = out.tail() + record_size(8);
-            map.store(s::OUT_TAIL, tail, Ordering::Release);
-            self.note("published a record over the length limit".into());
+    /// Write a `LOG` through the link and then set its `len` over the limit.
+    /// The frame's publish carries it, and later records go after it, so the
+    /// sidecar meets it however late it polls. A record written past the
+    /// link's private tail would be overwritten by the next frame's publish
+    /// before a sidecar that polls slower than the frame rate could read it.
+    fn bad_length(&mut self) {
+        if !self.link.put_raw(kind::LOG as u16, &[0; 8]) {
+            self.note("no room for the record over the length limit".into());
+            return;
         }
-        if self.at(|b| match b {
-            Misbehavior::TailPastCapacity(f) => Some(f),
-            _ => None,
-        }) {
-            let head = map.load(s::OUT_HEAD, Ordering::Acquire);
-            let tail = head + out.ring().capacity + 8;
-            map.store(s::OUT_TAIL, tail, Ordering::Release);
+        let out = self.link.outbound();
+        let ring = out.ring();
+        let at = out.tail() - record_size(8);
+        let off = ring.data + (at & (ring.capacity - 1)) as usize;
+        self.link.map().write(off, &u32::MAX.to_le_bytes());
+        self.note("published a record over the length limit".into());
+    }
+
+    /// Store a tail more than a capacity past the head after the frame's
+    /// publish. Every publish stores the link's own tail, so the bad one is
+    /// stored again after each, for as long as the attach lasts: a sidecar
+    /// that polls slower than the frame rate still reads it. On the frame the
+    /// link is found detached, the tail the link published is put back, so
+    /// the next sidecar's attach finds a sane ring. A detach and the next
+    /// accept are at least two frames apart (`Link::begin`).
+    fn misbehave_ring(&mut self, attached: bool) {
+        if attached
+            && self.at(|b| match b {
+                Misbehavior::TailPastCapacity(f) => Some(f),
+                _ => None,
+            })
+        {
+            self.tail_past = true;
             self.note("published a tail past the capacity".into());
+        }
+        if !self.tail_past {
+            return;
+        }
+        let map = self.link.map();
+        if attached {
+            let head = map.load(s::OUT_HEAD, Ordering::Acquire);
+            let tail = head + self.link.outbound().ring().capacity + 8;
+            map.store(s::OUT_TAIL, tail, Ordering::Release);
+        } else {
+            // Nothing is written while detached, so the private tail is the
+            // one the last publish stored.
+            map.store(s::OUT_TAIL, self.link.outbound().tail(), Ordering::Release);
+            self.tail_past = false;
         }
     }
 

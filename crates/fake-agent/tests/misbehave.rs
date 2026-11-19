@@ -383,6 +383,13 @@ fn a_tail_past_the_capacity_fails_the_check() {
         "{:?}",
         p.reports
     );
+    // The agent puts its own tail back when it detaches, so the next attach
+    // to the same boot skips to it.
+    assert!(
+        p.until(WAIT, |p| p.reported("skipped from")),
+        "{:?}",
+        p.reports
+    );
     p.finish();
 }
 
