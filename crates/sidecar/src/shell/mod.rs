@@ -425,6 +425,7 @@ pub fn save(dir: &Path, campaign: u64, slot: u8, bytes: &[u8]) -> std::io::Resul
     {
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(bytes)?;
+        #[expect(clippy::disallowed_methods, reason = "created, so open for writing")]
         f.sync_all()?;
     }
     std::fs::rename(&tmp, &path)?;

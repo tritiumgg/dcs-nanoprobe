@@ -56,6 +56,24 @@ jobs:
         id: names
         run: printf 'commit=%s\n' "$(printf '%s' "$GITHUB_SHA" | cut -c1-12)" >>"$GITHUB_OUTPUT"
 
+      # The mise tools (LLVM alone unpacks to about 8 GB) and the builds do
+      # not fit beside the toolchains the image ships. This job takes every
+      # tool from mise, so it removes those toolchains and the image's tool
+      # cache.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /opt/ghc \
+            /usr/local/share/boost /opt/hostedtoolcache
+          df -h /
+
+      # The mise Lua 5.1 build links readline. The packages are the ones of
+      # ubuntu-24.04.
+      - name: Install the headers the Lua build needs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libreadline-dev libncurses-dev
+
       # The tools of mise.toml, the pinned gh among them, for every step below.
       - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
         with:

@@ -240,7 +240,7 @@ impl ServerStore {
             tx.commit()?;
             conn.close().map_err(|(_, e)| DiskError::Sql(e))?;
         }
-        fs::File::open(&tmp)?.sync_all()?;
+        crate::store::sync_file(&tmp)?;
         fs::rename(&tmp, path)?;
         Ok(())
     }

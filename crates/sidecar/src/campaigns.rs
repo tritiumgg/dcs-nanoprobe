@@ -10,6 +10,7 @@ use crate::ids::CampaignId;
 use crate::store::{
     CampaignRecord, CampaignState, DiskError, MIGRATIONS, Migration, SCHEMA, Store, TierPeriod,
     backup_file, ident_of, next_entity_of, rebase_world, record_of, revision_of, state_of,
+    sync_file,
 };
 
 /// Why a backup was taken.
@@ -496,10 +497,6 @@ impl Drop for ReadCopy {
     }
 }
 
-fn sync_file(path: &Path) -> io::Result<()> {
-    fs::OpenOptions::new().write(true).open(path)?.sync_all()
-}
-
 /// The backups of one store folder: a campaign's, or the server store's
 /// (spec/persistence.md, "Backups").
 #[derive(Clone, Debug)]
@@ -530,12 +527,13 @@ impl BackupFolder {
             backup_file(&self.dir.join(STORE), &dir.join(STORE))?;
             // VACUUM INTO does not flush the copy: flush it before the
             // marker that says it is complete, then the marker.
-            fs::File::open(dir.join(STORE))?.sync_all()?;
+            sync_file(&dir.join(STORE))?;
             let mut info = fs::File::create(dir.join(INFO))?;
             io::Write::write_all(
                 &mut info,
                 format!("{at_ms} {schema} {revision} {}\n", reason.name()).as_bytes(),
             )?;
+            #[expect(clippy::disallowed_methods, reason = "created, so open for writing")]
             info.sync_all()?;
             Ok::<u64, DiskError>(fs::metadata(dir.join(STORE))?.len())
         })();

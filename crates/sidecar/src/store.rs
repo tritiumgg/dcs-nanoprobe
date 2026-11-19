@@ -22,6 +22,8 @@ use crate::stock::{Item, Stock};
 mod disk;
 
 #[cfg(feature = "disk")]
+pub(crate) use disk::sync_file;
+#[cfg(feature = "disk")]
 pub use disk::{
     CampaignRecord, CampaignState, Checkpoint, DiskError, JournalPrune, MIGRATIONS, Migration,
     REVISION_RESERVE, SCHEMA, TierPeriod, backup_file, checkpoint_of, idempotency_of, ident_of,

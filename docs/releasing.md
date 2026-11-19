@@ -63,7 +63,9 @@ What to expect on the first run:
 
 - Linux and macOS run `mise run check` and then `mise run dll`, as a developer does.
   The first run installs every tool in `mise.toml` and builds from nothing; later runs
-  restore caches that pushes to main save.
+  restore caches that pushes to main save. On Linux the job first frees disk space by
+  deleting the image's preinstalled toolchains, and installs `libreadline-dev
+  libncurses-dev` with apt for mise's Lua build.
 - The breaking-change check compares the schema with the commit before the push. When
   that commit holds no schema, as on the first push of the schema, it reports "nothing
   to compare" and passes.
@@ -82,9 +84,12 @@ gh run view --log-failed
 Reproduce it on a development machine with the same command: `mise run check` or
 `mise run dll` on Linux or macOS. The tools are the same versions as CI's.
 
-- A test that fails only on the runner and passes locally is often a timing limit
-  under the runner's fewer cores. Rerun the failed jobs once
-  (`gh run rerun --failed`); if it fails again, it is a real failure on that machine.
+- A test that fails only on the runner and passes locally may be a timing limit, or a
+  race that the runner's fewer cores expose. Before a rerun, look for a race: slow the
+  thread the test waits on and reproduce it locally, as the slow-sidecar variants in
+  `crates/fake-agent/tests/misbehave.rs` do. With no race found, rerun the failed jobs
+  once (`gh run rerun --failed`); if it fails again, it is a real failure on that
+  machine.
 - A failure in installing a tool (a download error from mise) is usually transient:
   rerun the job.
 - A failure on Windows only cannot be reproduced on Linux or macOS. The log names the
@@ -108,8 +113,11 @@ a commit whose CI failed.
 gh workflow run release.yml --ref main
 ```
 
-It runs the job Build: `mise run package` on an `ubuntu-24.04` runner, from nothing,
-with no cache, and the archive test `tools/stage-release-test.sh`. That test fails when
+It runs the job Build on an `ubuntu-24.04` runner. The job first deletes the image's
+preinstalled toolchains and tool cache, which it does not use, for the disk space the
+mise tools and the builds need, and installs with apt the readline and ncurses headers
+that mise's Lua build needs. Then it runs `mise run package` from nothing, with no
+cache, and the archive test `tools/stage-release-test.sh`. That test fails when
 an archive holds other files than spec/install.md lists, when a program is not static,
 when a file names the runner's home folder or checkout, or when a PDB is among the
 release's files. The files are kept as the workflow artifact `release-files-<commit>`
@@ -141,9 +149,12 @@ completed", "not yet run", "TBD" or "TODO".
 The first dry run is also the first time `mise run package` runs on a Linux host. If it
 fails, the log names the step. The tools come from `mise.toml`: zig as the C compiler
 for the static programs, cargo-xwin and LLVM for the Windows files, buf for the schema.
-The runner supplies rustup, which installs the toolchain `rust-toolchain.toml` names,
-the C compiler and linker for programs built for the runner itself and for the `cargo:`
-tools mise installs, `zip`, `unzip`, git, `gh` and the shell tools.
+mise builds Lua 5.1 from source, which needs the readline and ncurses development
+headers (`libreadline-dev libncurses-dev` on Debian and Ubuntu); the job installs them
+with apt. `gh` is pinned in `mise.toml` too. The runner supplies rustup, which installs
+the toolchain `rust-toolchain.toml` names, the C compiler and linker for programs built
+for the runner itself and for the `cargo:` tools mise installs, `zip`, `unzip`, git and
+the shell tools.
 
 ## 4. Tag the version
 
