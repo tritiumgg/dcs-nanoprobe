@@ -63,7 +63,9 @@ What to expect on the first run:
 
 - Linux and macOS run `mise run check` and then `mise run dll`, as a developer does.
   The first run installs every tool in `mise.toml` and builds from nothing; later runs
-  restore caches that pushes to main save.
+  restore caches that pushes to main save. On Linux the job first frees disk space by
+  deleting the image's preinstalled toolchains, and installs `libreadline-dev
+  libncurses-dev` with apt for mise's Lua build.
 - The breaking-change check compares the schema with the commit before the push. When
   that commit holds no schema, as on the first push of the schema, it reports "nothing
   to compare" and passes.
@@ -82,9 +84,12 @@ gh run view --log-failed
 Reproduce it on a development machine with the same command: `mise run check` or
 `mise run dll` on Linux or macOS. The tools are the same versions as CI's.
 
-- A test that fails only on the runner and passes locally is often a timing limit
-  under the runner's fewer cores. Rerun the failed jobs once
-  (`gh run rerun --failed`); if it fails again, it is a real failure on that machine.
+- A test that fails only on the runner and passes locally may be a timing limit, or a
+  race that the runner's fewer cores expose. Before a rerun, look for a race: slow the
+  thread the test waits on and reproduce it locally, as the slow-sidecar variants in
+  `crates/fake-agent/tests/misbehave.rs` do. With no race found, rerun the failed jobs
+  once (`gh run rerun --failed`); if it fails again, it is a real failure on that
+  machine.
 - A failure in installing a tool (a download error from mise) is usually transient:
   rerun the job.
 - A failure on Windows only cannot be reproduced on Linux or macOS. The log names the
@@ -146,9 +151,10 @@ fails, the log names the step. The tools come from `mise.toml`: zig as the C com
 for the static programs, cargo-xwin and LLVM for the Windows files, buf for the schema.
 mise builds Lua 5.1 from source, which needs the readline and ncurses development
 headers (`libreadline-dev libncurses-dev` on Debian and Ubuntu); the job installs them
-with apt. The runner supplies rustup, which installs the toolchain `rust-toolchain.toml` names,
-the C compiler and linker for programs built for the runner itself and for the `cargo:`
-tools mise installs, `zip`, `unzip`, git, `gh` and the shell tools.
+with apt. `gh` is pinned in `mise.toml` too. The runner supplies rustup, which installs
+the toolchain `rust-toolchain.toml` names, the C compiler and linker for programs built
+for the runner itself and for the `cargo:` tools mise installs, `zip`, `unzip`, git and
+the shell tools.
 
 ## 4. Tag the version
 

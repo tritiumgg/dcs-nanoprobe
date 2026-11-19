@@ -15,7 +15,9 @@ RUSTUP_TOOLCHAIN = ""
 
 [tools]
 # Stock Lua 5.1 for the host tests. The plugin builds it from source with make,
-# which a Windows host lacks, and the host Lua test is skipped on Windows.
+# which a Windows host lacks, and the host Lua test is skipped on Windows. On
+# Linux the build needs the readline and ncurses headers, which mise does not
+# install (`libreadline-dev libncurses-dev` on Debian and Ubuntu).
 lua = { version = "5.1.5", os = ["linux", "macos"] }
 lua-language-server = "3.19.2"
 buf = "1.75.0"
