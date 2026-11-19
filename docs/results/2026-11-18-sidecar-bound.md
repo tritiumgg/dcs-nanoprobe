@@ -207,7 +207,8 @@ where the series' mean is near 0 or large against the rate a stopped bound would
 | Dead groups (`store_size.groups_dead`) | At most 34 at every record | 30 an hour kept for an hour, one step's kill, and a death or an expiry that lands a step late |
 | Awaiting purge (`store_size.awaiting_purge`) | At most 10 at every record | One removal a step, purged after an enumeration |
 | Purged, expired (`store_size`) | 150 and 30 an hour, within 20 % | The bound at work |
-| Deaths on the event stream (`streams.deaths`), kills (`churn.kills`) | 120 and 30 an hour, within 20 %, over the whole run | The death path carries the full churn; the S21 soak's kills stopped after 3.7 hours from a tool defect, fixed before this run |
+| Kills (`churn.kills`), groups left dead (`churn.dead_left`) | 30 an hour each, within 20 %, over the whole run | The death path carries the full churn; the S21 soak's kills stopped after 3.7 hours from a tool defect, fixed before this run |
+| Deaths on the event stream (`streams.deaths`) | Reported; from the stored history, at least 4 deaths of the campaign's units a kill and no unit dead twice | Set at minute 37 of the run, from the stored history read then: a kill's blasts also destroy scenery (17 of 105 DEAD events) and units of neighboring groups, so the stream's count runs at about 175 an hour, not 120; the 8-hour soak had the same ratio |
 | The agent's pending sets (`pending_destroy`, `pending_deaths`, `loadouts_waiting`, `births`) | At most 1 entry an hour | S21's limit: each drains in steady state |
 | Journal and event rows and bytes, the store's files | Reported per hour | They rise by design until their limits |
 

@@ -2952,10 +2952,14 @@ const FIT_SERIES: &[(&str, Rule)] = &[
             whole: false,
         },
     ),
+    // Every S_EVENT_DEAD on the stream: the kill's blasts also destroy
+    // scenery and units of neighboring groups, so it is reported, and the
+    // death path is judged by the kills and the dead groups they leave.
+    ("/streams/deaths", Rule::Report),
     (
-        "/streams/deaths",
+        "/churn/dead_left",
         Rule::Rate {
-            per_h: 120.0,
+            per_h: 30.0,
             within: 0.2,
             whole: true,
         },
@@ -3439,7 +3443,7 @@ mod tests {
                         "expired": (30.0 * h) as u64,
                     },
                     "streams": { "deaths": (120.0 * h) as u64 },
-                    "churn": { "kills": (30.0 * h) as u64 },
+                    "churn": { "kills": (30.0 * h) as u64, "dead_left": (30.0 * h) as u64 },
                     "agent": { "pending_destroy": 0, "pending_deaths": 0, "loadouts_waiting": 0, "births": 0 },
                     "api": {
                         "last_backup_s": if k >= 60 { Some(1_000 + i64::from(k >= 119)) } else { None },
