@@ -31,6 +31,9 @@ struct Watched {
     control_first: bool,
     /// Panic in `record`.
     panic: bool,
+    /// Sleep this long in every `durable`, once per poll that read records:
+    /// a sidecar that reads slower than the agent's frames.
+    slow: Duration,
 }
 
 impl Sink for Watched {
@@ -50,6 +53,7 @@ impl Sink for Watched {
         self.stub.record(a, n, k, p)
     }
     fn durable(&mut self) -> Result<(), String> {
+        std::thread::sleep(self.slow);
         self.stub.durable()
     }
     fn hello(&mut self, h: &Hello, number: u64) {
@@ -96,6 +100,8 @@ struct Sidecar {
     control_first: bool,
     /// Panic in the first `record`.
     panic: bool,
+    /// Sleep in every `durable` (`Watched::slow`).
+    slow: Duration,
 }
 
 /// What a test changes from the defaults.
@@ -118,6 +124,8 @@ struct Setup {
     commands_per_frame: Option<usize>,
     /// Frames per second, when not the default.
     fps: Option<u32>,
+    /// Sleep in every `durable` of the sidecar (`Watched::slow`).
+    slow: Duration,
 }
 
 struct Pair {
@@ -207,6 +215,7 @@ impl Pair {
         pair.start_sidecar(Sidecar {
             stall: setup.stall,
             control_first: setup.control_first,
+            slow: setup.slow,
             ..Sidecar::default()
         });
         pair
@@ -220,6 +229,7 @@ impl Pair {
             limit: o.limit,
             control_first: o.control_first,
             panic: o.panic,
+            slow: o.slow,
         };
         self.sidecar_stop = Arc::new(AtomicBool::new(false));
         let (cfg, stop) = (self.cfg.clone(), self.sidecar_stop.clone());
@@ -357,16 +367,25 @@ fn a_connection_closed_after_ok_ends_the_session() {
     p.finish();
 }
 
-#[test]
-fn a_record_over_the_length_limit_fails_the_check() {
-    let p = Pair::start("len", &[Misbehavior::BadLength(50)], Duration::ZERO);
-    assert!(
-        p.until(WAIT, |p| p.reported("len over an eighth")),
-        "{:?}",
-        p.reports
+/// A sidecar's read period for the slow variants: ten of the fake agent's
+/// 10 ms frames, under the 250 ms after which a poll is reported late and
+/// the agent's 0.5 s heartbeat limit. A fault the next frame's publish
+/// overwrites is gone before such a sidecar reads it.
+const SLOW_READ: Duration = Duration::from_millis(100);
+
+/// The ring fault `misbehave` fails the sidecar's check with `report`. The
+/// next attach to the same boot skips past it instead of meeting it again;
+/// for a bad tail, the agent puts its own tail back when it detaches.
+fn ring_fault_fails_the_check(name: &str, misbehave: Misbehavior, report: &str, slow: Duration) {
+    let p = Pair::with(
+        name,
+        Setup {
+            misbehave: vec![misbehave],
+            slow,
+            ..Setup::default()
+        },
     );
-    // The next attach to the same boot skips the bad record instead of
-    // meeting it again.
+    assert!(p.until(WAIT, |p| p.reported(report)), "{:?}", p.reports);
     assert!(
         p.until(WAIT, |p| p.reported("skipped from")),
         "{:?}",
@@ -376,21 +395,43 @@ fn a_record_over_the_length_limit_fails_the_check() {
 }
 
 #[test]
+fn a_record_over_the_length_limit_fails_the_check() {
+    ring_fault_fails_the_check(
+        "len",
+        Misbehavior::BadLength(50),
+        "len over an eighth",
+        Duration::ZERO,
+    );
+}
+
+#[test]
+fn a_record_over_the_length_limit_fails_the_check_of_a_slow_sidecar() {
+    ring_fault_fails_the_check(
+        "len-slow",
+        Misbehavior::BadLength(50),
+        "len over an eighth",
+        SLOW_READ,
+    );
+}
+
+#[test]
 fn a_tail_past_the_capacity_fails_the_check() {
-    let p = Pair::start("tail", &[Misbehavior::TailPastCapacity(50)], Duration::ZERO);
-    assert!(
-        p.until(WAIT, |p| p.reported("outbound ring: tail")),
-        "{:?}",
-        p.reports
+    ring_fault_fails_the_check(
+        "tail",
+        Misbehavior::TailPastCapacity(50),
+        "outbound ring: tail",
+        Duration::ZERO,
     );
-    // The agent puts its own tail back when it detaches, so the next attach
-    // to the same boot skips to it.
-    assert!(
-        p.until(WAIT, |p| p.reported("skipped from")),
-        "{:?}",
-        p.reports
+}
+
+#[test]
+fn a_tail_past_the_capacity_fails_the_check_of_a_slow_sidecar() {
+    ring_fault_fails_the_check(
+        "tail-slow",
+        Misbehavior::TailPastCapacity(50),
+        "outbound ring: tail",
+        SLOW_READ,
     );
-    p.finish();
 }
 
 #[test]
