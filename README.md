@@ -171,7 +171,9 @@ DCS function the platform calls and no longer finds.
 ## Build from source
 
 Every tool comes from `mise.toml`; the Rust toolchain is pinned in
-`rust-toolchain.toml`.
+`rust-toolchain.toml`. On Linux, mise builds Lua 5.1 from source and needs the
+readline and ncurses development headers first (`libreadline-dev libncurses-dev` on
+Debian and Ubuntu); the Linux CI jobs install them with apt.
 
 ```sh
 mise install
