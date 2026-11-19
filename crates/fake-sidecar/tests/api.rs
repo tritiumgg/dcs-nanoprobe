@@ -381,8 +381,9 @@ async fn a_watch_resumes_from_a_listed_revision_and_expires() {
     // List, then watch from the listed revision: the next change arrives as
     // an upsert at a later revision. This hub keeps the default number of
     // changes. With 4 kept, the put and the fake sim's own changes after it
-    // (about 35 in 0.5 s on a Mac) can drop the listed revision before the
-    // watch's task first reads, and the watch ends as too slow.
+    // can drop the listed revision before the watch's task first reads, and
+    // the watch ends as too slow: the likely cause of a failure on Windows,
+    // not shown there.
     let (hub, ch, l, c) = busy_hub(cfg(), 6).await;
     let mut world = WorldServiceClient::new(ch.clone());
     let rev = {
