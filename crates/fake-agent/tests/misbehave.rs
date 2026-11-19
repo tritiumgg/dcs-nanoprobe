@@ -31,8 +31,9 @@ struct Watched {
     control_first: bool,
     /// Panic in `record`.
     panic: bool,
-    /// Sleep this long in every `durable`, once per poll that read records:
-    /// a sidecar that reads slower than the agent's frames.
+    /// Sleep this long in every `last_number`, which the sidecar calls once
+    /// per poll as it starts to read records: a sidecar that reads slower
+    /// than the agent's frames.
     slow: Duration,
 }
 
@@ -41,6 +42,7 @@ impl Sink for Watched {
         self.stub.attached(a, b)
     }
     fn last_number(&self, a: u64) -> u64 {
+        std::thread::sleep(self.slow);
         self.stub.last_number(a)
     }
     fn record(&mut self, a: u64, n: u64, k: u16, p: &[u8]) -> Result<(), String> {
@@ -53,7 +55,6 @@ impl Sink for Watched {
         self.stub.record(a, n, k, p)
     }
     fn durable(&mut self) -> Result<(), String> {
-        std::thread::sleep(self.slow);
         self.stub.durable()
     }
     fn hello(&mut self, h: &Hello, number: u64) {
@@ -100,7 +101,7 @@ struct Sidecar {
     control_first: bool,
     /// Panic in the first `record`.
     panic: bool,
-    /// Sleep in every `durable` (`Watched::slow`).
+    /// Sleep once per poll (`Watched::slow`).
     slow: Duration,
 }
 
@@ -124,7 +125,7 @@ struct Setup {
     commands_per_frame: Option<usize>,
     /// Frames per second, when not the default.
     fps: Option<u32>,
-    /// Sleep in every `durable` of the sidecar (`Watched::slow`).
+    /// Sleep once per poll of the sidecar (`Watched::slow`).
     slow: Duration,
 }
 

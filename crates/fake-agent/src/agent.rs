@@ -42,9 +42,11 @@ pub enum Misbehavior {
     /// On this attached frame, detach right after publishing.
     DetachAfterPublish(u64),
     /// On this attached frame, publish a record whose `len` is over the limit.
+    /// It stays in the ring: later records go after it.
     BadLength(u64),
-    /// On this attached frame, publish a tail more than a capacity past the
-    /// head.
+    /// From this attached frame, store a tail more than a capacity past the
+    /// head after every publish, until the link detaches; then put the
+    /// link's own tail back.
     TailPastCapacity(u64),
     /// On this attached frame, write a `LOG` whose `str` is not UTF-8.
     BadUtf8(u64),
@@ -56,7 +58,8 @@ impl Misbehavior {
     /// Parse `bad-magic`, `never-ready`, `wrong-ok-hash`, `no-ok`,
     /// `close-after-ok`, `ok-other-boot`, `frame-number@F`, `oversize@F`, `lose-control@F`,
     /// `detach-after-publish@F`, `bad-length@F`, `tail-past@F`, `bad-utf8@F`,
-    /// `stall@F:MS`.
+    /// `stall@F:MS`. `F` is the attached frame a misbehavior fires on;
+    /// `tail-past@F` holds its bad tail from `F` until the link detaches.
     pub fn parse(text: &str) -> Option<Misbehavior> {
         let (name, at) = text.split_once('@').unwrap_or((text, ""));
         let frame = || at.parse().ok();
@@ -420,8 +423,11 @@ impl Agent {
         }
         let map = self.link.map();
         if attached {
-            let head = map.load(s::OUT_HEAD, Ordering::Acquire);
-            let tail = head + self.link.outbound().ring().capacity + 8;
+            // Past the published tail, not the stored head: the sidecar
+            // checks against its own head, which may be ahead of the stored
+            // one but is never past the published tail.
+            let out = self.link.outbound();
+            let tail = out.tail() + out.ring().capacity + 8;
             map.store(s::OUT_TAIL, tail, Ordering::Release);
         } else {
             // Nothing is written while detached, so the private tail is the
