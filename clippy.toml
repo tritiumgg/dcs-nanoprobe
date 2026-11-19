@@ -1,0 +1,9 @@
+# Windows refuses to flush a file handle opened without write access
+# (FlushFileBuffers returns "Access is denied"), so `File::open(p)?.sync_all()`
+# works on macOS and Linux and fails on Windows. Flush a file by path with the
+# sidecar's `store::sync_file`, which opens it for writing; a site that holds a
+# handle it opened for writing says so with `#[expect]`.
+disallowed-methods = [
+  { path = "std::fs::File::sync_all", reason = "flush by path with store::sync_file, which opens for writing as Windows requires" },
+  { path = "std::fs::File::sync_data", reason = "flush by path with store::sync_file, which opens for writing as Windows requires" },
+]

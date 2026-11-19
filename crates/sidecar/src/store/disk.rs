@@ -359,11 +359,24 @@ fn wal(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(p)
 }
 
+/// Flush the closed file at `path` to the disk. The file is opened for
+/// writing: Windows refuses to flush a handle without write access
+/// (`FlushFileBuffers`, "Access is denied"). Clippy's `disallowed_methods`
+/// (clippy.toml) sends every other flush of a file by path through here.
+pub(crate) fn sync_file(path: &Path) -> std::io::Result<()> {
+    #[expect(clippy::disallowed_methods, reason = "the handle is open for writing")]
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)?
+        .sync_all()
+}
+
 /// Flush a folder's entries, so a rename in it survives a power loss. Not
 /// possible on Windows, where the rename is flushed with the file system.
 fn sync_dir(dir: &Path) {
     #[cfg(unix)]
     if let Ok(d) = std::fs::File::open(dir) {
+        #[expect(clippy::disallowed_methods, reason = "a folder, on Unix only")]
         let _ = d.sync_all();
     }
     #[cfg(not(unix))]
@@ -748,7 +761,7 @@ impl Store {
         // The last connection's close folds the WAL into the file.
         let conn = std::mem::replace(&mut d.conn, Connection::open_in_memory()?);
         conn.close().map_err(|(_, e)| DiskError::Sql(e))?;
-        std::fs::File::open(&tmp)?.sync_all()?;
+        sync_file(&tmp)?;
         std::fs::rename(&tmp, path)?;
         if let Some(dir) = path.parent() {
             sync_dir(dir);
