@@ -382,8 +382,7 @@ async fn a_watch_resumes_from_a_listed_revision_and_expires() {
     // an upsert at a later revision. This hub keeps the default number of
     // changes. With 4 kept, the put and the fake sim's own changes after it
     // can drop the listed revision before the watch's task first reads, and
-    // the watch ends as too slow: the likely cause of a failure on Windows,
-    // not shown there.
+    // the watch ends as too slow.
     let (hub, ch, l, c) = busy_hub(cfg(), 6).await;
     let mut world = WorldServiceClient::new(ch.clone());
     let rev = {
