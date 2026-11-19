@@ -187,6 +187,8 @@ matches decides:
 | 4 | A TCP connect to the handshake port is refused | `gone` |
 | 5 | Otherwise | `hung` |
 
+- A connect to the handshake port that gets no answer before the probe's timeout counts
+  as not refused.
 - `heartbeat_stale_s` applies in every lifecycle state but `LOADING`. No frame runs
   during a load, so the heartbeat stands still and the agent answers no handshake;
   only `loading_limit_s` bounds a load.
