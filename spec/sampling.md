@@ -47,20 +47,23 @@ clock (`QueryPerformanceCounter` on Windows).
 | `c` | The per-frame charge for the system-call frames: `C` × `I` / 10⁶ |
 | `D` | Debt: agent time spent past the allowances, at most one second's budget (`overhead_share` × 10⁶). Below 0 it is credit: allowance earned on frames that spent less, at most 150 µs. The time that births' and the enumeration's balance pays is not in it ("Tiers") |
 | `r` | The repayment planned this frame: the smaller of `D` and `A` / 2, when `D` is above 0 |
-| `S` | The frame's slice, `slice_us`: the smaller of `A` − `c` − `r` + credit and the cap. The cap is 250 less what the frame's finish takes: the frame's fixed part already spent, and an estimate of closing the last batch and writing its record (`close_us` + the batch tail + 2 × the closing's mean deviation, at least 6 µs). No frame passes 250 µs. The cap binds only below about 12 frames a second. After a frame interval over 2 × `I`, such as a stall, the frame takes no credit |
+| `S` | The frame's slice, `slice_us`: the smaller of `A` − `c` − `r` + credit and the cap. The cap is 250 less what the frame's finish takes: the frame's fixed part already spent, and an estimate of closing the last batch and writing its record (`close_us` + the batch tail + 2 × the closing's mean deviation, at least 6 µs). No frame passes 250 µs. At the default `overhead_share` of 0.003, with `C` at the measured 165 µs a second (LIVE, docs/results/2026-11-13-e25-cpu-idle.md), no debt and the cap at its largest, 244 µs, the cap binds below about 30 frames a second with full credit (`A` − `c` ≥ 94 µs) and below about 12 with no credit (`A` − `c` ≥ 244 µs). After a frame interval over 2 × `I`, such as a stall, the frame takes no credit |
 | `F` | Fixed work: agent time from the start of `frame` to the point of the decision, plus the agent time of the events handled since the last frame, less commanded work done so far (spec/commands.md, "Handlers"). For the pump it includes the frame's sweep |
 | `m` | The share of the allowance for births and the enumeration: 0.5, and 0.75 while an enumeration has run longer than `enumeration_s` |
 | `R` | The sweep's savings that the pump leaves alone ("The sweep"), `k` times what the sweep has saved. 0 when the pump reads the positions |
-| `x` | The running estimate of the cross-state call: the time from `frame`'s decision to the start of the shim's pump, each new call weighing 0.1, one call counting at most 62.5 µs. It decays by 1 % on each pump, and on a frame where 3 × `x` is above the gate's cap and the pump has work worth the call ("The pump's worth"), at most once a frame, so an estimate that is too high cannot keep the pump shut |
+| `x` | The running estimate of the cross-state call: the time from `frame`'s decision to the start of the shim's pump, each new call weighing 0.1, one call counting at most 62.5 µs. It decays by 1 % on each pump, and on a frame where 3 × `x` is above `reach` (`G`) and the pump has work worth the call ("The pump's worth"), at most once a frame, so an estimate that is too high cannot keep the pump shut |
 | `f` | The running estimate of a pump batch's fixed part ("Tiers"), from the row tiers' batches only. It decays by 1 % on each pump, except a pump whose batches were all births or the enumeration |
-| `G` | The gate: 3 × (`x` + `f`), but at most the cap `reach` = 0.8 × (`A` − `c` + 150 − `F` − `R`) and never under 3 × `x` |
+| `G` | The gate: 3 × (`x` + `f`), but at most `reach` = 0.8 × (min(`A` − `c` + 150, the cap of `S`) − `F` − `R`) and never under 3 × `x` |
 | `B` | The pump's sampling budget: (`S` − `F` − `R`) × `k`. Nothing is sampled when it is 0 or less. `k` is 1, except in a build with fault injection, where the `sampling` fault sets it (spec/faults.md) |
 
 A frame calls the shim's pump only when the pump has work worth the call ("The pump's
 worth") and `S` − `F` − `R` is at least `G`, so the call and one batch's fixed part take
-at most a third of what the frame has left, as far as credit can reach. The cap `reach`
-leaves out the sweep's reserve `R`, so the gate never asks for more than a frame can
-have beside it. Under Wine the
+at most a third of what the frame has left, as far as credit can reach. The gate never
+asks for more than a frame can have: `reach` counts credit only up to the cap of `S` and
+leaves out the sweep's reserve `R`. With full credit and `S` at its cap, `S` − `F` − `R`
+is at least `reach`, so the gate opens once 3 × `x` is at most `reach`. Where the cap
+binds with a large `R`, `reach` is small: `x` decays below the call's measured cost until
+the gate opens, and each pump measures it again. Under Wine the
 call costs 22–30 µs (PRIOR, S10, docs/results/2026-11-13-s10-sampling.md) against an
 allowance of about 27 µs at 110 frames a second, so frames carry their allowance
 forward as credit until a sweep or a pump spends it.
@@ -599,7 +602,7 @@ message `sampling` and these `data` keys:
 | `batch_us` | The running estimate of a batch's fixed part: planning it, the shim's dispatch and its return, apart from its rows |
 | `xcall_seen_us` | The running average of the calls measured, µs: the first call measured sets it, each later call weighs 0.1, each counts at most 62.5 µs, with no decay between pumps. It reads 0 before the first pump, when the pump's worth uses 20 µs. The call the pump bound uses ("The pump's worth") |
 | `pump_work_us` | The pumps' batches in the window, from plan to close, µs: rows of every tier the pump reads, births and the enumeration. `W` of the pump bound ("The pump's worth"); the call share is `pumps` × `xcall_seen_us` over `us_xcall` + `us_pump` |
-| `xcall_us`, `close_us` | The running estimates of the cross-state call and of closing a batch. Each takes at most a quarter of 250 µs from one measurement and decays by 1 % on each pump, so one slow call cannot stop sampling. `xcall_us` also decays on a frame where the gate's cap is below 3 × `x` ("Slice") |
+| `xcall_us`, `close_us` | The running estimates of the cross-state call and of closing a batch. Each takes at most a quarter of 250 µs from one measurement and decays by 1 % on each pump, so one slow call cannot stop sampling. `xcall_us` also decays on a frame where the gate's `reach` is below 3 × `x` ("Slice") |
 | `starved` | Frames in the window whose fixed work reached the allowance `A`; when above 0 the agent also logs a warning (spec/config.md) |
 | `us_fixed`, `us_xcall`, `us_pump`, `us_syscall` | Where the window's agent time went, µs: from the start of `frame` to the slice on frames that are not system-call frames; the cross-state calls; the pumps; the system-call frames. With the tiers' times they do not add up to the window's agent time: the rest is the end of each frame |
 | `us_births`, `us_enumeration`, `us_subscribed`, `us_positions`, `us_stopped`, `us_vitals`, `us_warehouses` | Each tier's time in the window, µs: its batches from plan to close, and the sweeps for positions |

@@ -2576,6 +2576,7 @@ impl Sampler {
             } else {
                 self.reserved()
             };
+        let cap = self.slice_cap();
         let b = &mut self.budget;
         let fixed = now.saturating_duration_since(link.began()).as_secs_f64() * 1e6 + b.events_us
             - b.commanded_us;
@@ -2594,7 +2595,14 @@ impl Sampler {
         // credit can reach beside the sweep's savings (LIVE, S10: small
         // pumps spent most of their time on the call and the batches' fixed
         // parts).
-        let reach = 0.8 * (b.allowance - b.charge + CREDIT_CAP_US - fixed - reserved);
+        // Credit reaches no further than the largest slice, as in
+        // [`Sampler::sweep`]: the gate never asks for more than a frame can
+        // have. A reach past the cap would let three calls and batches above
+        // what the frame has left shut the gate on every frame, with no pump
+        // to lower the estimates. Where the cap binds with a large
+        // reserve, `reach` is small, so the call's estimate decays below its
+        // measured value until the gate opens, and each pump relearns it.
+        let reach = 0.8 * ((b.allowance - b.charge + CREDIT_CAP_US).min(cap) - fixed - reserved);
         let gate = (3.0 * (self.xcall_us + self.batch_us))
             .min(reach)
             .max(3.0 * self.xcall_us)

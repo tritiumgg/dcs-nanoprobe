@@ -660,6 +660,10 @@ struct Run {
     over_250_plain: usize,
     /// Every report the run wrote.
     reports: Vec<Report>,
+    /// The mean of what the host's sweep took of a frame, its rows and the
+    /// savings it held back from the pump, at a gate while births waited,
+    /// µs.
+    sweep_hold_us: f64,
 }
 
 fn run(s: &mut Sampler, rec: &mut Rec, w: &mut World, secs: f64, fps: f64, syscall_us: f64) -> Run {
@@ -703,6 +707,7 @@ fn run_x(
     let mut over_250_plain = 0;
     let mut reports = Vec::new();
     let mut report = None;
+    let (mut hold_us, mut holds) = (0.0, 0u32);
     for f in 0..frames {
         let t0 = start + Duration::from_nanos((f as f64 * interval * 1000.0) as u64);
         clock.0 = t0;
@@ -764,6 +769,11 @@ fn run_x(
                 clock.0 = end;
                 if first_worth.is_none() && s.pump_worth(clock.0) {
                     first_worth = Some(elapsed);
+                }
+                if s.births > 0 {
+                    hold_us +=
+                        end.saturating_duration_since(now).as_secs_f64() * 1e6 + s.reserved();
+                    holds += 1;
                 }
                 s.gate(rec, clock.0)
             } else {
@@ -844,6 +854,7 @@ fn run_x(
         over_250,
         over_250_plain,
         reports,
+        sweep_hold_us: hold_us / f64::from(holds.max(1)),
     }
 }
 
@@ -5434,4 +5445,209 @@ fn a_frame_hands_its_commanded_work_to_the_link() {
         t + Duration::from_millis(9) + Duration::from_micros(20),
     );
     assert_eq!(rec.commanded, 0.0);
+}
+
+/// At a share of 0.05 and 100 frames a second the slice's cap (244 µs), not
+/// the gate's `reach` (about 500 µs), bounds what a frame has for the pump.
+/// With the call at 54 µs and a batch's fixed part at 31 µs, as on the Linux
+/// CI runner's sweep test, three of each pass that cap. Births that arrive
+/// once the sampler has learned those costs must still get a pump within
+/// 1,000 frames.
+#[test]
+fn births_get_a_pump_when_three_calls_and_batches_pass_the_slice_cap() {
+    second_spawn(60, 54.0, 10.0);
+}
+
+/// The starvation band below the lock: with the call at 45 µs, three calls
+/// and batches fit the cap only on frames with little fixed work. Every
+/// birth of the second spawn still resolves within 1,000 frames.
+#[test]
+fn births_get_a_pump_in_the_starvation_band_below_the_lock() {
+    second_spawn(60, 45.0, 10.0);
+}
+
+/// Many positions owed while births wait: the host's sweep takes near half
+/// the cap for them, in rows read and savings held, and the cap binds the
+/// gate. The call's estimate then decays below its measured 54 µs until the
+/// gate opens, and each pump relearns it. Every birth still resolves, no
+/// frame passes 250 µs and the share holds.
+#[test]
+fn births_get_a_pump_beside_a_sweep_that_takes_half_the_cap() {
+    let (s, after) = second_spawn(1000, 54.0, 60.0);
+    assert!(
+        after.sweep_hold_us >= 0.4 * s.slice_cap(),
+        "the sweep took {:.1} µs of a {:.1} µs cap on average",
+        after.sweep_hold_us,
+        s.slice_cap()
+    );
+}
+
+/// Two spawns at a share of 0.05 and 100 frames a second, with the Linux CI
+/// runner's costs and the call at `call_us`: `units` births to learn on for
+/// `learn_s` seconds, then 60 more. Every birth of the second spawn resolves
+/// within 1,000 frames, no frame's agent time passes 250 µs, and the share
+/// stays within the configured share and the time forgiven. Returns the
+/// sampler and the second run.
+fn second_spawn(units: u64, call_us: f64, learn_s: f64) -> (Sampler, Run) {
+    const SHARE: f64 = 0.05;
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(SHARE, 1e4);
+    let mut w = world(units, 0, 0);
+    // The CI runner's figures: the sweep's batch and row, a batch's fixed
+    // part, a close, the system-call frame.
+    w.sweep = Some((19.5, 14.7));
+    w.batch_us = 31.0;
+    w.close_us = 2.2;
+    let learn = run_x(&mut s, &mut rec, &mut w, learn_s, 100.0, 46.0, call_us, 2.0);
+    let case = format!("{units} units, call {call_us} µs");
+    assert_eq!(
+        s.len(),
+        units as usize,
+        "{case}: the first {units} births did not resolve"
+    );
+    let (x, b) = (s.xcall_us, s.batch_us);
+    // 60 more births, as a second spawn.
+    for i in units + 1..=units + 60 {
+        w.spawn(1000 + i, object_kind::UNIT, format!("u{i}"), 5.0);
+        s.birth_waits();
+    }
+    rec.began += Duration::from_millis(10);
+    let after = run_x(&mut s, &mut rec, &mut w, 10.0, 100.0, 46.0, call_us, 2.0);
+    assert!(
+        w.births.is_empty(),
+        "{case}: {} of 60 births pending after 1,000 frames; pumps {} while learning, {} \
+         after; call {x:.2} then {:.2} µs, batch {b:.2} then {:.2} µs, 3 × (call + batch) \
+         {:.1} µs against a slice of {:.1} µs",
+        w.births.len(),
+        learn.pumps,
+        after.pumps,
+        s.xcall_us,
+        s.batch_us,
+        3.0 * (s.xcall_us + s.batch_us),
+        s.slice_us(),
+    );
+    for (what, r, secs) in [
+        ("learning", &learn, learn_s),
+        ("second spawn", &after, 10.0),
+    ] {
+        assert_eq!(
+            r.over_250, 0,
+            "{case}, {what}: frames over 250 µs, the longest {:.1} µs",
+            r.longest_us
+        );
+        let forgiven = (r.forgiven_us + r.maintenance_forgiven_us) / (secs * 1e6);
+        assert!(
+            r.share <= SHARE + forgiven,
+            "{case}, {what}: share {} against {SHARE} and {forgiven} forgiven",
+            r.share
+        );
+    }
+    (s, after)
+}
+
+/// With full credit and the slice at its cap, the gate opens whenever three
+/// calls fit its reach, whatever a batch's fixed part: it never asks for
+/// more than a frame can have.
+#[test]
+fn on_full_credit_at_the_cap_the_gate_opens_whenever_three_calls_fit_its_reach() {
+    let mut rec = Rec::new(0.05, 1e4);
+    rec.syscall = false;
+    let t = rec.began;
+    // Cases where three calls and batches pass what the frame has left:
+    // the uncapped reach shut the gate on them.
+    let mut past_left = 0;
+    for fixed in [0.0, 20.0, 60.0, 120.0, 200.0] {
+        for x in [5.0, 20.0, 40.0, 54.0, SLICE_CAP_US / 4.0] {
+            for b in [0.0, 10.0, 31.0, SLICE_CAP_US / 4.0] {
+                let mut s = Sampler::new(Rates::default(), 0.07);
+                s.budget.debt = -CREDIT_CAP_US;
+                s.xcall_us = x;
+                s.batch_us = b;
+                s.slice(&rec, t);
+                let cap = s.slice_cap();
+                assert_eq!(s.slice_us(), cap, "the slice is not at its cap");
+                let reach = 0.8 * (cap - fixed);
+                if 3.0 * x > reach {
+                    continue;
+                }
+                past_left += usize::from(3.0 * (x + b) > cap - fixed);
+                let now = t + Duration::from_nanos((fixed * 1000.0) as u64);
+                assert!(
+                    s.gate(&rec, now),
+                    "fixed {fixed} µs, call {x} µs, batch {b} µs: the gate is shut"
+                );
+                assert_eq!(s.xcall_us, x, "the call's estimate decayed");
+            }
+        }
+    }
+    assert!(past_left > 0, "no case passes what the frame has left");
+}
+
+/// Wherever the allowance less the system calls, with full credit, stays
+/// within the slice's cap, the gate decides as the rule with an uncapped
+/// reach did, and the call's estimate decays alike.
+#[test]
+fn within_the_cap_the_gate_decides_as_the_uncapped_rule() {
+    let mut opened = [0usize; 2];
+    for (share, fps) in [(0.003, 110.0), (0.003, 60.0), (0.003, 33.0), (0.01, 110.0)] {
+        for syscall_per_s in [0.0, 165.0, 2000.0] {
+            for debt in [-CREDIT_CAP_US, -40.0, 0.0, 30.0] {
+                for reserve in [None, Some(0.0), Some(20.0), Some(60.0)] {
+                    for fixed in [0.0, 10.0, 40.0, 80.0] {
+                        for x in [5.0, 23.0, 40.0, SLICE_CAP_US / 4.0] {
+                            for b in [0.0, 7.0, 20.0, 31.0] {
+                                let mut rec = Rec::new(share, 1e6 / fps);
+                                rec.syscall = false;
+                                let t = rec.began;
+                                let mut s = Sampler::new(Rates::default(), 0.07);
+                                s.budget.syscall_per_s = syscall_per_s;
+                                s.budget.debt = debt;
+                                if let Some(fund) = reserve {
+                                    // The host sweeps, a birth waits so the
+                                    // pump is worth its call, and the sweep
+                                    // holds `fund` back.
+                                    s.set_direct(true);
+                                    s.birth_waits();
+                                    s.sweep_fund = fund;
+                                }
+                                s.xcall_us = x;
+                                s.batch_us = b;
+                                s.slice(&rec, t);
+                                let cap = s.slice_cap();
+                                let top = s.budget.allowance - s.budget.charge + CREDIT_CAP_US;
+                                assert!(top <= cap, "share {share} at {fps} fps passes the cap");
+                                let now = t + Duration::from_nanos((fixed * 1000.0) as u64);
+                                let worth = reserve.is_none() || s.pump_worth(now);
+                                let reserved = s.reserved();
+                                let reach = 0.8 * (top - fixed - reserved);
+                                let gate =
+                                    (3.0 * (x + b)).min(reach).max(3.0 * x).max(MIN_BUDGET_US);
+                                let left = s.slice_us() - fixed - reserved;
+                                let want = worth && left >= gate;
+                                let want_x = if worth && 3.0 * x > reach {
+                                    x * 0.99
+                                } else {
+                                    x
+                                };
+                                let case = format!(
+                                    "share {share}, {fps} fps, system calls {syscall_per_s} µs/s, \
+                                     debt {debt}, reserve {reserve:?}, fixed {fixed}, call {x}, \
+                                     batch {b}"
+                                );
+                                assert_eq!(s.gate(&rec, now), want, "{case}");
+                                assert_eq!(s.xcall_us, want_x, "{case}: the call's estimate");
+                                opened[usize::from(want)] += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        opened[0] > 0 && opened[1] > 0,
+        "shut {}, open {}",
+        opened[0],
+        opened[1]
+    );
 }
