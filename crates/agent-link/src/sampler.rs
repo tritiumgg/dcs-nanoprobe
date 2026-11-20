@@ -3664,7 +3664,7 @@ impl Sampler {
                 let cost = self.tiers[plan.tier.index()].cost;
                 // A batch planned past what is left: one dear row, or a
                 // fixed part that alone passes the budget.
-                let lead = (self.batch_us - self.tail_us).max(0.0);
+                let lead = (self.batch_fixed(plan.tier) - self.tail_us).max(0.0);
                 let past = cost > 0.0 && plan.rows as f64 * cost + lead > remaining;
                 if past {
                     self.lone = true;
@@ -3869,6 +3869,25 @@ impl Sampler {
     }
 
     /// How many rows of a tier the remaining budget allows, at most `owed`.
+    /// A batch's fixed part for `tier`, µs: the tier's own estimate (the row
+    /// tiers share one; births and the enumeration share another), or,
+    /// until it has one, the largest any tier has learned. A row tier whose
+    /// batches never take two clock reads never learns its own, and a
+    /// planner that took it as 0 planned rows its pump could not pay
+    /// (host survey: pumps 20 µs past their slice).
+    fn batch_fixed(&self, tier: Tier) -> f64 {
+        let own = if matches!(tier, Tier::Births | Tier::Enumeration) {
+            self.maintenance_batch_us
+        } else {
+            self.batch_us
+        };
+        if own > 0.0 {
+            own
+        } else {
+            self.batch_us.max(self.maintenance_batch_us)
+        }
+    }
+
     /// A row that costs more than a whole budget is taken alone when there
     /// is no debt.
     fn affordable(&self, tier: Tier, remaining: f64, owed: usize) -> usize {
@@ -3878,7 +3897,7 @@ impl Sampler {
         let cost = self.tiers[tier.index()].cost;
         // Each batch pays its fixed cost once, apart from its rows.
         // `remaining` already keeps room for the batch's tail.
-        let lead = (self.batch_us - self.tail_us).max(0.0);
+        let lead = (self.batch_fixed(tier) - self.tail_us).max(0.0);
         if cost <= 0.0 {
             // Unmeasured: a few rows, when the fixed part leaves room.
             // A warehouse's read is the dearest of any tier (LIVE, about
