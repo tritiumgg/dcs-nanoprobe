@@ -665,8 +665,14 @@ struct Run {
     /// µs, and of the savings alone (`R`).
     sweep_hold_us: f64,
     reserve_us: f64,
-    /// The least the call's estimate read after a gate, µs.
+    /// The least the call's estimate read after a gate, µs, and after a
+    /// gate that opened while births waited.
     least_xcall_us: f64,
+    least_open_xcall_us: f64,
+    /// Frames each urgent check waited until the queue was empty, counting
+    /// the frame that emptied it, and whether one still waits at the end.
+    urgent_waits: Vec<usize>,
+    urgent_waiting: bool,
 }
 
 fn run(s: &mut Sampler, rec: &mut Rec, w: &mut World, secs: f64, fps: f64, syscall_us: f64) -> Run {
@@ -712,7 +718,12 @@ fn run_x(
     let mut report = None;
     let (mut hold_us, mut reserve_us, mut holds) = (0.0, 0.0, 0u32);
     let mut least_xcall_us = f64::INFINITY;
+    let mut least_open_xcall_us = f64::INFINITY;
+    let (mut urgent_waits, mut urgent_since) = (Vec::new(), None);
     for f in 0..frames {
+        if !s.urgent.is_empty() {
+            urgent_since.get_or_insert(f);
+        }
         let t0 = start + Duration::from_nanos((f as f64 * interval * 1000.0) as u64);
         clock.0 = t0;
         rec.began = t0;
@@ -780,8 +791,12 @@ fn run_x(
                     reserve_us += s.reserved();
                     holds += 1;
                 }
+                let waited = s.births > 0;
                 let open = s.gate(rec, clock.0);
                 least_xcall_us = least_xcall_us.min(s.xcall_us);
+                if open && waited {
+                    least_open_xcall_us = least_open_xcall_us.min(s.xcall_us);
+                }
                 open
             } else {
                 s.decide(rec, clock.0)
@@ -831,6 +846,11 @@ fn run_x(
             reports.push(r);
         }
         agent += clock.0.saturating_duration_since(t0).as_secs_f64();
+        if s.urgent.is_empty()
+            && let Some(since) = urgent_since.take()
+        {
+            urgent_waits.push(f + 1 - since);
+        }
         if f % (fps as usize).max(1) == 0 {
             samples.push(rec.periods);
             checks.push(s.checks_waiting());
@@ -864,6 +884,9 @@ fn run_x(
         sweep_hold_us: hold_us / f64::from(holds.max(1)),
         reserve_us: reserve_us / f64::from(holds.max(1)),
         least_xcall_us,
+        least_open_xcall_us,
+        urgent_waits,
+        urgent_waiting: urgent_since.is_some(),
     }
 }
 
@@ -5477,28 +5500,30 @@ fn births_get_a_pump_in_the_starvation_band_below_the_lock() {
 
 /// Many positions owed while births wait: the host's sweep takes near half
 /// the cap for them, in rows read and savings held, and the cap binds the
-/// gate. The call's estimate then decays below its measured 54 µs until the
-/// gate opens, and each pump relearns it. Every birth still resolves, no
-/// frame passes 250 µs and the share holds.
+/// gate. The call's estimate then decays below its measured 54 µs, and the
+/// gate's floor on the measured call decides when a pump opens. Every birth
+/// still resolves, no frame passes 250 µs and the share holds.
 #[test]
 fn births_get_a_pump_beside_a_sweep_that_takes_half_the_cap() {
     let (s, after) = second_spawn(1000, 54.0, 60.0, None);
     let cap = s.slice_cap();
     let figures = format!(
         "the sweep took {:.1} µs of a {cap:.1} µs cap on average, its savings {:.1} µs; \
-         the call read as low as {:.2} µs and ends at {:.2} µs, measured {:.2} µs",
-        after.sweep_hold_us, after.reserve_us, after.least_xcall_us, s.xcall_us, s.xcall_seen
+         the call read as low as {:.2} µs, {:.2} µs at a pump for births, and ends at \
+         {:.2} µs, measured {:.2} µs",
+        after.sweep_hold_us,
+        after.reserve_us,
+        after.least_xcall_us,
+        after.least_open_xcall_us,
+        s.xcall_us,
+        s.xcall_seen
     );
     assert!(after.sweep_hold_us >= 0.4 * cap, "{figures}");
-    // The estimate decays below the measured call while the cap binds, and
-    // the pumps measure it again.
+    // Pumps for births open with the estimate decayed below the measured
+    // call: the floor, not three calls, is what they pay.
     assert!(
-        after.least_xcall_us < 0.75 * s.xcall_seen,
-        "no decay: {figures}"
-    );
-    assert!(
-        s.xcall_us > 1.1 * after.least_xcall_us,
-        "no relearn: {figures}"
+        after.least_open_xcall_us < 0.75 * s.xcall_seen,
+        "no pump with the estimate decayed: {figures}"
     );
 }
 
@@ -5720,12 +5745,149 @@ fn within_the_cap_the_gate_decides_as_the_uncapped_rule() {
     );
 }
 
+/// Normal play at the default share and the live server's frame rate: the
+/// call's estimate at its steady state below the measured call, live costs
+/// of the call and a batch's fixed part (LIVE, gameserver bundles,
+/// 2026-11-14 to 2026-11-18: call 19.7 to 49.0 µs, a batch's fixed part up
+/// to 37.0 µs), the frame's fixed work and the sweep's savings within what
+/// a frame at 112 frames a second holds. The gate's floor never binds: the
+/// gate decides as main's rule, with its uncapped reach and no floor.
+#[test]
+fn in_normal_play_the_gate_decides_as_mains_rule() {
+    let mut opened = [0usize; 2];
+    for fps in [112.0, 100.0, 60.0] {
+        for syscall_per_s in [0.0, 165.0] {
+            for debt in [-CREDIT_CAP_US, -40.0, 0.0, 30.0] {
+                for reserve in [None, Some(0.0), Some(20.0), Some(60.0)] {
+                    for fixed in [0.0, 3.0, 10.0] {
+                        for x in [19.7, 25.0, 35.0, 49.0] {
+                            for b in [0.0, 8.0, 20.0, 37.0] {
+                                let mut rec = Rec::new(0.003, 1e6 / fps);
+                                rec.syscall = false;
+                                let t = rec.began;
+                                let mut s = Sampler::new(Rates::default(), 0.07);
+                                s.budget.syscall_per_s = syscall_per_s;
+                                s.budget.debt = debt;
+                                if let Some(fund) = reserve {
+                                    s.set_direct(true);
+                                    s.birth_waits();
+                                    s.sweep_fund = fund;
+                                }
+                                // Each pump moves the estimate a tenth of the
+                                // way to the call and decays it 1 %: it
+                                // settles at 0.099 / 0.109 of the measured
+                                // call.
+                                s.xcall_seen = x;
+                                s.xcall_us = x * 0.099 / 0.109;
+                                s.batch_us = b;
+                                s.close_us = 2.2;
+                                s.close_dev_us = 0.5;
+                                let xu = s.xcall_us;
+                                s.slice(&rec, t);
+                                let now = t + Duration::from_nanos((fixed * 1000.0) as u64);
+                                let worth = reserve.is_none() || s.pump_worth(now);
+                                let reserved = s.reserved();
+                                let top = s.budget.allowance - s.budget.charge + CREDIT_CAP_US;
+                                let reach = 0.8 * (top - fixed - reserved);
+                                let gate =
+                                    (3.0 * (xu + b)).min(reach).max(3.0 * xu).max(MIN_BUDGET_US);
+                                let left = s.slice_us() - fixed - reserved;
+                                let want = worth && left >= gate;
+                                let case = format!(
+                                    "{fps} fps, system calls {syscall_per_s} µs/s, debt {debt}, \
+                                     reserve {reserve:?}, fixed {fixed}, call {x}, batch {b}"
+                                );
+                                assert_eq!(s.gate(&rec, now), want, "{case}");
+                                opened[usize::from(want)] += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        opened[0] > 0 && opened[1] > 0,
+        "shut {}, open {}",
+        opened[0],
+        opened[1]
+    );
+}
+
+/// Normal play, run: 1,200 units with four in five halted, the host's sweep,
+/// the default share at 112 frames a second, the live median call and a
+/// batch's fixed part (LIVE, gameserver bundles: call plus batch median
+/// 37.4 µs), 60 births at 10 s and a HIT each second, for 60 s. The figures
+/// are main's rule's (uncapped reach, no floor, the sweep's part 1 beside
+/// an urgent check), run on this test with those three reverted: pumps 207,
+/// sweeps 472, frames over 250 µs 0, the longest frame 174.3 µs, the share
+/// 0.00152, urgent checks pumped within 22 frames. This rule gave the same
+/// figures exactly. Each may differ by 2 %, so a later change to the host
+/// model that moves both rules alike does not fail here.
+#[test]
+fn normal_play_matches_mains_rule() {
+    const SHARE: f64 = 0.003;
+    const FPS: f64 = 112.0;
+    let mut s = Sampler::new(Rates::default(), 0.07);
+    let mut rec = Rec::new(SHARE, 1e6 / FPS);
+    let mut w = world(1200, 0, 0);
+    halt_four_in_five(&mut w);
+    w.sweep = Some((15.0, 1.0));
+    w.batch_us = 12.0;
+    w.close_us = 2.0;
+    w.tier_us[Tier::Vitals.index()] = Some(1.3);
+    let (mut pumps, mut sweeps, mut over, mut longest) = (0usize, 0u64, 0usize, 0.0f64);
+    let (mut agent, mut forgiven) = (0.0, 0.0);
+    let mut waits = Vec::new();
+    for i in 0..60u64 {
+        if i == 10 {
+            for n in 1201..=1260 {
+                w.spawn(1000 + n, object_kind::UNIT, format!("u{n}"), 5.0);
+                s.birth_waits();
+            }
+        }
+        if i > 0 {
+            s.watch(Some((1001 + i) as f64));
+            rec.began += Duration::from_nanos((1e9 / FPS) as u64);
+        }
+        let r = run_x(&mut s, &mut rec, &mut w, 1.0, FPS, 165.0, 25.0, 3.0);
+        pumps += r.pumps;
+        sweeps += r.sweeps;
+        over += r.over_250;
+        longest = longest.max(r.longest_us);
+        agent += r.share;
+        forgiven += (r.forgiven_us + r.maintenance_forgiven_us) / 1e6;
+        waits.extend(r.urgent_waits);
+    }
+    let share = agent / 60.0;
+    let figures = format!(
+        "pumps {pumps}, sweeps {sweeps}, frames over 250 µs {over}, the longest {longest:.1} µs, \
+         share {share:.5}, units {}, urgent waits up to {:?} frames",
+        s.len(),
+        waits.iter().max()
+    );
+    eprintln!("{figures}");
+    assert_eq!(s.len(), 1260, "births pending: {figures}");
+    assert_eq!(over, 0, "{figures}");
+    assert!(share <= SHARE + forgiven / 60.0, "{figures}");
+    let near = |got: f64, main: f64| (got - main).abs() <= 0.02 * main;
+    assert!(near(pumps as f64, 207.0), "pumps: {figures}");
+    assert!(near(sweeps as f64, 472.0), "sweeps: {figures}");
+    assert!(near(longest, 174.3), "the longest frame: {figures}");
+    assert!(near(share, 0.00152), "share: {figures}");
+    let worst = waits.iter().copied().max().unwrap_or(0);
+    assert!(
+        waits.len() == 59 && worst as f64 <= 22.0 * 1.02,
+        "urgent checks: {figures}"
+    );
+}
+
 /// The cap binds and the host's sweep takes nearly all of it: 2,000 units
 /// owe positions, no birth or enumeration waits, so the sweep's part is 1.
 /// A HIT each second makes an urgent check, so the pump is worth its call.
-/// No frame's agent time passes 250 µs.
+/// No frame's agent time passes 250 µs, and each check gets its pump within
+/// a tenth of a second: while it waits the sweep leaves the pump room.
 #[test]
-#[ignore = "fails on the reach cap alone; the floor lands after 0.1"]
 fn an_urgent_check_beside_a_sweep_that_takes_the_cap_passes_no_frame_over_250() {
     const SHARE: f64 = 0.05;
     let rates = Rates {
@@ -5742,8 +5904,19 @@ fn an_urgent_check_beside_a_sweep_that_takes_the_cap_passes_no_frame_over_250() 
     run_x(&mut s, &mut rec, &mut w, 120.0, 100.0, 46.0, 54.0, 2.0);
     assert_eq!(s.len(), 2000, "the births did not resolve");
     assert!(s.behind(), "the sweep is not behind");
+    // The regime: with nothing above the positions waiting, the sweep plans
+    // nearly the whole cap less the link's 2 µs.
+    let cap = s.slice_cap();
+    assert!(
+        s.sweep_need >= 0.95 * (cap - 2.0),
+        "the sweep plans {:.1} µs of a {cap:.1} µs cap",
+        s.sweep_need
+    );
     let (mut over, mut longest, mut pumps) = (0, 0.0f64, 0);
     let mut least_x = s.xcall_us;
+    // The most frames a check waited for its pump, and the checks still
+    // waiting at the next HIT.
+    let (mut worst, mut missed) = (0usize, 0u32);
     for i in 0..40u64 {
         // After 30 s, rows read faster than the sweep's estimate, so a sweep
         // leaves part of the cap: rows vary from frame to frame live.
@@ -5751,21 +5924,240 @@ fn an_urgent_check_beside_a_sweep_that_takes_the_cap_passes_no_frame_over_250() 
             w.sweep = Some((19.5, 10.0));
         }
         s.watch(Some((1001 + i) as f64));
+        assert!(!s.urgent.is_empty(), "the HIT queued no urgent check");
         rec.began += Duration::from_millis(10);
         let r = run_x(&mut s, &mut rec, &mut w, 1.0, 100.0, 46.0, 54.0, 2.0);
         over += r.over_250;
         longest = longest.max(r.longest_us);
         pumps += r.pumps;
         least_x = least_x.min(s.xcall_us);
+        worst = worst.max(r.urgent_waits.iter().copied().max().unwrap_or(0));
+        missed += u32::from(r.urgent_waiting);
         assert!(
             s.births == 0 && !s.higher_waits(),
             "a tier above the positions waits"
         );
     }
-    eprintln!(
-        "frames over 250 µs {over}, the longest {longest:.1} µs, pumps {pumps}, \
-         call as low as {least_x:.2} µs, last {:.2} µs",
-        s.xcall_us
+    let figures = format!(
+        "frames over 250 µs {over}, the longest {longest:.1} µs, pumps {pumps}, call as low \
+         as {least_x:.2} µs, last {:.2} µs, measured {:.2} µs; checks not pumped within the \
+         second {missed}, the longest wait {worst} frames",
+        s.xcall_us, s.xcall_seen
     );
-    assert_eq!(over, 0, "frames over 250 µs, the longest {longest:.1} µs");
+    eprintln!("{figures}");
+    assert_eq!(over, 0, "{figures}");
+    // Ten frames, a tenth of a second: room for the system-call frame and a
+    // few frames while the sweep's savings and the credit refill at share
+    // 0.05. A check that waits a whole second would meet the next HIT.
+    assert!(missed == 0 && worst <= 10, "{figures}");
+}
+
+/// The cap binds and the frame's own work before the gate leaves less than
+/// one measured call, a batch's fixed part and its close: 190 µs of it on
+/// every frame for 3 s while an urgent check waits. The call's estimate
+/// decays until three of it fit what the frame has left, but the gate's
+/// floor keeps the pump shut, so no frame passes 250 µs. Once the frames are
+/// light again the check gets its pump within a tenth of a second.
+#[test]
+fn heavy_fixed_work_beside_an_urgent_check_passes_no_frame_over_250() {
+    const SHARE: f64 = 0.05;
+    const HEAVY_US: f64 = 190.0;
+    let rates = Rates {
+        enumeration_s: 3600.0,
+        ..Rates::default()
+    };
+    let mut s = Sampler::new(rates, 0.07);
+    let mut rec = Rec::new(SHARE, 1e4);
+    let mut w = world(200, 0, 0);
+    // The CI runner's figures, as in `second_spawn`.
+    w.sweep = Some((19.5, 14.7));
+    w.batch_us = 31.0;
+    w.close_us = 2.2;
+    run_x(&mut s, &mut rec, &mut w, 20.0, 100.0, 46.0, 54.0, 2.0);
+    assert_eq!(s.len(), 200, "the births did not resolve");
+    s.watch(Some(1001.0));
+    assert!(!s.urgent.is_empty(), "the HIT queued no urgent check");
+    rec.began += Duration::from_millis(10);
+    let heavy = run_x(&mut s, &mut rec, &mut w, 3.0, 100.0, 46.0, 54.0, HEAVY_US);
+    let cap = s.slice_cap();
+    let left = cap - HEAVY_US;
+    let floor = s.xcall_seen + s.batch_us + s.close_us + 2.0 * s.close_dev_us;
+    let figures = format!(
+        "frames over 250 µs {}, the longest {:.1} µs, pumps {}; the frame leaves at most \
+         {left:.1} µs, the floor {floor:.1} µs, three calls as low as {:.1} µs",
+        heavy.over_250,
+        heavy.longest_us,
+        heavy.pumps,
+        3.0 * heavy.least_xcall_us
+    );
+    eprintln!("{figures}");
+    // The regime: the decayed estimate alone would open the gate, and only
+    // the floor holds it.
+    assert!(
+        3.0 * heavy.least_xcall_us < left && floor > left,
+        "not the regime: {figures}"
+    );
+    assert_eq!(heavy.over_250, 0, "{figures}");
+    assert!(heavy.urgent_waiting, "the check got a pump: {figures}");
+    rec.began += Duration::from_millis(10);
+    let light = run_x(&mut s, &mut rec, &mut w, 1.0, 100.0, 46.0, 54.0, 2.0);
+    let wait = light.urgent_waits.first().copied();
+    assert_eq!(
+        light.over_250, 0,
+        "light frames over 250 µs, the longest {:.1} µs",
+        light.longest_us
+    );
+    // A tenth of a second, as for the urgent check beside a sweep.
+    assert!(
+        !light.urgent_waiting && wait.is_some_and(|f| f <= 10),
+        "the check waited {wait:?} frames once the frames were light"
+    );
+}
+
+/// The gate's state for the floor's properties: the costs it learned, the
+/// frame's fixed work, and the sweep's savings when the host sweeps.
+#[derive(Clone, Debug)]
+struct GateCase {
+    share: f64,
+    fps: f64,
+    syscall_per_s: f64,
+    debt: f64,
+    fixed: f64,
+    x: f64,
+    seen: f64,
+    batch: f64,
+    close: f64,
+    dev: f64,
+    reserve: Option<f64>,
+}
+
+fn gate_case() -> impl Strategy<Value = GateCase> {
+    let quarter = SLICE_CAP_US / 4.0;
+    (
+        (
+            0.001f64..0.2,
+            10.0f64..200.0,
+            0.0f64..2000.0,
+            -CREDIT_CAP_US..300.0,
+        ),
+        (
+            0.0f64..250.0,
+            0.0..quarter,
+            prop_oneof![Just(0.0), 0.1..quarter],
+        ),
+        (0.0..quarter, 0.0f64..20.0, 0.0f64..5.0),
+        proptest::option::of(0.0f64..200.0),
+    )
+        .prop_map(
+            |(
+                (share, fps, syscall_per_s, debt),
+                (fixed, x, seen),
+                (batch, close, dev),
+                reserve,
+            )| {
+                GateCase {
+                    share,
+                    fps,
+                    syscall_per_s,
+                    debt,
+                    fixed,
+                    x,
+                    seen,
+                    batch,
+                    close,
+                    dev,
+                    reserve,
+                }
+            },
+        )
+}
+
+impl GateCase {
+    /// A sampler and its link in this state; a birth waits so that a host
+    /// that sweeps finds the pump worth its call and keeps its savings.
+    fn sampler(&self) -> (Sampler, Rec) {
+        let mut rec = Rec::new(self.share, 1e6 / self.fps);
+        rec.syscall = false;
+        let mut s = Sampler::new(Rates::default(), 0.07);
+        s.budget.syscall_per_s = self.syscall_per_s;
+        s.budget.debt = self.debt;
+        if let Some(fund) = self.reserve {
+            s.set_direct(true);
+            s.birth_waits();
+            s.sweep_fund = fund;
+        }
+        s.xcall_us = self.x;
+        s.xcall_seen = self.seen;
+        s.batch_us = self.batch;
+        s.close_us = self.close;
+        s.close_dev_us = self.dev;
+        (s, rec)
+    }
+
+    /// What a pump costs at least: the gate's floor.
+    fn floor(&self) -> f64 {
+        if self.seen > 0.0 {
+            self.seen + self.batch + self.close + 2.0 * self.dev
+        } else {
+            0.0
+        }
+    }
+}
+
+proptest! {
+    // Most cases of the second property leave less than the floor and are
+    // rejected, so the rejects may pass the default limit.
+    #![proptest_config(ProptestConfig {
+        cases: 2000,
+        max_global_rejects: 100_000,
+        ..ProptestConfig::default()
+    })]
+
+    /// The gate never opens on a frame that leaves less than the floor.
+    #[test]
+    fn the_gate_never_opens_below_its_floor(c in gate_case()) {
+        let (mut s, rec) = c.sampler();
+        let t = rec.began;
+        s.slice(&rec, t);
+        let now = t + Duration::from_nanos((c.fixed * 1000.0) as u64);
+        let left = s.slice_us() - c.fixed - s.reserved();
+        if s.gate(&rec, now) {
+            prop_assert!(left >= c.floor(), "left {left}, floor {}", c.floor());
+        }
+    }
+
+    /// With full credit on every frame, a frame that leaves the floor and
+    /// at least the gate's least budget opens the gate within 600 frames,
+    /// whatever the call's estimate: it decays 1 % a frame from at most
+    /// 62.5 µs while three of it pass `reach`, which is at least 0.8 of
+    /// what the frame leaves. From 62.5 µs to 0.8 / 3 of 1 µs takes 543
+    /// frames.
+    #[test]
+    fn a_frame_with_room_for_the_floor_opens_the_gate(c in gate_case()) {
+        let (mut s, mut rec) = c.sampler();
+        let fixed = Duration::from_nanos((c.fixed * 1000.0) as u64);
+        s.budget.debt = -CREDIT_CAP_US;
+        s.slice(&rec, rec.began);
+        let left = s.slice_us() - c.fixed - s.reserved();
+        prop_assume!(left >= c.floor().max(MIN_BUDGET_US));
+        prop_assume!(c.reserve.is_none() || s.pump_worth(rec.began + fixed));
+        let mut opened = None;
+        for frame in 0..600 {
+            if frame > 0 {
+                rec.began += Duration::from_nanos((1e9 / c.fps) as u64);
+                s.budget.debt = -CREDIT_CAP_US;
+                s.slice(&rec, rec.began);
+            }
+            if s.gate(&rec, rec.began + fixed) {
+                opened = Some(frame);
+                break;
+            }
+        }
+        prop_assert!(
+            opened.is_some(),
+            "shut for 600 frames: left {left}, floor {}, call's estimate now {}",
+            c.floor(),
+            s.xcall_us
+        );
+    }
 }

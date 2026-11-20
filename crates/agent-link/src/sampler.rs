@@ -2615,6 +2615,23 @@ impl Sampler {
         if 3.0 * self.xcall_us > reach && !std::mem::replace(&mut self.x_decayed, true) {
             self.xcall_us *= 0.99;
         }
+        // The decay can take the gate below one real call. Where the cap
+        // binds and the frame's fixed work or the sweep's savings leave
+        // almost nothing, it would then open a pump whose call alone runs
+        // the frame past 250 µs (host test: 296.5 µs beside a sweep that
+        // took the whole cap). So the gate is never below what a pump
+        // costs at least: the measured call, which no frame decays, one
+        // batch's fixed part and its close. Before the first pump nothing
+        // is measured and the floor is 0. With the slice at its cap, the
+        // rest of the gate is at most `reach` once the decay has run, and
+        // `reach` is less than what the frame has left: a frame that leaves
+        // the floor then opens the gate.
+        let floor = if self.xcall_seen > 0.0 {
+            self.xcall_seen + self.batch_us + self.close_us + 2.0 * self.close_dev_us
+        } else {
+            0.0
+        };
+        let gate = gate.max(floor);
         let left = b.slice - fixed - reserved;
         if left < gate {
             return false;
@@ -2864,8 +2881,10 @@ impl Sampler {
         // Of a frame, the sweep takes at most what births and the
         // enumeration leave while a tier above the positions waits for a
         // pump: the shares of one frame add up to the frame, so a pump has
-        // room in it when the slice's cap binds.
-        let part = if self.higher_waits() {
+        // room in it when the slice's cap binds. An urgent check waits for
+        // a pump too: beside a sweep that took the whole cap the gate's
+        // floor never fits, and the check would wait for good.
+        let part = if self.higher_waits() || !self.urgent.is_empty() {
             1.0 - self.maintenance_share(now)
         } else {
             1.0
