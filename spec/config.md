@@ -94,7 +94,7 @@ removed_keep_h = 1          # a removed entity's rows, before the purge may take
 dead_keep_h = 24            # a dead group, before it expires; 0 never
 
 [health]
-heartbeat_stale_s = 10      # no heartbeat for this long outside a load: hung or gone (spec/errors.md)
+heartbeat_stale_s = 10      # no heartbeat for this long outside a load: hung or gone once a connect to the handshake port answers (spec/errors.md, "Health")
 loading_limit_s = 900       # no heartbeat for this long while loading: hung
 handshake_timeout_s = 15    # how long one handshake attempt waits, counting only time in which the agent runs frames; after a DCS restart, how long before the sidecar exits
 

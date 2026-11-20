@@ -189,11 +189,12 @@ matches decides:
 | 6 | Otherwise | `hung` |
 
 - A stall begins when the sidecar reads a heartbeat that advanced, or finds a session
-  attached, and lasts until the next such read. Rows 1 and 4 to 6 use only the
-  connects tried in the current stall.
+  attached, and lasts until the next such read. Rows 1, 5 and 6 read the last connect
+  tried in the current stall that finished; row 4 holds while there is none.
 - A connect finishes when it is refused, accepted, or reaches the probe's timeout. One
-  that reaches the timeout counts as not refused. A try whose connect was never made
-  is no connect; the sidecar tries again a second later and logs repeated failures.
+  that reaches the timeout counts as not refused. A try that fails in any other way,
+  or whose connect was never made, is no connect; the sidecar tries again a second
+  later and logs repeated failures.
 - The probe's timeout is 100 ms on Unix and 5 s on Windows (`REFUSAL_WAIT` in the
   sidecar), whatever `handshake_timeout_s` says. Windows reports a refusal only after
   about 2 s (PRIOR).
