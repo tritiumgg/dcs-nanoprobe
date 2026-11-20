@@ -401,8 +401,38 @@ local function main()
     return n
   end
 
+  -- Births go before a running enumeration (spec/sampling.md, "Tiers"), so
+  -- a spawn fills the table at a birth's cost and may outlast a fixed wait.
+  -- Wait for a `sampling` report that holds `n` rows and no birth waiting,
+  -- at most `limit` seconds, then run one more lap of every tier.
+  local function filled(n, limit)
+    -- The log is read twice a second, not on every frame.
+    local next_read = now()
+    local function done()
+      if now() < next_read then
+        return false
+      end
+      next_read = now() + 0.5
+      local last
+      for _, line in ipairs(S.lines(profile .. 'nanoprobe/logs/agent.log')) do
+        local ok, e = pcall(S.json, line)
+        local d = ok and type(e) == 'table' and e.msg == 'sampling' and e.data
+        if d then
+          last = d
+        end
+      end
+      return last ~= nil and last.births == 0 and last.rows >= n
+    end
+    assert(run(limit, done), 'the spawn of ' .. n .. ' did not resolve in ' .. limit .. ' s')
+  end
+
   if MODE == 'sweep' then
     local spawned = scenario.spawn_mixed(60, { label = 'a' })
+    -- A birth costs a pump of its own, and a slow runner pumps a few times
+    -- in 10 s, so a fixed wait compared a mirror of 8 rows against 60.
+    -- 60 s is about six times the idle wait; the compare after it has its
+    -- own lap of every tier.
+    filled(60, 60)
     run(8)
     assert(getter.calls > 60, 'the frame swept no positions: ' .. getter.calls .. ' reads')
     compare('60')
@@ -862,30 +892,6 @@ local function main()
     assert(longest >= slow_s * 1e6 * 0.9, 'enum_step_max_us ' .. longest .. ' is below the static list\'s ' .. slow_s * 1e6)
     S.ok('the static list runs in a batch of its own, and enum_step_max_us reports its time')
   elseif MODE == 'match' then
-    -- Births go before a running enumeration (spec/sampling.md, "Tiers"), so
-    -- a spawn fills the table at a birth's cost and may outlast a fixed wait.
-    -- Wait for a `sampling` report that holds `n` rows and no birth waiting,
-    -- at most `limit` seconds, then run one more lap of every tier.
-    local function filled(n, limit)
-      -- The log is read twice a second, not on every frame.
-      local next_read = now()
-      local function done()
-        if now() < next_read then
-          return false
-        end
-        next_read = now() + 0.5
-        local last
-        for _, line in ipairs(S.lines(profile .. 'nanoprobe/logs/agent.log')) do
-          local ok, e = pcall(S.json, line)
-          local d = ok and type(e) == 'table' and e.msg == 'sampling' and e.data
-          if d then
-            last = d
-          end
-        end
-        return last ~= nil and last.births == 0 and last.rows >= n
-      end
-      assert(run(limit, done), 'the spawn of ' .. n .. ' did not resolve in ' .. limit .. ' s')
-    end
     local first = scenario.spawn_mixed(500, { label = 'a' })
     assert(first.ships > 0 and first.air > 0 and first.statics > 0, 'the mix lacks a kind: ' .. encode(first))
     -- Births resolve, the first enumeration ends, every row gets a position
