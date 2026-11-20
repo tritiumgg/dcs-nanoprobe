@@ -447,8 +447,7 @@ local function main()
     -- 120 s of process time is about twelve times what the births take in
     -- the host model at the runner's costs (60 within 1,000 frames, 10 s:
     -- crates/agent-link/src/sampler_tests.rs, `second_spawn`) and on an
-    -- idle Mac (9.09 s). The gate with the capped reach has not run on the
-    -- runner yet. The compare after it has its own lap of every tier.
+    -- idle Mac (9.09 s). The compare after it has its own lap of every tier.
     filled(60, 120)
     run(8)
     assert(getter.calls > 60, 'the frame swept no positions: ' .. getter.calls .. ' reads')

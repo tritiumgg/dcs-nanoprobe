@@ -53,7 +53,7 @@ clock (`QueryPerformanceCounter` on Windows).
 | `R` | The sweep's savings that the pump leaves alone ("The sweep"), `k` times what the sweep has saved. 0 when the pump reads the positions |
 | `x` | The running estimate of the cross-state call: the time from `frame`'s decision to the start of the shim's pump, each new call weighing 0.1, one call counting at most 62.5 µs. It decays by 1 % on each pump, and on a frame where 3 × `x` is above `reach` (`G`) and the pump has work worth the call ("The pump's worth"), at most once a frame, so an estimate that is too high cannot keep the pump shut |
 | `f` | The running estimate of a pump batch's fixed part ("Tiers"), from the row tiers' batches only. It decays by 1 % on each pump, except a pump whose batches were all births or the enumeration |
-| `G` | The gate: 3 × (`x` + `f`), but at most `reach` = 0.8 × (min(`A` − `c` + 150, the cap of `S`) − `F` − `R`) and never under 3 × `x`. After `x` decays on the frame, `G` is never under the floor `x̄` + `f` + `close_us` + 2 × the closing's mean deviation, where `x̄` is the measured call (`xcall_seen_us`, "Reporting"), which does not decay between pumps. The floor is 0 before the first pump |
+| `G` | The gate: 3 × (`x` + `f`), but at most `reach` = 0.8 × (min(`A` − `c` + 150, the cap of `S`) − `F` − `R`) and never under 3 × `x`. On every frame, after this frame's decay of `x`, `G` is never under the floor min(`N`, 0.8 × `T`). `N`, what a pump needs, is `x̄` + `f` + `close_us` + 2 × the closing's mean deviation, where `x̄` is the measured call (`xcall_seen_us`, "Reporting"), which does not decay between pumps; it is 0 before the first pump. `T` is the most a frame can have, min(`A` − `c` + 150, the cap of `S`) |
 | `B` | The pump's sampling budget: (`S` − `F` − `R`) × `k`. Nothing is sampled when it is 0 or less. `k` is 1, except in a build with fault injection, where the `sampling` fault sets it (spec/faults.md) |
 
 A frame calls the shim's pump only when the pump has work worth the call ("The pump's
@@ -67,7 +67,17 @@ cap of `S` and leaves out the sweep's reserve `R`. With full credit, `S` at its 
 large `F` or `R`, `reach` is small: `x` decays below the call's measured cost, and each
 pump measures it again. The floor keeps the decayed `x` from opening a pump on a frame
 that cannot pay one measured call, a batch's fixed part and its close, so the pump does
-not carry the frame past 250 µs. Under Wine the
+not carry the frame past 250 µs. The first pump comes before any call is measured, with
+no floor, and may pass 250 µs.
+
+When the gate shuts for lack of room (the pump is worth its call and `S` − `F` − `R` is
+under `G`) while births, the enumeration, subscribed rows with attitude or an urgent
+existence check wait for a pump, the next frame's sweep holds min(`N` / 0.8, `T`) of the
+frame for the pump ("The sweep"). A frame with full credit then leaves the pump at least
+the floor, so a pump that waits never waits for good. Where `N` passes 0.8 × `T`, a host
+too slow for one measured call and batch in 0.8 of a frame, the floor stops at 0.8 × `T`:
+the pump runs, may pass its slice, and is counted in `clamped_pumps` ("Reporting"). Under
+Wine the
 call costs 22–30 µs (PRIOR, S10, docs/results/2026-11-13-s10-sampling.md) against an
 allowance of about 27 µs at 110 frames a second, so frames carry their allowance
 forward as credit until a sweep or a pump spends it.
@@ -239,9 +249,9 @@ when the balance pays its first batch, and their time stays within `m` of the sa
 time. A batch of births or the enumeration costs the balance the larger of the batch's
 time and its batch cost × (1 − `k`), so at a scale below 1 maintenance yields to the
 tiers: it falls about as `k`^1.7, to about 2 % of its rate at `k` = 1 when `k` = 0.1 with
-rows owed. At `k` = 1 nothing changes. While a tier above the positions waits for a pump,
-the sweep takes at most 1 − `m` of a frame, so the pump has room in each frame ("The
-sweep"). While births or an enumeration wait, the sweep may read unsubscribed positions
+rows owed. At `k` = 1 nothing changes. While a tier above the positions or an urgent existence
+check waits for a pump, the sweep takes at most 1 − `m` of a frame, so the pump has room
+in each frame ("The sweep"). While births or an enumeration wait, the sweep may read unsubscribed positions
 while subscribed rows with attitude are owed. The row tiers therefore always keep the
 rest of the sampling time, so subscribed positions keep a rate even at a tenth of the
 slice, where that takes precedence over the enumeration's period. At live row costs a
@@ -363,8 +373,9 @@ Nothing else runs between choosing a row and reading it. It writes them in one
   cost is the sweep's fixed part plus the rows owed, at most 256, at the cost of a row; it
   is at most what one frame can ever spend on it: the smaller of `A` − `c` + 150 and the cap of `S`,
   less `F`, times 1 − `m` while any of those wait for a pump, and times 1 otherwise. Where
-  the sweep would take the whole cap, the pump they wait for then has room for the gate's
-  floor ("Slice") beside it. The sweep never waits on births or the
+  the sweep would take the whole cap, it then leaves `m` of what the frame can have to
+  the pump they wait for, which holds the gate's floor ("Slice") when the floor is at
+  most `m` × (the cap of `S` − `F`). The sweep never waits on births or the
   enumeration, directly or through the subscribed rows that wait behind them: their steps
   leave it no debt to repay. The pump leaves `k` × `R` of the frame alone, with one
   exception: on a frame where the pump is wanted for subscribed rows read with their
@@ -372,6 +383,17 @@ Nothing else runs between choosing a row and reading it. It writes them in one
   Other tiers keep the reserve. On such a frame, unless births or an enumeration that is
   due or running wait for a pump, the sweep reads no row of the positions tier, which no
   subscription names, until that pump has run.
+- **Hold.** While a pump waits and the gate shut for lack of room ("Slice"), the sweep
+  yields both the room and the budget that pump needs. On the frame after such a gate,
+  a full sweep's cost is also at most `T` − `F` − min(`N` / 0.8, `T`): the sweep spends
+  and saves no more, so the pump has the rest of the frame. The cap covers the savings
+  as well as the spending, because the gate counts the savings `R` against what the
+  frame leaves: a sweep that only spent less would save the rest and leave the pump no
+  more. Savings past it are dropped. On that frame the savings also grow by at most 1 −
+  `m` of `A` − `c`, the part above, so the rest of the allowance becomes credit for the
+  pump: an urgent check has no balance of its own, and a sweep that saved the whole
+  allowance would spend it on every frame and leave `S` under the floor for good. On
+  every other frame the hold is 0 and the savings grow as above.
 - **When.** A sweep's budget is the smaller of `k` × `R` and `S` − `F`. It reads the rows
   that pays for after its fixed part. It waits until that is 64 rows, or as many as a
   frame can ever pay for when that is fewer; or every row owed, once the last sweep is
@@ -606,10 +628,11 @@ message `sampling` and these `data` keys:
 | `birth_step_p50_us`, `birth_step_p99_us`, `enum_step_p50_us`, `enum_step_p99_us` | The upper edge of the histogram bucket (spec/transport.md, "Metrics") holding the p50 and p99 of one birth step (one object's reads) and one enumeration step (one DCS call, or one object), since the agent started |
 | `birth_step_max_us`, `enum_step_max_us` | The longest such step in the window |
 | `batch_us` | The running estimate of a batch's fixed part: planning it, the shim's dispatch and its return, apart from its rows |
-| `xcall_seen_us` | The running average of the calls measured, µs: the first call measured sets it, each later call weighs 0.1, each counts at most 62.5 µs, with no decay between pumps. It reads 0 before the first pump, when the pump's worth uses 20 µs. The call the pump bound uses ("The pump's worth") |
+| `xcall_seen_us` | The running average of the calls measured, µs: the first call measured sets it, each later call weighs 0.1, each counts at most 62.5 µs, with no decay between pumps. It reads 0 before the first pump, when the pump's worth uses 20 µs. The call the pump bound uses ("The pump's worth"), and the base of the gate's floor ("Slice") |
 | `pump_work_us` | The pumps' batches in the window, from plan to close, µs: rows of every tier the pump reads, births and the enumeration. `W` of the pump bound ("The pump's worth"); the call share is `pumps` × `xcall_seen_us` over `us_xcall` + `us_pump` |
 | `xcall_us`, `close_us` | The running estimates of the cross-state call and of closing a batch. Each takes at most a quarter of 250 µs from one measurement and decays by 1 % on each pump, so one slow call cannot stop sampling. `xcall_us` also decays on a frame where the gate's `reach` is below 3 × `x` ("Slice") |
 | `starved` | Frames in the window whose fixed work reached the allowance `A`; when above 0 the agent also logs a warning (spec/config.md) |
+| `clamped_pumps` | Pumps in the window the gate opened under the clamp of its floor ("Slice"): the frame left less than one measured call, a batch's fixed part and its close, which pass 0.8 of the most a frame can have |
 | `us_fixed`, `us_xcall`, `us_pump`, `us_syscall` | Where the window's agent time went, µs: from the start of `frame` to the slice on frames that are not system-call frames; the cross-state calls; the pumps; the system-call frames. With the tiers' times they do not add up to the window's agent time: the rest is the end of each frame |
 | `us_births`, `us_enumeration`, `us_subscribed`, `us_positions`, `us_stopped`, `us_vitals`, `us_warehouses` | Each tier's time in the window, µs: its batches from plan to close, and the sweeps for positions |
 | `rows_births`, `rows_enumeration`, `rows_subscribed`, `rows_positions`, `rows_stopped`, `rows_vitals`, `rows_warehouses` | Each tier's rows in the window |

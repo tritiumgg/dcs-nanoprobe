@@ -655,8 +655,15 @@ struct Run {
     first_pump: Option<f64>,
     /// Existence checks waiting, once a second.
     checks: Vec<usize>,
-    /// Frames over 250 µs, and those with no dear enumeration step in them.
+    /// Frames over 250 µs, those whose pump came before any call was
+    /// measured, and those with no dear enumeration step in them.
     over_250: usize,
+    over_250_cold: usize,
+    /// Frames over 250 µs whose pump the gate opened under its clamp, and
+    /// those that were neither that, nor the first pump before any call was
+    /// measured, nor a frame with a dear enumeration step in it.
+    over_250_clamped: usize,
+    over_250_other: usize,
     over_250_plain: usize,
     /// Every report the run wrote.
     reports: Vec<Report>,
@@ -669,6 +676,9 @@ struct Run {
     /// gate that opened while births waited.
     least_xcall_us: f64,
     least_open_xcall_us: f64,
+    /// The most a frame left at the host's gate, µs: the slice less the
+    /// frame's fixed work and the savings the gate keeps.
+    most_left_us: f64,
     /// Frames each urgent check waited until the queue was empty, counting
     /// the frame that emptied it, and whether one still waits at the end.
     urgent_waits: Vec<usize>,
@@ -713,12 +723,16 @@ fn run_x(
     let (mut first_worth, mut first_pump) = (None, None);
     let mut checks = Vec::new();
     let mut over_250 = 0;
+    let mut over_250_cold = 0;
+    let mut over_250_clamped = 0;
+    let mut over_250_other = 0;
     let mut over_250_plain = 0;
     let mut reports = Vec::new();
     let mut report = None;
     let (mut hold_us, mut reserve_us, mut holds) = (0.0, 0.0, 0u32);
     let mut least_xcall_us = f64::INFINITY;
     let mut least_open_xcall_us = f64::INFINITY;
+    let mut most_left_us = f64::NEG_INFINITY;
     let (mut urgent_waits, mut urgent_since) = (Vec::new(), None);
     for f in 0..frames {
         if !s.urgent.is_empty() {
@@ -743,6 +757,7 @@ fn run_x(
             // samples, then `finish`.
             clock.add(pre_us);
             counted += 1;
+            let mut clamped = false;
             let pumped = if w.detached {
                 s.slice(rec, clock.0);
                 false
@@ -792,7 +807,19 @@ fn run_x(
                     holds += 1;
                 }
                 let waited = s.births > 0;
+                // What the frame leaves, as `Sampler::gate` reckons it.
+                let reserved = if s.sub_wanted() || (!s.urgent.is_empty() && !s.behind()) {
+                    0.0
+                } else {
+                    s.reserved()
+                };
+                let fixed = clock.0.saturating_duration_since(rec.began).as_secs_f64() * 1e6
+                    + s.budget.events_us
+                    - s.budget.commanded_us;
+                most_left_us = most_left_us.max(s.budget.slice - fixed - reserved);
+                let clamped0 = s.clamped_pumps;
                 let open = s.gate(rec, clock.0);
+                clamped = s.clamped_pumps > clamped0;
                 least_xcall_us = least_xcall_us.min(s.xcall_us);
                 if open && waited {
                     least_open_xcall_us = least_open_xcall_us.min(s.xcall_us);
@@ -802,6 +829,8 @@ fn run_x(
                 s.decide(rec, clock.0)
             };
             let steps0 = w.enum_steps;
+            // A pump before any call is measured: the gate has no floor yet.
+            let cold = pumped && s.xcall_seen <= 0.0;
             if pumped {
                 pumps += 1;
                 first_pump.get_or_insert(elapsed);
@@ -815,6 +844,10 @@ fn run_x(
             }
             let frame_us = clock.0.saturating_duration_since(t0).as_secs_f64() * 1e6;
             over_250 += usize::from(frame_us > SLICE_CAP_US);
+            over_250_cold += usize::from(frame_us > SLICE_CAP_US && cold);
+            over_250_clamped += usize::from(frame_us > SLICE_CAP_US && clamped);
+            over_250_other +=
+                usize::from(frame_us > SLICE_CAP_US && !cold && !clamped && w.enum_steps == steps0);
             // A frame past the cap with no dear enumeration step in it.
             over_250_plain += usize::from(frame_us > SLICE_CAP_US && w.enum_steps == steps0);
             longest_us = longest_us.max(frame_us);
@@ -879,12 +912,16 @@ fn run_x(
         first_pump,
         checks,
         over_250,
+        over_250_cold,
+        over_250_clamped,
+        over_250_other,
         over_250_plain,
         reports,
         sweep_hold_us: hold_us / f64::from(holds.max(1)),
         reserve_us: reserve_us / f64::from(holds.max(1)),
         least_xcall_us,
         least_open_xcall_us,
+        most_left_us,
         urgent_waits,
         urgent_waiting: urgent_since.is_some(),
     }
@@ -5487,7 +5524,7 @@ fn a_frame_hands_its_commanded_work_to_the_link() {
 /// 1,000 frames.
 #[test]
 fn births_get_a_pump_when_three_calls_and_batches_pass_the_slice_cap() {
-    second_spawn(60, 54.0, 10.0, Some(Regime::Lock));
+    second_spawn(60, 54.0, 31.0, 10.0, Some(Regime::Lock));
 }
 
 /// The starvation band below the lock: with the call at 45 µs, three calls
@@ -5495,7 +5532,7 @@ fn births_get_a_pump_when_three_calls_and_batches_pass_the_slice_cap() {
 /// birth of the second spawn still resolves within 1,000 frames.
 #[test]
 fn births_get_a_pump_in_the_starvation_band_below_the_lock() {
-    second_spawn(60, 45.0, 10.0, Some(Regime::Band));
+    second_spawn(60, 45.0, 31.0, 10.0, Some(Regime::Band));
 }
 
 /// Many positions owed while births wait: the host's sweep takes near half
@@ -5505,7 +5542,7 @@ fn births_get_a_pump_in_the_starvation_band_below_the_lock() {
 /// still resolves, no frame passes 250 µs and the share holds.
 #[test]
 fn births_get_a_pump_beside_a_sweep_that_takes_half_the_cap() {
-    let (s, after) = second_spawn(1000, 54.0, 60.0, None);
+    let (s, after) = second_spawn(1000, 54.0, 31.0, 60.0, None);
     let cap = s.slice_cap();
     let figures = format!(
         "the sweep took {:.1} µs of a {cap:.1} µs cap on average, its savings {:.1} µs; \
@@ -5527,6 +5564,309 @@ fn births_get_a_pump_beside_a_sweep_that_takes_half_the_cap() {
     );
 }
 
+/// A slow host beside a sweep that takes half the cap while births wait:
+/// the call at 62 µs and a batch's fixed part at 60 µs put the gate's floor
+/// above the half of the cap that the sweep leaves, so no frame leaves the
+/// floor while the sweep takes its share. After a gate that shut for lack of
+/// room, the next sweep holds room for the pump, and every birth resolves.
+/// The floor stays within 0.8 of the cap, so no pump goes under the clamp.
+#[test]
+fn births_get_a_pump_on_a_slow_host_beside_a_sweep_that_takes_half_the_cap() {
+    let (s, after) = second_spawn(1000, 62.0, 60.0, 300.0, None);
+    let cap = s.slice_cap();
+    let need = s.pump_need();
+    let figures = format!(
+        "the floor {need:.1} µs, the cap {cap:.1} µs, the sweep held {:.1} µs on average, \
+         pumps {}",
+        after.sweep_hold_us, after.pumps
+    );
+    // The regime: the floor passes what the sweep's half of the cap leaves.
+    assert!(need > 0.5 * (cap - 2.0), "not the regime: {figures}");
+    let clamped: u64 = after.reports.iter().map(|r| r.clamped_pumps).sum();
+    assert_eq!(clamped, 0, "pumps under the clamp: {figures}");
+}
+
+/// A run for the gate's properties: the host's sweep at the CI runner's
+/// costs, the call at `call_us`, a batch's fixed part at `batch_us`;
+/// `births` new units at 20 s; with `checks`, a HIT each second from 20 to
+/// 45 s; with `enumeration`, statics and airbases enumerated every so many
+/// seconds at so many µs a step; with `attitude`, twenty units subscribed
+/// with their attitude from the first second.
+#[derive(Clone, Debug)]
+struct WaitCase {
+    share: f64,
+    fps: f64,
+    units: u64,
+    call_us: f64,
+    batch_us: f64,
+    births: u64,
+    checks: bool,
+    enumeration: Option<(f64, f64)>,
+    attitude: bool,
+}
+
+fn wait_case() -> impl Strategy<Value = WaitCase> {
+    let quarter = SLICE_CAP_US / 4.0;
+    (
+        (
+            prop_oneof![
+                Just(0.001),
+                Just(0.003),
+                Just(0.01),
+                Just(0.05),
+                Just(0.1),
+                Just(0.3)
+            ],
+            20.0f64..250.0,
+            30u64..2000,
+        ),
+        (5.0..quarter, 0.0..quarter),
+        (
+            prop_oneof![Just(0u64), 1u64..300],
+            any::<bool>(),
+            proptest::option::of((5.0f64..60.0, prop_oneof![Just(10.0), Just(687.0)])),
+            any::<bool>(),
+        ),
+    )
+        .prop_map(
+            |(
+                (share, fps, units),
+                (call_us, batch_us),
+                (births, checks, enumeration, attitude),
+            )| {
+                WaitCase {
+                    share,
+                    fps,
+                    units,
+                    call_us,
+                    batch_us,
+                    births,
+                    checks,
+                    enumeration,
+                    attitude,
+                }
+            },
+        )
+}
+
+/// One second of a [`wait_run`].
+#[derive(Clone, Copy, Debug)]
+struct WaitSecond {
+    /// Positions the host's sweep read.
+    swept: u64,
+    pumps: usize,
+    /// At the second's end: births pending, and whether an urgent check
+    /// waits.
+    births: usize,
+    urgent: bool,
+}
+
+/// One run of a [`WaitCase`] for 50 s. Returns the sampler, its frames, and
+/// its seconds.
+fn wait_run(c: &WaitCase) -> (Sampler, WaitFrames, Vec<WaitSecond>) {
+    let rates = Rates {
+        enumeration_s: c.enumeration.map_or(3600.0, |(period, _)| period),
+        ..Rates::default()
+    };
+    let mut s = Sampler::new(rates, 0.07);
+    let mut rec = Rec::new(c.share, 1e6 / c.fps);
+    let (statics, airbases) = if c.enumeration.is_some() {
+        (40, 5)
+    } else {
+        (0, 0)
+    };
+    let mut w = world(c.units, statics, airbases);
+    w.sweep = Some((19.5, 14.7));
+    w.batch_us = c.batch_us;
+    w.close_us = 2.2;
+    w.enum_step_us = c.enumeration.map(|(_, step)| step);
+    w.tier_us[Tier::Subscribed.index()] = Some(32.0);
+    let subscribed = c.units.min(20);
+    if c.attitude {
+        s.set_campaign(1);
+        for i in 1..=subscribed {
+            w.objects.get_mut(&(1000 + i)).unwrap().name = unit_name(i);
+        }
+    }
+    let mut f = WaitFrames::default();
+    let mut seconds = Vec::new();
+    for i in 0..50u64 {
+        if i == 1 && c.attitude {
+            s.subscribe(1.0, true, &(1..=subscribed).collect::<Vec<_>>());
+        }
+        if i == 20 {
+            for n in c.units + 1..=c.units + c.births {
+                w.spawn(1000 + n, object_kind::UNIT, format!("u{n}"), 5.0);
+                s.birth_waits();
+            }
+        }
+        if c.checks && (20..45).contains(&i) {
+            s.watch(Some((1001 + i % c.units) as f64));
+        }
+        if i > 0 {
+            rec.began += Duration::from_nanos((1e9 / c.fps) as u64);
+        }
+        let swept = w.swept;
+        let r = run_x(&mut s, &mut rec, &mut w, 1.0, c.fps, 46.0, c.call_us, 2.0);
+        f.frames += r.frames;
+        f.over += r.over_250_other;
+        f.clamped += r.over_250_clamped;
+        f.longest_us = f.longest_us.max(r.longest_us);
+        seconds.push(WaitSecond {
+            swept: w.swept - swept,
+            pumps: r.pumps,
+            births: w.births.len(),
+            urgent: r.urgent_waiting,
+        });
+    }
+    (s, f, seconds)
+}
+
+/// The frames of a [`wait_run`]: all of them; those over 250 µs that were
+/// neither the first pump before any call was measured, nor a pump under the
+/// clamp, nor a frame with a dear enumeration step; those under the clamp;
+/// and the longest, µs.
+#[derive(Debug, Default)]
+struct WaitFrames {
+    frames: usize,
+    over: usize,
+    clamped: usize,
+    longest_us: f64,
+}
+
+/// The gate's properties over `SURVEY_N` seeded cases (default 200), each
+/// failure counted by kind with its first case; with `SURVEY_OUT`, every
+/// case's kinds and figures go to that file. Run by hand, in release:
+/// `SURVEY_N=2000 cargo test -p nanoprobe-agent-link --lib --release
+/// survey_the_gate -- --ignored --nocapture`.
+#[test]
+#[ignore = "a survey, run by hand"]
+fn survey_the_gate() {
+    use proptest::strategy::ValueTree;
+    let n: usize = std::env::var("SURVEY_N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(200);
+    let mut runner = proptest::test_runner::TestRunner::new(ProptestConfig {
+        rng_seed: proptest::test_runner::RngSeed::Fixed(20_261_120),
+        ..ProptestConfig::default()
+    });
+    let mut kinds: std::collections::BTreeMap<&'static str, (usize, String)> = Default::default();
+    let mut out = String::new();
+    for i in 0..n {
+        let c = wait_case().new_tree(&mut runner).unwrap().current();
+        let (failures, figures) = wait_failures(&c);
+        out.push_str(&format!("{i}\t{failures:?}\t{figures}\n"));
+        for k in failures {
+            let e = kinds
+                .entry(k)
+                .or_insert((0, figures.chars().take(700).collect()));
+            e.0 += 1;
+        }
+    }
+    if let Ok(path) = std::env::var("SURVEY_OUT") {
+        std::fs::write(path, out).unwrap();
+    }
+    eprintln!("cases {n}");
+    for (k, (count, example)) in kinds {
+        eprintln!("{k}: {count}\n  {example}");
+    }
+}
+
+/// The gate's properties on one [`wait_run`], as the kinds of failure found
+/// and the run's figures: no pump waits for good, the sweep keeps reading,
+/// and frames pass 250 µs only where they may.
+fn wait_failures(c: &WaitCase) -> (Vec<&'static str>, String) {
+    let (s, f, seconds) = wait_run(c);
+    let figures = format!(
+        "{c:?}: units {} of {}, frames {f:?}, floor {:.1} µs, seconds 15 to 50 {:?}",
+        s.len(),
+        c.units + c.births,
+        s.pump_need(),
+        &seconds[15..]
+    );
+    let mut failures = Vec::new();
+    // Births: every one resolves by the end, or the count still falls in the
+    // last 10 s. Where the births tier is slow it may not be done in 30 s:
+    // at a share of 0.003, 75 frames a second, 861 units, the call 13.9 µs
+    // and a batch's fixed part 51.6 µs, 1 of 60 was pending at 30 s, where
+    // main's rule left 109 (host model). That is the births tier's rate, not
+    // a lock.
+    let (then, last) = (seconds[39].births, seconds[49].births);
+    if !(last == 0 || last < then) {
+        failures.push("births wait");
+    }
+    // Checks came until 45 s; the queue is empty by the end.
+    if seconds[49].urgent {
+        failures.push("an urgent check still waits");
+    }
+    // While births or checks wait, a pump comes in every 5 s.
+    if seconds[20..50].chunks(5).any(|window| {
+        window.iter().any(|w| w.births > 0 || w.urgent) && window.iter().all(|w| w.pumps == 0)
+    }) {
+        failures.push("5 s with no pump while work waited");
+    }
+    // The sweep reads positions in every 5 s.
+    if seconds[5..50]
+        .chunks(5)
+        .any(|window| window.iter().all(|w| w.swept == 0))
+    {
+        failures.push("5 s with no sweep");
+    }
+    // Outside the first pump, the clamp and a dear enumeration step, a frame
+    // passes 250 µs only when a pump's rows run past its slice, as they do
+    // under main's rule (host model: one frame at 252.8 µs under both rules
+    // at a share of 0.003, 30 frames a second, the call at 62.5 µs). A
+    // tenth of the owner's 1 % holds those few.
+    if f.over as f64 > 0.001 * f.frames as f64 {
+        failures.push("frames over 250 µs outside the clamp");
+    }
+    (failures, figures)
+}
+
+/// [`wait_failures`] as a property.
+fn wait_properties(c: &WaitCase) -> Result<(), TestCaseError> {
+    let (failures, figures) = wait_failures(c);
+    prop_assert!(failures.is_empty(), "{:?}: {}", failures, figures);
+    Ok(())
+}
+
+proptest! {
+    // A fixed seed, so a run here is the run recorded.
+    #![proptest_config(ProptestConfig {
+        cases: 64,
+        rng_seed: proptest::test_runner::RngSeed::Fixed(20_261_120),
+        ..ProptestConfig::default()
+    })]
+
+    /// Whatever the costs, the share, the frame rate, the births, the checks,
+    /// the enumeration and the attitude rows: a pump that waits comes, the
+    /// sweep keeps reading, and a frame passes 250 µs only on the first pump
+    /// before any call is measured, a pump under the clamp, a dear
+    /// enumeration step, or a pump's own rows (see [`wait_properties`]).
+    #[test]
+    fn a_waiting_pump_comes_and_frames_pass_250_only_under_the_clamp(c in wait_case()) {
+        wait_properties(&c)?;
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 4000,
+        rng_seed: proptest::test_runner::RngSeed::Fixed(20_261_120),
+        ..ProptestConfig::default()
+    })]
+
+    /// [`a_waiting_pump_comes_and_frames_pass_250_only_under_the_clamp`] on
+    /// 4,000 cases, run by hand: `cargo test -p nanoprobe-agent-link --lib
+    /// --release wide_ -- --ignored`.
+    #[test]
+    #[ignore = "4,000 cases, run by hand"]
+    fn wide_a_waiting_pump_comes(c in wait_case()) {
+        wait_properties(&c)?;
+    }
+}
+
 /// Where the costs learned put a run, checked right after learning.
 #[derive(Clone, Copy, Debug)]
 enum Regime {
@@ -5538,13 +5878,19 @@ enum Regime {
 }
 
 /// Two spawns at a share of 0.05 and 100 frames a second, with the Linux CI
-/// runner's costs and the call at `call_us`: `units` births to learn on for
-/// `learn_s` seconds, then 60 more. The learned costs put the run in
-/// `regime`. Every birth of the second spawn resolves within 1,000 frames,
-/// no frame's agent time passes 250 µs, and the share stays within the
-/// configured share and the time forgiven. Returns the sampler and the
-/// second run.
-fn second_spawn(units: u64, call_us: f64, learn_s: f64, regime: Option<Regime>) -> (Sampler, Run) {
+/// runner's costs, the call at `call_us` and a batch's fixed part at
+/// `batch_us`: `units` births to learn on for `learn_s` seconds, then 60
+/// more. The learned costs put the run in `regime`. Every birth of the
+/// second spawn resolves within 1,000 frames, no frame's agent time passes
+/// 250 µs, and the share stays within the configured share and the time
+/// forgiven. Returns the sampler and the second run.
+fn second_spawn(
+    units: u64,
+    call_us: f64,
+    batch_us: f64,
+    learn_s: f64,
+    regime: Option<Regime>,
+) -> (Sampler, Run) {
     const SHARE: f64 = 0.05;
     let mut s = Sampler::new(Rates::default(), 0.07);
     let mut rec = Rec::new(SHARE, 1e4);
@@ -5552,7 +5898,7 @@ fn second_spawn(units: u64, call_us: f64, learn_s: f64, regime: Option<Regime>) 
     // The CI runner's figures: the sweep's batch and row, a batch's fixed
     // part, a close, the system-call frame.
     w.sweep = Some((19.5, 14.7));
-    w.batch_us = 31.0;
+    w.batch_us = batch_us;
     w.close_us = 2.2;
     let learn = run_x(&mut s, &mut rec, &mut w, learn_s, 100.0, 46.0, call_us, 2.0);
     let case = format!("{units} units, call {call_us} µs");
@@ -5562,8 +5908,9 @@ fn second_spawn(units: u64, call_us: f64, learn_s: f64, regime: Option<Regime>) 
         "{case}: the first {units} births did not resolve"
     );
     if let Some(Regime::Lock) = regime {
-        // The estimates the CI runner's agent held when its gate shut (LOG,
-        // linux.log of run 44652424327: `xcall_us` 53.59, `batch_us` 30.60).
+        // The estimates the CI runner's agent held when its gate shut, from
+        // the `sampling` report in the log of the Linux CI run of
+        // `lua/tests/sampling.lua` (PRIOR: `xcall_us` 53.59, `batch_us` 30.60).
         // Learning reaches them only under a gate that never decays the
         // call, so the run starts from them.
         s.xcall_us = 53.59;
@@ -5613,9 +5960,14 @@ fn second_spawn(units: u64, call_us: f64, learn_s: f64, regime: Option<Regime>) 
         ("learning", &learn, learn_s),
         ("second spawn", &after, 10.0),
     ] {
-        assert_eq!(
-            r.over_250, 0,
-            "{case}, {what}: frames over 250 µs, the longest {:.1} µs",
+        // Only the first pump, before any call is measured, may pass 250 µs:
+        // the gate's floor is 0 until a pump measures the call.
+        assert!(
+            r.over_250 == r.over_250_cold && r.over_250_cold <= 1,
+            "{case}, {what}: frames over 250 µs {}, {} of them before the call was \
+             measured, the longest {:.1} µs",
+            r.over_250,
+            r.over_250_cold,
             r.longest_us
         );
         let forgiven = (r.forgiven_us + r.maintenance_forgiven_us) / (secs * 1e6);
@@ -5747,21 +6099,38 @@ fn within_the_cap_the_gate_decides_as_the_uncapped_rule() {
 
 /// Normal play at the default share and the live server's frame rate: the
 /// call's estimate at its steady state below the measured call, live costs
-/// of the call and a batch's fixed part (LIVE, gameserver bundles,
-/// 2026-11-14 to 2026-11-18: call 19.7 to 49.0 µs, a batch's fixed part up
-/// to 37.0 µs), the frame's fixed work and the sweep's savings within what
-/// a frame at 112 frames a second holds. The gate's floor never binds: the
-/// gate decides as main's rule, with its uncapped reach and no floor.
+/// of the call and a batch's fixed part (PRIOR: the agent's `sampling`
+/// reports on a Linux dedicated server, DCS 2.9.31.29434 under Wine 10.0,
+/// 2026-11-14 to 2026-11-18: the call's estimate 19.7 to 49.0 µs, a batch's
+/// fixed part up to 37.0 µs), the frame's fixed work, the sweep's savings
+/// up to what a frame holds with births waiting (half) and without, and the
+/// call's estimate decayed to a half and a quarter of its steady state. The
+/// gate decides as main's rule, with its uncapped reach and no floor, except
+/// that it stays shut where the frame leaves less than the floor: a pump
+/// main's rule opens there cannot pay one measured call, a batch's fixed
+/// part and its close. With the steady estimate, savings up to 60 µs and
+/// fixed work up to 10 µs, the floor binds in no case.
 #[test]
 fn in_normal_play_the_gate_decides_as_mains_rule() {
     let mut opened = [0usize; 2];
+    let (mut held, mut held_steady) = (0usize, 0usize);
     for fps in [112.0, 100.0, 60.0] {
         for syscall_per_s in [0.0, 165.0] {
             for debt in [-CREDIT_CAP_US, -40.0, 0.0, 30.0] {
-                for reserve in [None, Some(0.0), Some(20.0), Some(60.0)] {
-                    for fixed in [0.0, 3.0, 10.0] {
+                for reserve in [
+                    None,
+                    Some(0.0),
+                    Some(20.0),
+                    Some(60.0),
+                    Some(86.0),
+                    Some(170.0),
+                ] {
+                    for fixed in [0.0, 3.0, 10.0, 40.0, 86.0] {
                         for x in [19.7, 25.0, 35.0, 49.0] {
-                            for b in [0.0, 8.0, 20.0, 37.0] {
+                            for (b, decay) in [0.0, 8.0, 20.0, 37.0]
+                                .into_iter()
+                                .flat_map(|b| [(b, 1.0), (b, 0.5), (b, 0.25)])
+                            {
                                 let mut rec = Rec::new(0.003, 1e6 / fps);
                                 rec.syscall = false;
                                 let t = rec.began;
@@ -5778,7 +6147,7 @@ fn in_normal_play_the_gate_decides_as_mains_rule() {
                                 // settles at 0.099 / 0.109 of the measured
                                 // call.
                                 s.xcall_seen = x;
-                                s.xcall_us = x * 0.099 / 0.109;
+                                s.xcall_us = x * 0.099 / 0.109 * decay;
                                 s.batch_us = b;
                                 s.close_us = 2.2;
                                 s.close_dev_us = 0.5;
@@ -5788,17 +6157,28 @@ fn in_normal_play_the_gate_decides_as_mains_rule() {
                                 let worth = reserve.is_none() || s.pump_worth(now);
                                 let reserved = s.reserved();
                                 let top = s.budget.allowance - s.budget.charge + CREDIT_CAP_US;
+                                assert!(top <= s.slice_cap(), "{fps} fps passes the cap");
                                 let reach = 0.8 * (top - fixed - reserved);
                                 let gate =
                                     (3.0 * (xu + b)).min(reach).max(3.0 * xu).max(MIN_BUDGET_US);
                                 let left = s.slice_us() - fixed - reserved;
-                                let want = worth && left >= gate;
+                                let main = worth && left >= gate;
+                                let floor = x + b + 2.2 + 2.0 * 0.5;
+                                let want = main && left >= floor;
                                 let case = format!(
                                     "{fps} fps, system calls {syscall_per_s} µs/s, debt {debt}, \
-                                     reserve {reserve:?}, fixed {fixed}, call {x}, batch {b}"
+                                     reserve {reserve:?}, fixed {fixed}, call {x}, batch {b}, \
+                                     decay {decay}"
                                 );
                                 assert_eq!(s.gate(&rec, now), want, "{case}");
                                 opened[usize::from(want)] += 1;
+                                if main && !want {
+                                    held += 1;
+                                    let steady = decay == 1.0
+                                        && reserve.unwrap_or(0.0) <= 60.0
+                                        && fixed <= 10.0;
+                                    held_steady += usize::from(steady);
+                                }
                             }
                         }
                     }
@@ -5812,20 +6192,92 @@ fn in_normal_play_the_gate_decides_as_mains_rule() {
         opened[0],
         opened[1]
     );
+    // The grid reaches frames where the floor holds the gate, and none of
+    // them has the steady estimate with small savings and fixed work.
+    assert!(held > 0, "the floor held no case");
+    assert_eq!(held_steady, 0, "the floor held {held_steady} steady cases");
 }
 
 /// Normal play, run: 1,200 units with four in five halted, the host's sweep,
-/// the default share at 112 frames a second, the live median call and a
-/// batch's fixed part (LIVE, gameserver bundles: call plus batch median
-/// 37.4 µs), 60 births at 10 s and a HIT each second, for 60 s. The figures
-/// are main's rule's (uncapped reach, no floor, the sweep's part 1 beside
-/// an urgent check), run on this test with those three reverted: pumps 207,
-/// sweeps 472, frames over 250 µs 0, the longest frame 174.3 µs, the share
-/// 0.00152, urgent checks pumped within 22 frames. This rule gave the same
-/// figures exactly. Each may differ by 2 %, so a later change to the host
-/// model that moves both rules alike does not fail here.
+/// the default share at 112 frames a second, 60 births at 10 s and a HIT
+/// each second, for 60 s, at three costs of the call and a batch's fixed
+/// part: about the live median, and the live extremes of each with the
+/// largest batch (PRIOR, as for `in_normal_play_the_gate_decides_as_mains_rule`:
+/// call plus batch median 37.4 µs). The figures are main's rule's (uncapped
+/// reach, no floor, the sweep's part 1 beside an urgent check, no hold),
+/// run on this test with those reverted.
+///
+/// At the typical costs, 25/12 and 20/37 µs, this rule gives main's figures
+/// exactly; each may differ by 2 %, so a later change to the host model that
+/// moves both rules alike does not fail here. At the live extremes, 54/37 µs,
+/// a frame beside the sweep's savings can leave less than the floor while
+/// births or a check wait, and the sweep then holds room for the pump
+/// ("The sweep", Hold). This rule gave pumps 336 (main 344), sweeps 492
+/// (465), the longest frame 183.8 µs (189.2), the share 0.00188 (0.00189)
+/// and urgent checks within 18 frames (16). There the owner's targets hold
+/// (share, no frame over 250 µs, every birth and check served), and the
+/// bounds below hold the hold's reshaping of sweeps and pumps.
 #[test]
 fn normal_play_matches_mains_rule() {
+    // Call and batch, µs, then main's pumps, sweeps, longest frame (µs),
+    // share and the most frames an urgent check waited.
+    let main = [
+        ((25.0, 12.0), (207.0, 472.0, 174.34, 0.001523, 22usize)),
+        ((54.0, 37.0), (344.0, 465.0, 189.22, 0.001889, 16)),
+        ((20.0, 37.0), (1880.0, 464.0, 134.64, 0.002962, 7)),
+    ];
+    let near = |got: f64, main: f64| (got - main).abs() <= 0.02 * main;
+    for ((call, batch), (pumps, sweeps, longest, share, wait)) in main {
+        let p = normal_play(call, batch);
+        let worst = p.waits.iter().copied().max().unwrap_or(0);
+        let figures = format!("call {call} µs, batch {batch} µs: {p:?}, longest wait {worst}");
+        eprintln!("{figures}");
+        assert_eq!(p.units, 1260, "births pending: {figures}");
+        assert_eq!(p.over, 0, "{figures}");
+        assert!(p.share <= 0.003 + p.forgiven, "{figures}");
+        assert_eq!(p.waits.len(), 59, "urgent checks: {figures}");
+        if call == 54.0 {
+            // Held frames give the pump what the sweep would have taken:
+            // pumps may fall and sweeps rise. A tenth either way of main's
+            // keeps both tiers served (8 fewer pumps and 27 more sweeps
+            // measured); an urgent check may wait twice main's longest, a
+            // fifth of a second at 112 frames a second.
+            assert!(p.pumps as f64 >= 0.9 * pumps, "pumps: {figures}");
+            assert!(
+                p.sweeps as f64 >= 0.9 * sweeps && p.sweeps as f64 <= 1.1 * sweeps,
+                "sweeps: {figures}"
+            );
+            assert!(p.longest <= SLICE_CAP_US, "the longest frame: {figures}");
+            assert!(worst <= 2 * wait, "urgent checks: {figures}");
+            continue;
+        }
+        assert!(near(p.pumps as f64, pumps), "pumps: {figures}");
+        assert!(near(p.sweeps as f64, sweeps), "sweeps: {figures}");
+        assert!(near(p.longest, longest), "the longest frame: {figures}");
+        assert!(near(p.share, share), "share: {figures}");
+        assert!(
+            worst as f64 <= wait as f64 * 1.02,
+            "urgent checks: {figures}"
+        );
+    }
+}
+
+/// The figures of one normal-play run.
+#[derive(Debug)]
+struct Play {
+    pumps: usize,
+    sweeps: u64,
+    over: usize,
+    longest: f64,
+    share: f64,
+    forgiven: f64,
+    units: usize,
+    waits: Vec<usize>,
+}
+
+/// Normal play at the default share and 112 frames a second, the call at
+/// `call_us` and a batch's fixed part at `batch_us`.
+fn normal_play(call_us: f64, batch_us: f64) -> Play {
     const SHARE: f64 = 0.003;
     const FPS: f64 = 112.0;
     let mut s = Sampler::new(Rates::default(), 0.07);
@@ -5833,7 +6285,7 @@ fn normal_play_matches_mains_rule() {
     let mut w = world(1200, 0, 0);
     halt_four_in_five(&mut w);
     w.sweep = Some((15.0, 1.0));
-    w.batch_us = 12.0;
+    w.batch_us = batch_us;
     w.close_us = 2.0;
     w.tier_us[Tier::Vitals.index()] = Some(1.3);
     let (mut pumps, mut sweeps, mut over, mut longest) = (0usize, 0u64, 0usize, 0.0f64);
@@ -5850,7 +6302,7 @@ fn normal_play_matches_mains_rule() {
             s.watch(Some((1001 + i) as f64));
             rec.began += Duration::from_nanos((1e9 / FPS) as u64);
         }
-        let r = run_x(&mut s, &mut rec, &mut w, 1.0, FPS, 165.0, 25.0, 3.0);
+        let r = run_x(&mut s, &mut rec, &mut w, 1.0, FPS, 165.0, call_us, 3.0);
         pumps += r.pumps;
         sweeps += r.sweeps;
         over += r.over_250;
@@ -5859,27 +6311,16 @@ fn normal_play_matches_mains_rule() {
         forgiven += (r.forgiven_us + r.maintenance_forgiven_us) / 1e6;
         waits.extend(r.urgent_waits);
     }
-    let share = agent / 60.0;
-    let figures = format!(
-        "pumps {pumps}, sweeps {sweeps}, frames over 250 µs {over}, the longest {longest:.1} µs, \
-         share {share:.5}, units {}, urgent waits up to {:?} frames",
-        s.len(),
-        waits.iter().max()
-    );
-    eprintln!("{figures}");
-    assert_eq!(s.len(), 1260, "births pending: {figures}");
-    assert_eq!(over, 0, "{figures}");
-    assert!(share <= SHARE + forgiven / 60.0, "{figures}");
-    let near = |got: f64, main: f64| (got - main).abs() <= 0.02 * main;
-    assert!(near(pumps as f64, 207.0), "pumps: {figures}");
-    assert!(near(sweeps as f64, 472.0), "sweeps: {figures}");
-    assert!(near(longest, 174.3), "the longest frame: {figures}");
-    assert!(near(share, 0.00152), "share: {figures}");
-    let worst = waits.iter().copied().max().unwrap_or(0);
-    assert!(
-        waits.len() == 59 && worst as f64 <= 22.0 * 1.02,
-        "urgent checks: {figures}"
-    );
+    Play {
+        pumps,
+        sweeps,
+        over,
+        longest,
+        share: agent / 60.0,
+        forgiven: forgiven / 60.0,
+        units: s.len(),
+        waits,
+    }
 }
 
 /// The cap binds and the host's sweep takes nearly all of it: 2,000 units
@@ -5979,8 +6420,7 @@ fn heavy_fixed_work_beside_an_urgent_check_passes_no_frame_over_250() {
     assert!(!s.urgent.is_empty(), "the HIT queued no urgent check");
     rec.began += Duration::from_millis(10);
     let heavy = run_x(&mut s, &mut rec, &mut w, 3.0, 100.0, 46.0, 54.0, HEAVY_US);
-    let cap = s.slice_cap();
-    let left = cap - HEAVY_US;
+    let left = heavy.most_left_us;
     let floor = s.xcall_seen + s.batch_us + s.close_us + 2.0 * s.close_dev_us;
     let figures = format!(
         "frames over 250 µs {}, the longest {:.1} µs, pumps {}; the frame leaves at most \

@@ -7,3 +7,5 @@
 cc 9c40f1381ed8090405edf652eedc00e1c673097e13ab3dc3726b9fdf0c1eeba1 # shrinks to ops = [Spawn { kind: 1 }, Frames { n: 1 }, Vanish { pick: 0 }]
 cc 1e8286ca7fe324270ca8f5926eeae8bce0e0e587e5ca9c6b4245be0876fc3b86 # shrinks to c = GateCase { share: 0.04950239557556889, fps: 10.0, syscall_per_s: 0.0, debt: 0.0, fixed: 145.12713047155341, x: 0.0, seen: 0.1, batch: 45.135415353875295, close: 17.605180399666892, dev: 2.9445422978983355, reserve: Some(15.937449619224093) }
 cc 83d6f612ceeaf5e4cf22bfd313dd8e274fb88bb62713973cd7cee9acdce479e9 # shrinks to c = GateCase { share: 0.17910725562948468, fps: 10.0, syscall_per_s: 0.0, debt: 0.0, fixed: 139.65224660007516, x: 56.92164496235427, seen: 0.0, batch: 0.0, close: 0.0, dev: 0.0, reserve: None }
+cc 7a4935d6f94c67e968f45617fb65c96a708f18aa8899ad31da934a923f59d84f # shrinks to c = WaitCase { share: 0.003, fps: 75.28005589655706, units: 861, call_us: 13.94421961578941, batch_us: 51.56342729853223 }
+cc 74c2ed0acf842201883dd3dd10490a7887f5a6d2b20f89b5280efd8ce139e2b7 # shrinks to c = WaitCase { share: 0.001, fps: 20.0, units: 30, call_us: 5.0, batch_us: 0.0, births: 0, checks: false, enumeration: None, attitude: true }

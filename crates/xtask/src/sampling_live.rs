@@ -35,9 +35,10 @@
 //!   `xcall_seen_us`) in every report, here and in the mirror part.
 //!
 //! `--share S` with `mirror` or `mirror500` sets `overhead_share` to `S` in
-//! the deployed `agent.toml` before DCS restarts, judges the share and the
-//! debt by `S`, and puts the deployed `agent.toml` back after the part; the
-//! running agent keeps `S` until DCS restarts.
+//! the deployed `agent.toml` before DCS restarts, judges the mean share by
+//! `S`, and puts the deployed `agent.toml` back after the part; the running
+//! agent keeps `S` until DCS restarts. With it, `mirror500` also judges the
+//! share over the run and the frames over 250 µs beside its compare.
 //!
 //! Everything goes under `bundles/sampling-<name>-<time>/`: every mirror and
 //! oracle dump, the verdicts, the probe's output and the recording, and
@@ -952,8 +953,25 @@ fn part_mirror(
         let lines = std::fs::read(run.folder.join("mirror-probe.jsonl"))
             .map(|b| link::parse_lines(&b))
             .unwrap_or_default();
+        let mut ok = v500["matches"] == json!(true);
+        // With `--share` the run also judges the agent's time: the share
+        // over the whole run and the frames over 250 µs.
+        let mut checks = Vec::new();
+        if GIVEN_SHARE.get().is_some() {
+            let (span_ok, span_detail) = span(&reports);
+            let exact_tail = tail(&reports);
+            let tail_ok = exact_tail["p99_within_250"] == json!(true);
+            ok &= span_ok && tail_ok;
+            checks.push(json!({
+                "check": format!("mean share <= {} and nothing forgiven", share()),
+                "ok": span_ok, "detail": span_detail}));
+            checks.push(json!({
+                "check": "pump p99 <= 250 µs (frames over 250 µs at most 1 %, counted exactly)",
+                "ok": tail_ok, "detail": exact_tail}));
+        }
         return Ok(json!({
-            "ok": v500["matches"] == json!(true),
+            "ok": ok,
+            "checks": checks,
             "spawned": [first],
             "verdict_500": v500,
             "fps_500": fps500,
@@ -1018,10 +1036,10 @@ fn part_mirror(
         // The budget holds the mean over a span, not each 10 s window: a
         // window can spend credit earned before it, or run up debt that the
         // next one repays (spec/sampling.md, "Slice").
-        json!({"check": "mean share <= 0.003 and nothing forgiven, from the 800 spawn on", "ok": burst_ok,
-               "detail": burst_span}),
-        json!({"check": "mean share <= 0.003 and nothing forgiven at 2,000, settled", "ok": steady_ok,
-               "detail": steady_span}),
+        json!({"check": format!("mean share <= {} and nothing forgiven, from the 800 spawn on", share()),
+               "ok": burst_ok, "detail": burst_span}),
+        json!({"check": format!("mean share <= {} and nothing forgiven at 2,000, settled", share()),
+               "ok": steady_ok, "detail": steady_span}),
         json!({"check": "the mirror fills within twice the births' expected time", "ok": filled2000,
                "detail": format!("{fill2000_s:.0} s for 800 births")}),
         json!({"check": "position period <= 3 s while the table fills", "ok": burst_positions > 0.0 && burst_positions <= 3.0,

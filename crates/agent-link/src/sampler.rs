@@ -754,6 +754,9 @@ pub struct Sampler {
     /// Running average of a batch's fixed cost, µs: planning it, the
     /// shim's dispatch and its return, apart from its rows.
     batch_us: f64,
+    /// The same for a batch of births or the enumeration: its time less
+    /// its timed steps, µs, each batch weighing 0.1.
+    maintenance_batch_us: f64,
     /// The part of `batch_us` after a batch's last clock check, µs: the
     /// shim's return to the next plan. The stop check keeps room for it.
     tail_us: f64,
@@ -844,6 +847,13 @@ pub struct Sampler {
     scale: f64,
     /// Frames this window whose fixed work reached the allowance.
     starved: u64,
+    /// The last gate shut for lack of room while a pump waited: the next
+    /// sweep holds room for the pump ([`Sampler::sweep`]).
+    room_shut: bool,
+    /// Pumps this window the gate opened under its clamp: one measured call,
+    /// a batch's fixed part and its close passed 0.8 of the most a frame can
+    /// have, and the frame left less than them.
+    clamped_pumps: u64,
     /// This frame took a row that costs more than its whole budget.
     lone: bool,
     /// Frames this window that took such a row.
@@ -1118,6 +1128,7 @@ impl Sampler {
             xcall_us: 0.0,
             close_us: 0.0,
             batch_us: 0.0,
+            maintenance_batch_us: 0.0,
             tail_us: 0.0,
             close_dev_us: 0.0,
             maintenance_us: 0.0,
@@ -1156,6 +1167,8 @@ impl Sampler {
 
             scale: 1.0,
             starved: 0,
+            room_shut: false,
+            clamped_pumps: 0,
             lone: false,
             lone_rows: 0,
             maintenance: false,
@@ -2577,6 +2590,10 @@ impl Sampler {
                 self.reserved()
             };
         let cap = self.slice_cap();
+        let top = self.top();
+        let need = self.pump_need();
+        let waits = self.higher_waits() || !self.urgent.is_empty();
+        self.room_shut = false;
         let b = &mut self.budget;
         let fixed = now.saturating_duration_since(link.began()).as_secs_f64() * 1e6 + b.events_us
             - b.commanded_us;
@@ -2618,24 +2635,62 @@ impl Sampler {
         // The decay can take the gate below one real call. Where the cap
         // binds and the frame's fixed work or the sweep's savings leave
         // almost nothing, it would then open a pump whose call alone runs
-        // the frame past 250 µs (host test: 296.5 µs beside a sweep that
-        // took the whole cap). So the gate is never below what a pump
-        // costs at least: the measured call, which no frame decays, one
-        // batch's fixed part and its close. Before the first pump nothing
-        // is measured and the floor is 0. With the slice at its cap, the
-        // rest of the gate is at most `reach` once the decay has run, and
-        // `reach` is less than what the frame has left: a frame that leaves
-        // the floor then opens the gate.
-        let floor = if self.xcall_seen > 0.0 {
-            self.xcall_seen + self.batch_us + self.close_us + 2.0 * self.close_dev_us
-        } else {
-            0.0
-        };
+        // the frame past 250 µs (host test
+        // `heavy_fixed_work_beside_an_urgent_check_passes_no_frame_over_250`).
+        // So the gate is never below what a pump costs at least, `need`:
+        // the measured call, which no frame decays, one batch's fixed part
+        // and its close. Before the first pump nothing is measured and the
+        // floor is 0. A slow host can measure more than a frame beside the
+        // sweep ever leaves; the floor is then at most 0.8 of the most a
+        // frame can have, and a pump the clamp lets through is counted
+        // (`clamped_pumps`): it may run its frame past its slice, but it
+        // never waits for good. With the slice at its cap, the rest of the
+        // gate is at most `reach` once the decay has run, and `reach` is
+        // less than what the frame has left: a frame that leaves the floor
+        // then opens the gate.
+        let floor = need.min(0.8 * top);
         let gate = gate.max(floor);
         let left = b.slice - fixed - reserved;
         if left < gate {
+            // A pump waits and the frame had no room for it: the next sweep
+            // leaves it room ([`Sampler::sweep`]).
+            self.room_shut = waits;
             return false;
         }
+        let open = self.scaled_gate(left);
+        if open && left < need {
+            self.clamped_pumps += 1;
+        }
+        open
+    }
+
+    /// The most a frame can ever have, with full credit and no debt: no
+    /// more than the largest slice.
+    fn top(&self) -> f64 {
+        let b = &self.budget;
+        (b.allowance - b.charge + CREDIT_CAP_US).min(self.slice_cap())
+    }
+
+    /// What a pump costs at least, µs: the measured call, one batch's fixed
+    /// part and its close. 0 before the first pump measures the call. The
+    /// batch's fixed part is the larger of the row tiers' and births' and
+    /// the enumeration's: any of them can open the pump, and a floor that
+    /// counted only the row tiers' let a pump for births or the enumeration
+    /// open where its batch did not fit, and run its frame past 250 µs.
+    fn pump_need(&self) -> f64 {
+        if self.xcall_seen > 0.0 {
+            self.xcall_seen
+                + self.batch_us.max(self.maintenance_batch_us)
+                + self.close_us
+                + 2.0 * self.close_dev_us
+        } else {
+            0.0
+        }
+    }
+
+    /// The rest of [`Sampler::gate`], on a frame that leaves `left`, at least
+    /// the gate: below a scale of 1, whether the budget pays a first step.
+    fn scaled_gate(&self, left: f64) -> bool {
         // Below scale 1 the pump's budget is `k` of what is left
         // (`Sampler::begin`), which can be less than a batch's fixed part,
         // its close and one row. With no debt the first batch then takes a
@@ -2827,8 +2882,9 @@ impl Sampler {
     /// Nothing else runs between planning a row and reading it, so the sweep
     /// keeps no batch. It waits until it can read `SWEEP_MIN` rows, or every
     /// row owed when the last sweep is `SWEEP_LATE` of a period old, and it
-    /// takes half of what the frame has while a tier above the positions
-    /// waits for a pump (spec/sampling.md, "Tiers").
+    /// takes at most 1 − the maintenance share of what the frame has while a
+    /// tier above the positions or an urgent existence check waits for a
+    /// pump (spec/sampling.md, "Tiers").
     pub fn sweep(
         &mut self,
         link: &mut impl Port,
@@ -2902,7 +2958,34 @@ impl Sampler {
         } else {
             (1.0 - self.maintenance_earned / whole).clamp(0.0, 1.0)
         };
+        // While a pump waits and the gate shut for lack of room, the sweep
+        // yields both the room and the budget that pump needs. The budget:
+        // it saves at most its part of the allowance, so the rest becomes
+        // credit for the pump. An urgent check has no balance of its own,
+        // and a sweep that saved the whole allowance would spend it every
+        // frame and leave the slice short of the floor for good (host test
+        // `a_waiting_pump_comes_and_frames_pass_250_only_under_the_clamp`).
+        let saves = if self.room_shut {
+            saves.min(part)
+        } else {
+            saves
+        };
         let cap = self.slice_cap();
+        let top = self.top();
+        // The room: the sweep leaves the pump room for its floor, with the
+        // gate's margin: what one measured call, a batch's fixed part and its
+        // close need, over 0.8, and no more than a frame can have. The gate
+        // counts the sweep's savings against what the frame leaves
+        // ([`Sampler::reserved`]), so a sweep that only spent less would save
+        // the rest and leave the pump no more: the cap is on what the sweep
+        // plans, its spending and its savings both. A frame with full credit
+        // then leaves the pump at least that much. Without a gate shut for
+        // room the sweep is unchanged.
+        let hold = if self.room_shut {
+            (self.pump_need() / 0.8).min(top)
+        } else {
+            0.0
+        };
         let b = &self.budget;
         let fixed = now.saturating_duration_since(link.began()).as_secs_f64() * 1e6 + b.events_us
             - b.commanded_us;
@@ -2910,7 +2993,7 @@ impl Sampler {
         // more than the largest slice. A sweep the savings pay for always
         // fits a frame, and the pump is not shut out by savings the sweep
         // can never spend.
-        let reach = ((b.allowance - b.charge + CREDIT_CAP_US).min(cap) - fixed).max(0.0) * part;
+        let reach = ((top - fixed).max(0.0) * part).min((top - fixed - hold).max(0.0));
         // What a sweep of the rows owed costs, as far as a frame reaches.
         let need = (owed.min(self.max_batch) as f64 * row + lead).min(reach);
         // The scale applies to the savings (spec/faults.md): the sweep
@@ -4128,6 +4211,19 @@ impl Sampler {
             // Births and the enumeration time each step: their cost per row
             // leaves out the dear steps and the batch's fixed part.
             _ if !row_tier => {
+                // Their fixed part is the batch's time less its timed steps.
+                // The gate's floor counts it (`Sampler::pump_need`): a pump
+                // for births or the enumeration pays it, and a floor without
+                // it let such pumps run past their slice (host survey).
+                if done > 0 {
+                    let fixed = (elapsed - self.batch.dear_us - self.batch.cheap_us)
+                        .clamp(0.0, SLICE_CAP_US / 4.0);
+                    self.maintenance_batch_us = if self.maintenance_batch_us <= 0.0 {
+                        fixed
+                    } else {
+                        self.maintenance_batch_us * 0.9 + fixed * 0.1
+                    };
+                }
                 if self.batch.cheap > 0 {
                     self.batch.cheap_us / self.batch.cheap as f64
                 } else if done > self.batch.dear {
@@ -4858,6 +4954,7 @@ impl Sampler {
             overrun_us: std::mem::take(&mut self.overrun_max),
             clock_interval_us: self.rows_per_clock as f64 * self.cheapest_cost(),
             starved: std::mem::take(&mut self.starved),
+            clamped_pumps: std::mem::take(&mut self.clamped_pumps),
             lone_rows: std::mem::take(&mut self.lone_rows),
             maintenance_frames: std::mem::take(&mut self.maintenance_frames),
             maintenance_overrun_us: std::mem::take(&mut self.maintenance_overrun),
@@ -5040,6 +5137,10 @@ pub struct Report {
     pub clock_interval_us: f64,
     /// Frames in the window whose fixed work reached the allowance.
     pub starved: u64,
+    /// Pumps in the window that the gate opened under the clamp of its floor:
+    /// the frame left less than one measured call, a batch's fixed part and
+    /// its close, which pass 0.8 of the most a frame can have.
+    pub clamped_pumps: u64,
     /// Frames in the window that took one row costing more than the whole
     /// budget; their time is not in `overrun_us`.
     pub lone_rows: u64,
