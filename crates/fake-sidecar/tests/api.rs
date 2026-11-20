@@ -355,7 +355,7 @@ async fn a_watch_that_is_not_read_ends_too_slow() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_watch_resumes_from_a_listed_revision_and_expires() {
-    let (hub, ch, l, c) = busy_hub(
+    let (_hub, ch, _l, c) = busy_hub(
         Config {
             world_changes_keep: 4,
             ..cfg()
@@ -379,7 +379,12 @@ async fn a_watch_resumes_from_a_listed_revision_and_expires() {
     assert_eq!(reason(&e), ErrorReason::RevisionExpired);
 
     // List, then watch from the listed revision: the next change arrives as
-    // an upsert at a later revision.
+    // an upsert at a later revision. This hub keeps the default number of
+    // changes. With 4 kept, the put and the fake sim's own changes after it
+    // can drop the listed revision before the watch's task first reads, and
+    // the watch ends as too slow.
+    let (hub, ch, l, c) = busy_hub(cfg(), 6).await;
+    let mut world = WorldServiceClient::new(ch.clone());
     let rev = {
         let g = hub.lock();
         g.campaigns[&c].store.revision()

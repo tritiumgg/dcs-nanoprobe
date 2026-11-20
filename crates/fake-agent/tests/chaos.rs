@@ -182,7 +182,9 @@ fn a_slow_reconnect_fails_the_run() {
     std::fs::write(
         &wrapper,
         format!(
-            "if [ -e {seen} ]; then sleep 2.5; fi\ntouch {seen}\nexec {probe} \"$@\"\n",
+            // The runner starts it directly: Linux runs no script without
+            // its `#!` line.
+            "#!/bin/sh\nif [ -e {seen} ]; then sleep 2.5; fi\ntouch {seen}\nexec {probe} \"$@\"\n",
             seen = r.dir.join("seen").display()
         ),
     )

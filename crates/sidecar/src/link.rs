@@ -21,6 +21,24 @@ use nanoprobe_transport::records::{Frame, Hello};
 use nanoprobe_transport::ring::{Consumer, Producer, Ring};
 use nanoprobe_transport::status::{self, Geometry, Snapshot};
 
+/// How long a connect to the handshake port must be allowed to run on
+/// Windows to learn that it is refused. Windows answers a closed port's reset
+/// by sending the connect again, and reports it refused only after about 2 s
+/// (PRIOR: widely reported Windows behavior, not measured by this project).
+/// A shorter wait ends as a timeout, which is no refusal, so a dead agent
+/// would never count as gone. 5 s leaves room for a loaded machine.
+pub const REFUSAL_WAIT: Duration = Duration::from_secs(5);
+
+/// How long one connect to the handshake port waits, for a handshake
+/// timeout of `timeout`: on Windows at least [`REFUSAL_WAIT`].
+fn connect_wait(timeout: Duration) -> Duration {
+    if cfg!(windows) {
+        timeout.max(REFUSAL_WAIT)
+    } else {
+        timeout
+    }
+}
+
 /// How the sidecar reaches the agent.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -33,7 +51,9 @@ pub struct Config {
     /// How often the sidecar polls the file, 1 to 5 ms.
     pub poll: Duration,
     /// How long one handshake attempt waits; after a DCS restart, how long a
-    /// refused connect goes on before [`run`] gives up.
+    /// refused connect goes on before [`run`] gives up. On Windows one
+    /// connect waits at least [`REFUSAL_WAIT`], even when this is shorter:
+    /// Windows reports a refusal only after about 2 s (PRIOR).
     pub handshake_timeout: Duration,
 }
 
@@ -113,7 +133,7 @@ pub fn run(cfg: &Config, sink: &mut impl Sink, stop: &AtomicBool) -> End {
         let mut session = Session {
             cfg,
             sidecar_boot,
-            refused: false,
+            refused: None,
             corrupt: corrupt.take(),
         };
         let end = session.run(sink, stop, &mut last_boot);
@@ -132,15 +152,17 @@ pub fn run(cfg: &Config, sink: &mut impl Sink, stop: &AtomicBool) -> End {
             (Some(now), Some(last)) => now != last,
             _ => false,
         };
-        if session.refused && restarted {
-            let since = *refused_since.get_or_insert_with(Instant::now);
+        // The time counts from the start of the first refused connect, which
+        // on Windows takes about 2 s to be refused (see REFUSAL_WAIT).
+        if let (Some(started), true) = (session.refused, restarted) {
+            let since = *refused_since.get_or_insert(started);
             if since.elapsed() >= cfg.handshake_timeout {
                 return End::Gone;
             }
         } else {
             refused_since = None;
         }
-        std::thread::sleep(Duration::from_millis(if session.refused {
+        std::thread::sleep(Duration::from_millis(if session.refused.is_some() {
             20
         } else {
             100
@@ -159,7 +181,8 @@ fn file_boot(path: &std::path::Path) -> Option<u64> {
 struct Session<'a> {
     cfg: &'a Config,
     sidecar_boot: u64,
-    refused: bool,
+    /// When this session's connect started, if it was refused.
+    refused: Option<Instant>,
     /// On entry, the boot whose last session ended on a failed record check;
     /// on return, this session's boot if it did.
     corrupt: Option<u64>,
@@ -184,14 +207,17 @@ fn now_ms() -> u64 {
 impl Session<'_> {
     fn run(&mut self, sink: &mut impl Sink, stop: &AtomicBool, last_boot: &mut Option<u64>) -> End {
         let retry = |why: String| End::Retry(why);
-        let mut stream =
-            match TcpStream::connect_timeout(&self.cfg.handshake, self.cfg.handshake_timeout) {
-                Ok(s) => s,
-                Err(e) => {
-                    self.refused = e.kind() == ErrorKind::ConnectionRefused;
-                    return retry(format!("connect {}: {e}", self.cfg.handshake));
-                }
-            };
+        let started = Instant::now();
+        let mut stream = match TcpStream::connect_timeout(
+            &self.cfg.handshake,
+            connect_wait(self.cfg.handshake_timeout),
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                self.refused = (e.kind() == ErrorKind::ConnectionRefused).then_some(started);
+                return retry(format!("connect {}: {e}", self.cfg.handshake));
+            }
+        };
         let (agent_boot, attach_id) = match self.handshake(&mut stream, stop) {
             Ok(v) => v,
             Err(end) => return end,

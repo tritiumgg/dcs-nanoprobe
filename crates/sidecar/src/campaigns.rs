@@ -701,6 +701,31 @@ mod tests {
         (d, c)
     }
 
+    /// Leave the store at `path` as a sidecar that stopped without closing
+    /// it does: with its WAL.
+    #[cfg(unix)]
+    fn stop_without_closing(s: Store, _path: &Path) {
+        std::mem::forget(s);
+    }
+
+    /// Leave the store at `path` as a sidecar that stopped without closing
+    /// it does: with its WAL. Windows will not remove a file that is open,
+    /// so the store and its WAL are read, the store is closed, which
+    /// checkpoints and removes the WAL, and the files read are written back.
+    #[cfg(windows)]
+    fn stop_without_closing(s: Store, path: &Path) {
+        let mut wal = path.to_owned().into_os_string();
+        wal.push("-wal");
+        let wal = PathBuf::from(wal);
+        let (db, log) = (
+            fs::read(path).expect("store"),
+            fs::read(&wal).expect("its WAL"),
+        );
+        drop(s);
+        fs::write(path, db).expect("store back");
+        fs::write(&wal, log).expect("its WAL back");
+    }
+
     #[test]
     fn a_restore_keeps_ids_and_revisions_above_both_copies() {
         let (_d, c) = campaigns();
@@ -733,7 +758,7 @@ mod tests {
         );
         assert_eq!(next, 9);
         // The sidecar stopped without closing it: its WAL is still there.
-        std::mem::forget(s);
+        stop_without_closing(s, &c.store_path(id));
         assert!(c.restore(id, 99, 7).is_err(), "no backup 99");
         let r = c.restore(id, b.number, 7).expect("restore");
         assert_eq!(r.next_entity, 9, "the larger next EntityId");
@@ -887,18 +912,34 @@ mod tests {
         let s = c
             .create(CampaignId(1), record(CampaignState::Active))
             .expect("create");
-        // A store that cannot be copied fails the backup.
-        let moved = c.folder(CampaignId(1)).join("moved.sqlite");
-        fs::rename(c.store_path(CampaignId(1)), &moved).expect("move");
-        let err = c
-            .backup_folder(CampaignId(1))
-            .take(1, SCHEMA, 0, BackupReason::Manual);
-        assert!(err.is_err());
-        fs::rename(&moved, c.store_path(CampaignId(1))).expect("move back");
-        assert_eq!(
-            c.backup_folder(CampaignId(1)).numbered().expect("numbered"),
-            Vec::<u32>::new()
-        );
+        // A store that cannot be copied fails the backup: one moved out of
+        // its folder.
+        #[cfg(unix)]
+        {
+            let moved = c.folder(CampaignId(1)).join("moved.sqlite");
+            fs::rename(c.store_path(CampaignId(1)), &moved).expect("move");
+            let err = c
+                .backup_folder(CampaignId(1))
+                .take(1, SCHEMA, 0, BackupReason::Manual);
+            assert!(err.is_err());
+            fs::rename(&moved, c.store_path(CampaignId(1))).expect("move back");
+            assert_eq!(
+                c.backup_folder(CampaignId(1)).numbered().expect("numbered"),
+                Vec::<u32>::new()
+            );
+        }
+        // Windows will not move a file that is open, and the store is: there
+        // the backup is of a folder that has no store.
+        #[cfg(windows)]
+        {
+            let folder = BackupFolder {
+                dir: c.dir.join("no-store"),
+                ..c.backup_folder(CampaignId(1))
+            };
+            fs::create_dir_all(&folder.dir).expect("dir");
+            assert!(folder.take(1, SCHEMA, 0, BackupReason::Manual).is_err());
+            assert_eq!(folder.numbered().expect("numbered"), Vec::<u32>::new());
+        }
         // A folder left without its marker is removed at the next backup.
         fs::create_dir_all(c.folder(CampaignId(1)).join(BACKUPS).join("2")).expect("dir");
         let b = c
