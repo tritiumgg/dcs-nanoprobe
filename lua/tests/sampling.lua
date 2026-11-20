@@ -404,16 +404,17 @@ local function main()
   -- Births go before a running enumeration (spec/sampling.md, "Tiers"), so
   -- a spawn fills the table at a birth's cost and may outlast a fixed wait.
   -- Wait for a `sampling` report that holds `n` rows and no birth waiting,
-  -- at most `limit` seconds, then run one more lap of every tier.
+  -- at most `limit` seconds of process time (os.clock, as `run` counts),
+  -- then run one more lap of every tier.
   local function filled(n, limit)
     -- The log is read twice a second, not on every frame.
     local next_read = now()
+    local last
     local function done()
       if now() < next_read then
         return false
       end
       next_read = now() + 0.5
-      local last
       for _, line in ipairs(S.lines(profile .. 'nanoprobe/logs/agent.log')) do
         local ok, e = pcall(S.json, line)
         local d = ok and type(e) == 'table' and e.msg == 'sampling' and e.data
@@ -423,16 +424,31 @@ local function main()
       end
       return last ~= nil and last.births == 0 and last.rows >= n
     end
-    assert(run(limit, done), 'the spawn of ' .. n .. ' did not resolve in ' .. limit .. ' s')
+    if not run(limit, done) then
+      local seen = 'no sampling report'
+      if last then
+        local parts = {}
+        for _, k in ipairs({ 'births', 'rows', 'pumps', 'xcall_us', 'batch_us', 'slice_us', 'share' }) do
+          parts[#parts + 1] = k .. ' ' .. tostring(last[k])
+        end
+        seen = 'the last sampling report: ' .. table.concat(parts, ', ')
+      end
+      error('the spawn of ' .. n .. ' did not resolve in ' .. limit .. ' s of process time; ' .. seen, 2)
+    end
   end
 
   if MODE == 'sweep' then
     local spawned = scenario.spawn_mixed(60, { label = 'a' })
-    -- A birth costs a pump of its own, and a slow runner pumps a few times
-    -- in 10 s, so a fixed wait compared a mirror of 8 rows against 60.
-    -- 60 s is about six times the idle wait; the compare after it has its
-    -- own lap of every tier.
-    filled(60, 60)
+    -- Births resolve only in pumps. A pump gate that asks for more than the
+    -- slice's cap can give shuts after a few pumps, and a fixed wait then
+    -- compares a mirror of 8 rows against 60 (Linux CI runner, a share of
+    -- 0.05). The gate's reach stops at the cap (spec/sampling.md, "Slice");
+    -- this wait keeps a slow runner from comparing early. Its limit is
+    -- sized on that runner's rate before the gate shut: 8 births in a 10 s
+    -- report window, so 60 births take about 75 s, and `filled` needs one
+    -- more report, up to 10 s. About 120 s of process time covers both.
+    -- The compare after it has its own lap of every tier.
+    filled(60, 120)
     run(8)
     assert(getter.calls > 60, 'the frame swept no positions: ' .. getter.calls .. ' reads')
     compare('60')
