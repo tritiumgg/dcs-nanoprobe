@@ -443,11 +443,12 @@ local function main()
     -- slice's cap can give shuts after a few pumps, and a fixed wait then
     -- compares a mirror of 8 rows against 60 (Linux CI runner, a share of
     -- 0.05). The gate's reach stops at the cap (spec/sampling.md, "Slice");
-    -- this wait keeps a slow runner from comparing early. Its limit is
-    -- sized on that runner's rate before the gate shut: 8 births in a 10 s
-    -- report window, so 60 births take about 75 s, and `filled` needs one
-    -- more report, up to 10 s. About 120 s of process time covers both.
-    -- The compare after it has its own lap of every tier.
+    -- this wait keeps a slow runner from comparing early. Its limit of
+    -- 120 s of process time is about twelve times what the births take in
+    -- the host model at the runner's costs (60 within 1,000 frames, 10 s:
+    -- crates/agent-link/src/sampler_tests.rs, `second_spawn`) and on an
+    -- idle Mac (9.09 s). The gate with the capped reach has not run on the
+    -- runner yet. The compare after it has its own lap of every tier.
     filled(60, 120)
     run(8)
     assert(getter.calls > 60, 'the frame swept no positions: ' .. getter.calls .. ' reads')
