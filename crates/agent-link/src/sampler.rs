@@ -475,6 +475,8 @@ struct TierState {
     credit: f64,
     /// Running average cost per row, µs; 0 until measured.
     cost: f64,
+    /// The batches that measured `cost`.
+    samples: u32,
     /// Next slot (or list index) to read.
     cursor: usize,
     /// When the current sweep began, and the last completion.
@@ -786,6 +788,8 @@ pub struct Sampler {
     decided_commanded: f64,
     excused_us: f64,
     pump_rows: bool,
+    /// Whether a row batch of this pump measured a batch's fixed part.
+    batch_measured: bool,
     pump_paid: f64,
     /// When the frame before this one began.
     last_began: Option<Instant>,
@@ -819,6 +823,11 @@ pub struct Sampler {
     vitals_due: f64,
     #[cfg(test)]
     vitals_swept: u64,
+    /// Batches planned for a tier whose cost per row or step is not yet
+    /// measured: a test counts the frame of such a batch apart, as a first
+    /// measurement.
+    #[cfg(test)]
+    unmeasured_batches: u64,
     /// When a batch of each tier was last planned.
     last_planned: [Option<Instant>; 7],
     /// The tier the pump's planning runs late, which takes one row.
@@ -1139,6 +1148,7 @@ impl Sampler {
             decided_commanded: 0.0,
             excused_us: 0.0,
             pump_rows: false,
+            batch_measured: false,
             pump_paid: 0.0,
             last_began: None,
             pumps: 0,
@@ -1154,6 +1164,8 @@ impl Sampler {
             vitals_due: 0.0,
             #[cfg(test)]
             vitals_swept: 0,
+            #[cfg(test)]
+            unmeasured_batches: 0,
             last_planned: [None; 7],
             late_tier: None,
             x_decayed: false,
@@ -2677,6 +2689,11 @@ impl Sampler {
     /// the enumeration's: any of them can open the pump, and a floor that
     /// counted only the row tiers' let a pump for births or the enumeration
     /// open where its batch did not fit, and run its frame past 250 µs.
+    /// It holds no row: a first batch that does not fit takes one row
+    /// (`Sampler::affordable`), and with that, a floor that also held the
+    /// cheapest owed row changed no frame over 250 µs in the host survey and
+    /// made urgent checks wait longer (15 frames beside a sweep that takes
+    /// the cap).
     fn pump_need(&self) -> f64 {
         if self.xcall_seen > 0.0 {
             self.xcall_seen
@@ -2718,6 +2735,8 @@ impl Sampler {
             // budget, as above: the budget never reaches one step at a tenth
             // of the slice, and holding it to that would starve it. An
             // unmeasured step counts as free, so the first one still goes.
+            // The step's batch pays the fixed part the planner plans it
+            // with (`Sampler::batch_fixed`).
             let may = self.maintenance_pays();
             let step = if !may {
                 self.cheapest(false)
@@ -2730,7 +2749,10 @@ impl Sampler {
                 None => false,
                 Some(step) if in_debt || (!may && !self.credit_owed()) => {
                     k * (left - self.xcall_us)
-                        >= step.max(0.0) + self.batch_us + self.close_us + 2.0 * self.close_dev_us
+                        >= step.max(0.0)
+                            + self.batch_fixed()
+                            + self.close_us
+                            + 2.0 * self.close_dev_us
                 }
                 Some(_) => true,
             };
@@ -2741,7 +2763,7 @@ impl Sampler {
             && let Some(row) = self.cheapest_owed()
         {
             return k * (left - self.xcall_us)
-                >= row + self.batch_us + self.close_us + 2.0 * self.close_dev_us;
+                >= row + self.batch_fixed() + self.close_us + 2.0 * self.close_dev_us;
         }
         true
     }
@@ -3311,6 +3333,7 @@ impl Sampler {
         self.last_pump = Some(now);
         self.pump_call_us = 0.0;
         self.pump_rows = false;
+        self.batch_measured = false;
         self.pump_paid = 0.0;
         if let Some(d) = self.decided.take() {
             let whole = now.saturating_duration_since(d).as_secs_f64() * 1e6;
@@ -3343,7 +3366,8 @@ impl Sampler {
         // The estimates of closing a batch and of the call decay on every
         // pump, so one that grew too large comes down again; that of a
         // batch's fixed part on every pump but one that only resolved
-        // births or read the enumeration (`finish_pump`). Between pumps
+        // births or read the enumeration, or one whose batch measured it
+        // (`finish_pump`). Between pumps
         // they hold: with the sweep in `frame` the pump comes a few times a
         // second, and an estimate that decayed on every frame read near 0 by
         // the next pump (LIVE, S10: the gate then opened 20 to 30 times a
@@ -3662,9 +3686,13 @@ impl Sampler {
                     self.dirty = false;
                 }
                 let cost = self.tiers[plan.tier.index()].cost;
+                #[cfg(test)]
+                if cost <= 0.0 {
+                    self.unmeasured_batches += 1;
+                }
                 // A batch planned past what is left: one dear row, or a
                 // fixed part that alone passes the budget.
-                let lead = (self.batch_fixed(plan.tier) - self.tail_us).max(0.0);
+                let lead = (self.batch_fixed() - self.tail_us).max(0.0);
                 let past = cost > 0.0 && plan.rows as f64 * cost + lead > remaining;
                 if past {
                     self.lone = true;
@@ -3868,26 +3896,25 @@ impl Sampler {
             })
     }
 
-    /// How many rows of a tier the remaining budget allows, at most `owed`.
-    /// A batch's fixed part for `tier`, µs: the tier's own estimate (the row
-    /// tiers share one; births and the enumeration share another), or,
-    /// until it has one, the largest any tier has learned. A row tier whose
-    /// batches never take two clock reads never learns its own, and a
-    /// planner that took it as 0 planned rows its pump could not pay
-    /// (host survey: pumps 20 µs past their slice).
-    fn batch_fixed(&self, tier: Tier) -> f64 {
-        let own = if matches!(tier, Tier::Births | Tier::Enumeration) {
-            self.maintenance_batch_us
-        } else {
+    /// A batch's fixed part, µs, as the planner plans every tier's batch: the
+    /// row tiers' estimate, or, until they have one, that of births and the
+    /// enumeration. A row tier whose batches never take two clock reads may
+    /// not learn its own for a while, and a planner that took it as 0
+    /// planned rows its pump could not pay (host survey: pumps 20 µs past
+    /// their slice). Births and the enumeration plan with the row tiers'
+    /// part too: their own estimate holds their batch's first step, a birth
+    /// at 37 µs included, and planned with it births resolved a quarter
+    /// slower (host test: 787 of 1,000 in 40 s) and the pump came more often
+    /// than its bound at live costs (18.9 a second against 17.5).
+    fn batch_fixed(&self) -> f64 {
+        if self.batch_us > 0.0 {
             self.batch_us
-        };
-        if own > 0.0 {
-            own
         } else {
-            self.batch_us.max(self.maintenance_batch_us)
+            self.maintenance_batch_us
         }
     }
 
+    /// How many rows of a tier the remaining budget allows, at most `owed`.
     /// A row that costs more than a whole budget is taken alone when there
     /// is no debt.
     fn affordable(&self, tier: Tier, remaining: f64, owed: usize) -> usize {
@@ -3897,12 +3924,23 @@ impl Sampler {
         let cost = self.tiers[tier.index()].cost;
         // Each batch pays its fixed cost once, apart from its rows.
         // `remaining` already keeps room for the batch's tail.
-        let lead = (self.batch_fixed(tier) - self.tail_us).max(0.0);
+        let lead = (self.batch_fixed() - self.tail_us).max(0.0);
         if cost <= 0.0 {
             // Unmeasured: a few rows, when the fixed part leaves room.
             // A warehouse's read is the dearest of any tier (LIVE, about
             // 50 µs): unmeasured, it goes first in a pump or with room for
             // it, one row, so that it does not carry a frame past its cap.
+            // Below scale 1 the room counts the row tiers' own fixed part,
+            // not the part a tier that has not learned it plans with: this
+            // batch is the tier's first measurement. Held to the births'
+            // part, a tier at a tenth of the slice never had room, was never
+            // measured, and most pumps planned nothing (host test: 1,703
+            // empty pumps of 1,807).
+            let lead = if self.scale() < 1.0 {
+                (self.batch_us - self.tail_us).max(0.0)
+            } else {
+                lead
+            };
             if tier == Tier::Warehouses {
                 let room = remaining > lead + SLICE_CAP_US / 4.0;
                 return if room { owed.min(1) } else { 0 };
@@ -3918,13 +3956,21 @@ impl Sampler {
             // When the batch's fixed part and the reserves for closing it
             // pass what is left, as at a tenth of the slice, the first batch
             // takes the rows the budget `B` allows, at least one, and the
-            // overrun becomes debt.
+            // overrun becomes debt. Below scale 1, `B` is that share of what
+            // the frame has, so those rows fit the frame. At scale 1, `B` is
+            // all the frame has, its fixed part and the reserve the other
+            // tiers keep included, and its rows did not fit (host survey,
+            // case 1675: 23 births beside a 62.5 µs fixed part in 55.5 µs;
+            // frames to 307 µs): the batch takes one row.
             let dear = cost > self.budget.budget.max(0.0) || self.batches == 0;
             // On a pump for the subscribed rows the sweep's withheld debt
             // does not block them.
             let debt = self.budget.debt > 0.0 && !(self.sub_pump && tier == Tier::Subscribed);
             if debt || !dear {
                 return 0;
+            }
+            if self.scale() >= 1.0 {
+                return 1;
             }
             return ((self.budget.budget.max(0.0) / cost).floor() as usize).clamp(1, owed);
         }
@@ -4211,6 +4257,7 @@ impl Sampler {
             _ if self.batch.here => elapsed / done.max(1) as f64,
             Some(per_row) if row_tier => {
                 let fixed = (elapsed - per_row * done as f64).clamp(0.0, SLICE_CAP_US / 4.0);
+                self.batch_measured = true;
                 self.batch_us = if self.batch_us <= 0.0 {
                     fixed
                 } else {
@@ -4253,7 +4300,35 @@ impl Sampler {
                 }
             }
             Some(per_row) => per_row,
-            None => (elapsed - self.batch_us).max(elapsed / 100.0) / done.max(1) as f64,
+            // A row tier's batch without two clock reads, once its rows'
+            // cost is known: what its rows did not take is its fixed part.
+            // Only batches with two clock reads taught the fixed part, and
+            // every pump decays it, so where the batches had one row it fell
+            // far below the real part (host survey, case 508: 5.9 µs against
+            // 29.9 µs) and the planner planned rows past the deadline. With
+            // the estimate at 0 such a batch also counted its fixed part as
+            // its row, and the lone-row rule then took a row "dearer than
+            // the budget" with 20 µs left (case 174: frames to 321 µs).
+            None if row_tier && done > 0 && self.tiers[tier.index()].cost > 0.0 => {
+                let cost = self.tiers[tier.index()].cost;
+                let fixed = (elapsed - cost * done as f64).clamp(0.0, SLICE_CAP_US / 4.0);
+                self.batch_measured = true;
+                self.batch_us = if self.batch_us <= 0.0 {
+                    fixed
+                } else {
+                    self.batch_us * 0.9 + fixed * 0.1
+                };
+                (elapsed - self.batch_fixed()).max(elapsed / 100.0) / done as f64
+            }
+            // An unmeasured row tier's first batch without two clock reads:
+            // its time less the fixed part the planner plans with. Less the
+            // row tiers' part alone, 0 until learned, the batch's whole time
+            // counted as rows (vitals at 45.8 µs a row, against 0.2): its
+            // batches then held one row, no batch timed a row, and the split
+            // of those batches by that cost held the row tiers' part at
+            // 5.1 µs, against 50.8 µs, for good (host survey, case 944:
+            // frames to 265 µs).
+            None => (elapsed - self.batch_fixed()).max(elapsed / 100.0) / done.max(1) as f64,
         };
         // A row tier's batch without two clock reads cannot tell its rows
         // from its fixed part: its time would count as rows, and the planner
@@ -4273,10 +4348,22 @@ impl Sampler {
             || per_row < self.tiers[tier.index()].cost;
         if done > 0 && measured {
             let t = &mut self.tiers[tier.index()];
+            t.samples = t.samples.saturating_add(1);
+            // A row tier's cost averages its first ten measures equally, then
+            // weighs each new one at a tenth. A first estimate that missed by
+            // a few µs a row took dozens of batches to recover at a tenth,
+            // and plans of several rows passed their deadline meanwhile
+            // (host survey, case 338: a subscribed row at 29.3 µs against
+            // 32 µs, frames to 252 µs).
+            let w = if row_tier {
+                (1.0 / f64::from(t.samples)).max(0.1)
+            } else {
+                0.1
+            };
             t.cost = if t.cost <= 0.0 {
                 per_row
             } else {
-                t.cost * 0.9 + per_row * 0.1
+                t.cost * (1.0 - w) + per_row * w
             };
         }
         if matches!(tier, Tier::Births | Tier::Enumeration) {
@@ -4692,11 +4779,25 @@ impl Sampler {
             let us = total / k as f64;
             self.steps[kind][bucket(us)] += k as u64;
             self.step_max[kind] = self.step_max[kind].max(us);
-            if us > SLICE_CAP_US / 4.0 {
+            if first {
+                // The batch's first step holds its fixed part, which
+                // `close_batch` learns as the time no other step took. The
+                // fixed part is at most a quarter of the largest slice (its
+                // clamp) and a cheap step is too, so the first step is dear
+                // only past half of it. Tested at a quarter, a fixed part of
+                // 60.4 µs and a birth of 3 µs counted as a stall, the
+                // births' fixed part fell to 9 µs, and the planner gave
+                // births rows their budget could not pay (host survey,
+                // case 314: frames to 278 µs). A dear first step keeps the
+                // fixed part's estimate as its fixed part.
+                if total > SLICE_CAP_US / 2.0 {
+                    self.batch.dear += k;
+                    self.batch.dear_us += total - self.batch_fixed().min(total);
+                }
+            } else if us > SLICE_CAP_US / 4.0 {
                 self.batch.dear += k;
                 self.batch.dear_us += total;
-            } else if !first {
-                // The batch's first step holds its fixed part.
+            } else {
                 self.batch.cheap += k;
                 self.batch.cheap_us += total;
             }
@@ -4840,8 +4941,13 @@ impl Sampler {
         if let Some(spent) = spent {
             self.window.spend.pump_us += spent;
             // Only row batches teach a batch's fixed part, so a pump that
-            // planned none of them leaves its estimate as it is.
-            if !(self.maintenance && !self.pump_rows) {
+            // planned none of them leaves its estimate as it is. Nor does a
+            // pump whose batch measured it decay it: the decay brings down
+            // an estimate no batch corrects, and on a pump that also learned
+            // the part it held the estimate at about 0.91 of the real part,
+            // so plans to the deadline passed it (host survey, case 1132:
+            // 56.1 µs against 62.3 µs, frames to 251.5 µs).
+            if !(self.maintenance && !self.pump_rows) && !self.batch_measured {
                 self.batch_us *= 0.99;
             }
             // A pump that only resolved births or read the enumeration is
