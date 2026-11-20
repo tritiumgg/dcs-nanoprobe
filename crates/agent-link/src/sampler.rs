@@ -4293,6 +4293,11 @@ impl Sampler {
                 if self.batch.cheap > 0 {
                     self.batch.cheap_us / self.batch.cheap as f64
                 } else if done > self.batch.dear {
+                    // The row tiers' own part, not `batch_fixed`: with the row
+                    // tiers unlearned, `f_m` holds this very step, and a step
+                    // less `f_m` read near 0, so the planner gave births rows
+                    // nothing paid for (host test at a tenth: 2,729 empty
+                    // pumps of 2,739).
                     (elapsed - self.batch.dear_us - self.batch_us).max(elapsed / 100.0)
                         / (done - self.batch.dear) as f64
                 } else {

@@ -47,13 +47,13 @@ clock (`QueryPerformanceCounter` on Windows).
 | `c` | The per-frame charge for the system-call frames: `C` × `I` / 10⁶ |
 | `D` | Debt: agent time spent past the allowances, at most one second's budget (`overhead_share` × 10⁶). Below 0 it is credit: allowance earned on frames that spent less, at most 150 µs. The time that births' and the enumeration's balance pays is not in it ("Tiers") |
 | `r` | The repayment planned this frame: the smaller of `D` and `A` / 2, when `D` is above 0 |
-| `S` | The frame's slice, `slice_us`: the smaller of `A` − `c` − `r` + credit and the cap. The cap is 250 less an estimate of the frame's finish, closing the last batch and writing its record: `close_us` + the batch tail + 2 × the closing's mean deviation, at least 6 µs. The frame's fixed work `F` comes out of `S` (`G`, `B`), so no frame passes 250 µs. At the default `overhead_share` of 0.003, with `C` at 165 µs a second (one system-call frame a second at its p99, LIVE, docs/results/2026-11-13-e25-cpu-idle.md), no debt and the cap at its largest, 244 µs, the cap binds below about 30 frames a second with full credit (`A` − `c` ≥ 94 µs) and below about 12 with no credit (`A` − `c` ≥ 244 µs). After a frame interval over 2 × `I`, such as a stall, the frame takes no credit |
+| `S` | The frame's slice, `slice_us`: the smaller of `A` − `c` − `r` + credit and the cap. The cap is 250 less an estimate of the frame's finish, closing the last batch and writing its record: `close_us` + the batch tail + 2 × the closing's mean deviation, at least 6 µs. The frame's fixed work `F` comes out of `S` (`G`, `B`), so no frame passes 250 µs, except the first pump before a call is measured, a pump under the floor's clamp (`G`), a lone row ("Batches in the pump"), and a tier's first batch before its cost is measured, which plans its rows on a guess; a run counts these apart. At the default `overhead_share` of 0.003, with `C` at 165 µs a second (one system-call frame a second at its p99, LIVE, docs/results/2026-11-13-e25-cpu-idle.md), no debt and the cap at its largest, 244 µs, the cap binds below about 30 frames a second with full credit (`A` − `c` ≥ 94 µs) and below about 12 with no credit (`A` − `c` ≥ 244 µs). After a frame interval over 2 × `I`, such as a stall, the frame takes no credit |
 | `F` | Fixed work: agent time from the start of `frame` to the point of the decision, plus the agent time of the events handled since the last frame, less commanded work done so far (spec/commands.md, "Handlers"). For the pump it includes the frame's sweep |
 | `m` | The share of the allowance for births and the enumeration: 0.5, and 0.75 while an enumeration has run longer than `enumeration_s` |
 | `R` | The sweep's savings that the pump leaves alone ("The sweep"), `k` times what the sweep has saved. 0 when the pump reads the positions |
 | `x` | The running estimate of the cross-state call: the time from `frame`'s decision to the start of the shim's pump, each new call weighing 0.1, one call counting at most 62.5 µs. It decays by 1 % on each pump, and on a frame where 3 × `x` is above `reach` (`G`) and the pump has work worth the call ("The pump's worth"), at most once a frame, so an estimate that is too high cannot keep the pump shut |
-| `f` | The running estimate of a pump batch's fixed part ("Tiers"), from the row tiers' batches; until they have one, the fixed part of births' and the enumeration's batches (`f_m`). Every tier's batches plan with it. It decays by 1 % on each pump, except a pump whose batches were all births or the enumeration and a pump whose batch measured it |
-| `G` | The gate: 3 × (`x` + `f`), but at most `reach` = 0.8 × (min(`A` − `c` + 150, the cap of `S`) − `F` − `R`) and never under 3 × `x`. On every frame, after this frame's decay of `x`, `G` is never under the floor min(`N`, 0.8 × `T`). `N`, what a pump needs, is `x̄` + the larger of `f` and `f_m` + `close_us` + 2 × the closing's mean deviation, where `x̄` is the measured call (`xcall_seen_us`, "Reporting"), which does not decay between pumps; it is 0 before the first pump. `T` is the most a frame can have, min(`A` − `c` + 150, the cap of `S`) |
+| `f` | The running estimate of a pump batch's fixed part ("Tiers"), from the row tiers' batches; until they have one, the fixed part of births' and the enumeration's batches (`f_m`). Every tier's batches plan with it. The row tiers' estimate decays by 1 % on each pump, except a pump whose batches were all births or the enumeration and a pump whose batch measured it; `f_m` does not decay |
+| `G` | The gate: 3 × (`x` + the row tiers' estimate of `f`, 0 until they learn it), but at most `reach` = 0.8 × (min(`A` − `c` + 150, the cap of `S`) − `F` − `R`) and never under 3 × `x`. On every frame, after this frame's decay of `x`, `G` is never under the floor min(`N`, 0.8 × `T`). `N`, what a pump needs, is `x̄` + the larger of `f` and `f_m` + `close_us` + 2 × the closing's mean deviation, where `x̄` is the measured call (`xcall_seen_us`, "Reporting"), which does not decay between pumps; it is 0 before the first pump. `T` is the most a frame can have, min(`A` − `c` + 150, the cap of `S`) |
 | `B` | The pump's sampling budget: (`S` − `F` − `R`) × `k`. Nothing is sampled when it is 0 or less. `k` is 1, except in a build with fault injection, where the `sampling` fault sets it (spec/faults.md) |
 
 A frame calls the shim's pump only when the pump has work worth the call ("The pump's
@@ -69,9 +69,8 @@ pump measures it again. The floor keeps the decayed `x` from opening a pump on a
 that cannot pay one measured call, a batch's fixed part and its close, so the pump does
 not carry the frame past 250 µs. The first pump comes before any call is measured, with
 no floor, and may pass 250 µs. `N` holds no row: the frame's first batch takes one row
-when it does not fit ("Batches in the pump"), and with that, a floor that also held the
-cheapest owed row changed no frame over 250 µs in the host survey and made urgent checks
-wait longer.
+when it does not fit ("Batches in the pump"), so a row in the floor would only make
+urgent checks wait longer.
 
 When the gate shuts for lack of room (the pump is worth its call and `S` − `F` − `R` is
 under `G`) while births, the enumeration, subscribed rows with attitude or an urgent
@@ -480,27 +479,23 @@ its rows. The sink that takes each row reads the clock at the first and the last
 row, and every `rows_per_clock` rows between. A row tier's cost per row is measured
 inside the batch, from the first row's clock read to the last; the rest of the batch's
 time is its fixed part. A row tier's batch without two clock reads, once the tier has a
-cost, splits its time by that cost: what its rows did not take is its fixed part, and
-the rest lowers a cost that is too high. Learned from batches with two clock reads alone,
-`f` decayed far below the real part where batches held one row (host survey: 5.9 µs
-against 29.9 µs). A tier's first batch without two clock reads takes its time less `f`
-as its first cost: its whole time counted as rows (a vitals row at 45.8 µs against
-0.2 µs), its batches then held one row, none timed a row, and the split held `f` at
-5.1 µs against 50.8 µs. Births and the enumeration time each step: the batch's first
-step holds its fixed part `f_m`, the time no other step took, and their cost per row is
-the mean of the steps after it. A step over 62.5 µs, such as one `coalition.getGroups`,
-stays out of it; the first step, which also holds the fixed part, only over 125 µs, and
-it then keeps the estimate of `f` as its fixed part. Taken as dear at 62.5 µs, a 60.4 µs
-fixed part and a 3 µs birth left `f_m` at 9 µs (host survey). Each tier keeps a running
-average of its cost per row: a row tier's averages its first ten measures alike, then
-weighs each new one at 0.1, so a first estimate a few µs off does not linger (host
-survey: a subscribed row at 29.3 µs against 32 µs ran plans past their deadline). The
-agent keeps one of `f`, `f_m` and `t`, the part of `f` after a batch's last clock read;
-each new batch weighs 0.1. Every tier plans with `f`, not `f_m`: `f_m` holds the
-batch's first step, and planned with it, births at 37 µs resolved a quarter slower and
-the pump came more often than its bound at live costs. A tier whose cost is unmeasured
-plans up to 8 rows when what is left passes `f`; below a scale of 1, the row tiers' own
-`f`, 0 until learned, so its first batch measures it.
+cost, splits its time by that cost: what its rows did not take is its fixed part, so `f`
+keeps learning where batches hold one row, and the rest lowers a cost that is too high.
+A tier's first batch without two clock reads takes its time less `f` as its first cost,
+so its fixed part never counts as rows (host test
+`a_tiers_first_row_cost_leaves_out_the_fixed_part`). Births and the enumeration time
+each step: the batch's first step holds their fixed part `f_m`, the time no other step
+took, and their cost per row is the mean of the steps after it; a births or enumeration
+batch with no step after its first takes its time less the row tiers' `f`. A step over
+62.5 µs, such as one `coalition.getGroups`, stays out of the cost; the first step, which
+also holds the fixed part, only over 125 µs, and it then keeps the estimate of `f` as its
+fixed part. A row tier's cost averages its first ten measures alike, then weighs each new
+one at 0.1, so a first estimate that is off does not linger. The agent keeps a running
+average of `f`, `f_m` and `t`, the part of `f` after a batch's last clock read; each new
+batch weighs 0.1. Every tier plans with `f`, not `f_m`, which holds the batch's first
+step as well. A tier whose cost is unmeasured plans up to 8 rows when what is left
+passes `f`; below a scale of 1, the row tiers' own `f`, 0 until learned, so its first
+batch can measure it.
 
 What is left of `B` for rows keeps room for closing the batch: the running average of
 a close, which decays by 1 % on each pump, twice its mean deviation, and `t`. A batch plans (what is left − (`f` − `t`)) /
@@ -513,8 +508,8 @@ overrun becomes debt. When `f` and the room for closing pass what is left, as at
 tenth of the slice, the frame's first batch takes the rows `B` allows, at least one, on
 the same terms; below a scale of 1, `B` is that share of what the frame has, so they
 fit it. At a scale of 1, `B` is all the frame has, `f` and the reserve the other tiers
-keep included, and that first batch takes one row (host survey: 23 births beside a
-62.5 µs fixed part in 55.5 µs ran frames to 307 µs). Its planned rows bound it, not the clock. The report counts all of these
+keep included, and that first batch takes one row (host test
+`a_first_batch_past_what_is_left_takes_one_row`). Its planned rows bound it, not the clock. The report counts all of these
 as `lone_rows`.
 
 `rows_per_clock` is the smallest whole number that keeps clock reads under 2% of a

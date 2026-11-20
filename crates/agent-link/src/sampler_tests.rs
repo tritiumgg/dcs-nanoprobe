@@ -181,7 +181,9 @@ struct World {
     /// When set, every second dear enumeration step costs this instead of
     /// `enum_step_us`.
     enum_step_alt: Option<f64>,
-    /// Dear enumeration steps so far, for the alternation.
+    /// Enumeration step calls so far, for the alternation, and those past a
+    /// quarter of the cap (dear).
+    enum_calls: u64,
     enum_steps: u64,
     /// A stall the next dear enumeration step takes on top of its cost, µs,
     /// as a garbage collection or a Wine stall inside `coalition.getGroups`.
@@ -473,9 +475,15 @@ fn pump(s: &mut Sampler, rec: &mut Rec, w: &mut World, clock: &mut Clock) {
                     if w.enum_at.is_multiple_of(100)
                         && let Some(us) = w.enum_step_us
                     {
-                        w.enum_steps += 1;
-                        let alt = w.enum_steps.is_multiple_of(2);
-                        clock.add(w.enum_step_alt.filter(|_| alt).unwrap_or(us));
+                        w.enum_calls += 1;
+                        let alt = w.enum_calls.is_multiple_of(2);
+                        let step = w.enum_step_alt.filter(|_| alt).unwrap_or(us);
+                        // Only a dear step, past a quarter of the cap, counts
+                        // as one: a frame with one is counted apart.
+                        if step > SLICE_CAP_US / 4.0 {
+                            w.enum_steps += 1;
+                        }
+                        clock.add(step);
                         if let Some(stall) = w.enum_stall.take() {
                             clock.add(stall);
                         }

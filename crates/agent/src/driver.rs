@@ -606,6 +606,7 @@ fn report(d: &mut Driver, r: &Report) {
             ("overrun_us", Value::Num(r.overrun_us)),
             ("clock_interval_us", Value::Num(r.clock_interval_us)),
             ("starved", Value::Int(r.starved as i64)),
+            ("clamped_pumps", Value::Int(r.clamped_pumps as i64)),
             ("lone_rows", Value::Int(r.lone_rows as i64)),
             (
                 "maintenance_frames",

@@ -668,6 +668,8 @@ pub(crate) fn pump(lines: &[Value]) -> Value {
 /// the frames. The histogram's 256 µs bucket edge cannot show it. A report
 /// without `frames` or `frames_over_250` (an agent built before the count
 /// existed) is counted in `missing`, and any such report fails the check.
+/// `clamped_pumps` counts the pumps the gate's floor let through under its
+/// clamp, whose frames may pass 250 µs (spec/sampling.md, "Slice").
 pub(crate) fn tail(reports: &[Value]) -> Value {
     let sum = |k: &str| reports.iter().filter_map(|r| r[k].as_u64()).sum::<u64>();
     let (frames, over) = (sum("frames"), sum("frames_over_250"));
@@ -686,7 +688,7 @@ pub(crate) fn tail(reports: &[Value]) -> Value {
     };
     json!({
         "frames": frames, "over_250": over, "syscall_over_250": sum("syscall_over_250"),
-        "over_share": share, "missing": missing,
+        "clamped_pumps": sum("clamped_pumps"), "over_share": share, "missing": missing,
         "p99_within_250": frames > 0 && missing == 0 && share <= 0.01, "max_us": max,
     })
 }
