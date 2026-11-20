@@ -59,7 +59,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::meter::{self, Sampler};
-use crate::sampling::live::{self, DIR, Opened, Run, SHARE};
+use crate::sampling::live::{self, DIR, Opened, Run, SHIPPED_SHARE};
 use crate::{bundle, link};
 
 pub mod series;
@@ -1007,7 +1007,7 @@ fn soak(
         "agent": agent_window(&reports),
         "agent_span": live::span(&reports).1["mean"],
         "agent_within_share": live::span(&reports).0,
-        "share_limit": SHARE,
+        "share_limit": SHIPPED_SHARE,
         "whole_run_process": meter::summarize(&all.samples, if hz > 0.0 { hz } else { all.hz }),
         "frame_meter": meter_window,
         "tz_offset_s": all.utc_offset_s,

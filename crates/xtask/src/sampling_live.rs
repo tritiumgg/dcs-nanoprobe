@@ -34,6 +34,11 @@
 //!   pump bound, pumps a second at most 5 + `pump_work_us` a second ÷ (3 ×
 //!   `xcall_seen_us`) in every report, here and in the mirror part.
 //!
+//! `--share S` with `mirror` or `mirror500` sets `overhead_share` to `S` in
+//! the deployed `agent.toml` before DCS restarts, judges the share and the
+//! debt by `S`, and puts the deployed `agent.toml` back after the part; the
+//! running agent keeps `S` until DCS restarts.
+//!
 //! Everything goes under `bundles/sampling-<name>-<time>/`: every mirror and
 //! oracle dump, the verdicts, the probe's output and the recording, and
 //! `sampling.json`, the run's verdict. A recording holds server data and is
@@ -42,8 +47,10 @@
 //! with the scenario's objects in the shell mission: the caller restores the
 //! target.
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -66,7 +73,46 @@ const SUBSCRIBED: usize = 20;
 /// by the S10 ruling one in five moves and the rest stay alive and halted.
 pub(crate) const MOVING: f64 = 0.2;
 /// The share in the shipping `agent.toml`.
-pub(crate) const SHARE: f64 = 0.003;
+pub(crate) const SHIPPED_SHARE: f64 = 0.003;
+/// The share `--share` sets in `agent.toml` for the run.
+static GIVEN_SHARE: OnceLock<f64> = OnceLock::new();
+
+/// The share the run's agent has and its checks judge by: `--share`, or the
+/// shipped one.
+pub(crate) fn share() -> f64 {
+    GIVEN_SHARE.get().copied().unwrap_or(SHIPPED_SHARE)
+}
+
+/// Set the run's share from `--share`.
+pub(crate) fn set_share(given: &str) -> Result<(), String> {
+    GIVEN_SHARE
+        .set(parse_share(given)?)
+        .map_err(|_| "--share is given once".to_string())
+}
+
+/// A share as `--share` gives it: above 0 and at most 1, as the agent's
+/// configuration takes it.
+fn parse_share(given: &str) -> Result<f64, String> {
+    let share: f64 = given.parse().map_err(|e| format!("--share {given}: {e}"))?;
+    if !(share > 0.0 && share <= 1.0) {
+        return Err(format!("--share {given}: above 0, at most 1"));
+    }
+    Ok(share)
+}
+
+/// `old` with `[budget] overhead_share = share`, every other key kept.
+pub(crate) fn with_share(old: &str, share: f64) -> Result<String, String> {
+    let mut table: toml::Table =
+        toml::from_str(old).map_err(|e| format!("agent.toml on the target: {e}"))?;
+    let budget = table
+        .entry("budget")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    let Some(budget) = budget.as_table_mut() else {
+        return Err("agent.toml on the target: budget is not a table".into());
+    };
+    budget.insert("overhead_share".into(), toml::Value::Float(share));
+    toml::to_string(&table).map_err(|e| e.to_string())
+}
 /// Model seconds between the oracle's early read and the compare: a slow
 /// position period and one more (6 s at the targets), and a second.
 pub(crate) const EARLY_S: f64 = 7.0;
@@ -80,6 +126,9 @@ pub(crate) struct Run {
     port: String,
     token: String,
     pub(crate) repository: PathBuf,
+    /// `agent.toml` as the last deploy wrote it, kept while `--share`
+    /// replaces it.
+    deployed_toml: RefCell<Option<Vec<u8>>>,
 }
 
 impl Run {
@@ -399,6 +448,17 @@ impl Run {
         empty(&self.remote, "deploy")?;
         println!("== deploy{}", if faults { " --faults" } else { "" });
         crate::deploy(name, None, true, faults)?;
+        if let Some(&share) = GIVEN_SHARE.get() {
+            let deployed = self
+                .remote
+                .read(crate::install::AGENT_TOML)?
+                .ok_or("no agent.toml on the target")?;
+            let changed = with_share(&String::from_utf8_lossy(&deployed), share)?;
+            self.deployed_toml.borrow_mut().get_or_insert(deployed);
+            self.remote
+                .write(crate::install::AGENT_TOML, changed.as_bytes())?;
+            println!("== agent.toml: overhead_share = {share}");
+        }
         println!("== restart");
         crate::restart(name)?;
         println!("== load a fresh shell mission");
@@ -465,7 +525,7 @@ pub(crate) fn fill_limit(last: &Value, births: usize, k: f64) -> f64 {
         .as_f64()
         .filter(|c| *c > 0.0)
         .unwrap_or(37.0);
-    let mut expected = births as f64 * cost / (0.25 * SHARE * 1e6 * k);
+    let mut expected = births as f64 * cost / (0.25 * share() * 1e6 * k);
     if k < 1.0 {
         expected = expected.max(last["enumeration_s"].as_f64().unwrap_or(0.0));
     }
@@ -549,7 +609,7 @@ pub(crate) fn span(reports: &[Value]) -> (bool, Value) {
         .iter()
         .filter_map(|w| w["share"].as_f64())
         .fold(0.0f64, f64::max);
-    let ok = !reports.is_empty() && mean <= SHARE && forgiven == 0.0;
+    let ok = !reports.is_empty() && mean <= share() && forgiven == 0.0;
     (
         ok,
         json!({
@@ -1505,7 +1565,7 @@ fn part_tenth(run: &Run, name: &str, shell: &[u8], probe: &Path) -> Result<Value
     // 3) makes reported there.
     check(
         "debt bounded",
-        max("debt_us") <= SHARE * 1e6,
+        max("debt_us") <= share() * 1e6,
         format!("max {:.1} µs", max("debt_us")),
     );
     let (rows, over) = (sum("row_frames"), sum("overrun_frames"));
@@ -1618,6 +1678,7 @@ pub(crate) fn open(repository: &Path, name: &str, kind: &str) -> Result<Opened, 
         remote,
         folder,
         repository: repository.to_path_buf(),
+        deployed_toml: RefCell::new(None),
     };
     Ok(Opened { run, shell, probe })
 }
@@ -1651,6 +1712,7 @@ pub(crate) fn open_eval(
         remote,
         folder,
         repository: repository.to_path_buf(),
+        deployed_toml: RefCell::new(None),
     };
     Ok((run, shell))
 }
@@ -1722,7 +1784,14 @@ pub fn run(repository: &Path, name: &str, part: Part) -> Result<ExitCode, String
         if r.is_err() {
             run.stop_probe("mirror");
         }
+        // `--share` changed agent.toml: put the deployed one back. The
+        // running agent keeps the share until DCS restarts.
+        if let Some(deployed) = run.deployed_toml.borrow_mut().take() {
+            run.remote.write(crate::install::AGENT_TOML, &deployed)?;
+            println!("== agent.toml put back as deployed");
+        }
         let mut r = r?;
+        r["overhead_share"] = json!(share());
         ok &= r["ok"] == json!(true);
         // Read before the next part deploys, so it names this part's build.
         r["agent_build"] = crate::soak::agent_build(name);
@@ -1783,6 +1852,32 @@ mod tests {
         assert!(refuse_given_dll(Part::Windows, true).is_ok());
         assert!(refuse_given_dll(Part::Both, false).is_ok());
         assert!(refuse_given_dll(Part::Tenth, false).is_ok());
+    }
+
+    #[test]
+    fn a_share_is_above_0_and_at_most_1() {
+        assert_eq!(parse_share("0.05"), Ok(0.05));
+        assert_eq!(parse_share("1"), Ok(1.0));
+        for bad in ["0", "-0.1", "1.5", "NaN", "x"] {
+            assert!(parse_share(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_share_replaces_only_overhead_share() {
+        let old = "[transport]\nport = 7777\n\n[budget]\noverhead_share = 0.003\n";
+        let new: toml::Table = toml::from_str(&with_share(old, 0.05).unwrap()).unwrap();
+        assert_eq!(new["budget"]["overhead_share"].as_float(), Some(0.05));
+        assert_eq!(new["transport"]["port"].as_integer(), Some(7777));
+        let new: toml::Table =
+            toml::from_str(&with_share("[transport]\nport = 1\n", 0.05).unwrap()).unwrap();
+        assert_eq!(new["budget"]["overhead_share"].as_float(), Some(0.05));
+        assert!(with_share("budget = 1\n", 0.05).is_err());
+        // The agent's own parser reads the share written.
+        let config =
+            nanoprobe_agent_link::config::AgentToml::parse(&with_share(old, 0.05).unwrap())
+                .unwrap();
+        assert_eq!(config.budget.overhead_share, 0.05);
     }
 
     #[test]
