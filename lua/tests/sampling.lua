@@ -929,21 +929,31 @@ local function main()
     assert(m.counters.disagreements == 0, 'the mirror and the agent disagree on an enumeration')
     S.ok('at 2,000 moving, mixed objects, with deaths, the mirror matches the oracle')
 
-    -- The periods are reported, near their targets. The agent's period is
-    -- wall time: a period read while the machine starved this process (the
-    -- compare's rule, `peak` over 1.5) says nothing about the agent, and is
-    -- read again from a new compare, up to three times in all. The band is
-    -- the same on every read.
+    -- The periods are reported, near their targets. The status block's
+    -- period is the real time between the last two sweep completions: one
+    -- pass, not a mean (spec/sampling.md, "Achieved period"). A period read
+    -- while the machine starved this process (the compare's rule, `peak` over
+    -- 1.5) says nothing about the agent; nor does one pass read while the
+    -- sweep catches up on positions it owes, as after the deaths above, which
+    -- runs shorter than the target (0.546 s once in a full check at a peak of
+    -- 1.34, with the agent's 10 s report before it at 0.987 s; 0.98-1.03 s in
+    -- five runs alone, four of them beside a CPU load at peaks of 1.7-2.2).
+    -- A reading outside the band is read again from a new compare, whose
+    -- laps let the sweep settle, up to three reads in all. The band is the
+    -- same on every read, and a period that stays off fails every one.
     local p = m.periods
+    local reads = { p[1] }
     for _ = 1, 2 do
-      if (p[1] > 0.8 and p[1] < 1.5) or peak <= 1.5 then
+      if p[1] > 0.8 and p[1] < 1.5 then
         break
       end
       p = select(2, compare('2000')).periods
+      reads[#reads + 1] = p[1]
     end
     -- The vitals period is not judged here: a pass that partial batches end
     -- early reports under 4 s in some runs of the mock.
-    assert(p[1] > 0.8 and p[1] < 1.5, 'position period ' .. p[1] .. string.format(' peak %.2f', peak))
+    assert(p[1] > 0.8 and p[1] < 1.5, 'position period ' .. table.concat(reads, ', ')
+      .. string.format(' peak %.2f', peak))
     assert(p[2] > 0, 'no vitals period reported')
     S.ok('the status block reports the achieved periods near their targets')
   else
