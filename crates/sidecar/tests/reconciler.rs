@@ -2427,3 +2427,29 @@ fn unanswered_spawns_hold_the_plan_to_the_budget() {
         "the burst writes every waiting spawn"
     );
 }
+
+/// A static the lost policy marked dead after its removal, whose object a
+/// script revived while the ruin spawn was in flight: the agent answers the
+/// spawn `AT_REVISION` and holds no ruin, the live object stays bound, and
+/// the plan destroys it and spawns the ruin (spec/world.md, "Ruins"). Found
+/// by the property search; the minimal input of the failing case.
+#[test]
+fn a_static_revived_under_a_ruin_spawn_gets_its_ruin() {
+    let ops = [
+        Op::Authority(8918, false),
+        Op::LoseResult,
+        Op::Order(4500),
+        Op::Order(13193),
+        Op::Revive(59084),
+        Op::KillRemoved(23963),
+        Op::SidecarRestart,
+        Op::RefuseDestroys(5),
+        Op::Revive(54106),
+    ];
+    let mut w = World::new_late(1, 2, LostPolicy::Dead, 0);
+    for (i, op) in ops.iter().enumerate() {
+        w.apply(op)
+            .unwrap_or_else(|e| panic!("op {i} {op:?}: {}", e.0));
+    }
+    w.settle().unwrap();
+}
