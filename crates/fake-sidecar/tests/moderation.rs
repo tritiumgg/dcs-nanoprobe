@@ -802,15 +802,25 @@ async fn the_hub_asks_for_the_players_it_missed_and_asks_again_when_the_answer_i
     fake(&hub, |s| {
         s.seed_client(2, UCID_A, "Ann", 2, "77");
         s.seed_client(3, UCID_B, "Bo", 1, "");
-        s.lose_next_result();
+        // The first `PLAYERS` answer is lost, whatever else the sim writes.
+        s.lose_next_result_of(nanoprobe_sidecar::sim::wire::opcode::PLAYERS);
     });
     let l = lease(&ch).await;
     let _c = campaign(&ch, &l).await;
+    // The lost answer drops the link; the agent attaches again, as a sidecar
+    // does, and the hub asks again.
+    until(|| async { fake(&hub, |s| s.ledger().players_asked >= 1 && !s.attached()) }).await;
+    assert!(
+        players_now(&ch, false).await.is_empty(),
+        "the lost answer was applied"
+    );
+    fake(&hub, |s| {
+        nanoprobe_sidecar::conformance::Target::reattach(s)
+    });
     until(|| async { players_now(&ch, false).await.len() == 2 }).await;
     let listed = players_now(&ch, false).await;
     let names: Vec<&str> = listed.iter().map(|p| p.name.as_str()).collect();
     assert!(names.contains(&"Ann") && names.contains(&"Bo"), "{names:?}");
-    // The first answer was lost: the hub asked more than once.
     assert!(
         fake(&hub, |s| s.ledger().players_asked) >= 2,
         "the hub asked once"

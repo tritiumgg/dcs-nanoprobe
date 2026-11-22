@@ -549,6 +549,7 @@ pub struct FakeSim {
     theater: String,
     /// Drop the next `RESULT` of the next frame.
     lose_result: bool,
+    lose_opcode: Option<u16>,
     /// The generation and campaign of the last `FRAME` written.
     written_stamp: (u32, u64),
     /// Destroys to answer `DCS_REFUSED`.
@@ -694,6 +695,7 @@ impl FakeSim {
             rng: cfg_seed,
             theater: String::new(),
             lose_result: false,
+            lose_opcode: None,
             written_stamp: (0, 0),
             refuse_destroys: 0,
             refuse_damages: 0,
@@ -1452,9 +1454,12 @@ impl FakeSim {
         if let Input::Object(o) = &input {
             self.sent.insert(o.object);
         }
-        if self.losing
-            && let Input::Result(r) = &input
+        if let Input::Result(r) = &input
+            && (self.losing || self.lose_opcode == Some(r.opcode))
         {
+            if self.lose_opcode == Some(r.opcode) {
+                self.lose_opcode = None;
+            }
             // The result is lost and the link drops with it; the next
             // attach's HELLO settles the command.
             self.destroy_result_lost(r);
@@ -1732,6 +1737,14 @@ impl FakeSim {
     /// `CONTROL_LOST` and its resync `HELLO` are not modeled.)
     pub fn lose_next_result(&mut self) {
         self.lose_result = true;
+    }
+
+    /// The next `RESULT` of the opcode, in whatever frame it is written, is
+    /// lost, and the link drops with it. Results of other opcodes are
+    /// delivered, and the hook waits across frames until one of the opcode
+    /// appears.
+    pub fn lose_next_result_of(&mut self, opcode: u16) {
+        self.lose_opcode = Some(opcode);
     }
 
     /// Take at most `n` commands a frame from now on; 0 stalls the ring.
