@@ -1,6 +1,6 @@
 # Release notes
 
-## Draft: 0.1.0, the first release
+## 0.1.0, the first release
 
 The first release of nanoprobe, 0.1: an agent inside DCS World, a sidecar that owns a
 persistent campaign world, and a gRPC API for a controller in any language. The
@@ -29,16 +29,16 @@ releasing them, from commit `00642c4`. The tagged commit differs from it in one 
 build reads: the sidecar opens a campaign's events file for a backup with an immediate
 transaction, so a backup taken while events are written waits for the write lock
 instead of failing with "database is locked". The agent is the same code. The published
-files are the build repeated for the tag, so their bytes,
-and the checksums in `SHA256SUMS`, differ from the tested ones; the MSVC CRT and
-Windows SDK that `cargo-xwin` downloads for each build may differ too.
+files are the build repeated for the tag, so their bytes, and the checksums in
+`SHA256SUMS`, differ from the tested ones; the MSVC CRT and Windows SDK that
+`cargo-xwin` downloads for each build may differ too.
 
 The agent's PDB is not published. The project keeps it to turn the agent's crash
 records into function names.
 
 ### Where it is verified
 
-To be completed from the acceptance run ([acceptance.md](acceptance.md)):
+From the acceptance run ([acceptance.md](acceptance.md)):
 
 | Platform | Result |
 |---|---|
@@ -80,18 +80,18 @@ Run `nanoprobe doctor`. It passes, or it names each DCS function the platform ca
 no longer finds. The conformance suite, which checks the agent's behavior against the
 specification on a running DCS, is not in the release: it runs from a source checkout
 with the development tooling ([acceptance.md](acceptance.md), criterion 6). The
-project's recorded run passed 9 of 9 on 2026-11-15, on DCS 2.9.31.29434 under Wine, with
-an earlier agent build than this release's (LIVE,
-[2026-11-15-s17-api-on-real-dcs.md](results/2026-11-15-s17-api-on-real-dcs.md)). The
+project's recorded run passed 9 of 9 on 2026-11-22, on DCS 2.9.31.29434 under Wine, with
+the agent of the tested files (LIVE,
+[2026-11-22-s22-acceptance-wine.md](results/2026-11-22-s22-acceptance-wine.md)). The
 suite must pass in full when `doctor` reports every name present (Open items says what
 happens when one is absent).
 
 ### Open items
 
-To be completed before the tag is pushed (docs/releasing.md, step 4).
-
 - The conformance suite has no table from each check to the DCS names it needs. When
   `doctor` reports a name absent, a person reads the suite's result.
 - At 2,000 objects the agent's pump rate at k = 1 goes past the sampling tool's bound
-  in some windows. The owner's overhead targets hold
+  in some windows. The overhead targets hold
   ([2026-11-22-s22-acceptance-wine.md](results/2026-11-22-s22-acceptance-wine.md)).
+- The status block's achieved position period is the length of the last sweep pass,
+  so one slow pass moves it; it is not an average.
