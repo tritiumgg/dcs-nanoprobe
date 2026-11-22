@@ -39,7 +39,7 @@ To be completed from the acceptance run ([acceptance.md](acceptance.md)):
 
 | Platform | Result |
 |---|---|
-| DCS dedicated server under Wine on Linux | not yet run |
+| DCS dedicated server under Wine on Linux | criteria 3 to 6 pass; criterion 1's owner targets hold, with open items ([2026-11-22-s22-acceptance-wine.md](results/2026-11-22-s22-acceptance-wine.md)) |
 | DCS on Windows, hosting a session from the client | not yet run |
 | DCS dedicated server on Windows | unverified: no test has run on one |
 
@@ -64,6 +64,12 @@ The soak runs on the Wine server only.
   restarts is not yet verified.
 - The sidecar writes its log to standard output and standard error, not to a file.
 - Fuel is not tracked, and ammunition is known only for units players occupy.
+- The platform cannot unpause DCS. A dedicated server that pauses while nobody is
+  connected stays paused, and a campaign's groups do not move until a player joins or
+  the server is set not to pause.
+- Static templates and payload presets are not yet supported.
+- The released agent differs from the one the 8-hour soak ran by one fix: after an
+  attach, a row's `VITALS` record is no longer written before its `OBJECT` record.
 
 ### After a DCS update
 
@@ -83,3 +89,6 @@ To be completed before the tag is pushed (docs/releasing.md, step 4).
 
 - The conformance suite has no table from each check to the DCS names it needs. When
   `doctor` reports a name absent, a person reads the suite's result.
+- At 2,000 objects the agent's pump rate at k = 1 goes past the sampling tool's bound
+  in some windows. The owner's overhead targets hold
+  ([2026-11-22-s22-acceptance-wine.md](results/2026-11-22-s22-acceptance-wine.md)).
