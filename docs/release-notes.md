@@ -40,7 +40,7 @@ To be completed from the acceptance run ([acceptance.md](acceptance.md)):
 | Platform | Result |
 |---|---|
 | DCS dedicated server under Wine on Linux | criteria 3 to 6 pass; criterion 1's owner targets hold, with open items ([2026-11-22-s22-acceptance-wine.md](results/2026-11-22-s22-acceptance-wine.md)) |
-| DCS on Windows, hosting a session from the client | not yet run |
+| DCS on Windows, hosting a session from the client | install, `doctor`, the sidecar and its kill, and uninstall pass; criterion 1's owner targets hold, with an open item; the hello campaigns and the controller and DCS kills are not shown ([2026-11-22-s22-acceptance-windows.md](results/2026-11-22-s22-acceptance-windows.md)) |
 | DCS dedicated server on Windows | unverified: no test has run on one |
 
 The soak runs on the Wine server only.
