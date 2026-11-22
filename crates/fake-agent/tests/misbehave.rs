@@ -439,7 +439,13 @@ fn a_tail_past_the_capacity_fails_the_check_of_a_slow_sidecar() {
 fn a_str_that_is_not_utf8_is_found() {
     let p = Pair::start("utf8", &[Misbehavior::BadUtf8(50)], Duration::ZERO);
     assert!(p.until(WAIT, Pair::attached));
-    std::thread::sleep(Duration::from_millis(1200));
+    // The fault is written on the 50th attached frame; wait until the
+    // journal holds it, however slow the frames and the sidecar are.
+    let journal = p.dir.join("journal");
+    let found = |_: &Pair| {
+        verify::verify(&journal).is_ok_and(|r| r.errors.iter().any(|e| e.contains("not UTF-8")))
+    };
+    assert!(p.until(WAIT, found), "the journal never held the bad str");
     let r = p.finish();
     assert!(
         r.errors.iter().any(|e| e.contains("not UTF-8")),
@@ -901,11 +907,19 @@ fn a_long_detach_keeps_the_event_queue_within_its_cap() {
     );
     assert!(p.until(WAIT, Pair::attached));
     p.stop_sidecar();
-    std::thread::sleep(Duration::from_millis(3000));
-    // The agent publishes what its queue holds, counted from the queue.
+    // The agent also drops events before the sidecar attaches, so count the
+    // drops from here. After its heartbeat limit it detaches, fills the queue
+    // to its cap in a second or two, and drops the rest; wait for a drop past
+    // this count, not a fixed time.
     let m = p.map();
+    let before = m.load(s::EVENTS_DROPPED, Ordering::Acquire);
+    assert!(
+        p.until(WAIT, |_| m.load(s::EVENTS_DROPPED, Ordering::Acquire)
+            > before),
+        "no event was dropped while detached"
+    );
+    // The agent publishes what its queue holds, counted from the queue.
     let bytes = m.load(s::EVENT_QUEUE_BYTES, Ordering::Acquire);
     assert!(bytes > 0 && bytes <= 2048, "{bytes}");
-    assert!(m.load(s::EVENTS_DROPPED, Ordering::Acquire) > 0);
     p.finish();
 }
