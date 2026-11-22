@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::store::DiskError;
 
@@ -105,7 +105,11 @@ impl EventFile {
     pub fn open(path: &Path, campaign: u64) -> Result<EventFile, DiskError> {
         let conn = connect(path)?;
         {
-            let tx = conn.unchecked_transaction()?;
+            // Immediate: the write lock is taken before the first read, so a
+            // commit by another connection in between cannot make the
+            // upgrade fail at once with SQLITE_BUSY_SNAPSHOT, and a held
+            // lock waits under the busy timeout.
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
             tx.execute_batch(TABLES)?;
             put_meta(&tx, "format", FORMAT.to_string().as_bytes())?;
             put_meta(&tx, "campaign_id", campaign.to_string().as_bytes())?;
@@ -441,6 +445,35 @@ mod tests {
             source: source.map(str::to_owned),
             body: vec![seq as u8],
         }
+    }
+
+    /// Opening a file while another connection commits to it must not fail
+    /// with "database is locked". A deferred transaction that read and then
+    /// wrote failed at once when a commit fell between the two. The race is
+    /// timing-dependent, so this is a bounded stress test, not a
+    /// deterministic one.
+    #[test]
+    fn open_waits_for_a_writer_that_commits_in_between() {
+        let d = tempfile::tempdir().expect("dir");
+        let p = d.path().join("events.sqlite");
+        let mut f = EventFile::open(&p, 3).expect("open");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = stop.clone();
+        let writer = std::thread::spawn(move || {
+            let mut seq = 1;
+            while !flag.load(std::sync::atomic::Ordering::Relaxed) && seq < 20_000 {
+                f.push(row(seq, seq, None));
+                f.commit().expect("commit");
+                seq += 1;
+                // Leave the lock free long enough for the opener's retry.
+                std::thread::sleep(std::time::Duration::from_micros(500));
+            }
+        });
+        for _ in 0..200 {
+            drop(EventFile::open(&p, 3).expect("open beside a writer"));
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        writer.join().expect("writer");
     }
 
     #[test]
