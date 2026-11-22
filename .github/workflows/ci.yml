@@ -11,10 +11,17 @@
 
 name: CI
 
+# A change to the documents alone runs nothing. The release notes are the
+# exception: the check reads them (tools/release-check-test.sh).
 on:
   push:
     branches: [main]
+    paths: &code
+      - "**"
+      - "!docs/**"
+      - "docs/release-notes.md"
   pull_request:
+    paths: *code
   workflow_dispatch:
 
 permissions:
