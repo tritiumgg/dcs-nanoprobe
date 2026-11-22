@@ -25,8 +25,11 @@ version, `0.1.0`: `nanoprobe-0.1.0-windows-x86_64.zip`, for example.
 The files are built on one Linux runner of GitHub Actions with `mise run package`: the
 Windows programs and the agent DLL cross-built with `cargo-xwin`, the Linux programs as
 static musl binaries. The acceptance run tested files the same workflow built without
-releasing them, from a commit that differs from the tagged one only in files the build
-does not read. The published files are that build repeated for the tag, so their bytes,
+releasing them, from commit `00642c4`. The tagged commit differs from it in one place the
+build reads: the sidecar opens a campaign's events file for a backup with an immediate
+transaction, so a backup taken while events are written waits for the write lock
+instead of failing with "database is locked". The agent is the same code. The published
+files are the build repeated for the tag, so their bytes,
 and the checksums in `SHA256SUMS`, differ from the tested ones; the MSVC CRT and
 Windows SDK that `cargo-xwin` downloads for each build may differ too.
 
