@@ -2848,8 +2848,9 @@ impl FakeSim {
                 return self.result(&cmd, rc::BAD_PAYLOAD, 0, "no revision", Lv::Nil);
             }
             if h.rev <= map.get(&h.entity).copied().unwrap_or(0) {
-                let object = self.group_of(h.entity).unwrap_or(0);
-                return self.result(&cmd, rc::AT_REVISION, object, "", Lv::Nil);
+                // The agent's admission check answers before any handler
+                // runs, so the result names no object.
+                return self.result(&cmd, rc::AT_REVISION, 0, "", Lv::Nil);
             }
         }
         match &cmd.body {
