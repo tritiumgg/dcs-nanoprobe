@@ -238,7 +238,10 @@ local function debris()
       assert(sim.statics[e.static], 'the mock has no static ' .. tostring(e.static))
       local before = read_round(host)
       assert(before:match('^4 4 4 true:[%d.]+:900%.0 20$'), 'the read before the column is ' .. before)
-      S.write(control .. 'go', string.format('%.1f', GROUND))
+      -- Rename into place: the fake agent reads `go` as soon as it exists, and
+      -- a plain write is visible empty between the create and the write.
+      S.write(control .. 'go.tmp', string.format('%.1f', GROUND))
+      assert(os.rename(control .. 'go.tmp', control .. 'go'))
     elseif e.name == 'column' then
       local after = read_round(host)
       assert(after:match('^0 4 4 true:[%d.]+:900%.0 16$'), 'the read after the column is ' .. after)
