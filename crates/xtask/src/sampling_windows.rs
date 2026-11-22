@@ -37,8 +37,8 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::live::{
-    EARLY_S, LIVE_COUNT_SOURCE, MOVING, SHARE, TAIL_BYTES, fill_limit, fps_source, hold_source,
-    hold_timeout, pump, span, spawn_source, steps, tail, worst_position,
+    EARLY_S, LIVE_COUNT_SOURCE, MOVING, SHIPPED_SHARE, TAIL_BYTES, fill_limit, fps_source,
+    hold_source, hold_timeout, pump, span, spawn_source, steps, tail, worst_position,
 };
 use crate::install::{AGENT_TOML, Profile, TOKEN};
 use crate::profile::Target;
@@ -136,7 +136,7 @@ fn stage_checks(
                "ok": filled.0, "detail": format!("{:.0} s", filled.1)}),
         json!({"check": format!("the reports cover {WINDOW_MIN_S:.0} s at {size}"),
                "ok": real >= WINDOW_MIN_S, "detail": format!("{real:.0} s")}),
-        json!({"check": format!("mean share <= {SHARE} and nothing forgiven at {size}, settled"),
+        json!({"check": format!("mean share <= {SHIPPED_SHARE} and nothing forgiven at {size}, settled"),
                "ok": window.0, "detail": window.1}),
         json!({"check": format!("frames over 250 µs are at most 1 % at {size}"),
                "ok": tail["p99_within_250"] == json!(true), "detail": tail}),

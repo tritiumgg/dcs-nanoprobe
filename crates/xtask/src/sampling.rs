@@ -667,7 +667,7 @@ fn interval_judged(
         && (median - reported).abs() > INTERVAL_SHARE * reported
 }
 
-const USAGE: &str = "usage: cargo xtask sampling compare <oracle.json> <mirror.json> [--no-ages] [--strict] [--recording FILE] [--out FILE]\n       cargo xtask sampling deaths <probe.json> <recording.jsonl> [--catch-s N] [--hit-s N]\n       cargo xtask sampling --rejudge <bundle dir>\n       cargo xtask sampling <name> [--part mirror|mirror500|tenth|probes|design|deaths|windows]";
+const USAGE: &str = "usage: cargo xtask sampling compare <oracle.json> <mirror.json> [--no-ages] [--strict] [--recording FILE] [--out FILE]\n       cargo xtask sampling deaths <probe.json> <recording.jsonl> [--catch-s N] [--hit-s N]\n       cargo xtask sampling --rejudge <bundle dir>\n       cargo xtask sampling <name> [--part mirror|mirror500|tenth|probes|design|deaths|windows]\n       cargo xtask sampling <name> --part mirror|mirror500 --share S";
 
 /// `cargo xtask sampling ...`.
 pub fn command(repo: &Path, args: &[&str]) -> Result<ExitCode, String> {
@@ -676,6 +676,21 @@ pub fn command(repo: &Path, args: &[&str]) -> Result<ExitCode, String> {
         [name] => live::run(repo, name, Part::Both),
         [name, "--part", "mirror"] => live::run(repo, name, Part::Mirror),
         [name, "--part", "mirror500"] => live::run(repo, name, Part::Mirror500),
+        [
+            name,
+            "--part",
+            part @ ("mirror" | "mirror500"),
+            "--share",
+            share,
+        ] => {
+            live::set_share(share)?;
+            let part = if *part == "mirror" {
+                Part::Mirror
+            } else {
+                Part::Mirror500
+            };
+            live::run(repo, name, part)
+        }
         [name, "--part", "tenth"] => live::run(repo, name, Part::Tenth),
         [name, "--part", "probes"] => live::run(repo, name, Part::Probes),
         [name, "--part", "design"] => live::run(repo, name, Part::Design),

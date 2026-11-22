@@ -8,7 +8,9 @@
 //! report a position period over [`POSITION_WINDOW_S`]. A stall window is a
 //! `sampling` report whose `gap_max_s` (the longest real time between two
 //! consecutive DCS frames the agent pumped in the window) is over the target
-//! period. Stall windows are reported, not judged.
+//! period. Stall windows are reported, not judged, and so is every window
+//! whose position period overlaps a stall's possible span: the window where
+//! the stall begins as well as the one where it ends.
 //!
 //! The real time of a window and of a sample is the probe's read time, `t`
 //! in milliseconds: the `sampling` LOG record ends its window, and a
@@ -54,6 +56,9 @@ pub(crate) enum Kind {
     Stall,
     /// The window after a stall window.
     After,
+    /// A window whose position period overlaps a stall's possible span, such
+    /// as the one in which the stall began: counted as stalled.
+    Overlap,
     /// No `gap_max_s` and no proxy allowed.
     Unknown,
 }
@@ -144,6 +149,33 @@ pub(crate) fn classify(wins: &[Win], proxy: bool) -> (Vec<Kind>, bool) {
         prev_stall = kind == Kind::Stall;
         kinds.push(kind);
     }
+    // A gap counts in the window where it ends (`gap_max_s`), so the window
+    // in which the stall began reads a position period that spans the stall
+    // while its own gap is short (LIVE, 2026-11-22: a window at 3.03 s with
+    // `gap_max_s` 0.02 before a window of 5 frames in 10.98 s). The stall's
+    // gap ended somewhere in its window, so it lies within the window's
+    // span widened by the gap before its start; a proxy, without
+    // `gap_max_s`, cannot place the gap and takes the window's own span. Any
+    // other window whose
+    // position period, the `position_s` before its end, meets that span is
+    // stalled too.
+    let spans: Vec<(f64, f64)> = wins
+        .iter()
+        .zip(&kinds)
+        .filter(|(_, k)| **k == Kind::Stall)
+        .map(|(w, _)| {
+            let gap = w.gap_max_s.unwrap_or(0.0);
+            (w.start_ms - gap * 1000.0, w.end_ms)
+        })
+        .collect();
+    for (w, kind) in wins.iter().zip(kinds.iter_mut()) {
+        if matches!(*kind, Kind::Free | Kind::After) {
+            let period = (w.end_ms - w.position_s.max(0.0) * 1000.0, w.end_ms);
+            if spans.iter().any(|(a, b)| period.0 < *b && period.1 > *a) {
+                *kind = Kind::Overlap;
+            }
+        }
+    }
     (kinds, by_proxy)
 }
 
@@ -223,10 +255,11 @@ pub(crate) fn judge(
     let stall_list: Vec<Value> = in_span
         .iter()
         .zip(kinds_span)
-        .filter(|(_, k)| **k == Kind::Stall)
-        .map(|(w, _)| {
+        .filter(|(_, k)| matches!(**k, Kind::Stall | Kind::Overlap))
+        .map(|(w, k)| {
             json!({"position_s": w.position_s, "gap_max_s": w.gap_max_s,
-                   "frames": w.frames, "window_s": w.window_s})
+                   "frames": w.frames, "window_s": w.window_s,
+                   "overlaps_stall": *k == Kind::Overlap})
         })
         .collect();
     let after = kinds_span.iter().filter(|k| **k == Kind::After).count();
@@ -234,7 +267,12 @@ pub(crate) fn judge(
     let excluded: Vec<&Win> = wins
         .iter()
         .zip(&kinds)
-        .filter(|(_, k)| matches!(**k, Kind::Stall | Kind::After | Kind::Unknown))
+        .filter(|(_, k)| {
+            matches!(
+                **k,
+                Kind::Stall | Kind::After | Kind::Overlap | Kind::Unknown
+            )
+        })
         .map(|(w, _)| w)
         .collect();
     let (lo, hi) = (
@@ -353,13 +391,60 @@ mod tests {
         s.extend(samples(30.0, 60.0, 1.0));
         let (c, d) = judge(&reports, 0, &s, false, "");
         assert_eq!(ok(&c), (true, true), "{d}");
-        assert_eq!(d["stall_windows"].as_array().map(Vec::len), Some(1));
+        // The stall of 10.9 s may have begun before its window: the window
+        // before it is stalled too.
+        assert_eq!(d["stall_windows"].as_array().map(Vec::len), Some(2));
         assert_eq!(d["after_stall_windows"], json!(1));
-        assert_eq!(d["stall_free"], json!(4));
+        assert_eq!(d["stall_free"], json!(3));
         // The same readings in a window with a small gap fail the window judge.
         reports[1] = report(20.0, 10.9, Some(0.2));
         let (c, _) = judge(&reports, 0, &s, false, "");
         assert_eq!(ok(&c), (true, false));
+    }
+
+    /// The live shape of 2026-11-22: a window reads 3.03 s with a 0.02 s gap
+    /// because the stall that follows began in it; the next window holds the
+    /// gap. Both edges of the stall are stalled: the window where it began
+    /// and the one where it ended. A window whose period ends before the
+    /// stall could have begun stays free and is judged, and so is a later
+    /// window whose period starts after the stall.
+    #[test]
+    fn the_windows_where_a_stall_begins_and_ends_are_both_stalled() {
+        let mut reports = free_windows(7, 1.0);
+        reports[2] = report(30.0, 3.03, Some(0.02));
+        reports[3] = report(40.0, 14.0, Some(3.03));
+        let s = samples(0.0, 70.0, 1.0);
+        let kinds = classify(&windows(&reports), false).0;
+        assert_eq!(
+            kinds,
+            [
+                Kind::Free,
+                Kind::Free,
+                Kind::Overlap,
+                Kind::Stall,
+                Kind::After,
+                Kind::Free,
+                Kind::Free
+            ]
+        );
+        let (c, d) = judge(&reports, 0, &s, false, "");
+        assert_eq!(ok(&c), (true, true), "{d}");
+        assert_eq!(d["stall_windows"].as_array().map(Vec::len), Some(2));
+        assert_eq!(d["stall_free"], json!(4));
+        // A long period in a window before the stall's possible span is
+        // judged: 1.26 s ending 3.03 s before the stall window starts.
+        let mut early = reports.clone();
+        early[1] = report(20.0, 1.26, Some(0.02));
+        assert_eq!(classify(&windows(&early), false).0[1], Kind::Free);
+        assert_eq!(ok(&judge(&early, 0, &s, false, "").0), (true, false));
+        // A later window whose period reaches back into the stall's span is
+        // stalled; one whose period starts after the stall is judged.
+        let mut late = reports.clone();
+        late[5] = report(60.0, 25.0, Some(0.02));
+        assert_eq!(classify(&windows(&late), false).0[5], Kind::Overlap);
+        late[5] = report(60.0, 1.26, Some(0.02));
+        assert_eq!(classify(&windows(&late), false).0[5], Kind::Free);
+        assert_eq!(ok(&judge(&late, 0, &s, false, "").0), (true, false));
     }
 
     #[test]
@@ -390,7 +475,8 @@ mod tests {
             [
                 Kind::Free,
                 Kind::Stall,
-                Kind::After,
+                // Its period meets the long window that follows.
+                Kind::Overlap,
                 Kind::Stall,
                 Kind::After
             ]

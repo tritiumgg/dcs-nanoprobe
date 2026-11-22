@@ -606,6 +606,7 @@ fn report(d: &mut Driver, r: &Report) {
             ("overrun_us", Value::Num(r.overrun_us)),
             ("clock_interval_us", Value::Num(r.clock_interval_us)),
             ("starved", Value::Int(r.starved as i64)),
+            ("clamped_pumps", Value::Int(r.clamped_pumps as i64)),
             ("lone_rows", Value::Int(r.lone_rows as i64)),
             (
                 "maintenance_frames",
@@ -2323,6 +2324,41 @@ mod tests {
         want.sort_by(|a, b| a.0.cmp(b.0));
         let want: Vec<_> = want.into_iter().map(|(k, v)| (k.to_owned(), v)).collect();
         assert_eq!(args(opcode, h, body), Some(want), "opcode {opcode}");
+    }
+
+    /// Every key of spec/sampling.md's "Reporting" table is a field the
+    /// `sampling` LOG writes (`report`): a key dropped from the record, such
+    /// as `clamped_pumps` or `lone_rows`, fails here. A key is a backticked
+    /// name in the table's first column.
+    #[test]
+    fn the_sampling_log_writes_every_reporting_key() {
+        let spec = include_str!("../../../spec/sampling.md");
+        let section = spec
+            .split("\n## Reporting")
+            .nth(1)
+            .expect("a Reporting section");
+        let section = section.split("\n## ").next().unwrap_or(section);
+        let source = include_str!("driver.rs");
+        let start = source.find("fn report(d: &mut Driver").expect("report");
+        let body = &source[start..];
+        let body = &body[..body.find("\n}\n").expect("report's end")];
+        let mut keys = Vec::new();
+        for line in section.lines().filter(|l| l.starts_with("| `")) {
+            let first = line.split('|').nth(1).unwrap_or("");
+            keys.extend(first.split('`').skip(1).step_by(2).map(str::to_owned));
+        }
+        assert!(
+            keys.iter().any(|k| k == "clamped_pumps") && keys.iter().any(|k| k == "lone_rows"),
+            "{keys:?}"
+        );
+        let missing: Vec<_> = keys
+            .iter()
+            .filter(|k| !body.contains(&format!("\"{k}\"")))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "keys the LOG does not write: {missing:?}"
+        );
     }
 
     #[test]
