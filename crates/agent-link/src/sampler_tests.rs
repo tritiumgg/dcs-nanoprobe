@@ -5692,6 +5692,9 @@ struct WaitSecond {
     /// waits.
     births: usize,
     urgent: bool,
+    /// Frames on which the sweep owed rows and read none, by why, in
+    /// [`SweepWait`]'s order.
+    waits: [u64; 5],
 }
 
 /// One run of a [`WaitCase`] for 50 s. Returns the sampler, its frames, and
@@ -5750,7 +5753,7 @@ fn wait_run_for(
         if i > 0 {
             rec.began += Duration::from_nanos((1e9 / c.fps) as u64);
         }
-        let swept = w.swept;
+        let (swept, waits) = (w.swept, w.waits);
         let r = run_x(&mut s, &mut rec, &mut w, 1.0, c.fps, 46.0, c.call_us, 2.0);
         f.frames += r.frames;
         f.over += r.over_250_other;
@@ -5762,6 +5765,7 @@ fn wait_run_for(
             pumps: r.pumps,
             births: w.births.len(),
             urgent: r.urgent_waiting,
+            waits: std::array::from_fn(|k| w.waits[k] - waits[k]),
         });
     }
     (s, f, seconds)
@@ -5837,13 +5841,13 @@ fn wait_failures_under(c: &WaitCase, main: bool) -> (Vec<&'static str>, String) 
     // its objects, against the units and births the case has.
     let figures = format!(
         "{c:?}: objects {}, units and births {}, frames {f:?}, floor {:.1} µs, fixed part \
-         {:.1} µs, vitals row {:.1} µs, seconds 15 to 50 {:?}",
+         {:.1} µs, vitals row {:.1} µs, seconds 5 to 50 {:?}",
         s.len(),
         c.units + c.births,
         s.pump_need(),
         s.batch_us,
         s.tiers[Tier::Vitals.index()].cost,
-        &seconds[15..]
+        &seconds[5..]
     );
     let mut failures = Vec::new();
     // Births: every one resolves by the end, or the last 10 s cleared at a
@@ -5869,12 +5873,33 @@ fn wait_failures_under(c: &WaitCase, main: bool) -> (Vec<&'static str>, String) 
     }) {
         failures.push("5 s with no pump while work waited");
     }
-    // The sweep reads positions in every 5 s.
-    if seconds[5..50]
-        .chunks(5)
-        .any(|window| window.iter().all(|w| w.swept == 0))
-    {
-        failures.push("5 s with no sweep");
+    // The sweep reads positions in every 5 s running. A window in which it
+    // waited mostly for the pump for the subscribed rows read with their
+    // attitude (`SweepWait::Subscribed`, more than half of its waiting
+    // frames) is the attitude-row hold, an open item shared with main,
+    // counted apart. Not all of them: in the second the hold ends, the sweep
+    // still waits a few dozen frames to save for its first batch
+    // (`SweepWait::MinBatch`, `SweepWait::Slice`; host model, share 0.003,
+    // 207 frames a second, 47 units: 162 frames for the pump, 44 saving).
+    let held = |window: &[WaitSecond]| {
+        let sub: u64 = window
+            .iter()
+            .map(|w| w.waits[SweepWait::Subscribed as usize])
+            .sum();
+        let all: u64 = window.iter().flat_map(|w| w.waits).sum();
+        2 * sub > all
+    };
+    for window in seconds[5..50].windows(5) {
+        if window.iter().all(|w| w.swept == 0) {
+            if held(window) {
+                if !failures.contains(&"5 s with no sweep, the attitude-row hold") {
+                    failures.push("5 s with no sweep, the attitude-row hold");
+                }
+            } else {
+                failures.push("5 s with no sweep");
+                break;
+            }
+        }
     }
     // Outside the first pump, the clamp, a tier's first batch before its
     // cost is measured and a dear enumeration step (all first measurements
@@ -5890,16 +5915,20 @@ fn wait_failures_under(c: &WaitCase, main: bool) -> (Vec<&'static str>, String) 
 }
 
 /// Survey case 1965 (seed 20261120): share 0.1, 109 frames a second, twenty
-/// subscribed units at 32 µs a row, a batch's fixed part 11.1 µs. The
-/// subscribed tier's first batch has one row and no two clock reads, while
-/// the row tiers have not learned their fixed part: its cost is its time
-/// less the births' and the enumeration's part. Counted with their batch's
-/// first step, that part read 14.1 µs, the row 29.0 µs, and the next batch
-/// planned six rows that ran its frame to 258.7 µs. The planner's part
-/// leaves the first steps out; the gate's floor keeps them, as a pump for
-/// births pays at least one.
+/// subscribed units at 32 µs a row, a batch's fixed part 11.1 µs, an
+/// enumeration and no births. The subscribed tier's first batch, in the
+/// second second, has one row and no two clock reads, while the row tiers
+/// have not learned their fixed part: its cost is its time less the births'
+/// and the enumeration's part, which the enumeration's batches taught by
+/// then. Counted with their batch's first step, that part read 14.1 µs, the
+/// row 29.0 µs, and the next batch planned six rows that ran its frame to
+/// 258.7 µs. The planner's part leaves the first steps out; the gate's floor
+/// keeps them, as a pump for births or the enumeration pays one at least.
+/// The part is read after the first second, before the subscribed tier's
+/// first batch: later, enumeration batches whose first clock read holds a
+/// dear step every hundred items raise it (about 25 µs by 50 s).
 #[test]
-fn a_row_tiers_first_cost_leaves_out_the_births_first_step() {
+fn a_row_tiers_first_cost_leaves_out_the_enumerations_first_step() {
     let c = WaitCase {
         share: 0.1,
         fps: 108.764_721_371_082_17,
@@ -5911,13 +5940,19 @@ fn a_row_tiers_first_cost_leaves_out_the_births_first_step() {
         enumeration: Some((21.698_525_962_427_16, 10.0)),
         attitude: true,
     };
-    let (s, f, _) = wait_run(&c);
+    let (early, _, _) = wait_run_for(&c, false, 1);
     let figures = format!(
-        "frames {f:?}, the part without the first step {:.2} µs, with it {:.2} µs",
-        s.maintenance_part_us, s.maintenance_batch_us
+        "after 1 s: the part without the first step {:.2} µs, with it {:.2} µs, \
+         the case's real part {:.2} µs",
+        early.maintenance_part_us, early.maintenance_batch_us, c.batch_us
     );
-    assert_eq!(f.over, 0, "{figures}");
-    assert!(s.maintenance_batch_us > s.maintenance_part_us, "{figures}");
+    assert!(
+        (early.maintenance_part_us - c.batch_us).abs() <= 1.0,
+        "{figures}"
+    );
+    assert!(early.maintenance_batch_us - c.batch_us > 2.0, "{figures}");
+    let (_, f, _) = wait_run(&c);
+    assert_eq!(f.over, 0, "frames {f:?}, {figures}");
 }
 
 /// Survey case 1216 (seed 20261120): share 0.1, 41 frames a second, an
@@ -6236,17 +6271,16 @@ fn a_row_tiers_first_measures_weigh_alike() {
 
 /// [`wait_failures`] as a property, at shares of 0.003 and above. At 0.001
 /// the budget starves births and checks under main's rule too (survey seed
-/// 20261120: 931 of 2,000 cases with births waiting under main's rule, 189
-/// under this one, all at 0.001): an open item, not this property's. Nor is
-/// a sweep that waits 5 s for the pump of the subscribed rows read with
-/// their attitude (`Sampler::sweep`): the attitude-row hold, an open item
-/// shared with main, so with attitude rows the sweep's 5 s is not checked.
+/// 20261120: 161 of 2,000 cases with births waiting under this rule, all at
+/// 0.001; 919 under main's rule, 615 of them at higher shares): an open item,
+/// not this property's. Nor is a sweep that waits 5 s mostly (more than half
+/// its waiting frames) for the pump of the subscribed rows read with their
+/// attitude (`SweepWait::Subscribed`): the attitude-row hold, an open item
+/// shared with main. A 5 s without a sweep for any other reason fails.
 fn wait_properties(c: &WaitCase) -> Result<(), TestCaseError> {
     prop_assume!(c.share >= 0.003);
     let (mut failures, figures) = wait_failures(c);
-    if c.attitude {
-        failures.retain(|&k| k != "5 s with no sweep");
-    }
+    failures.retain(|&k| k != "5 s with no sweep, the attitude-row hold");
     prop_assert!(failures.is_empty(), "{:?}: {}", failures, figures);
     Ok(())
 }
@@ -6924,18 +6958,19 @@ fn the_gate_opens_under_the_clamp_and_counts_it() {
         close: 2.0,
         dev: 0.5,
         reserve: None,
+        sub_row: None,
     };
     let (mut s, rec) = c.sampler();
     s.slice(&rec, rec.began);
     let top = s.top();
-    let left = s.slice_us() - c.fixed - s.reserved();
+    let left = c.left(&s);
+    let floor = c.floor(&s);
     let figures = format!(
-        "floor {:.1} µs, 0.8 of the most {:.1} µs, left {left:.1} µs",
-        c.floor(),
+        "floor {floor:.1} µs, 0.8 of the most {:.1} µs, left {left:.1} µs",
         0.8 * top
     );
     assert!(
-        c.floor() > 0.8 * top && left >= 0.8 * top && left < c.floor(),
+        floor > 0.8 * top && left >= 0.8 * top && left < floor,
         "{figures}"
     );
     let now = rec.began + Duration::from_nanos((c.fixed * 1000.0) as u64);
@@ -7012,7 +7047,8 @@ fn warehouse_reads_that_cost_more_at_some_airbases_leave_the_fixed_part_near_its
 /// row even when it does not fit, and the floor held no row: 299 of 9,500
 /// frames (2872) and 27 of 2,150 (3912) ran 2 to 6 µs past 250 µs. Where the
 /// most a frame can have is within that row of the cap, the floor holds it
-/// (`Sampler::forced_sub_row`).
+/// (`Sampler::forced_sub_row`): it decides 304 gates in 2872 and 23 in
+/// 3912, each a frame that left the floor without the row and not with it.
 #[test]
 fn a_pump_for_attitude_rows_holds_its_forced_row_in_the_floor() {
     let cases = [
@@ -7062,17 +7098,21 @@ fn a_pump_for_attitude_rows_holds_its_forced_row_in_the_floor() {
         ),
     ];
     for (c, most) in cases {
-        let (_, f, _) = wait_run(&c);
-        assert!(f.over <= most, "{c:?}: frames {f:?}");
-        assert!(wait_failures(&c).0.is_empty(), "{c:?}: frames {f:?}");
+        let (s, f, _) = wait_run(&c);
+        let figures = format!("{c:?}: frames {f:?}, gates the row shut {}", s.row_shuts);
+        assert!(f.over <= most, "{figures}");
+        assert!(s.row_shuts > 0, "{figures}");
+        assert!(wait_failures(&c).0.is_empty(), "{figures}");
     }
 }
 
-/// At the default share the most a frame can have stays well below the
-/// slice's cap (about 200 µs at 60 frames a second, 177 µs at 110), more
-/// than a subscribed row below it: the floor is `N`, and a pump for the
-/// attitude rows is gated as before. With a frame that could reach the cap
-/// the same state would hold the row.
+/// At the default share above about 46 frames a second, the most a frame
+/// can have, `A − c + 150` µs, stays more than a subscribed row below the
+/// slice's cap (about 200 µs at 60 frames a second, 177 µs at 110): the
+/// floor is `N`, and a pump for the attitude rows is gated as before. With
+/// a frame that could reach the cap the same state would hold the row, as
+/// it does at lower frame rates
+/// (`at_30_frames_a_second_the_default_share_holds_the_row_as_main_plays`).
 #[test]
 fn at_the_default_share_the_floor_holds_no_forced_row() {
     for fps in [60.0, 110.0] {
@@ -7096,10 +7136,73 @@ fn at_the_default_share_the_floor_holds_no_forced_row() {
         let (top, cap) = (s.top(), s.slice_cap());
         let row = s.tiers[Tier::Subscribed.index()].cost;
         let figures = format!("{fps} fps: top {top:.1} µs, cap {cap:.1} µs, row {row:.1} µs");
-        assert!(row > 0.0 && s.subscribed_plans_first(), "{figures}");
-        assert_eq!(s.forced_sub_row(top, cap), 0.0, "{figures}");
-        assert_eq!(s.forced_sub_row(cap, cap), row, "{figures}");
+        assert!(row > 0.0 && s.subscribed_plans_first(cap), "{figures}");
+        assert_eq!(s.forced_sub_row(top, cap, cap), 0.0, "{figures}");
+        assert_eq!(s.forced_sub_row(cap, cap, cap), row, "{figures}");
     }
+}
+
+/// At the default share and 30 frames a second the most a frame can have is
+/// the slice's cap (244 µs), so the floor holds the subscribed row
+/// (`A − c ≥ cap − r_s − 150` below about 46 frames a second). Normal play
+/// there, with 300 units, twenty subscribed with their attitude, 60 births,
+/// a check a second and the call and a batch's fixed part at 25 and 12 µs,
+/// keeps every property of [`wait_failures`], passes no frame over 250 µs,
+/// and pumps and sweeps within a tenth of main's rule (measured: 347
+/// pumps against 338, 4,679 positions swept against 4,787). The tenth is
+/// this test's own tolerance: the run's counts move by a few percent with
+/// any change to the gate, and no owner target rests on them. The row
+/// decides no gate here: the gate's own term, three calls and fixed parts
+/// or `reach`, stays above `N + r_s`, so normal play is unchanged because
+/// the rule never acts (host model: no gate in 50 s at 30 or 40 frames a
+/// second, with the call and fixed part at 25/12, 5/60, 10/40, 40/5, 60/60
+/// or 15/25 µs). Where it acts, at share 0.05, see
+/// `a_pump_for_attitude_rows_holds_its_forced_row_in_the_floor`.
+#[test]
+fn at_30_frames_a_second_the_default_share_holds_the_row_as_main_plays() {
+    let c = WaitCase {
+        share: 0.003,
+        fps: 30.0,
+        units: 300,
+        call_us: 25.0,
+        batch_us: 12.0,
+        births: 60,
+        checks: true,
+        enumeration: None,
+        attitude: true,
+    };
+    let (mut s, f, seconds) = wait_run(&c);
+    let (_, main_f, main_seconds) = wait_run_for(&c, true, 50);
+    let pumps = |w: &[WaitSecond]| w.iter().map(|w| w.pumps).sum::<usize>() as f64;
+    let swept = |w: &[WaitSecond]| w.iter().map(|w| w.swept).sum::<u64>() as f64;
+    let (failures, _) = wait_failures(&c);
+    let figures = format!(
+        "frames {f:?}, main {main_f:?}; pumps {} against {}, swept {} against {}; \
+         failures {failures:?}",
+        pumps(&seconds),
+        pumps(&main_seconds),
+        swept(&seconds),
+        swept(&main_seconds)
+    );
+    assert!(failures.is_empty(), "{figures}");
+    assert_eq!(f.over + f.clamped, 0, "{figures}");
+    assert_eq!(s.row_shuts, 0, "{figures}");
+    assert!(
+        (pumps(&seconds) / pumps(&main_seconds) - 1.0).abs() <= 0.1,
+        "{figures}"
+    );
+    assert!(
+        (swept(&seconds) / swept(&main_seconds) - 1.0).abs() <= 0.1,
+        "{figures}"
+    );
+    // The rule is live here: with the attitude rows owed, the floor holds
+    // their row.
+    s.tiers[Tier::Subscribed.index()].credit = 20.0;
+    let (top, cap) = (s.top(), s.slice_cap());
+    let row = s.tiers[Tier::Subscribed.index()].cost;
+    assert_eq!(top, cap, "{figures}");
+    assert!(row > 0.0, "{figures}");
+    assert_eq!(s.forced_sub_row(top, cap, cap), row, "{figures}");
 }
 
 /// The attitude rows alone on a slow host under the clamp: the default share
@@ -7229,6 +7332,9 @@ struct GateCase {
     close: f64,
     dev: f64,
     reserve: Option<f64>,
+    /// The subscribed tier's row cost, with their attitude rows owed
+    /// instead of a birth.
+    sub_row: Option<f64>,
 }
 
 fn gate_case() -> impl Strategy<Value = GateCase> {
@@ -7246,14 +7352,17 @@ fn gate_case() -> impl Strategy<Value = GateCase> {
             prop_oneof![Just(0.0), 0.1..quarter],
         ),
         (0.0..quarter, 0.0f64..20.0, 0.0f64..5.0),
-        proptest::option::of(0.0f64..200.0),
+        (
+            proptest::option::of(0.0f64..200.0),
+            proptest::option::of(1.0..quarter),
+        ),
     )
         .prop_map(
             |(
                 (share, fps, syscall_per_s, debt),
                 (fixed, x, seen),
                 (batch, close, dev),
-                reserve,
+                (reserve, sub_row),
             )| {
                 GateCase {
                     share,
@@ -7267,6 +7376,7 @@ fn gate_case() -> impl Strategy<Value = GateCase> {
                     close,
                     dev,
                     reserve,
+                    sub_row,
                 }
             },
         )
@@ -7274,7 +7384,9 @@ fn gate_case() -> impl Strategy<Value = GateCase> {
 
 impl GateCase {
     /// A sampler and its link in this state; a birth waits so that a host
-    /// that sweeps finds the pump worth its call and keeps its savings.
+    /// that sweeps finds the pump worth its call and keeps its savings, or,
+    /// with `sub_row`, twenty subscribed rows read with their attitude are
+    /// owed, and the pump for them spends the savings.
     fn sampler(&self) -> (Sampler, Rec) {
         let mut rec = Rec::new(self.share, 1e6 / self.fps);
         rec.syscall = false;
@@ -7283,8 +7395,19 @@ impl GateCase {
         s.budget.debt = self.debt;
         if let Some(fund) = self.reserve {
             s.set_direct(true);
-            s.birth_waits();
+            if self.sub_row.is_none() {
+                s.birth_waits();
+            }
             s.sweep_fund = fund;
+        }
+        if let Some(row) = self.sub_row {
+            // The first slice's attach clears the subscription and asks for
+            // an enumeration, which would take the pump's first batch.
+            s.check_attach(&rec);
+            s.enum_due = false;
+            s.sub_attitude = true;
+            s.tiers[Tier::Subscribed.index()].cost = row;
+            s.tiers[Tier::Subscribed.index()].credit = 20.0;
         }
         s.xcall_us = self.x;
         s.xcall_seen = self.seen;
@@ -7294,13 +7417,35 @@ impl GateCase {
         (s, rec)
     }
 
-    /// What a pump costs at least: the gate's floor.
-    fn floor(&self) -> f64 {
+    /// What a pump costs at least, `N`.
+    fn need(&self) -> f64 {
         if self.seen > 0.0 {
             self.seen + self.batch + self.close + 2.0 * self.dev
         } else {
             0.0
         }
+    }
+
+    /// The gate's floor before its clamp: `N`, and the subscribed row when
+    /// the pump is for them on a host that sweeps (no birth waits) and the
+    /// most a frame can have is within that row of the slice's cap.
+    fn floor(&self, s: &Sampler) -> f64 {
+        let row = match (self.sub_row, self.reserve) {
+            (Some(row), Some(_)) if s.top() >= s.slice_cap() - row => row,
+            _ => 0.0,
+        };
+        self.need() + row
+    }
+
+    /// What the frame leaves the gate: the slice less the fixed work and
+    /// the sweep's savings, which a pump for the subscribed rows may spend.
+    fn left(&self, s: &Sampler) -> f64 {
+        let reserved = if self.sub_row.is_some() {
+            0.0
+        } else {
+            s.reserved()
+        };
+        s.slice_us() - self.fixed - reserved
     }
 }
 
@@ -7323,15 +7468,15 @@ proptest! {
         let t = rec.began;
         s.slice(&rec, t);
         let now = t + Duration::from_nanos((c.fixed * 1000.0) as u64);
-        let left = s.slice_us() - c.fixed - s.reserved();
-        let floor = c.floor().min(0.8 * s.top());
+        let left = c.left(&s);
+        let floor = c.floor(&s).min(0.8 * s.top());
         let clamped = s.clamped_pumps;
         if s.gate(&rec, now) {
             prop_assert!(left >= floor, "left {left}, floor {floor}");
             prop_assert_eq!(
                 s.clamped_pumps - clamped,
-                u64::from(left < c.floor()),
-                "left {}, unclamped floor {}", left, c.floor()
+                u64::from(left < c.floor(&s)),
+                "left {}, unclamped floor {}", left, c.floor(&s)
             );
         }
     }
@@ -7348,8 +7493,8 @@ proptest! {
         let fixed = Duration::from_nanos((c.fixed * 1000.0) as u64);
         s.budget.debt = -CREDIT_CAP_US;
         s.slice(&rec, rec.began);
-        let left = s.slice_us() - c.fixed - s.reserved();
-        prop_assume!(left >= c.floor().max(MIN_BUDGET_US));
+        let left = c.left(&s);
+        prop_assume!(left >= c.floor(&s).max(MIN_BUDGET_US));
         prop_assume!(c.reserve.is_none() || s.pump_worth(rec.began + fixed));
         let mut opened = None;
         for frame in 0..600 {
@@ -7366,8 +7511,136 @@ proptest! {
         prop_assert!(
             opened.is_some(),
             "shut for 600 frames: left {left}, floor {}, call's estimate now {}",
-            c.floor(),
+            c.floor(&s),
             s.xcall_us
         );
     }
+}
+
+/// A host that sweeps at a share of 0.05 and 100 frames a second, where the
+/// most a frame can have is the slice's cap, twenty subscribed rows read
+/// with their attitude owed at 32 µs a row, no debt, and a call estimate
+/// decayed to 5 µs, so that only the floor shuts the gate. `N` is the
+/// measured call `seen`, a batch's fixed part of 5 µs and its close, 2 µs
+/// and twice 0.5 µs.
+fn sub_row_case(seen: f64) -> GateCase {
+    GateCase {
+        share: 0.05,
+        fps: 100.0,
+        syscall_per_s: 0.0,
+        debt: 0.0,
+        fixed: 0.0,
+        x: 5.0,
+        seen,
+        batch: 5.0,
+        close: 2.0,
+        dev: 0.5,
+        reserve: Some(0.0),
+        sub_row: Some(32.0),
+    }
+}
+
+/// The gate of `s` on a frame that leaves `left` µs: whether it opened.
+fn sub_row_gate(s: &mut Sampler, rec: &Rec, left: f64) -> bool {
+    let fixed = s.slice_us() - left;
+    s.gate(rec, rec.began + Duration::from_secs_f64(fixed / 1e6))
+}
+
+/// The forced subscribed row in the floor (coordinator ruling, 2026-11-21):
+/// with `N` at 68 µs and the row at 32 µs, a frame that leaves 80 µs, at
+/// least `N` and less than `N + r_s`, shuts the gate for room and the gate
+/// records the row; the next sweep holds the larger of `N / 0.8` and
+/// `N + r_s`, here 100 µs. A frame that leaves 110 µs opens it.
+#[test]
+fn the_floor_holds_the_forced_subscribed_row_and_the_hold_follows() {
+    let c = sub_row_case(60.0);
+    let (mut s, rec) = c.sampler();
+    s.slice(&rec, rec.began);
+    let (top, cap, need) = (s.top(), s.slice_cap(), c.need());
+    let figures = format!("top {top:.1} µs, cap {cap:.1} µs, N {need:.1} µs");
+    assert_eq!(top, cap, "{figures}");
+    assert_eq!(c.floor(&s), need + 32.0, "{figures}");
+    assert!(!sub_row_gate(&mut s, &rec, 80.0), "{figures}");
+    assert!(s.room_shut, "{figures}");
+    assert_eq!(s.room_row, 32.0, "{figures}");
+    let hold = (need / 0.8).max(need + 32.0).min(top);
+    assert_eq!(hold, need + 32.0, "{figures}");
+    assert_eq!(s.room_hold(top), hold, "{figures}");
+    // Without the forced row, the hold is `N / 0.8`, which is less.
+    assert!(need / 0.8 < hold, "{figures}");
+    assert!(sub_row_gate(&mut s, &rec, 110.0), "{figures}");
+    assert_eq!(s.clamped_pumps, 0, "{figures}");
+}
+
+/// The clamp counts against `N + r_s`: with `N` at 168 µs and the row at
+/// 32 µs, 0.8 of the most a frame can have (195.2 µs) lies between them. A
+/// frame that leaves 197 µs opens the gate under the clamp and counts it.
+#[test]
+fn the_clamp_counts_a_pump_below_its_forced_subscribed_row() {
+    let c = sub_row_case(160.0);
+    let (mut s, rec) = c.sampler();
+    s.slice(&rec, rec.began);
+    let (top, need) = (s.top(), c.need());
+    let figures = format!("top {top:.1} µs, N {need:.1} µs");
+    assert!(need <= 0.8 * top && 0.8 * top < need + 32.0, "{figures}");
+    assert!(sub_row_gate(&mut s, &rec, 197.0), "{figures}");
+    assert_eq!(s.clamped_pumps, 1, "{figures}");
+}
+
+/// Births that take the pump's first batch leave the floor at `N`: with
+/// births pending at 10 µs a birth and their balance paid, a frame that
+/// leaves 80 µs leaves them a batch, and the gate opens.
+#[test]
+fn births_that_take_the_first_batch_hold_no_forced_row() {
+    let c = sub_row_case(60.0);
+    let (mut s, rec) = c.sampler();
+    s.slice(&rec, rec.began);
+    s.birth_waits();
+    s.tiers[Tier::Births.index()].cost = 10.0;
+    s.maintenance_us = 1e4;
+    let (top, cap) = (s.top(), s.slice_cap());
+    assert_eq!(s.forced_sub_row(top, cap, 80.0), 0.0);
+    assert!(sub_row_gate(&mut s, &rec, 80.0));
+}
+
+/// Review round 3, #2: births pending and paid for, but in debt and dearer
+/// than what the pump would have left, take no batch
+/// (`Sampler::affordable`), so the planner forces the subscribed row first.
+/// The gate asks the planner's own test (`Sampler::maintenance_rows`), and
+/// the floor holds the row: a frame that leaves 80 µs, at least `N` (68 µs)
+/// but less than `N + r_s`, shuts the gate. With room for a birth the floor
+/// is `N` again. Counting births as first whenever they waited, the floor
+/// held no row here.
+#[test]
+fn births_the_debt_holds_back_leave_the_forced_row_to_the_floor() {
+    let mut c = sub_row_case(60.0);
+    c.debt = 5.0;
+    let (mut s, rec) = c.sampler();
+    s.slice(&rec, rec.began);
+    s.birth_waits();
+    s.tiers[Tier::Births.index()].cost = 50.0;
+    s.maintenance_us = 1e4;
+    let (top, cap) = (s.top(), s.slice_cap());
+    let figures = format!("top {top:.1} µs, cap {cap:.1} µs, debt {}", s.budget.debt);
+    assert!(s.maintenance_may(Tier::Births), "{figures}");
+    assert_eq!(s.forced_sub_row(top, cap, 80.0), 32.0, "{figures}");
+    assert!(!sub_row_gate(&mut s, &rec, 80.0), "{figures}");
+    assert_eq!(s.room_row, 32.0, "{figures}");
+    // At 200 µs a birth fits what the pump would have: births go first.
+    assert_eq!(s.forced_sub_row(top, cap, 200.0), 0.0, "{figures}");
+}
+
+/// Below a scale of 1 the floor holds no forced row: the pump's budget is a
+/// share of what is left, and the row is not the frame's to hold.
+#[cfg(feature = "faults")]
+#[test]
+fn below_scale_1_the_floor_holds_no_forced_row() {
+    let c = sub_row_case(60.0);
+    let (mut s, rec) = c.sampler();
+    s.set_scale(0.5).unwrap();
+    s.slice(&rec, rec.began);
+    let (top, cap) = (s.top(), s.slice_cap());
+    assert_eq!(s.forced_sub_row(top, cap, 80.0), 0.0);
+    sub_row_gate(&mut s, &rec, 80.0);
+    assert_eq!(s.room_row, 0.0);
 }

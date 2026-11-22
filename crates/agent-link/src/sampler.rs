@@ -836,6 +836,10 @@ pub struct Sampler {
     /// measurement.
     #[cfg(test)]
     unmeasured_batches: u64,
+    /// Gates the forced subscribed row in the floor shut: the frame left
+    /// the gate without the row and not with it. Host tests only.
+    #[cfg(test)]
+    row_shuts: u64,
     /// The gate and the planner of release 0.0 (`5568772`), for a survey
     /// that compares them with these: the gate's reach uncapped, no floor,
     /// no room held by the sweep, no part for an urgent check; every batch
@@ -1185,6 +1189,8 @@ impl Sampler {
             vitals_swept: 0,
             #[cfg(test)]
             unmeasured_batches: 0,
+            #[cfg(test)]
+            row_shuts: 0,
             #[cfg(test)]
             main_rule: false,
             last_planned: [None; 7],
@@ -2627,20 +2633,22 @@ impl Sampler {
         let top = self.top();
         let need = self.pump_need();
         let main_rule = self.main_rule();
+        let waits = self.higher_waits() || !self.urgent.is_empty();
+        self.room_shut = false;
+        self.room_row = 0.0;
+        let fixed = now.saturating_duration_since(link.began()).as_secs_f64() * 1e6
+            + self.budget.events_us
+            - self.budget.commanded_us;
+        let left = self.budget.slice - fixed - reserved;
         // The row a pump for the subscribed rows read with their attitude
         // forces: the floor holds it too, where it can carry a frame past
         // 250 µs (`Sampler::forced_sub_row`).
         let need = if main_rule {
             need
         } else {
-            need + self.forced_sub_row(top, cap)
+            need + self.forced_sub_row(top, cap, left)
         };
-        let waits = self.higher_waits() || !self.urgent.is_empty();
-        self.room_shut = false;
-        self.room_row = 0.0;
         let b = &mut self.budget;
-        let fixed = now.saturating_duration_since(link.began()).as_secs_f64() * 1e6 + b.events_us
-            - b.commanded_us;
         if fixed - self.sweep_spent >= b.allowance {
             self.starved += 1;
         }
@@ -2697,8 +2705,17 @@ impl Sampler {
         // less than what the frame has left: a frame that leaves the floor
         // then opens the gate.
         let floor = if main_rule { 0.0 } else { need.min(0.8 * top) };
+        #[cfg(test)]
+        let without_row = gate.max(if main_rule {
+            0.0
+        } else {
+            self.pump_need().min(0.8 * top)
+        });
         let gate = gate.max(floor);
-        let left = b.slice - fixed - reserved;
+        #[cfg(test)]
+        if left < gate && left >= without_row {
+            self.row_shuts += 1;
+        }
         if left < gate {
             // A pump waits and the frame had no room for it: the next sweep
             // leaves it room ([`Sampler::sweep`]), with the forced row when
@@ -2728,30 +2745,55 @@ impl Sampler {
     /// further below the cap, the row cannot carry a frame past 250 µs, and
     /// the floor stays `N`. No other pump's row is held: a floor with the
     /// cheapest owed row changed no overrun and made urgent checks wait.
-    fn forced_sub_row(&self, top: f64, cap: f64) -> f64 {
+    fn forced_sub_row(&self, top: f64, cap: f64, left: f64) -> f64 {
         let r = self.tiers[Tier::Subscribed.index()].cost.max(0.0);
-        if r > 0.0 && self.scale() >= 1.0 && self.subscribed_plans_first() && top >= cap - r {
+        if r > 0.0 && self.scale() >= 1.0 && top >= cap - r && self.subscribed_plans_first(left) {
             r
         } else {
             0.0
         }
     }
 
+    /// What the sweep holds for a pump after the gate shut for room, µs, with
+    /// `top` the most a frame can have: `N` over 0.8, or `N` and the forced
+    /// subscribed row the floor held ([`Sampler::forced_sub_row`]) if that
+    /// is more, at most `top`; 0 without such a shut.
+    fn room_hold(&self, top: f64) -> f64 {
+        if self.room_shut {
+            let need = self.pump_need();
+            (need / 0.8).max(need + self.room_row).min(top)
+        } else {
+            0.0
+        }
+    }
+
     /// Whether a pump's first batch is the subscribed rows read with their
-    /// attitude: they want a pump, and no tier the planner ranks ahead of
-    /// them ([`Sampler::plan_rank`]) waits for a batch it may take.
-    fn subscribed_plans_first(&self) -> bool {
-        self.direct
-            && self.sub_wanted()
-            && !Tier::ALL.iter().any(|&t| {
-                Self::plan_rank(false, t) < Self::plan_rank(false, Tier::Subscribed)
-                    && self.maintenance_may(t)
-                    && match t {
-                        Tier::Births => self.births > 0,
-                        Tier::Enumeration => self.enum_due || self.enumeration.is_some(),
-                        _ => true,
-                    }
-            })
+    /// attitude, on a frame that leaves `left` µs at the gate: they want a
+    /// pump, and no tier the planner ranks ahead of them
+    /// ([`Sampler::plan_rank`]) takes a batch. That is the planner's own
+    /// test ([`Sampler::maintenance_rows`]) on the budget the pump would
+    /// have: `left` less the call, the close's reserve, the tail and the
+    /// sweep's savings, which births and the enumeration leave alone on a
+    /// pump for the subscribed rows. The call is the larger of its measured
+    /// mean and its running estimate, so the budget is not overstated. A birth the debt or the budget keeps
+    /// out of the batch then leaves the first batch to the subscribed rows,
+    /// and the floor holds their row (host test
+    /// `births_the_debt_holds_back_leave_the_forced_row_to_the_floor`).
+    fn subscribed_plans_first(&self, left: f64) -> bool {
+        if !(self.direct && self.sub_wanted()) {
+            return false;
+        }
+        let remaining = left
+            - self.xcall_seen.max(self.xcall_us)
+            - self.close_us
+            - 2.0 * self.close_dev_us
+            - self.tail_us
+            - self.reserved() * self.scale();
+        !Tier::ALL.iter().any(|&t| {
+            Self::plan_rank(false, t) < Self::plan_rank(false, Tier::Subscribed)
+                && self.maintenance_may(t)
+                && self.maintenance_rows(t, remaining, true) > 0
+        })
     }
 
     /// The order in which a pump's plan offers the tiers a batch, lowest
@@ -3109,12 +3151,7 @@ impl Sampler {
         // a forced subscribed row (`Sampler::forced_sub_row`), the hold is
         // at least the floor itself, so a frame can open it. Without a gate
         // shut for room the sweep is unchanged.
-        let hold = if self.room_shut {
-            let need = self.pump_need();
-            (need / 0.8).max(need + self.room_row).min(top)
-        } else {
-            0.0
-        };
+        let hold = self.room_hold(top);
         let b = &self.budget;
         let fixed = now.saturating_duration_since(link.began()).as_secs_f64() * 1e6 + b.events_us
             - b.commanded_us;
@@ -3144,7 +3181,9 @@ impl Sampler {
         // put the frame back in debt, so credit never built and the pump
         // never came (host survey, case 313: share 0.003, 234 frames a
         // second, a row at 14.7 µs; no pump after the sixth second). The
-        // pump then reads the positions owed.
+        // positions then wait at least until the sweep is late, a tenth of
+        // position_s, and the forced row runs again once the savings are
+        // full and the frame has no debt.
         let late = self.last_sweep.is_none_or(|l| {
             now.saturating_duration_since(l).as_secs_f64() >= SWEEP_LATE * self.rates.position_s
         });
@@ -4025,10 +4064,42 @@ impl Sampler {
         }
     }
 
+    /// The rows births or the enumeration take in a batch on `remaining`
+    /// µs, the pump's first when `first` is set; 0 for another tier. An
+    /// enumeration due to start takes one step at least. The planner and the
+    /// gate's forced-row test both ask this
+    /// ([`Sampler::subscribed_plans_first`]), the gate on its estimate of the
+    /// pump's budget. They can still differ where the state moves between
+    /// the gate and the plan: the credit the pump accrues as it begins, and a
+    /// call slower than its estimate while in debt.
+    fn maintenance_rows(&self, tier: Tier, remaining: f64, first: bool) -> usize {
+        match tier {
+            Tier::Births => {
+                self.affordable_as(tier, remaining, self.births.min(self.max_batch), first)
+            }
+            Tier::Enumeration => {
+                let start = self.enumeration.is_none() && self.enum_due;
+                if self.enumeration.is_none() && !start {
+                    return 0;
+                }
+                self.affordable_as(tier, remaining, self.max_batch, first)
+                    .max(usize::from(start))
+            }
+            _ => 0,
+        }
+    }
+
     /// How many rows of a tier the remaining budget allows, at most `owed`.
     /// A row that costs more than a whole budget is taken alone when there
     /// is no debt.
     fn affordable(&self, tier: Tier, remaining: f64, owed: usize) -> usize {
+        self.affordable_as(tier, remaining, owed, self.batches == 0)
+    }
+
+    /// [`Sampler::affordable`] for a batch that is the pump's first when
+    /// `first` is set, whatever the pump has planned so far: the gate asks
+    /// it before the pump.
+    fn affordable_as(&self, tier: Tier, remaining: f64, owed: usize, first: bool) -> usize {
         if owed == 0 {
             return 0;
         }
@@ -4073,7 +4144,7 @@ impl Sampler {
             // tiers keep included, and its rows did not fit (host survey,
             // case 1675: 23 births beside a 62.5 µs fixed part in 55.5 µs;
             // frames to 307 µs): the batch takes one row.
-            let dear = cost > self.budget.budget.max(0.0) || self.batches == 0;
+            let dear = cost > self.budget.budget.max(0.0) || first;
             // On a pump for the subscribed rows the sweep's withheld debt
             // does not block them.
             let debt = self.budget.debt > 0.0 && !(self.sub_pump && tier == Tier::Subscribed);
@@ -4098,7 +4169,7 @@ impl Sampler {
     ) -> Option<Plan> {
         match tier {
             Tier::Births => {
-                let n = self.affordable(tier, remaining, self.births.min(self.max_batch));
+                let n = self.maintenance_rows(tier, remaining, self.batches == 0);
                 (n > 0).then_some(Plan {
                     tier,
                     rows: n,
@@ -4106,6 +4177,10 @@ impl Sampler {
                 })
             }
             Tier::Enumeration => {
+                let n = self.maintenance_rows(tier, remaining, self.batches == 0);
+                if n == 0 {
+                    return None;
+                }
                 let mut start = false;
                 if self.enumeration.is_none() && self.enum_due {
                     self.enum_due = false;
@@ -4134,11 +4209,7 @@ impl Sampler {
                     self.dirty = true;
                     start = true;
                 }
-                self.enumeration?;
-                let n = self
-                    .affordable(tier, remaining, self.max_batch)
-                    .max(usize::from(start));
-                (n > 0).then_some(Plan {
+                Some(Plan {
                     tier,
                     rows: n,
                     flag: start,
