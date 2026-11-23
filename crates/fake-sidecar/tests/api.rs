@@ -700,6 +700,15 @@ async fn tokens_give_roles() {
         .expect_err("observer");
     assert_eq!(e.code(), Code::PermissionDenied);
     assert_eq!(reason(&e), ErrorReason::RoleRequired);
+    let e = CommandsServiceClient::with_interceptor(ch.clone(), with(OBSERVER_TOKEN))
+        .put_from_static_template(pb::PutFromStaticTemplateRequest {
+            path: "/nowhere/layout.stm".into(),
+            ..pb::PutFromStaticTemplateRequest::default()
+        })
+        .await
+        .expect_err("observer");
+    assert_eq!(e.code(), Code::PermissionDenied);
+    assert_eq!(reason(&e), ErrorReason::RoleRequired);
     let mut ctl = SessionServiceClient::with_interceptor(ch.clone(), with(CONTROLLER_TOKEN));
     ctl.acquire_lease(AcquireLeaseRequest::default())
         .await

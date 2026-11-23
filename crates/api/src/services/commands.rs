@@ -14,20 +14,23 @@ use nanoprobe_proto::v1alpha1::{
     self as pb, AdjustWarehouseStockRequest, AdjustWarehouseStockResponse, CaptureRequest,
     CaptureResponse, DematerializeRequest, DematerializeResponse, DoEffectRequest,
     DoEffectResponse, ErrorReason, GetOutcomeRequest, GetOutcomeResponse, GroupCategory,
-    MaterializeRequest, MaterializeResponse, PutGroupFromTemplateRequest,
-    PutGroupFromTemplateResponse, PutGroupRequest, PutGroupResponse, PutStaticRequest,
-    PutStaticResponse, RemoveEntityRequest, RemoveEntityResponse, Resolution, ResolveMemberRequest,
-    ResolveMemberResponse, SetAirbaseOwnerRequest, SetAirbaseOwnerResponse, SetLostPolicyRequest,
-    SetLostPolicyResponse, SetOptionsRequest, SetOptionsResponse, SetOrderRequest,
-    SetOrderResponse, SetSampleRatesRequest, SetSampleRatesResponse, SetWarehouseStockRequest,
+    MaterializeRequest, MaterializeResponse, PutFromStaticTemplateRequest,
+    PutFromStaticTemplateResponse, PutGroupFromTemplateRequest, PutGroupFromTemplateResponse,
+    PutGroupRequest, PutGroupResponse, PutStaticRequest, PutStaticResponse, RemoveEntityRequest,
+    RemoveEntityResponse, Resolution, ResolveMemberRequest, ResolveMemberResponse,
+    SetAirbaseOwnerRequest, SetAirbaseOwnerResponse, SetLostPolicyRequest, SetLostPolicyResponse,
+    SetOptionsRequest, SetOptionsResponse, SetOrderRequest, SetOrderResponse,
+    SetSampleRatesRequest, SetSampleRatesResponse, SetWarehouseStockRequest,
     SetWarehouseStockResponse, Write,
 };
 use nanoprobe_sidecar::ids::EntityId;
+use nanoprobe_sidecar::intents::Intent;
 use nanoprobe_sidecar::reconciler::EffectResult;
 use nanoprobe_sidecar::sim::wire::{Body, Debris};
 use nanoprobe_sidecar::stock::{Item, Stock};
 use nanoprobe_sidecar::store::{
     Authority, Kind, LostPolicy, NewGroup, NewUnit, Outcome, Point, Store, StoreError, UnitState,
+    check_lv,
 };
 use nanoprobe_transport::records::Rates;
 use prost::Message;
@@ -41,6 +44,7 @@ use crate::group_template;
 use crate::hub::{Call, Hub, Inner, Need, Slot, settle};
 use crate::idem::EffectKind;
 use crate::lua::{extra_to_lua, from_lua, to_lua};
+use crate::static_template;
 use nanoprobe_transport::codec::{Lv, Writer};
 
 /// The service.
@@ -234,6 +238,18 @@ fn put_group(g: &mut Inner, c: u64, r: &PutGroupRequest) -> Result<PutGroupRespo
         .spec
         .as_ref()
         .ok_or_else(|| invalid("spec", "a spec is required"))?;
+    let category = check_group(g, spec, r.order.as_ref())?;
+    let slot = g.campaigns.get_mut(&c).expect("resolved campaign");
+    if r.group_id != 0 {
+        return replace_group(slot, r, category);
+    }
+    let plan = plan_group(slot, spec, r.order.as_ref(), category)?;
+    write_group(&mut slot.store, plan)
+}
+
+/// The checks of a group spec that need no campaign: its category, units
+/// and size. Returns the DCS category.
+fn check_group(g: &Inner, spec: &pb::GroupSpec, order: Option<&pb::Order>) -> Result<u32, Status> {
     let category = GroupCategory::try_from(spec.category)
         .ok()
         .and_then(dcs_category)
@@ -256,11 +272,24 @@ fn put_group(g: &mut Inner, c: u64, r: &PutGroupRequest) -> Result<PutGroupRespo
     }
     let limit = g.backend.max_command();
     fits(spawn_bound(spec), limit, "spec")?;
-    fits(order_bound(r.order.as_ref()), limit, "order")?;
-    let slot = g.campaigns.get_mut(&c).expect("resolved campaign");
-    if r.group_id != 0 {
-        return replace_group(slot, r, category);
-    }
+    fits(order_bound(order), limit, "order")?;
+    Ok(category)
+}
+
+/// A new group, checked against its campaign and ready to write.
+struct GroupPlan<'a> {
+    spec: &'a pb::GroupSpec,
+    group: NewGroup,
+    order: Option<Intent>,
+}
+
+/// The checks of a new group against its campaign, which write nothing.
+fn plan_group<'a>(
+    slot: &Slot,
+    spec: &'a pb::GroupSpec,
+    order: Option<&pb::Order>,
+    category: u32,
+) -> Result<GroupPlan<'a>, Status> {
     let theater = spec.units[0]
         .position
         .as_ref()
@@ -293,13 +322,13 @@ fn put_group(g: &mut Inner, c: u64, r: &PutGroupRequest) -> Result<PutGroupRespo
             )
         });
     }
-    let order = match &r.order {
+    let order = match order {
         Some(o) => Some(intent(Some(o), &theater, "order", &slot.store)?),
         None => None,
     };
-    let id = slot
-        .store
-        .create_group(NewGroup {
+    Ok(GroupPlan {
+        spec,
+        group: NewGroup {
             theater,
             country: spec.country,
             category,
@@ -313,22 +342,34 @@ fn put_group(g: &mut Inner, c: u64, r: &PutGroupRequest) -> Result<PutGroupRespo
             },
             label: spec.label.clone(),
             extra: extra_to_lua(spec.extra.as_ref()),
-        })
-        .map_err(store_error)?;
-    set_components(&mut slot.store, id, &spec.components)?;
-    let members = slot.store.group(id).expect("created").members.clone();
+        },
+        order,
+    })
+}
+
+/// The entity IDs a new group takes: its own and one per unit.
+fn ids_of(group: &NewGroup) -> u64 {
+    1 + group.units.len() as u64
+}
+
+/// Write a planned group.
+fn write_group(store: &mut Store, plan: GroupPlan) -> Result<PutGroupResponse, Status> {
+    let GroupPlan { spec, group, order } = plan;
+    let id = store.create_group(group).map_err(store_error)?;
+    set_components(store, id, &spec.components)?;
+    let members = store.group(id).expect("created").members.clone();
     for (u, uid) in spec.units.iter().zip(members) {
-        set_spawn_life(&mut slot.store, uid, u)?;
+        set_spawn_life(store, uid, u)?;
     }
     if let Some(o) = order {
-        slot.store.set_order(id, o).map_err(store_error)?;
+        store.set_order(id, o).map_err(store_error)?;
     }
-    let grp = slot.store.group(id).expect("created");
+    let grp = store.group(id).expect("created");
     Ok(PutGroupResponse {
         group_id: id.0,
         unit_ids: grp.members.iter().map(|m| m.0).collect(),
         spec_revision: grp.spec_rev,
-        revision: slot.store.revision(),
+        revision: store.revision(),
     })
 }
 
@@ -380,6 +421,116 @@ fn put_group_from_template(
         unit_ids: made.unit_ids,
         spec_revision: made.spec_revision,
         revision: made.revision,
+    })
+}
+
+/// `PutFromStaticTemplate`: every vehicle group and static of a static
+/// template the caller's file holds (spec/world.md, "Static templates").
+/// `file` is the layout as it was read before the call took the lock, or
+/// why it was refused.
+///
+/// Every check of every entity, entity IDs and value sizes included, comes
+/// before the first store write, so the call makes all of them or none.
+/// The converted specs go through the checks and writes of `PutGroup` and
+/// `PutStatic`.
+fn put_from_static_template(
+    g: &mut Inner,
+    c: u64,
+    r: &PutFromStaticTemplateRequest,
+    file: Result<static_template::Layout, Status>,
+) -> Result<PutFromStaticTemplateResponse, Status> {
+    let slot = g.campaigns.get(&c).expect("resolved campaign");
+    if r.anchor.is_some() {
+        place(r.anchor.as_ref(), slot, "anchor")?;
+    }
+    finite(r.heading, "heading")?;
+    let l = file?;
+    let specs = static_template::specs(&l, r.anchor.as_ref(), r.heading, r.country, &r.label)
+        .map_err(|e| invalid(e.field, e.text))?;
+    if !slot.meta.theaters.contains(&specs.theater) {
+        return Err(invalid(
+            "path",
+            format!("the campaign does not use the theater `{}`", specs.theater),
+        ));
+    }
+    let limit = g.backend.max_command();
+    let mut categories = Vec::with_capacity(specs.groups.len());
+    for spec in &specs.groups {
+        fits(spawn_bound(spec), limit, "path")?;
+        categories.push(check_group(g, spec, None)?);
+    }
+    let slot = g.campaigns.get(&c).expect("resolved campaign");
+    let mut groups = Vec::with_capacity(specs.groups.len());
+    for (spec, category) in specs.groups.iter().zip(categories) {
+        groups.push(plan_group(slot, spec, None, category)?);
+    }
+    let mut statics = Vec::with_capacity(specs.statics.len());
+    for spec in &specs.statics {
+        fits(static_bound(spec), limit, "path")?;
+        statics.push(plan_static(slot, spec, limit)?);
+    }
+    // The two writes that can still fail, checked for every entity first.
+    let news = groups
+        .iter()
+        .map(|p| &p.group)
+        .chain(statics.iter().map(|p| &p.group));
+    // The reader refuses such a value with its place; this keeps the writes
+    // below from failing whatever the reader lets through.
+    let stored = |e: String| {
+        invalid(
+            "path",
+            format!("the file is not a static template file: a value cannot be stored: {e}"),
+        )
+    };
+    for n in news {
+        check_lv(&n.extra).map_err(stored)?;
+        for u in &n.units {
+            check_lv(&u.extra).map_err(stored)?;
+        }
+    }
+    let ids = groups.iter().map(|p| ids_of(&p.group)).sum::<u64>() + statics.len() as u64;
+    if ids > slot.store.ids_left() {
+        return Err(store_error(StoreError::Exhausted));
+    }
+    let store = &mut g.campaigns.get_mut(&c).expect("resolved campaign").store;
+    let checked = "checked before the first write";
+    let groups: Vec<_> = groups
+        .into_iter()
+        .map(|p| {
+            let made = write_group(store, p).expect(checked);
+            pb::StaticTemplateGroup {
+                group_id: made.group_id,
+                unit_ids: made.unit_ids,
+                spec_revision: made.spec_revision,
+            }
+        })
+        .collect();
+    let statics: Vec<_> = statics
+        .into_iter()
+        .map(|p| {
+            let made = write_static(store, p).expect(checked);
+            pb::StaticTemplateStatic {
+                static_id: made.static_id,
+                spec_revision: made.spec_revision,
+            }
+        })
+        .collect();
+    // The store keeps the specs alone; the log is where the file is named.
+    eprintln!(
+        "PutFromStaticTemplate made {} groups and {} statics from {:?}{}",
+        groups.len(),
+        statics.len(),
+        r.path,
+        if l.dropped.is_empty() {
+            String::new()
+        } else {
+            format!("; keys not used: {}", l.dropped.join(", "))
+        }
+    );
+    Ok(PutFromStaticTemplateResponse {
+        groups,
+        statics,
+        revision: store.revision(),
     })
 }
 
@@ -485,10 +636,28 @@ fn put_static(g: &mut Inner, c: u64, r: &PutStaticRequest) -> Result<PutStaticRe
         .spec
         .as_ref()
         .ok_or_else(|| invalid("spec", "a spec is required"))?;
+    let limit = g.backend.max_command();
+    let slot = g.campaigns.get_mut(&c).expect("resolved campaign");
+    let plan = plan_static(slot, spec, limit)?;
+    write_static(&mut slot.store, plan)
+}
+
+/// A new static, checked and ready to write.
+struct StaticPlan {
+    group: NewGroup,
+    dead: bool,
+}
+
+/// The bytes of a static's spawn command, at most.
+fn static_bound(spec: &pb::StaticSpec) -> usize {
+    2 * OVERHEAD + spec.r#type.len() + lv_len(&extra_to_lua(spec.extra.as_ref()))
+}
+
+/// The checks of a new static, which write nothing.
+fn plan_static(slot: &Slot, spec: &pb::StaticSpec, limit: usize) -> Result<StaticPlan, Status> {
     if spec.r#type.is_empty() {
         return Err(invalid("spec.type", "a static needs its DCS type"));
     }
-    let slot = g.campaigns.get_mut(&c).expect("resolved campaign");
     let at = place(spec.position.as_ref(), slot, "spec.position")?;
     let theater = spec.position.as_ref().expect("placed").theater.clone();
     let heading = finite(spec.heading, "spec.heading")?;
@@ -505,25 +674,16 @@ fn put_static(g: &mut Inner, c: u64, r: &PutStaticRequest) -> Result<PutStaticRe
             "set spec.dead to create a static destroyed; extra takes no dead key",
         ));
     }
-    fits(
-        2 * OVERHEAD + spec.r#type.len() + lv_len(&extra_to_lua(spec.extra.as_ref())),
-        g.backend.max_command(),
-        "spec",
-    )?;
-    let create = if spec.dead {
-        Store::create_ruin
-    } else {
-        Store::create_static
-    };
-    let id = create(
-        &mut slot.store,
-        NewGroup {
+    fits(static_bound(spec), limit, "spec")?;
+    let extra = extra_to_lua(spec.extra.as_ref());
+    Ok(StaticPlan {
+        group: NewGroup {
             theater,
             country: spec.country,
             category: 0,
             coalition: 0,
             units: vec![NewUnit {
-                extra: extra_to_lua(spec.extra.as_ref()),
+                extra,
                 ..NewUnit::new(
                     &spec.r#type,
                     UnitState {
@@ -537,12 +697,22 @@ fn put_static(g: &mut Inner, c: u64, r: &PutStaticRequest) -> Result<PutStaticRe
             label: spec.label.clone(),
             extra: nanoprobe_transport::codec::Lv::Nil,
         },
-    )
-    .map_err(store_error)?;
+        dead: spec.dead,
+    })
+}
+
+/// Write a planned static.
+fn write_static(store: &mut Store, plan: StaticPlan) -> Result<PutStaticResponse, Status> {
+    let create = if plan.dead {
+        Store::create_ruin
+    } else {
+        Store::create_static
+    };
+    let id = create(store, plan.group).map_err(store_error)?;
     Ok(PutStaticResponse {
         static_id: id.0,
-        spec_revision: slot.store.group(id).map_or(0, |x| x.spec_rev),
-        revision: slot.store.revision(),
+        spec_revision: store.group(id).map_or(0, |x| x.spec_rev),
+        revision: store.revision(),
     })
 }
 
@@ -1343,6 +1513,50 @@ impl CommandsService for Commands {
                 },
                 &hashed,
                 |g: &mut Inner, c: u64| put_group_from_template(g, c, &r, file).map(|x| (x, c)),
+            )
+            .await?;
+        Ok(Response::new(resp))
+    }
+
+    async fn put_from_static_template(
+        &self,
+        req: Request<PutFromStaticTemplateRequest>,
+    ) -> Result<Response<PutFromStaticTemplateResponse>, Status> {
+        require(&req, Access::Controller)?;
+        let r = req.into_inner();
+        let mut hashed = r.clone();
+        hashed.write = unleased(&r.write);
+        let w = r.write.clone().unwrap_or_default();
+        // Read and parsed on a worker thread without the lock, as
+        // PutGroupFromTemplate reads its file; the refusal is given inside
+        // the call, so a repeat under an answered key gets its first answer.
+        let dirs = self.0.cfg.template_dirs.clone();
+        let path = r.path.clone();
+        let file = tokio::task::spawn_blocking(move || {
+            let bytes = crate::template_file::read_for(
+                "PutFromStaticTemplate",
+                static_template::FILE_WHAT,
+                static_template::FILE_MAX,
+                &dirs,
+                &path,
+            )
+            .map_err(|e| invalid("path", e))?;
+            static_template::read(&bytes).map_err(|e| invalid(e.field, e.text))
+        })
+        .await
+        .unwrap_or_else(|_| Err(invalid("path", format!("{:?} could not be read", r.path))));
+        let resp = self
+            .0
+            .write(
+                Call {
+                    method: "PutFromStaticTemplate",
+                    key: w.idempotency.as_ref(),
+                    lease: w.lease.as_ref(),
+                    campaign: w.campaign_id,
+                    need: Need::Campaign,
+                },
+                &hashed,
+                |g: &mut Inner, c: u64| put_from_static_template(g, c, &r, file).map(|x| (x, c)),
             )
             .await?;
         Ok(Response::new(resp))
