@@ -2,8 +2,7 @@
 # cross-built on Linux and built natively on Windows. The Windows build checks
 # that the code builds and passes its checks there; no file it makes is
 # released. The release's files are built on a Linux runner by release.yml.
-# macOS is the development system and runs the same check there; CI does not
-# repeat it.
+# CI does not run macOS; `mise run check` on a macOS host checks it.
 #
 # On Linux, CI runs `mise run check` itself, so the two cannot list different
 # checks. Every tool comes from mise.toml through mise-action, so CI runs the

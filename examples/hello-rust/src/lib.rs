@@ -34,7 +34,8 @@ pub struct Summary {
     pub group: u64,
     /// The store revision when the group arrived.
     pub revision: u64,
-    /// Lifecycle states the group went through, in order.
+    /// Lifecycle states the group went through, in order, from its state at
+    /// the listed revision. A state it left before the list is not seen.
     pub states: Vec<EntityState>,
     /// Events received.
     pub events: usize,
@@ -244,9 +245,27 @@ async fn run_inner(channel: Channel, token: Option<&str>) -> Result<Summary, Str
         .await
         .map_err(fail("ListWorld"))?
         .into_inner();
+    let mut summary = Summary {
+        campaign: campaign.id,
+        group: put.group_id,
+        ..Summary::default()
+    };
+    let mut live = false;
     let mut revision = 0;
     while let Some(page) = listed.message().await.map_err(fail("ListWorld"))? {
         revision = page.revision;
+        // The group's state at the listed revision: the watch reports only
+        // what changes after it.
+        for e in page.entities {
+            if let Some(entity::Kind::Group(g)) = e.kind
+                && g.id == put.group_id
+            {
+                let s = EntityState::try_from(g.state).unwrap_or(EntityState::Unspecified);
+                println!("group {} is {:?} at revision {}", g.id, s, page.revision);
+                summary.states.push(s);
+                live = s == EntityState::Live;
+            }
+        }
     }
     let mut watch = world
         .watch_world(WatchWorldRequest {
@@ -259,12 +278,6 @@ async fn run_inner(channel: Channel, token: Option<&str>) -> Result<Summary, Str
         .map_err(fail("WatchWorld"))?
         .into_inner();
 
-    let mut summary = Summary {
-        campaign: campaign.id,
-        group: put.group_id,
-        ..Summary::default()
-    };
-    let mut live = false;
     let mut arrived = false;
     while !(live && arrived) {
         tokio::select! {

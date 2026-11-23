@@ -577,8 +577,9 @@ async fn compaction_at_open_keeps_the_newest_event_and_ids_skip_unreadable_folde
     let a = create(&ch, &l, "a", true).await;
     publish(&server.hub, 2);
     // Retention counts back from the newest event's time. An event is
-    // stamped with the agent's time at the last frame the driver read, so a
-    // sleep alone can leave all three with one stamp on a loaded runner. The
+    // stamped with the wall-clock time at which the driver read the last
+    // frame, so the stamp stands still while no frame is read, and a sleep
+    // alone can leave all three with one stamp on a loaded runner. The
     // test waits until the stamp is 100 ms on, five times the 20 ms
     // retention set below.
     let first = stamp_ms(&server);

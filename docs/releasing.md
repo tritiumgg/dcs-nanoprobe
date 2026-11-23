@@ -61,7 +61,7 @@ gh run watch --exit-status "$(gh run list --workflow ci.yml --commit "$(git rev-
 
 What to expect on the first run:
 
-- Linux and macOS run `mise run check` and then `mise run dll`, as a developer does.
+- Linux runs `mise run check` and then `mise run dll`, as a developer does.
   The first run installs every tool in `mise.toml` and builds from nothing; later runs
   restore caches that pushes to main save. On Linux the job first frees disk space by
   deleting the image's preinstalled toolchains, and installs `libreadline-dev
