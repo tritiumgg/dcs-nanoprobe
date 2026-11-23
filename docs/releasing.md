@@ -8,7 +8,7 @@ Two workflows take part:
 
 | Workflow | Started by | Does |
 |---|---|---|
-| `ci.yml` | a push to main, a pull request, or by hand | `mise run check` and `mise run dll` on Linux and macOS; a build and the checks on Windows |
+| `ci.yml` | a push to main, a pull request, or by hand | `mise run check` and `mise run dll` on Linux; a build and the checks on Windows |
 | `release.yml` | a pushed tag `v<version>`, or by hand as a dry run | builds every released file on one Linux runner with `mise run package` and publishes them as the release; a dry run keeps the files as workflow artifacts and makes no release |
 
 Pushing commits and tags and starting a workflow by hand (`gh workflow run` is a write
@@ -51,7 +51,7 @@ mise exec -- gitleaks git --redact --no-banner .
 git push origin main
 ```
 
-The push starts the CI workflow (`.github/workflows/ci.yml`): the jobs Linux, macOS and
+The push starts the CI workflow (`.github/workflows/ci.yml`): the jobs Linux and
 Windows. A few seconds after the push, watch the run for the pushed commit; the command
 exits nonzero when a job fails:
 
