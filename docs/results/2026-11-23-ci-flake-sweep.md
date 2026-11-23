@@ -7,7 +7,7 @@
 | DCS | None. Every test here runs on the host against the fake agent or the fake sim |
 | Platform | GitHub `ubuntu-latest` and `windows-latest` runners; host check on macOS 26.6.2, arm64 |
 | Script | `.github/workflows/ci.yml`, started by hand with `gh workflow run CI --ref <branch>` |
-| Code | `73dd99e`, this branch's fixes (last one `f82642b`) merged with main at `b36cb76`; the commit after it changes only this document |
+| Code | `73dd99e`, this branch's fixes (last one `f82642b`) merged with main at `49474ec`; the commit after it changes only this document |
 | Result | Six tests failed by timing on the runners or under load on the host; all are fixed in test code (and in the Rust hello example), none in the product. Three consecutive CI runs on `73dd99e` passed on Linux and Windows (45170990880, 45176319046, 45180794833) |
 
 ## Flakes fixed
