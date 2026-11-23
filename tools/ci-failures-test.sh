@@ -68,13 +68,16 @@ test codec::tests::empty"
     printf '%s \t[C]: in function error\n' "$TS"
     printf '%s --- lua/tests/third.lua\n' "$TS"
     printf '%s ok  it counts\n' "$TS"
-    printf '%s lua/tests/third.lua:7: the count is off\n' "$TS"
-} >"$SCRATCH/linux.log"
+    printf '%s /work/repo/lua/tests/third.lua:7: the count is off\n' "$TS"
+    printf '%s --- lua/tests/fourth.lua\n' "$TS"
+    printf '%s ...ests/fourth.lua:9: the name is cut\n' "$TS"
+}>"$SCRATCH/linux.log"
 
 out=$(parse "$SCRATCH/linux.log")
 want="test a::c
 lua lua/tests/second.lua: lua/tests/second.lua:42: expected 3, got 4
-lua lua/tests/third.lua: lua/tests/third.lua:7: the count is off"
+lua lua/tests/third.lua: /work/repo/lua/tests/third.lua:7: the count is off
+lua lua/tests/fourth.lua: ...ests/fourth.lua:9: the name is cut"
 [ "$out" = "$want" ] || fail "linux log: got: $out"
 
 # A failed step with no test name prints nothing from the parser.
@@ -168,7 +171,7 @@ expect "run 7 on owner/repo"
 expect "success: Build"
 expect "failure: Linux"
 expect "  test a::c"
-expect "  lua lua/tests/third.lua: lua/tests/third.lua:7: the count is off"
+expect "  lua lua/tests/third.lua: /work/repo/lua/tests/third.lua:7: the count is off"
 expect "failure: Lint"
 expect "  step: Run lint"
 expect "cancelled: Windows"

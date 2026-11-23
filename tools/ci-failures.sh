@@ -10,8 +10,9 @@
 # output of tools/luatest.sh, which prints `--- lua/tests/NAME.lua` before each
 # script and stops at the first failure. A Lua failure has two shapes: a
 # `lua: FILE:LINE: MESSAGE` error, and a bare `lua/tests/NAME.lua:LINE: MESSAGE`
-# line from a script that exits with status 1. Both are reported under the last
-# script header.
+# line from a script that exits with status 1. Lua names the chunk by the path
+# it was given, which is absolute in tools/luatest.sh, and may cut it to
+# `...ests/NAME.lua`. Both shapes are reported under the last script header.
 #
 # Usage: sh tools/ci-failures.sh [--wait] RUN_ID_OR_BRANCH
 #        sh tools/ci-failures.sh --parse < LOG
@@ -49,11 +50,22 @@ parse() {
             in_list = 0
             next
         }
-        if (script != "" && index(line, script ":") == 1 &&
-            substr(line, length(script) + 2) ~ /^[0-9]+: /) {
-            emit("lua " script ": " line)
-            in_list = 0
-            next
+        # The chunk name is the script path as the run gave it: relative,
+        # absolute, or an absolute one Lua cut to "...TAIL".
+        if (script != "" && match(line, /:[0-9]+: /)) {
+            chunk = substr(line, 1, RSTART - 1)
+            sl = length(script)
+            cl = length(chunk)
+            hit = 0
+            if (chunk == script) hit = 1
+            else if (cl > sl && substr(chunk, cl - sl) == "/" script) hit = 1
+            else if (substr(chunk, 1, 3) == "..." && cl > 3 && cl - 3 <= sl &&
+                     substr(script, sl - (cl - 3) + 1) == substr(chunk, 4)) hit = 1
+            if (hit) {
+                emit("lua " script ": " line)
+                in_list = 0
+                next
+            }
         }
         if (line ~ /^test .* \.\.\. FAILED/) {
             name = line
