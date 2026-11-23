@@ -8,7 +8,10 @@
 #
 # Reads libtest output (`test NAME ... FAILED` and the `failures:` list) and the
 # output of tools/luatest.sh, which prints `--- lua/tests/NAME.lua` before each
-# script and stops at the first Lua error (`lua: FILE:LINE: MESSAGE`).
+# script and stops at the first failure. A Lua failure has two shapes: a
+# `lua: FILE:LINE: MESSAGE` error, and a bare `lua/tests/NAME.lua:LINE: MESSAGE`
+# line from a script that exits with status 1. Both are reported under the last
+# script header.
 #
 # Usage: sh tools/ci-failures.sh [--wait] RUN_ID_OR_BRANCH
 #        sh tools/ci-failures.sh --parse < LOG
@@ -16,6 +19,13 @@
 #   --parse  print the failures found in a log on stdin; no network
 #
 # A branch names its latest run of the workflow called CI.
+#
+# Exit status:
+#   0  every job succeeded or was skipped
+#   1  a job failed, timed out, was canceled or did not start (also when
+#      --wait saw the run fail); wins over 3
+#   2  usage error, or a gh call failed
+#   3  no job failed, and a job is still running
 # POSIX sh. Needs gh, which mise.toml pins.
 set -eu
 
@@ -36,6 +46,12 @@ parse() {
         if (line ~ /^--- .*\.lua$/) { script = substr(line, 5); in_list = 0; next }
         if (line ~ /^lua: /) {
             emit("lua " (script == "" ? "?" : script) ": " substr(line, 6))
+            in_list = 0
+            next
+        }
+        if (script != "" && index(line, script ":") == 1 &&
+            substr(line, length(script) + 2) ~ /^[0-9]+: /) {
+            emit("lua " script ": " line)
             in_list = 0
             next
         }
@@ -78,44 +94,73 @@ TARGET=$1
 
 command -v gh >/dev/null 2>&1 || die "no gh on PATH. Run: mise exec -- sh tools/ci-failures.sh ..."
 
-REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
+ERRFILE=$(mktemp)
+trap 'rm -f "$ERRFILE"' EXIT INT TERM
+
+# gh with its stderr kept in $ERRFILE, apart from its output.
+ghq() {
+    gh "$@" 2>"$ERRFILE"
+}
+
+# The first line of what gh printed on stderr.
+gherr() {
+    sed -n 1p "$ERRFILE"
+}
+
+REPO=$(ghq repo view --json nameWithOwner --jq .nameWithOwner) ||
+    die "gh repo view: $(gherr)"
 
 case $TARGET in
     *[!0-9]*)
-        RUN=$(gh run list --repo "$REPO" --branch "$TARGET" --workflow CI --limit 1 \
-            --json databaseId --jq '.[0].databaseId // empty')
+        RUN=$(ghq run list --repo "$REPO" --branch "$TARGET" --workflow CI --limit 1 \
+            --json databaseId --jq '.[0].databaseId // empty') ||
+            die "gh run list: $(gherr)"
         [ -n "$RUN" ] || die "no CI run on branch $TARGET"
         ;;
     *) RUN=$TARGET ;;
 esac
 
+WATCH=0
 if [ "$WAIT" -eq 1 ]; then
-    # The exit status says whether the run passed; the jobs below say why.
-    gh run watch "$RUN" --repo "$REPO" --exit-status --compact >&2 || true
+    # The jobs below say why a run failed; the status says that it did.
+    ghq run watch "$RUN" --repo "$REPO" --exit-status --compact >&2 || WATCH=$?
 fi
 
 printf 'run %s on %s\n' "$RUN" "$REPO"
 
 # One row per job: ID, conclusion ("running" while it has none), name.
-JOBS=$(gh api "repos/$REPO/actions/runs/$RUN/jobs" --paginate \
-    --jq '.jobs[] | [.id, (.conclusion // "running"), .name] | @tsv')
+JOBS=$(ghq api "repos/$REPO/actions/runs/$RUN/jobs" --paginate \
+    --jq '.jobs[] | [.id, (.conclusion // "running"), .name] | @tsv') ||
+    die "gh api runs/$RUN/jobs: $(gherr)"
 [ -n "$JOBS" ] || die "run $RUN has no jobs"
 
 TAB=$(printf '\t')
 FAILED=0
+RUNNING=0
 while IFS=$TAB read -r id conclusion name; do
     printf '%s: %s\n' "$conclusion" "$name"
-    case $conclusion in failure | timed_out) ;; *) continue ;; esac
+    case $conclusion in
+        success | skipped) continue ;;
+        running)
+            RUNNING=1
+            continue
+            ;;
+    esac
     FAILED=1
 
-    log=$(gh api --allow-escape-sequences "repos/$REPO/actions/jobs/$id/logs" 2>&1) ||
+    note=
+    log=$(ghq api --allow-escape-sequences "repos/$REPO/actions/jobs/$id/logs") || {
+        note="log unavailable: $(gherr)"
         log=
+    }
+    [ -z "$note" ] || printf '  %s\n' "$note"
     found=$(printf '%s\n' "$log" | parse)
     if [ -n "$found" ]; then
         printf '%s\n' "$found" | sed 's/^/  /'
     else
-        steps=$(gh api "repos/$REPO/actions/jobs/$id" \
-            --jq '.steps[] | select(.conclusion == "failure" or .conclusion == "timed_out") | .name')
+        steps=$(ghq api "repos/$REPO/actions/jobs/$id" \
+            --jq '.steps[] | select(.conclusion != null and .conclusion != "success" and .conclusion != "skipped") | .name') ||
+            die "gh api jobs/$id: $(gherr)"
         if [ -n "$steps" ]; then
             printf '%s\n' "$steps" | sed 's/^/  step: /'
         else
@@ -126,5 +171,7 @@ done <<EOF2
 $JOBS
 EOF2
 
-[ "$FAILED" -eq 1 ] && exit 1
+[ "$FAILED" -eq 0 ] || exit 1
+[ "$WATCH" -eq 0 ] || exit 1
+[ "$RUNNING" -eq 0 ] || exit 3
 exit 0
