@@ -43,9 +43,14 @@ async fn hello_campaign_in_process() {
     let s = nanoprobe_hello::run_on(channel, None, LIMIT)
         .await
         .expect("hello campaign");
-    assert_eq!(
-        s.states,
-        vec![pb::EntityState::Materializing, pb::EntityState::Live]
+    // The hello records the states its watch sees, from the revision it
+    // listed. On a loaded runner the group can be Live before that list, so
+    // Materializing is allowed to be missing; nothing else may appear.
+    let seen = [pb::EntityState::Materializing, pb::EntityState::Live];
+    assert!(
+        s.states == seen || s.states == seen[1..],
+        "states {:?}",
+        s.states
     );
 }
 

@@ -202,6 +202,13 @@ where
     .unwrap_or_else(|_| panic!("timed out: {what}"));
 }
 
+/// The time, in Unix milliseconds, the hub stamps an event with now.
+fn stamp_ms(server: &Running) -> u64 {
+    let w = server.hub.lock().link.stamp().wall.expect("wall time");
+    u64::try_from(w.seconds).expect("seconds") * 1000
+        + u64::try_from(w.nanos / 1_000_000).expect("millis")
+}
+
 /// Publish `n` events to the active campaign's log.
 fn publish(hub: &nanoprobe_api::hub::Hub, n: u32) {
     let mut g = hub.lock();
@@ -569,8 +576,17 @@ async fn compaction_at_open_keeps_the_newest_event_and_ids_skip_unreadable_folde
     let l = lease(&ch).await;
     let a = create(&ch, &l, "a", true).await;
     publish(&server.hub, 2);
-    // Retention counts back from the newest event's time.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Retention counts back from the newest event's time. An event is
+    // stamped with the agent's time at the last frame the driver read, so a
+    // sleep alone can leave all three with one stamp on a loaded runner. The
+    // test waits until the stamp is 100 ms on, five times the 20 ms
+    // retention set below.
+    let first = stamp_ms(&server);
+    eventually("the agent's time moves past the retention", || {
+        let ahead = stamp_ms(&server) > first + 100;
+        async move { ahead }
+    })
+    .await;
     publish(&server.hub, 1);
     // Suspend, so no event arrives between the stop and the next start.
     CampaignServiceClient::new(ch.clone())
@@ -583,6 +599,7 @@ async fn compaction_at_open_keeps_the_newest_event_and_ids_skip_unreadable_folde
         .expect("suspend");
     let before = read_events(&ch, a, 0).await.expect("read");
     let newest = *before.last().expect("events");
+    let newest_ms = stamp_ms(&server);
     server.stop().await.expect("stop");
 
     // A folder that cannot be read, numbered past any time this test sees.
@@ -590,7 +607,12 @@ async fn compaction_at_open_keeps_the_newest_event_and_ids_skip_unreadable_folde
     std::fs::create_dir_all(d.path().join(far.0.to_string())).expect("dir");
     std::fs::write(store_path(d.path(), far.0), b"not a database").expect("garbage");
 
-    tokio::time::sleep(Duration::from_millis(5)).await;
+    // A clock behind the newest event skips the time limit; wait it out.
+    eventually("the wall clock passes the newest event", || {
+        let past = nanoprobe_api::hub::wall_ms() > newest_ms;
+        async move { past }
+    })
+    .await;
     let mut c = cfg(d.path());
     c.event_retention = Duration::from_millis(20);
     let server = start(c, fake_config()).await.expect("restart");
