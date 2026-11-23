@@ -207,6 +207,8 @@ run = [
   "sh tools/secretscan-test.sh",
   # The tag and notes checks .github/workflows/release.yml runs before it builds a tag.
   "sh tools/release-check-test.sh",
+  # The log parser of tools/ci-failures.sh, on written samples.
+  "sh tools/ci-failures-test.sh",
   "actionlint",
 ]
 
