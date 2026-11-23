@@ -5404,6 +5404,66 @@ pub struct PutGroupFromTemplateResponse {
     pub revision: u64,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PutFromStaticTemplateRequest {
+    #[prost(message, optional, tag = "1")]
+    pub write: ::core::option::Option<Write>,
+    /// The static template file, as the sidecar opens it: an absolute path to
+    /// a file in a folder that `\[missions\] template_dirs` lists
+    /// (spec/config.md).
+    #[prost(string, tag = "2")]
+    pub path: ::prost::alloc::string::String,
+    /// Where the layout's origin goes, on this position's theater and at its
+    /// altitude. The origin is the center of the box that bounds every unit's
+    /// and static's place in the file. Absent places every entity where the
+    /// file has it, on the file's `theatre`, which must be the campaign's.
+    #[prost(message, optional, tag = "3")]
+    pub anchor: ::core::option::Option<Position>,
+    /// Radians, clockwise from north. Turns the layout about its origin and is
+    /// added to each unit's and static's heading. 0 keeps the file's layout.
+    #[prost(double, tag = "4")]
+    pub heading: f64,
+    /// The DCS country number of every entity. Absent keeps each entity's
+    /// country in the file.
+    #[prost(uint32, optional, tag = "5")]
+    pub country: ::core::option::Option<u32>,
+    /// Prefixed to each entity's label: `<label>/<name>`, with the name the
+    /// file gives its group. Empty gives each entity the file's name alone.
+    #[prost(string, tag = "6")]
+    pub label: ::prost::alloc::string::String,
+}
+/// A group the call made.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StaticTemplateGroup {
+    #[prost(uint64, tag = "1")]
+    pub group_id: u64,
+    /// In the file's unit order.
+    #[prost(uint64, repeated, tag = "2")]
+    pub unit_ids: ::prost::alloc::vec::Vec<u64>,
+    #[prost(uint64, tag = "3")]
+    pub spec_revision: u64,
+}
+/// A static the call made.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StaticTemplateStatic {
+    #[prost(uint64, tag = "1")]
+    pub static_id: u64,
+    #[prost(uint64, tag = "2")]
+    pub spec_revision: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PutFromStaticTemplateResponse {
+    /// The vehicle groups in the order of the file's text, across its
+    /// coalitions and countries.
+    #[prost(message, repeated, tag = "1")]
+    pub groups: ::prost::alloc::vec::Vec<StaticTemplateGroup>,
+    /// The statics in the order of the file's text, likewise.
+    #[prost(message, repeated, tag = "2")]
+    pub statics: ::prost::alloc::vec::Vec<StaticTemplateStatic>,
+    /// The store revision of the one commit.
+    #[prost(uint64, tag = "3")]
+    pub revision: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PutStaticRequest {
     #[prost(message, optional, tag = "1")]
     pub write: ::core::option::Option<Write>,
@@ -6124,6 +6184,42 @@ pub mod commands_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Create every vehicle group and static of a DCS static template (a
+        /// `.stm` file of the Mission Editor) the administrator provides, in one
+        /// store commit or not at all. The sidecar reads the file once and keeps
+        /// the converted specs; nothing reads the file again. Each entity is then
+        /// an ordinary group or static: give a group its orders with SetOrder.
+        /// One commit is not one DCS spawn: the entities spawn at the pace of
+        /// every materialization, and each shows a failure in its own last error.
+        pub async fn put_from_static_template(
+            &mut self,
+            request: impl tonic::IntoRequest<super::PutFromStaticTemplateRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::PutFromStaticTemplateResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nanoprobe.v1alpha1.CommandsService/PutFromStaticTemplate",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "nanoprobe.v1alpha1.CommandsService",
+                        "PutFromStaticTemplate",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn put_static(
             &mut self,
             request: impl tonic::IntoRequest<super::PutStaticRequest>,
@@ -6583,6 +6679,20 @@ pub mod commands_service_server {
             tonic::Response<super::PutGroupFromTemplateResponse>,
             tonic::Status,
         >;
+        /// Create every vehicle group and static of a DCS static template (a
+        /// `.stm` file of the Mission Editor) the administrator provides, in one
+        /// store commit or not at all. The sidecar reads the file once and keeps
+        /// the converted specs; nothing reads the file again. Each entity is then
+        /// an ordinary group or static: give a group its orders with SetOrder.
+        /// One commit is not one DCS spawn: the entities spawn at the pace of
+        /// every materialization, and each shows a failure in its own last error.
+        async fn put_from_static_template(
+            &self,
+            request: tonic::Request<super::PutFromStaticTemplateRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::PutFromStaticTemplateResponse>,
+            tonic::Status,
+        >;
         async fn put_static(
             &self,
             request: tonic::Request<super::PutStaticRequest>,
@@ -6858,6 +6968,55 @@ pub mod commands_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = PutGroupFromTemplateSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/nanoprobe.v1alpha1.CommandsService/PutFromStaticTemplate" => {
+                    #[allow(non_camel_case_types)]
+                    struct PutFromStaticTemplateSvc<T: CommandsService>(pub Arc<T>);
+                    impl<
+                        T: CommandsService,
+                    > tonic::server::UnaryService<super::PutFromStaticTemplateRequest>
+                    for PutFromStaticTemplateSvc<T> {
+                        type Response = super::PutFromStaticTemplateResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::PutFromStaticTemplateRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as CommandsService>::put_from_static_template(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = PutFromStaticTemplateSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

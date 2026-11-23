@@ -3428,6 +3428,7 @@ mod tests {
     use super::*;
 
     mod group_template;
+    mod static_template;
 
     /// The committed Caucasus template.
     const TEMPLATE: &[u8] = include_bytes!("../../../tests/fixtures/templates/caucasus.miz");

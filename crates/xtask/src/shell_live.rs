@@ -50,6 +50,7 @@ use tonic::transport::{Channel, Endpoint};
 use crate::install::Profile as _;
 use crate::sampling::live::Run;
 
+pub mod static_template;
 pub mod template;
 
 /// The two committed templates.
@@ -271,10 +272,10 @@ impl Api {
             .map_err(status_text("ListWorld"))?
         {
             for e in page.entities {
-                if let Some(entity::Kind::Group(g)) = e.kind
-                    && g.id == group
-                {
-                    found = Some(g.state);
+                match e.kind {
+                    Some(entity::Kind::Group(g)) if g.id == group => found = Some(g.state),
+                    Some(entity::Kind::Static(g)) if g.id == group => found = Some(g.state),
+                    _ => {}
                 }
             }
         }

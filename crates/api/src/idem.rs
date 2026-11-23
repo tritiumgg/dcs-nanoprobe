@@ -102,6 +102,7 @@ const METHODS: &[&str] = &[
     "Materialize",
     "MovePlayer",
     "PutDrawing",
+    "PutFromStaticTemplate",
     "PutGroup",
     "PutGroupFromTemplate",
     "PutMark",
