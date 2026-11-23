@@ -43,9 +43,19 @@ async fn hello_campaign_in_process() {
     let s = nanoprobe_hello::run_on(channel, None, LIMIT)
         .await
         .expect("hello campaign");
-    assert_eq!(
-        s.states,
-        vec![pb::EntityState::Materializing, pb::EntityState::Live]
+    // The hello records the group's state at its listed revision, then each
+    // change its watch sees. How far the group got before the list depends on
+    // the runner's load, so the states are any tail of the full path that
+    // ends Live.
+    let path = [
+        pb::EntityState::Virtual,
+        pb::EntityState::Materializing,
+        pb::EntityState::Live,
+    ];
+    assert!(
+        (0..path.len()).any(|i| s.states == path[i..]),
+        "states {:?}",
+        s.states
     );
 }
 

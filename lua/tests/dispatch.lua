@@ -3103,8 +3103,12 @@ scenario('extension-budget', SHIM, function(ctx)
     }
   ]]
   local fast = "local n = 0 return { on_event = function() n = n + 1 end, on_frame = function() n = n + 1000 end }"
+  -- The invoke that ends the play waits for 200 frames after the burst, not
+  -- for wall time: a loaded machine runs few frames in a fixed wait. The 20
+  -- queued calls need 20 frames at one call a frame; 200 leaves ten times that.
   local frames_at_burst, early
-  play(ctx, { ext_set('a', 1, slow), ext_set('b', 1, slow), ext_invoke('a', 400) }, function(n)
+  local drained = ctx.profile .. 'drained'
+  play(ctx, { ext_set('a', 1, slow), ext_set('b', 1, slow), ext_invoke('a', 0, drained) }, function(n)
     if shim.extensions.a and shim.extensions.b and not frames_at_burst then
       frames_at_burst = n
       for i = 1, 10 do
@@ -3113,6 +3117,8 @@ scenario('extension-budget', SHIM, function(ctx)
     elseif frames_at_burst and n == frames_at_burst + 5 then
       -- Five frames after the burst: one call a frame at most, 20 queued.
       early = { shim.extensions.a.calls, shim.extensions.b.calls }
+    elseif frames_at_burst and n == frames_at_burst + 200 then
+      S.write(drained, '')
     end
   end, 'slow extensions')
   local a, b = shim.extensions.a, shim.extensions.b

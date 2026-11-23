@@ -209,8 +209,11 @@ local function main()
   local stray = add('np-ld-stray', 41200, 'Stray')
 
   -- (a, b) The player's birth writes one AMMO record with cause 1; the AI
-  -- unit's birth writes none.
-  assert(run(20, function()
+  -- unit's birth writes none. The waits for a record end on the record; their
+  -- 120 s only stops a hang. The agent spends a small share of each frame, and
+  -- on a loaded runner one pass of its enumeration took 18 s
+  -- (`enumeration_s` in its sampling log).
+  assert(run(120, function()
     return count(pilot.id) >= 1
   end), 'no AMMO record for the player unit after its birth')
   -- Let the AI unit's birth resolve too, and every later pump run.
@@ -237,7 +240,7 @@ local function main()
   -- (c) The takeoffs: one more record for the player, none for the AI unit.
   sim:takeoff(pilot)
   sim:takeoff(ai)
-  assert(run(20, function()
+  assert(run(120, function()
     return count(pilot.id) >= 2
   end), 'no AMMO record for the player unit after its takeoff')
   run(3)

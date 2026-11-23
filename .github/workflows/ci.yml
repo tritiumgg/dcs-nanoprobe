@@ -1,13 +1,13 @@
-# Build, lint and host tests on Linux, macOS and Windows, and the agent DLL
-# cross-built on Linux and macOS and built natively on Windows. The Windows
-# build checks that the code builds and passes its checks there; no file it
-# makes is released. The release's files are built on a Linux runner by
-# release.yml.
+# Build, lint and host tests on Linux and Windows, and the agent DLL
+# cross-built on Linux and built natively on Windows. The Windows build checks
+# that the code builds and passes its checks there; no file it makes is
+# released. The release's files are built on a Linux runner by release.yml.
+# CI does not run macOS; `mise run check` on a macOS host checks it.
 #
-# On Linux and macOS, CI runs `mise run check` itself, so the two cannot list
-# different checks. Every tool comes from mise.toml through mise-action, so CI
-# runs the versions a developer runs. Actions are pinned to commit SHAs; the
-# comment names the tag.
+# On Linux, CI runs `mise run check` itself, so the two cannot list different
+# checks. Every tool comes from mise.toml through mise-action, so CI runs the
+# versions a developer runs. Actions are pinned to commit SHAs; the comment
+# names the tag.
 
 name: CI
 
@@ -47,16 +47,14 @@ jobs:
         include:
           - name: Linux
             os: ubuntu-latest
-          - name: macOS
-            os: macos-latest
     env:
       # tools/protobreak.sh compares the schema at its merge base with this
       # commit: the base of a pull request, or the commit before a push. Empty
       # on a manual run, where the script picks origin/main.
       PROTOBREAK_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
     steps:
-      # One cargo-xwin cache path on both systems, so one cache step serves
-      # both. The home folder is known only on the runner.
+      # The cargo-xwin cache path. The home folder is known only on the
+      # runner.
       - name: Name the cargo-xwin cache
         run: printf 'XWIN_CACHE_DIR=%s/.cache/cargo-xwin-ci\n' "$HOME" >>"$GITHUB_ENV"
 
@@ -114,7 +112,7 @@ jobs:
         run: gitleaks git --redact --no-banner .
 
   # The Rust builds and tests of `mise run check`, and the DLL's checks. The
-  # rest of the check task runs on Linux and macOS only: tools/tmpleak.sh needs
+  # rest of the check task runs on Linux only: tools/tmpleak.sh needs
   # pgrep, the host Lua 5.1 is built with make, the hello campaigns' scripts
   # manage processes with pkill, and the schema, secret-hook, release-script
   # and workflow lints check files that are the same on every system.

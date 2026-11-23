@@ -134,7 +134,10 @@ local function main()
     end
     return list
   end
-  assert(run(30, function()
+  -- The waits for OBJECT records end on the records; their 120 s only stops
+  -- a hang. A loaded runner gives the agent's small share of each frame few
+  -- frames, and 30 s was not enough there.
+  assert(run(120, function()
     return #got() >= #want
   end), 'only ' .. #got() .. ' of ' .. #want .. ' births have an OBJECT record')
   local list = got()
@@ -178,7 +181,7 @@ local function main()
   -- that has its row wrote no second OBJECT.
   local before = #want
   wave('c')
-  assert(run(30, function()
+  assert(run(120, function()
     return #got() >= #want
   end), 'only ' .. #got() .. ' of ' .. #want .. ' births have an OBJECT record after the queue emptied')
   list = got()
