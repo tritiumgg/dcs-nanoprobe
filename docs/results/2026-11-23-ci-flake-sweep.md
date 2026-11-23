@@ -7,8 +7,8 @@
 | DCS | None. Every test here runs on the host against the fake agent or the fake sim |
 | Platform | GitHub `ubuntu-latest` and `windows-latest` runners; host check on macOS 26.6.2, arm64 |
 | Script | `.github/workflows/ci.yml`, started by hand with `gh workflow run CI --ref <branch>` |
-| Code | `f82642b`, the last code change; the commit that adds this document changes only this document |
-| Result | Six tests failed by timing on the runners or under load on the host; all are fixed in test code (and in the Rust hello example), none in the product. The last code commit passed two consecutive CI runs on Linux and Windows. The exit test asks for three; the step's cap of 12 runs ran out first |
+| Code | `73dd99e`, this branch's fixes (last one `f82642b`) merged with main at `b36cb76`; the commit after it changes only this document |
+| Result | Six tests failed by timing on the runners or under load on the host; all are fixed in test code (and in the Rust hello example), none in the product. Three consecutive CI runs on `73dd99e` passed on Linux and Windows (45170990880, 45176319046, 45180794833) |
 
 ## Flakes fixed
 
@@ -46,11 +46,13 @@ Each run is the whole CI workflow on Linux and Windows, started by hand.
 | 45157825891 | `05805eb` | `births.lua` | pass |
 | 45161245631 | `f82642b` | pass | pass |
 | 45166181570 | `f82642b` | pass | pass |
+| 45170990880 | `73dd99e` (main merged in) | pass | pass |
+| 45176319046 | `73dd99e` | pass | pass |
+| 45180794833 | `73dd99e` | pass | pass |
 
-`mise run check` and `mise run dll` pass on the host on `f82642b`.
+`mise run check` and `mise run dll` pass on the host on `73dd99e`.
 
 ## Open items
 
-- The exit test's third consecutive green run on one commit is missing: the cap of 12 runs ran out with two on `f82642b`. Each fix needed a new commit, and runs 6, 9 and 10 each found a new flake.
 - Other Lua tests wait on wall-clock deadlines of 30 s or less in the way `loadout.lua` and `births.lua` did (`faults.lua`, `link.lua`, `sampling.lua`, `samplingcheck.lua`). Some of those deadlines check the project's timing targets and must stay; the others are candidates for a hang limit if they fail.
 - The Python and Kotlin hellos (`examples/hello-python/hello.py`, `examples/hello-kotlin/src/main/kotlin/Hello.kt`) list and watch the same way the Rust hello did: a group already Live at the list leaves them waiting until their limit. Their checks run in `mise run check`, so in CI on Linux; no run failed on it.
