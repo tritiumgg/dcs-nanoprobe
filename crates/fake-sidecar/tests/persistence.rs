@@ -438,6 +438,10 @@ async fn the_timers_take_checkpoints_and_backups_and_keep_backup_keep() {
         sf.backup_interval = Duration::from_millis(150);
         sf.backup_keep = 2;
     }
+    // The test holds one lease and never renews it. On a slow runner it
+    // reached the manual backup after the 30 s default had run out, so the
+    // lease lasts ten minutes here; each wait below has its own limit.
+    c.lease_ttl = Duration::from_secs(600);
     // The timers write into `d` for as long as the server runs, so the
     // server stops before `d` goes, pass or fail: a folder removed under a
     // checkpoint or a backup worker stays behind, half full.
