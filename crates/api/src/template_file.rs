@@ -1,4 +1,5 @@
-//! The file a `SetCampaignTemplate` or a `PutGroupFromTemplate` names
+//! The file a `SetCampaignTemplate`, a `PutGroupFromTemplate` or a
+//! `PutFromStaticTemplate` names
 //! (spec/config.md, `[missions] template_dirs`): resolved, held to the
 //! listed folders, and read once. What the call keeps is made from the
 //! bytes read; nothing reads the path again.

@@ -1634,6 +1634,12 @@ impl Store {
         }
     }
 
+    /// How many entity IDs are left to allocate. A call that makes several
+    /// entities checks this before the first, so it makes all or none.
+    pub fn ids_left(&self) -> u64 {
+        (MAX_ID + 1).saturating_sub(self.next_entity)
+    }
+
     fn allocate(&mut self) -> Result<EntityId, StoreError> {
         if self.next_entity > MAX_ID {
             return Err(StoreError::Exhausted);

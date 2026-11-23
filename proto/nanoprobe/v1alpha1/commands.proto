@@ -20,6 +20,14 @@ service CommandsService {
   // reads the file once and keeps the converted spec; nothing reads the file
   // again. The group is changed afterwards with PutGroup.
   rpc PutGroupFromTemplate(PutGroupFromTemplateRequest) returns (PutGroupFromTemplateResponse);
+  // Create every vehicle group and static of a DCS static template (a
+  // `.stm` file of the Mission Editor) the administrator provides, in one
+  // store commit or not at all. The sidecar reads the file once and keeps
+  // the converted specs; nothing reads the file again. Each entity is then
+  // an ordinary group or static: give a group its orders with SetOrder.
+  // One commit is not one DCS spawn: the entities spawn at the pace of
+  // every materialization, and each shows a failure in its own last error.
+  rpc PutFromStaticTemplate(PutFromStaticTemplateRequest) returns (PutFromStaticTemplateResponse);
   rpc PutStatic(PutStaticRequest) returns (PutStaticResponse);
   rpc SetOrder(SetOrderRequest) returns (SetOrderResponse);
   rpc SetOptions(SetOptionsRequest) returns (SetOptionsResponse);
@@ -185,6 +193,52 @@ message PutGroupFromTemplateResponse {
   uint64 spec_revision = 3;
   // The store revision of the change.
   uint64 revision = 4;
+}
+
+message PutFromStaticTemplateRequest {
+  Write write = 1;
+  // The static template file, as the sidecar opens it: an absolute path to
+  // a file in a folder that `[missions] template_dirs` lists
+  // (spec/config.md).
+  string path = 2;
+  // Where the layout's origin goes, on this position's theater and at its
+  // altitude. The origin is the center of the box that bounds every unit's
+  // and static's place in the file. Absent places every entity where the
+  // file has it, on the file's `theatre`, which must be the campaign's.
+  Position anchor = 3;
+  // Radians, clockwise from north. Turns the layout about its origin and is
+  // added to each unit's and static's heading. 0 keeps the file's layout.
+  double heading = 4;
+  // The DCS country number of every entity. Absent keeps each entity's
+  // country in the file.
+  optional uint32 country = 5;
+  // Prefixed to each entity's label: `<label>/<name>`, with the name the
+  // file gives its group. Empty gives each entity the file's name alone.
+  string label = 6;
+}
+
+// A group the call made.
+message StaticTemplateGroup {
+  uint64 group_id = 1;
+  // In the file's unit order.
+  repeated uint64 unit_ids = 2;
+  uint64 spec_revision = 3;
+}
+
+// A static the call made.
+message StaticTemplateStatic {
+  uint64 static_id = 1;
+  uint64 spec_revision = 2;
+}
+
+message PutFromStaticTemplateResponse {
+  // The vehicle groups in the order of the file's text, across its
+  // coalitions and countries.
+  repeated StaticTemplateGroup groups = 1;
+  // The statics in the order of the file's text, likewise.
+  repeated StaticTemplateStatic statics = 2;
+  // The store revision of the one commit.
+  uint64 revision = 3;
 }
 
 message PutStaticRequest {

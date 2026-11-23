@@ -85,6 +85,38 @@ The file is read as data and never run. A file over 1 MiB, or one that holds any
 but the one `templates = {...}` table of plain values, is refused
 (spec/world.md, "Group templates").
 
+## Static templates
+
+The Mission Editor saves the objects of the open mission as a static template, a
+`.stm` file in `StaticTemplate/` of the Saved Games profile. DCS ships its own in
+`MissionEditor/data/scripts/StaticTemplate/` in its install (ED-CODE,
+docs/results/2026-11-23-static-templates.md). A static template holds absolute places
+on one map, and the editor loads it where it was saved.
+
+A controller makes every ground group and static of one with `PutFromStaticTemplate`:
+
+1. The administrator copies the file into a folder that `[missions] template_dirs`
+   lists. Nothing in the DCS install is changed.
+2. The controller names the file's path as the sidecar opens it.
+3. Without an anchor, every object goes where the file has it, on the file's map, which
+   must be the campaign's. With an anchor, the center of the layout goes to the
+   anchor, on its map.
+4. Optionally it gives a heading, which turns the whole layout about its center; a
+   country, which replaces the file's countries; and a label, which is put in front of
+   each object's name from the file.
+
+The call makes all of the file's objects or none. The answer lists the groups, each
+with its units, and the statics, in the order the file holds them. The sidecar keeps
+what it made; the file can be changed, moved or deleted after the call. Give a group
+its orders afterwards with `SetOrder`: the routes and tasks in the file are not used.
+
+Only ground groups and statics are built. A file that holds planes, helicopters, ships,
+a complex, a static linked to a unit, a heliport or a grass airfield is refused whole.
+While the mission runs, the objects spawn on DCS at the platform's usual pace, by
+default one at a time. While it is paused, they spawn together in the restore burst
+(spec/persistence.md, "Restore burst"). Each shows its own error if DCS refuses it
+(spec/world.md, "Static templates").
+
 ## Check the templates
 
 `nanoprobe doctor` checks every `<theater>.miz` in the mission folder. It fails when the

@@ -21,5 +21,6 @@ pub mod real;
 pub mod server;
 pub mod services;
 pub mod sidecar_toml;
+pub mod static_template;
 pub mod template_file;
 pub mod timings;

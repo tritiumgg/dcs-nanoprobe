@@ -773,6 +773,75 @@ UNVERIFIED. A `payload` is dropped as any other key.
 A country the loaded mission does not hold, or a unit type DCS does not have, is DCS's
 refusal: it shows as the group's last error, as with `PutGroup`.
 
+## Static templates
+
+`PutFromStaticTemplate` makes every vehicle group and static of a static template of the
+DCS Mission Editor, a `.stm` file, in one store commit or none. The editor saves the
+objects of the mission it has open as one assignment `staticTemplate = {...}` of literal
+values, in `StaticTemplate/<name>.stm` of the Saved Games profile; DCS ships 23 in
+`MissionEditor/data/scripts/StaticTemplate/` (ED-CODE,
+docs/results/2026-11-23-static-templates.md). The file is the mission's own tree:
+`coalition`, then each coalition's `country` list, each country's DCS number `id` and
+its kinds (`vehicle`, `static`, `ship`, `plane`, `helicopter`, `complex`), each kind's
+`group` list. Every place is an absolute mission `x` and `y` on the file's `theatre`.
+The editor loads a static template where it was saved, with no anchor and no turn
+(ED-CODE).
+
+The file is named, read once and kept as `PutGroupFromTemplate` names, reads and keeps
+its file ("Group templates"), by the same reader with the root `staticTemplate` and the
+same 1 MiB cap; the largest shipped file is 147,286 bytes (ED-CODE). The store keeps
+the converted specs alone. Each entity is then an ordinary group or static: a group's
+orders are set afterwards with `SetOrder`.
+
+The file's order is the order of its text: the answer lists the vehicle groups in the
+order they appear in the file, across its coalitions and countries, each with its unit
+IDs in the file's unit order, then the statics likewise. Each entry carries its spec
+revision, and `revision` is the store revision of the call's one commit.
+
+| In the file | In the specs |
+|---|---|
+| `theatre` | The theater of every entity when the request has no `anchor`. It must be present and be the campaign's theater. With an anchor it is not used |
+| `coalition.<c>.country[i].id` | The DCS country number of every entity under that country, unless the request gives `country`. One that is not a whole number from 0 to 4,294,967,295 refuses the file. The country's `name` is not used |
+| `vehicle.group[j]` | A ground group. Its `name` is its label; every other group key, `route`, `task`, `tasks`, timing and activation keys included, is dropped and named in the sidecar's standard error |
+| `vehicle.group[j].units[k]` | A unit: `type` its DCS type, `x` meters north, `y` meters east, `heading` radians, `skill` when it is text. `unitId` and `name` are not used; every other key is dropped and logged. The unit's label is empty |
+| `static.group[j].units[k]` | One static per unit: `type`, `x`, `y` and the unit's `heading` as for a vehicle unit; `category`, `shape_name`, `rate`, `mass`, `canCargo` and `livery_id` go to the static's further keys; the group's `dead = true` creates it destroyed ("Ruins"); its label is the group's `name`. Other keys are dropped and logged |
+| `ship`, `plane`, `helicopter`, `complex` | A file with any group of these kinds is refused whole |
+| A static with `linkOffset` true or a route point with `linkUnit` | Refused: the link to a unit is not built |
+| A static of category `Heliports` or `GrassAirfields`, or with a `heliport_` or `grassairfield_` key | Refused: such a static makes an airbase, which the world model has not seen |
+| `name`, `desc`, `localization`, `requiredModules`, `customFormations` | Not used |
+
+A coalition or country with two entries under one key, a list with two entries under
+one number, and a static value the store cannot encode refuse the file.
+
+The shipped files hold only vehicle groups (ED-CODE). The form of a static is taken
+from the editor's code that saves one, and is UNVERIFIED against a saved file. That the
+editor writes x as north and y as east follows from "Group templates": a unit table's
+`x` and `y` are the world's `x` and `z` (LIVE). Two units and two `Fortifications`
+statics made by this call stood on DCS within 15 µm of the places the file and the
+request give, in place and at an anchor with a quarter turn (LIVE, DCS 2.9.31.29434
+dedicated server under Wine 10.0, docs/results/2026-11-23-static-templates.md).
+
+The layout's origin is the center of the box that bounds every unit's and static's `x`
+and `y`. Without an `anchor` every entity stands where the file has it, at altitude 0.
+With one, the origin goes to the anchor: every entity keeps its offset from the origin,
+on the anchor's theater and at its altitude. Either way the request's `heading` turns
+the layout about the origin and is added to every unit's and static's heading, by the
+rotation and the remainder of "Group templates"; at 0 every heading is the file's own
+number, and without an anchor every place too. A non-empty `label` is prefixed to each
+entity's label as `<label>/<name>`.
+
+Every check of every entity runs before the first store write: the checks of `PutGroup`
+and `PutStatic` on each converted spec, the size of each spawn command, each value's
+encoding, and that the campaign has an entity ID left for every group, unit and static.
+A refusal makes no entity.
+
+One store commit is not one DCS spawn. The entities materialize as every entity does:
+outside the restore burst at most `materialize_per_frame` spawns are unanswered at a
+time (spec/config.md), and a campaign that is paused with more entities waiting than
+that spawns them in the restore burst (spec/persistence.md, "Restore burst"). Each
+entity can fail on its own in DCS, a country the mission does not hold or a type DCS
+does not have, and shows it in its own last error.
+
 ## Lua tables in the API
 
 The API carries DCS tables as JSON-like values (`google.protobuf.Struct`), whose keys

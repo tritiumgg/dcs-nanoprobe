@@ -176,8 +176,8 @@ A campaign's mission is written from a template you save in the Mission Editor, 
 map, in the mission folder. The project ships none.
 [mission-templates.md](mission-templates.md) explains how to save them and how a
 campaign uses its own. A controller may name a file by path, a campaign's own mission
-template or a group template file, only inside a folder listed in
-`[missions] template_dirs`, which is empty by default.
+template, a group template file or a static template file, only inside a folder
+listed in `[missions] template_dirs`, which is empty by default.
 
 ## 5. Check the whole setup
 
@@ -218,8 +218,8 @@ turn the agent back on.
 > deleted with it. The per-map templates (`<theater>.miz`) must be in the mission
 > folder: to keep them through an uninstall, make the mission folder (`[missions] dir`
 > and `dcs_dir`) a folder in the profile outside `nanoprobe/`, or copy them out first.
-> Keep a campaign's own templates and group template files in a folder outside the
-> profile, listed in the sidecar's `[missions] template_dirs`.
+> Keep a campaign's own templates and group and static template files in a folder
+> outside the profile, listed in the sidecar's `[missions] template_dirs`.
 
 Quit DCS, then double-click `uninstall.cmd` on Windows, or on Linux run:
 
