@@ -249,7 +249,12 @@ fn put(
 }
 
 /// Run the part; the result goes under `static_template`.
-pub fn drive(run: &Run, endpoint: &str, token: &str, results: &mut Value) -> Result<(), String> {
+pub fn drive(
+    run: &dyn Live,
+    endpoint: &str,
+    token: &str,
+    results: &mut Value,
+) -> Result<(), String> {
     let mut api = Api::connect(endpoint, token)?;
     let generation = api.status()?.now.map_or(0, |n| n.mission_generation);
 
@@ -281,12 +286,12 @@ pub fn drive(run: &Run, endpoint: &str, token: &str, results: &mut Value) -> Res
     }
 
     let on_profile = format!("{}/own/{FILE}", crate::sidecar::MISSIONS_DIR);
-    run.remote.write(&on_profile, file().as_bytes())?;
-    let path = format!("{TEMPLATE_DIR}/{FILE}");
+    run.profile().write(&on_profile, file().as_bytes())?;
+    let path = run.template_path(FILE);
     let out = steps(run, &mut api, c, &path);
     // The file goes whatever the steps did.
-    let removed = run.remote.remove_file(&on_profile);
-    let gone = run.remote.read(&on_profile).map(|f| f.is_none());
+    let removed = run.profile().remove_file(&on_profile);
+    let gone = run.profile().read(&on_profile).map(|f| f.is_none());
     let mut v = out?;
     removed?;
     v["surface"] = surface;
@@ -335,9 +340,9 @@ fn world(api: &mut Api, campaign: u64) -> Result<Value, String> {
     Ok(json!(out))
 }
 
-fn steps(run: &Run, api: &mut Api, c: u64, path: &str) -> Result<Value, String> {
+fn steps(run: &dyn Live, api: &mut Api, c: u64, path: &str) -> Result<Value, String> {
     println!("== static-template: a path outside the listed folder is refused");
-    let outside = put(api, c, "/etc/nanoprobe/sidecar.toml", None, 0.0);
+    let outside = put(api, c, &run.config_path(), None, 0.0);
     let refused = matches!(&outside, Err(s) if s.code() == tonic::Code::InvalidArgument
         && s.message().contains("is not a file in a folder"));
     let refusal = outside.err().map(|s| s.message().to_owned());
@@ -449,7 +454,7 @@ fn read_lua(names: &[Vec<String>]) -> String {
 /// Make the layout twice, wait for every entity to be live, and read every
 /// object from DCS. Every answer is in `made`, also when a later step fails.
 fn spawn_and_read(
-    run: &Run,
+    run: &dyn Live,
     api: &mut Api,
     c: u64,
     path: &str,
@@ -484,7 +489,7 @@ fn spawn_and_read(
 /// Remove every made entity and hold the simulation running until DCS has
 /// dropped them. Every removal is tried; the first error is given.
 fn remove(
-    run: &Run,
+    run: &dyn Live,
     api: &mut Api,
     c: u64,
     made: &[pb::PutFromStaticTemplateResponse],

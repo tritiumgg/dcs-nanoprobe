@@ -156,7 +156,12 @@ fn put(api: &mut Api, c: u64, spec: pb::GroupSpec) -> Result<pb::PutGroupRespons
 }
 
 /// Run the part; the result goes under `payload_preset`.
-pub fn drive(run: &Run, endpoint: &str, token: &str, results: &mut Value) -> Result<(), String> {
+pub fn drive(
+    run: &dyn Live,
+    endpoint: &str,
+    token: &str,
+    results: &mut Value,
+) -> Result<(), String> {
     let mut api = Api::connect(endpoint, token)?;
     let generation = api.status()?.now.map_or(0, |n| n.mission_generation);
 
@@ -165,12 +170,12 @@ pub fn drive(run: &Run, endpoint: &str, token: &str, results: &mut Value) -> Res
     loaded(run, &mut api, "Caucasus", generation)?;
 
     let on_profile = format!("{}/own/{FILE}", crate::sidecar::MISSIONS_DIR);
-    run.remote.write(&on_profile, file().as_bytes())?;
-    let path = format!("{TEMPLATE_DIR}/{FILE}");
+    run.profile().write(&on_profile, file().as_bytes())?;
+    let path = run.template_path(FILE);
     let out = steps(run, &mut api, c, &path);
     // The file goes whatever the steps did.
-    let removed = run.remote.remove_file(&on_profile);
-    let gone = run.remote.read(&on_profile).map(|f| f.is_none());
+    let removed = run.profile().remove_file(&on_profile);
+    let gone = run.profile().read(&on_profile).map(|f| f.is_none());
     let mut v = out?;
     removed?;
     v["file_removed"] = json!(gone?);
@@ -188,7 +193,7 @@ pub fn drive(run: &Run, endpoint: &str, token: &str, results: &mut Value) -> Res
     Ok(())
 }
 
-fn steps(run: &Run, api: &mut Api, c: u64, path: &str) -> Result<Value, String> {
+fn steps(run: &dyn Live, api: &mut Api, c: u64, path: &str) -> Result<Value, String> {
     let preset = || {
         Some(pb::PayloadPreset {
             path: path.to_owned(),
@@ -350,7 +355,7 @@ fn unbase64(s: &str) -> Option<Vec<u8>> {
 /// Make both groups, wait until they are live, then read them from DCS and
 /// the store. Every answer is in `made`, also when a later step fails.
 fn spawn_and_read(
-    run: &Run,
+    run: &dyn Live,
     api: &mut Api,
     c: u64,
     made: &mut Vec<pb::PutGroupResponse>,
@@ -420,7 +425,7 @@ fn verdict(seen: &Value, stored: &[Value]) -> Value {
 /// Remove both groups and hold the simulation running until DCS has
 /// dropped them. Every removal is tried; the first error is given.
 fn remove(
-    run: &Run,
+    run: &dyn Live,
     api: &mut Api,
     c: u64,
     made: &[pb::PutGroupResponse],

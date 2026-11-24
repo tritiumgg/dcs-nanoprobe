@@ -118,6 +118,76 @@ it. This run is the first read of a static spawned from a static template's form
 (LIVE). The form of a static in a file the editor saved stays UNVERIFIED: the run's file
 was written by the run, after the editor's code.
 
+## Live on Windows
+
+`cargo xtask sidecar <name> --part static-template` on a windows-ssh target
+(`crates/xtask/src/sidecar_windows.rs`, driving the same
+`crates/xtask/src/shell_live/static_template.rs`) on a DCS 2.9.31.29434 client on
+Windows, hosting a private session, 2026-11-24: agent build `59c32c8a9b1bb30f`, sidecar
+binary (`x86_64-pc-windows-msvc`) sha256
+`2e54ce242313e450185b24c5ed3d231f9113ee221f0e0c111ccd5a2e0bda227a`, tree
+`v0.1.0-20-g79e3310-dirty`: the merged sidecar code, with the Windows branch of the
+harness before review.
+
+The client has no dedicated server. The run refuses when DCS already runs, starts DCS
+through the profile's start task and hosts a private session with the shell mission.
+The sidecar is a Windows program in the profile's `nanoprobe/dev/sidecar/`, with a
+loopback listener and native paths in its `sidecar.toml`, held by an SSH session; the
+API is reached through an SSH local forward. The path outside the listed folder is
+that `sidecar.toml`. At the end the run stops the sidecar, closes DCS through the stop
+task, removes its folders, undeploys, and fails unless the profile's top folders list
+what they listed before.
+
+The rule is the Wine run's, with one item left out. On Windows the sidecar stops
+cleanly only on Ctrl-C, which a process in another SSH session cannot be sent, so the
+run ends it with `Stop-Process`; "the sidecar's exit code after a stop" is not part of
+the Windows verdict.
+
+| Call | Object | Asked: north, east, heading | Read from DCS: north, east, heading |
+|---|---|---|---|
+| In place | M-113 | -289,700, 680,050, 0 | -289,699.999999, 680,049.999999, 0 |
+| In place | M-113 | -289,690, 680,080, 1.0 | -289,689.999999, 680,079.999999, 1.0000000 |
+| In place | FARP Tent | -289,760, 680,020, 0.5 | -289,760, 680,020, 0.4999998 |
+| In place | FARP Fuel Depot | -289,730, 679,990, 0 | -289,730, 679,990, 0 |
+| Anchor, π/2 | M-113 | -289,440, 680,060, 1.5707963 | -289,439.999986, 680,059.999996, 1.5707964 |
+| Anchor, π/2 | M-113 | -289,470, 680,070, 2.5707963 | -289,469.999986, 680,069.999996, 2.5707963 |
+| Anchor, π/2 | FARP Tent | -289,410, 680,000, 2.0707963 | -289,410, 680,000, 2.0707963 |
+| Anchor, π/2 | FARP Fuel Depot | -289,380, 680,030, 1.5707963 | -289,380, 680,030, 1.5707963 |
+
+| Check | Result |
+|---|---|
+| Each object within 1 m of its place | Yes: within 15 µm, the same reads as on Wine. No object stood where exchanged axes would put it |
+| Type and country | As asked, all eight |
+| Heading within 0.1 rad, recorded and not part of the verdict | Yes, all eight |
+| Every entity answered and listed after its call | Yes: `[[1,1],[4,1],[5,1]]`, then those and `[6,1],[9,1],[10,1]`; store revisions 7 and 11 |
+| IDs in file order | Group 1 with units 2 and 3, statics 4 and 5; then group 6 with 7 and 8, statics 9 and 10 |
+| A path outside the listed folder, the sidecar's own `sidecar.toml` | Refused: `is not a file in a folder that [missions] template_dirs lists` |
+| The log | `made 1 groups and 2 statics`, the same unused keys as on Wine |
+| `land.getSurfaceType` at the eight places | 1 (land), all |
+| Everything removed, the file removed | Yes |
+| Profile after the run | The top folders as before; DCS closed |
+| Verdict | PASS (LIVE) |
+
+The table holds run 3's reads. Runs used: 3 of 3. Run 1 read eight objects at their
+places but failed on the harness. Its outside-path probe was the container's
+`/etc/nanoprobe/sidecar.toml`, which is not an absolute path on Windows. It also tried to
+remove the mission folder while DCS still held the loaded mission open, and that removal
+failed; the undeploy removed the folder after DCS closed. The harness of runs 2 and 3
+asks the target for the sidecar's own config path, and removes the folders after DCS
+closes. Run 2 stopped before the API: the hosted session did not start the shim within
+the harness's 300 s, where run 1's session had taken two minutes after the mission
+started. Run 3 waited up to 900 s, the limit the API parts give a mission load; load
+time has no fixed duration. Run 3 passed.
+
+**Changed after run 3, from the review.** The start script writes the sidecar's process
+ID and exit code to files and exits 0 (a process ended by `Stop-Process` exits with -1,
+which SSH reported as its own failure); the stop ends that process by its ID; the run
+refuses a profile that holds a `nanoprobe` folder or a client where a sidecar runs; the
+restore verdict is a function with a host test; the bundle records the harness's
+SHA-256. None changes a step or a read the verdict uses: the part's driver is unchanged,
+and the restore still requires every step and an unchanged listing. The payload-preset
+part's Windows run 3 ran the final harness end to end.
+
 ## Runs
 
 macOS (aarch64), the working tree of this commit, 2026-11-23.

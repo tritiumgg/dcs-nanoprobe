@@ -1175,7 +1175,7 @@ pub(crate) mod live;
 #[path = "sampling_positions.rs"]
 pub(crate) mod positions;
 #[path = "sampling_windows.rs"]
-mod win;
+pub(crate) mod win;
 
 #[cfg(test)]
 mod tests {

@@ -91,7 +91,7 @@ exit $p.ExitCode"#
 }
 
 /// Names under each of [`LISTED`], as the profile holds them.
-fn listings(windows: &Windows) -> Result<BTreeMap<String, Vec<String>>, String> {
+pub(crate) fn listings(windows: &Windows) -> Result<BTreeMap<String, Vec<String>>, String> {
     LISTED
         .iter()
         .map(|dir| Ok(((*dir).to_owned(), windows.list(dir)?)))
@@ -99,7 +99,7 @@ fn listings(windows: &Windows) -> Result<BTreeMap<String, Vec<String>>, String> 
 }
 
 /// What `after` holds that `before` did not, and the reverse, one line each.
-fn listing_diff(
+pub(crate) fn listing_diff(
     before: &BTreeMap<String, Vec<String>>,
     after: &BTreeMap<String, Vec<String>>,
 ) -> Vec<String> {
