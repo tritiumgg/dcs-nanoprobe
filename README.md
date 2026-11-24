@@ -24,7 +24,7 @@ leaves alpha.
 | Service | Calls |
 |---|---|
 | Campaign | create, activate, suspend, finish, back up, export and delete campaigns; give a campaign its own mission template |
-| Commands | put groups and statics, make groups and statics from Mission Editor group and static templates, set orders and options, move a group between DCS and the campaign's own simulation (`Materialize`, `Dematerialize`), remove entities, set airbase owners and warehouse stock, clear wrecks |
+| Commands | put groups and statics, make groups and statics from Mission Editor group and static templates, give aircraft a Mission Editor payload preset, set orders and options, move a group between DCS and the campaign's own simulation (`Materialize`, `Dematerialize`), remove entities, set airbase owners and warehouse stock, clear wrecks |
 | World | list the world at a revision, watch its changes, query an area |
 | Events | subscribe to events from a sequence number, read history |
 | Mission | server status and health, weather and time of the next mission, reload |
@@ -140,9 +140,10 @@ in the agent's settings file on the server. No API call can turn them on.
 - Mission templates come from the administrator; the project ships none.
 - Groups and statics can be made from Mission Editor group templates
   (`PutGroupFromTemplate`) and static templates (`PutFromStaticTemplate`), for ground
-  groups and statics only. Payload presets are not read
-  ([docs/mission-templates.md](docs/mission-templates.md), "Group templates" and
-  "Static templates").
+  groups and statics only. An aircraft's pylons can come from a Mission Editor payload
+  preset file in the data form; a preset file with Lua code is refused
+  ([docs/mission-templates.md](docs/mission-templates.md), "Group templates", "Static
+  templates" and "Payload presets").
 
 ## Where it is verified
 

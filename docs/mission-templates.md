@@ -117,6 +117,36 @@ default one at a time. While it is paused, they spawn together in the restore bu
 (spec/persistence.md, "Restore burst"). Each shows its own error if DCS refuses it
 (spec/world.md, "Static templates").
 
+## Payload presets
+
+The Mission Editor keeps named loadouts per aircraft type as payload presets, one file
+per type. DCS ships its own in `MissionEditor/data/scripts/UnitPayloads/` and in each
+module's `UnitPayloads/` folder in its install (ED-CODE,
+docs/results/2026-11-24-payload-presets.md). The editor saves a user's own in a folder
+of the Saved Games profile, `MissionEditor/UnitPayloads/` (UNVERIFIED).
+
+A controller gives an aircraft a preset's pylons in `PutGroup`, with the unit's
+`payload_preset`:
+
+1. The administrator copies the type's file into a folder that
+   `[missions] template_dirs` lists, or lists the profile's `MissionEditor/UnitPayloads`
+   folder there. Never list a folder of the DCS install.
+2. The controller names the file's path as the sidecar opens it and the preset's
+   `name` in the file, not the `displayName` the editor shows.
+3. It gives the rest of the payload as usual, in `extra.payload`: `fuel` in kilograms,
+   `flare`, `chaff` and `gun`. A preset holds none of them, and an aircraft given no
+   `fuel` starts with part of its internal fuel, 45 % in the one check made. It does
+   not also write `pylons` there.
+
+The sidecar reads one named file. It does not merge the user's presets over the
+shipped ones as the editor does, so name the file that holds the preset. The unit
+keeps the pylons; the file can be changed, moved or deleted after the call, and the
+preset's name is not stored. The file is read as data and never run. Most shipped
+files start as plain data; a file with Lua code in it, such as a local constant or a
+function, which some shipped ones have, is refused whole. Save the preset from the
+editor instead, or copy the pylons into `extra.payload.pylons` by hand. That the editor
+saves a preset in the data form is UNVERIFIED (spec/world.md, "Payload presets").
+
 ## Check the templates
 
 `nanoprobe doctor` checks every `<theater>.miz` in the mission folder. It fails when the

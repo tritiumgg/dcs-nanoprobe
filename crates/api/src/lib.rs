@@ -17,6 +17,7 @@ pub mod lease;
 pub mod loadouts;
 pub mod lua;
 pub mod next;
+pub mod payload_preset;
 pub mod real;
 pub mod server;
 pub mod services;

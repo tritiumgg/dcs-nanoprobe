@@ -4,7 +4,8 @@
 //! carries it to DCS. Every call carries the lease and an idempotency key
 //! ([`Hub::write`]).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -44,6 +45,7 @@ use crate::group_template;
 use crate::hub::{Call, Hub, Inner, Need, Slot, settle};
 use crate::idem::EffectKind;
 use crate::lua::{extra_to_lua, from_lua, to_lua};
+use crate::payload_preset;
 use crate::static_template;
 use nanoprobe_transport::codec::{Lv, Writer};
 
@@ -247,9 +249,175 @@ fn put_group(g: &mut Inner, c: u64, r: &PutGroupRequest) -> Result<PutGroupRespo
     write_group(&mut slot.store, plan)
 }
 
-/// The checks of a group spec that need no campaign: its category, units
-/// and size. Returns the DCS category.
-fn check_group(g: &Inner, spec: &pb::GroupSpec, order: Option<&pb::Order>) -> Result<u32, Status> {
+/// The most distinct preset paths one `PutGroup` may name. Each is read
+/// and parsed, up to 1 MiB and its tree, before the call takes the lock;
+/// a group has one type per unit, and a handful of files covers any real
+/// group.
+pub(crate) const PRESET_FILES_MAX: usize = 16;
+
+/// What a unit asks of a preset file: its path, the unit's type and the
+/// preset's name.
+type Wanted = (String, String, String);
+
+/// The pylons of each distinct preset a `PutGroup` names, converted before
+/// the call takes the lock, or why it is refused. `Err` with the number of
+/// paths when the request names more than `PRESET_FILES_MAX`, and nothing
+/// was read.
+type Presets =
+    Result<BTreeMap<Wanted, Result<payload_preset::Pylons, payload_preset::Refusal>>, usize>;
+
+/// The distinct presets a request names.
+fn preset_wants(r: &PutGroupRequest) -> BTreeSet<Wanted> {
+    r.spec
+        .iter()
+        .flat_map(|s| &s.units)
+        .filter_map(|u| {
+            u.payload_preset
+                .as_ref()
+                .map(|p| (p.path.clone(), u.r#type.clone(), p.name.clone()))
+        })
+        .collect()
+}
+
+/// Read each preset file of `wants` once, as the sidecar opens it, and
+/// convert every preset asked of it. A file is parsed and dropped before
+/// the next is read, so at most one parsed file is held at a time.
+fn read_presets(dirs: &[PathBuf], wants: BTreeSet<Wanted>) -> Presets {
+    let paths: BTreeSet<&String> = wants.iter().map(|w| &w.0).collect();
+    if paths.len() > PRESET_FILES_MAX {
+        return Err(paths.len());
+    }
+    let mut out = BTreeMap::new();
+    for path in paths {
+        let file = crate::template_file::read_for(
+            "PutGroup",
+            payload_preset::FILE_WHAT,
+            payload_preset::FILE_MAX,
+            dirs,
+            path,
+        )
+        .map_err(|text| payload_preset::Refusal {
+            field: "path",
+            text,
+        })
+        .and_then(payload_preset::read);
+        for w in wants.iter().filter(|w| &w.0 == path) {
+            let got = match &file {
+                Ok(f) => f.pylons(&w.1, &w.2),
+                Err(e) => Err(e.clone()),
+            };
+            out.insert(w.clone(), got);
+        }
+    }
+    Ok(out)
+}
+
+/// Put a preset's pylons into a unit's `extra.payload.pylons`. `f` is the
+/// unit's field.
+fn set_pylons(u: &mut pb::UnitSpec, pylons: prost_types::Struct, f: &str) -> Result<(), Status> {
+    use prost_types::value::Kind as V;
+    let extra = u.extra.get_or_insert_default();
+    let payload = extra
+        .fields
+        .entry("payload".into())
+        .or_insert_with(|| prost_types::Value {
+            kind: Some(V::StructValue(prost_types::Struct::default())),
+        });
+    let Some(V::StructValue(payload)) = &mut payload.kind else {
+        return Err(invalid(
+            &format!("{f}.extra.payload"),
+            "a unit that names a payload preset has an object `payload` or none",
+        ));
+    };
+    if payload.fields.contains_key("pylons") {
+        return Err(invalid(
+            &format!("{f}.extra.payload.pylons"),
+            "a unit that names a payload preset carries no `pylons`; remove them to use the preset",
+        ));
+    }
+    payload.fields.insert(
+        "pylons".into(),
+        prost_types::Value {
+            kind: Some(V::StructValue(pylons)),
+        },
+    );
+    Ok(())
+}
+
+/// `PutGroup` (spec/world.md, "Payload presets"): each unit that names a
+/// payload preset gets the preset's pylons in `extra.payload.pylons`, from
+/// `presets` as they were read before the call took the lock. The spec
+/// then goes through `put_group` as written, so the group is the one a
+/// `PutGroup` with the pylons written by hand makes. The store keeps the
+/// pylons alone; the log names the files and presets.
+fn put_group_with_presets(
+    g: &mut Inner,
+    c: u64,
+    r: &PutGroupRequest,
+    presets: &Presets,
+) -> Result<PutGroupResponse, Status> {
+    let Some(spec) = r
+        .spec
+        .as_ref()
+        .filter(|s| s.units.iter().any(|u| u.payload_preset.is_some()))
+    else {
+        return put_group(g, c, r);
+    };
+    // A spec with no category, no units or a unit with no type is refused
+    // for that, not for a preset that cannot match it.
+    check_shape(spec)?;
+    let presets = presets.as_ref().map_err(|n| {
+        invalid(
+            "spec.units",
+            format!(
+                "a PutGroup names at most {PRESET_FILES_MAX} payload preset files; this one names {n}"
+            ),
+        )
+    })?;
+    let mut spec = spec.clone();
+    let mut used = Vec::new();
+    for (i, u) in spec.units.iter_mut().enumerate() {
+        let Some(p) = u.payload_preset.take() else {
+            continue;
+        };
+        let f = format!("spec.units[{i}]");
+        let want = (p.path.clone(), u.r#type.clone(), p.name.clone());
+        let got = presets
+            .get(&want)
+            .expect("every named preset was read")
+            .clone()
+            .map_err(|e| invalid(&format!("{f}.payload_preset.{}", e.field), e.text))?;
+        set_pylons(u, got.pylons, &f)?;
+        used.push(format!(
+            "unit {i} the preset {:?} of {:?}{}",
+            p.name,
+            p.path,
+            if got.dropped.is_empty() {
+                String::new()
+            } else {
+                format!(" (keys not used: {})", got.dropped.join(", "))
+            }
+        ));
+    }
+    let made = put_group(
+        g,
+        c,
+        &PutGroupRequest {
+            spec: Some(spec),
+            ..r.clone()
+        },
+    )?;
+    eprintln!(
+        "PutGroup gave group {} payload presets: {}",
+        made.group_id,
+        used.join("; ")
+    );
+    Ok(made)
+}
+
+/// The checks of a group spec's category and units that come before any
+/// other, a payload preset's included. Returns the DCS category.
+fn check_shape(spec: &pb::GroupSpec) -> Result<u32, Status> {
     let category = GroupCategory::try_from(spec.category)
         .ok()
         .and_then(dcs_category)
@@ -258,12 +426,32 @@ fn check_group(g: &Inner, spec: &pb::GroupSpec, order: Option<&pb::Order>) -> Re
         return Err(invalid("spec.units", "a group has at least one unit"));
     }
     for (i, u) in spec.units.iter().enumerate() {
-        let f = format!("spec.units[{i}]");
         if u.r#type.is_empty() {
-            return Err(invalid(&format!("{f}.type"), "a unit needs its DCS type"));
+            return Err(invalid(
+                &format!("spec.units[{i}].type"),
+                "a unit needs its DCS type",
+            ));
         }
+    }
+    Ok(category)
+}
+
+/// The checks of a group spec that need no campaign: its category, units
+/// and size. Returns the DCS category.
+fn check_group(g: &Inner, spec: &pb::GroupSpec, order: Option<&pb::Order>) -> Result<u32, Status> {
+    let category = check_shape(spec)?;
+    for (i, u) in spec.units.iter().enumerate() {
+        let f = format!("spec.units[{i}]");
         spawn_state_ok(u, &f)?;
         finite(u.heading, &format!("{f}.heading"))?;
+        // `PutGroup` converts a preset before this; any other way here has
+        // none to convert.
+        if u.payload_preset.is_some() {
+            return Err(invalid(
+                &format!("{f}.payload_preset"),
+                "a payload preset is taken by PutGroup only",
+            ));
+        }
     }
     // Every check comes before the first store write: a call that fails
     // changes nothing, so a repeat under its key cannot make a second group.
@@ -1470,7 +1658,55 @@ impl CommandsService for Commands {
         &self,
         req: Request<PutGroupRequest>,
     ) -> Result<Response<PutGroupResponse>, Status> {
-        changing!(self, req, "PutGroup", Need::Campaign, put_group)
+        require(&req, Access::Controller)?;
+        let r = req.into_inner();
+        let mut hashed = r.clone();
+        hashed.write = unleased(&r.write);
+        let w = r.write.clone().unwrap_or_default();
+        // The preset files are read and converted here, on a worker thread
+        // and without the lock, as a template's file is. A refusal is given
+        // inside the call, after the lease and the campaign are checked, so
+        // a repeat under an answered key gets its first answer whatever has
+        // become of a file.
+        let wants = preset_wants(&r);
+        let presets = if wants.is_empty() {
+            Ok(BTreeMap::new())
+        } else {
+            let dirs = self.0.cfg.template_dirs.clone();
+            let named = wants.clone();
+            tokio::task::spawn_blocking(move || read_presets(&dirs, named))
+                .await
+                .unwrap_or_else(|_| {
+                    Ok(wants
+                        .into_iter()
+                        .map(|w| {
+                            let text = format!("{:?} could not be read", w.0);
+                            (
+                                w,
+                                Err(payload_preset::Refusal {
+                                    field: "path",
+                                    text,
+                                }),
+                            )
+                        })
+                        .collect())
+                })
+        };
+        let resp = self
+            .0
+            .write(
+                Call {
+                    method: "PutGroup",
+                    key: w.idempotency.as_ref(),
+                    lease: w.lease.as_ref(),
+                    campaign: w.campaign_id,
+                    need: Need::Campaign,
+                },
+                &hashed,
+                |g: &mut Inner, c: u64| put_group_with_presets(g, c, &r, &presets).map(|x| (x, c)),
+            )
+            .await?;
+        Ok(Response::new(resp))
     }
 
     async fn put_group_from_template(

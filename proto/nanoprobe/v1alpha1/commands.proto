@@ -77,6 +77,30 @@ message UnitSpec {
   optional double life_percent = 8;
   reserved 9, 10;
   reserved "fuel", "ammo";
+  // Request only: the unit's pylons from a payload preset of the DCS
+  // Mission Editor. PutGroup reads the named preset and stores its pylons
+  // as `extra.payload.pylons`; the field itself is never stored, so it is
+  // always empty in a spec read back from WorldService or a capture. A
+  // spec that names a preset and also carries `extra.payload.pylons` is
+  // refused: a controller that sends a read-back spec again with a preset
+  // removes the pylons first. Other keys of `extra.payload` (`fuel`,
+  // `flare`, `chaff`, `gun`) are kept as the request gives them; a preset
+  // holds none. The controller supplies `fuel`, in kilograms: an aircraft
+  // spawned with pylons and no `fuel` had 45 % of its internal fuel
+  // (spec/world.md, "Payload presets").
+  PayloadPreset payload_preset = 11;
+}
+
+// A payload preset in a file the administrator provides (spec/world.md,
+// "Payload presets").
+message PayloadPreset {
+  // The preset file, as the sidecar opens it: an absolute path to a file
+  // in a folder that `[missions] template_dirs` lists (spec/config.md).
+  // One file of the editor's form: the sidecar does not merge the
+  // editor's folders.
+  string path = 1;
+  // The preset's `name` in the file (not its `displayName`).
+  string name = 2;
 }
 
 message GroupSpec {
