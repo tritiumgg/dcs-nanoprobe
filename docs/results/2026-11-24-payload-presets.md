@@ -122,5 +122,47 @@ refused; a unit with no type is refused for that before its preset is looked up.
 changes a step or a read of the run that passed: its file had one preset under one key,
 no `nil` and one path, every unit had a type, and its probe was refused. Run 3's reads
 pass the current verdict, which the host test `the_verdict_passes_a_good_read_and_fails_each_fault`
-holds to the same values. The later sidecar code is covered by host tests only; no live
-run was left to repeat it.
+holds to the same values. On Linux under Wine the later sidecar code is covered by host
+tests only. The Windows run below ran it live.
+
+## Live check on Windows
+
+Script: `cargo xtask sidecar <target> --part payload-preset` on a windows-ssh target
+(`crates/xtask/src/sidecar_windows.rs`, driving the same
+`crates/xtask/src/shell_live/payload_preset.rs`). DCS 2.9.31.29434 client on Windows,
+hosting a private session, Caucasus, 2026-11-24. The table is run 3's, on this
+commit's tree: agent build `59c32c8a9b1bb30f`, sidecar binary (`x86_64-pc-windows-msvc`)
+SHA-256 `2e54ce242313e450185b24c5ed3d231f9113ee221f0e0c111ccd5a2e0bda227a`, the merged
+sidecar code.
+
+The client has no dedicated server. The run refuses when DCS already runs, starts DCS
+through the profile's start task and hosts a private session with the shell mission.
+The sidecar is a Windows program in the profile's `nanoprobe/dev/sidecar/`, with a
+loopback listener and native paths in its `sidecar.toml`, held by an SSH session; the
+API is reached through an SSH local forward. At the end the run stops the sidecar,
+closes DCS through the stop task, removes its folders, undeploys, and fails unless the
+profile's top folders list what they listed before.
+
+The rule is the Wine run's, with one item left out. On Windows the sidecar stops
+cleanly only on Ctrl-C, which a process in another SSH session cannot be sent, so the
+run ends its process with `Stop-Process -Id` and records its exit code, -1; "exit code
+0 after a stop" is not part of the Windows verdict.
+
+| Item | Result |
+|---|---|
+| Ammunition, preset | `weapons.bombs.Mk_84` 2, `weapons.missiles.HB-AIM-7E-2` 1, `supply.shells.1` 639 |
+| Ammunition, by hand | the same |
+| One weapon for each pylon | yes |
+| Stored `extra` | the same for both: the hand-written pylons with their `settings`, plus `speed` and `alt_type` |
+| Fuel | `getFuel` 0.45 for both, of a `fuelMassMax` of 5,510.5 kg |
+| Preset and `pylons` together | refused: "a unit that names a payload preset carries no `pylons`; remove them to use the preset" |
+| File and groups | removed |
+| Profile after the run | the top folders as before; DCS closed |
+| Verdict | PASS (LIVE) |
+
+Runs used: 3 of 3, each a PASS with the reads above. Run 1 ran the harness before
+review. Runs 2 and 3 ran it after the review's fixes (the start script writes the
+sidecar's process ID and exit code, the stop ends that process by its ID, the run
+refuses a profile with a `nanoprobe` folder or a client where a sidecar runs, and the
+restore verdict is a tested function); run 3 also takes the process handle that lets
+the exit code be read, which run 2 recorded as empty.

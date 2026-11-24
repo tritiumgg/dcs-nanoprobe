@@ -4,7 +4,8 @@
 //! (`shell_live/template.rs`), with `--part static-template` the groups
 //! and statics of a static template file (`shell_live/static_template.rs`),
 //! and with `--part payload-preset` an aircraft given a payload preset
-//! (`shell_live/payload_preset.rs`), on a docker-wine target. The product's sidecar runs in a container of its own
+//! (`shell_live/payload_preset.rs`), on a docker-wine target, and the last two also
+//! on a windows-ssh target (`sidecar_windows.rs`). On docker-wine the product's sidecar runs in a container of its own
 //! that shares the game container's network namespace, as the example
 //! compose overlay in `deploy/` sets it up, but started by hand and removed
 //! at the end: the target's compose file is not touched.
@@ -68,7 +69,7 @@ pub(crate) const API_PORT: u16 = 47311;
 /// The run's lease lifetime. The drivers renew between calls, but one eval
 /// over SSH or a hold during a map load can take longer than the default
 /// 30 s, and a lost lease ends the run on a refusal no test meant.
-const LEASE_TTL_S: u64 = 300;
+pub(crate) const LEASE_TTL_S: u64 = 300;
 /// Model seconds each hold runs.
 const HOLD_S: f64 = 15.0;
 /// How long a probe or a hello may take, seconds.
@@ -105,6 +106,9 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
     let template = template
         .map(|t| std::fs::read(t).map_err(|e| format!("{t}: {e}")))
         .transpose()?;
+    if matches!(crate::target(name)?, Target::WindowsSsh { .. }) {
+        return crate::sidecar_windows::run(repository, name, part);
+    }
     let Target::DockerWine { ssh, container, .. } = crate::target(name)? else {
         return Err("sidecar runs on a docker-wine target".into());
     };
@@ -271,14 +275,7 @@ fn attempt(
         .ok_or("conformance-probe was not built")?;
     let sidecar = build_sidecar(repository)?;
     // Which code ran: the tree and the sidecar program's hash.
-    results["tree"] = json!(
-        Command::new("git")
-            .args(["describe", "--always", "--dirty"])
-            .current_dir(repository)
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-            .unwrap_or_default()
-    );
+    results["tree"] = json!(tree(repository));
     results["sidecar_sha256"] = json!(hex(&Sha256::digest(
         std::fs::read(&sidecar).map_err(|e| format!("{}: {e}", sidecar.display()))?
     )));
@@ -872,6 +869,16 @@ pub(crate) fn upload(
         bytes,
     )
     .map(|_| ())
+}
+
+/// Which code ran: `git describe --always --dirty` of the repository.
+pub(crate) fn tree(repository: &Path) -> String {
+    Command::new("git")
+        .args(["describe", "--always", "--dirty"])
+        .current_dir(repository)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .unwrap_or_default()
 }
 
 pub(crate) fn hex(bytes: &[u8]) -> String {

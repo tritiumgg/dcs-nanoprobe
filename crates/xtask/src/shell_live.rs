@@ -79,6 +79,46 @@ pub fn templates() -> [(&'static str, &'static [u8]); 2] {
 /// makes and removes.
 pub const TEMPLATE_DIR: &str = "/missions/own";
 
+/// What a part that drives the API needs from its target: the eval channel,
+/// a hold, the profile's files, and the template folder as the sidecar
+/// opens it. A docker-wine [`Run`] and a Windows client both give it.
+pub(crate) trait Live {
+    /// Run Lua in a state through the eval channel; its first value.
+    fn eval(&self, state: &str, stem: &str, source: &str, timeout_s: u64) -> Result<Value, String>;
+    /// Run model time for `seconds`, resuming the simulation if paused.
+    fn hold(&self, seconds: f64) -> Result<(), String>;
+    /// The DCS profile.
+    fn profile(&self) -> &dyn crate::install::Profile;
+    /// `file` in the folder `[missions] template_dirs` lists, as the
+    /// sidecar opens it. On the profile it is `nanoprobe/missions/own/`.
+    fn template_path(&self, file: &str) -> String;
+    /// The sidecar's own `sidecar.toml`, as the sidecar opens it: a file
+    /// outside every listed folder.
+    fn config_path(&self) -> String;
+}
+
+impl Live for Run {
+    fn eval(&self, state: &str, stem: &str, source: &str, timeout_s: u64) -> Result<Value, String> {
+        Run::eval(self, state, stem, source, timeout_s)
+    }
+
+    fn hold(&self, seconds: f64) -> Result<(), String> {
+        Run::hold(self, seconds)
+    }
+
+    fn profile(&self) -> &dyn crate::install::Profile {
+        &self.remote
+    }
+
+    fn template_path(&self, file: &str) -> String {
+        format!("{TEMPLATE_DIR}/{file}")
+    }
+
+    fn config_path(&self) -> String {
+        "/etc/nanoprobe/sidecar.toml".into()
+    }
+}
+
 /// Put the `--template` mission where the sidecar may read it, and give its
 /// path as the sidecar opens it (`SetCampaignTemplate` takes a path).
 fn own_template_file(run: &Run, t: &[u8]) -> Result<String, String> {
@@ -352,7 +392,7 @@ fn caucasus(north: f64, east: f64) -> pb::Position {
 /// Poll `check` while the simulation is held running, until it gives
 /// `Some` or `limit` passes.
 fn wait<T>(
-    run: &Run,
+    run: &dyn Live,
     api: &mut Api,
     limit: Duration,
     what: &str,
@@ -949,7 +989,7 @@ fn ruin_check(
 }
 
 /// Wait for the mission on `theater` loaded after `generation`.
-fn loaded(run: &Run, api: &mut Api, theater: &str, after_gen: u32) -> Result<u32, String> {
+fn loaded(run: &dyn Live, api: &mut Api, theater: &str, after_gen: u32) -> Result<u32, String> {
     wait(
         run,
         api,
@@ -966,7 +1006,7 @@ fn loaded(run: &Run, api: &mut Api, theater: &str, after_gen: u32) -> Result<u32
     )
 }
 
-fn live(run: &Run, api: &mut Api, campaign: u64, group: u64) -> Result<(), String> {
+fn live(run: &dyn Live, api: &mut Api, campaign: u64, group: u64) -> Result<(), String> {
     wait(
         run,
         api,

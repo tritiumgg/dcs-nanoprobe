@@ -51,6 +51,11 @@ const KILL_SWITCH: &str = r#"python3 -c 'import sys, time; t = int(time.time() *
 /// The longest one mission load may take before the reload step gives up.
 /// A limit, not an expectation: load times vary with hardware and mission.
 const PER_LOAD_S: u64 = 300;
+/// The longest a Windows client may take to host its session and start the
+/// shim. A limit, not an expectation: one load on the client took two
+/// minutes after the mission started, the next more than five (LIVE,
+/// docs/results/2026-11-23-static-templates.md, Windows runs 1 and 2).
+const HOST_LOAD_S: u64 = 900;
 /// The pass limit for a reload and for the kill switch.
 const LIMIT_MS: u64 = 2000;
 
@@ -525,10 +530,12 @@ pub(crate) fn host_session(profile: &dyn Profile) -> Result<(), String> {
         Duration::from_secs(300),
     )?;
     println!("hosting a private session; waiting for the shim to start");
-    let deadline = Instant::now() + Duration::from_secs(PER_LOAD_S);
+    let deadline = Instant::now() + Duration::from_secs(HOST_LOAD_S);
     while started(profile) <= before {
         if Instant::now() > deadline {
-            return Err("the hosted session did not start the shim".into());
+            return Err(format!(
+                "the hosted session did not start the shim within {HOST_LOAD_S} s"
+            ));
         }
         std::thread::sleep(Duration::from_secs(2));
     }

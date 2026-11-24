@@ -27,6 +27,7 @@ mod routes;
 mod sampling;
 mod shell_live;
 mod sidecar;
+mod sidecar_windows;
 mod soak;
 mod spec;
 mod ssh;
@@ -228,7 +229,11 @@ commands:
                             its own container in the game container's network
                             namespace, the conformance suite through RealSim, and both
                             hello campaigns against it; removes what it started.
-                            Refuses a server with players.
+                            Refuses a server with players. static-template and
+                            payload-preset also run on a windows-ssh target: DCS
+                            started through its task in a private session, the sidecar
+                            a Windows program in the profile; refuses when DCS or a
+                            sidecar runs or the profile holds a nanoprobe folder.
   persistence <name>|rehearse [--only a,b,...]
                             The S18 live tests on a docker-wine target, the sidecar
                             as `sidecar` runs it with its store on disk: reload and
