@@ -80,6 +80,77 @@ pub fn parse(src: &[u8]) -> Result<Doc, String> {
     })
 }
 
+/// The words Lua 5.1 reserves; none of them names a local.
+const RESERVED: [&[u8]; 21] = [
+    b"and",
+    b"break",
+    b"do",
+    b"else",
+    b"elseif",
+    b"end",
+    b"false",
+    b"for",
+    b"function",
+    b"if",
+    b"in",
+    b"local",
+    b"nil",
+    b"not",
+    b"or",
+    b"repeat",
+    b"return",
+    b"then",
+    b"true",
+    b"until",
+    b"while",
+];
+
+/// Parse `src` as the Mission Editor's payload preset files are written
+/// (ED-CODE, docs/results/2026-11-24-payload-presets.md): exactly
+/// `local <name> = <value>` then `return <name>`, the same name, with only
+/// white space and comments around them. The value is read as `parse`
+/// reads one. The error names the line of the first text that is not this
+/// form.
+pub fn parse_returned(src: &[u8]) -> Result<Doc, String> {
+    let mut p = P { s: src, i: 0 };
+    p.ws()?;
+    if p.ident() != Some(b"local".as_slice()) {
+        p.i = 0;
+        p.ws()?;
+        return Err(p.err("`local <name> = {`"));
+    }
+    p.ws()?;
+    let at = p.i;
+    let name = p.ident().filter(|n| !RESERVED.contains(n)).ok_or_else(|| {
+        p.i = at;
+        p.err("a name after `local`")
+    })?;
+    p.ws()?;
+    p.expect(b'=')?;
+    p.ws()?;
+    let root = p.value(0)?;
+    p.ws()?;
+    let at = p.i;
+    let want = format!("`return {}`", String::from_utf8_lossy(name));
+    if p.ident() != Some(b"return".as_slice()) {
+        p.i = at;
+        return Err(p.err(&want));
+    }
+    p.ws()?;
+    if p.ident() != Some(name) {
+        p.i = at;
+        return Err(p.err(&want));
+    }
+    p.ws()?;
+    if p.i != src.len() {
+        return Err(p.err("the end after the `return`"));
+    }
+    Ok(Doc {
+        name: String::from_utf8_lossy(name).into_owned(),
+        root,
+    })
+}
+
 /// Deepest table nesting read.
 const DEPTH_MAX: usize = 200;
 
@@ -593,6 +664,47 @@ mod tests {
         }
         let deep = format!("x = {}{}", "{".repeat(300), "}".repeat(300));
         assert!(parse(deep.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn parse_keeps_refusing_local_and_return() {
+        assert!(parse(b"local x = {}\nreturn x\n").is_err());
+        assert!(parse(b"x = {}\nreturn x\n").is_err());
+    }
+
+    #[test]
+    fn reads_a_returned_local() {
+        let src = "-- a comment\nlocal unitPayloads =\n{\n\t[\"name\"] = \"F-15C\",\n\t[\"payloads\"] = { [1] = { [\"num\"] = 2 } },\n}\nreturn unitPayloads\n";
+        let d = parse_returned(src.as_bytes()).unwrap();
+        assert_eq!(d.name, "unitPayloads");
+        let b = src.as_bytes();
+        assert_eq!(
+            scalar_value(b, d.root.get(&Key::s("name")).unwrap()),
+            Some(Lv::String(b"F-15C".to_vec()))
+        );
+        assert!(parse_returned(b"local x={1} --[[ c ]] return x -- end").is_ok());
+    }
+
+    #[test]
+    fn refuses_a_returned_local_in_any_other_form() {
+        for (bad, line) in [
+            ("x = {}\nreturn x", 1),
+            ("local x = {}", 1),
+            ("local x = {}\nreturn y", 2),
+            ("local x = {}\nreturn x;", 2),
+            ("local x = {}\nreturn x\nprint(x)", 3),
+            ("local a = \"{EFT}\"\nlocal x = { a }\nreturn x", 2),
+            ("local x = { [\"n\"] = \"a\" .. \"b\" }\nreturn x", 1),
+            ("local x = {}\nx.y = 1\nreturn x", 2),
+            ("local function f() end\nreturn f", 1),
+            ("local return = {}\nreturn return", 1),
+            ("local x, y = {}, {}\nreturn x", 1),
+            ("localx = {}\nreturn localx", 1),
+            ("", 1),
+        ] {
+            let e = parse_returned(bad.as_bytes()).expect_err(bad);
+            assert!(e.starts_with(&format!("line {line}:")), "{bad}: {e}");
+        }
     }
 
     #[test]

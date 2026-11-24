@@ -1,9 +1,10 @@
-//! `sidecar <name> [--part all|conformance|hello|template|static-template|shell [--template FILE]]`:
+//! `sidecar <name> [--part all|conformance|hello|template|static-template|payload-preset|shell [--template FILE]]`:
 //! the S17 live test, with `--part shell` the S19 one (`shell_live.rs`),
 //! with `--part template` a group made from a group template file
-//! (`shell_live/template.rs`), and with `--part static-template` the groups
-//! and statics of a static template file (`shell_live/static_template.rs`), on a
-//! docker-wine target. The product's sidecar runs in a container of its own
+//! (`shell_live/template.rs`), with `--part static-template` the groups
+//! and statics of a static template file (`shell_live/static_template.rs`),
+//! and with `--part payload-preset` an aircraft given a payload preset
+//! (`shell_live/payload_preset.rs`), on a docker-wine target. The product's sidecar runs in a container of its own
 //! that shares the game container's network namespace, as the example
 //! compose overlay in `deploy/` sets it up, but started by hand and removed
 //! at the end: the target's compose file is not touched.
@@ -76,7 +77,10 @@ const LIMIT_S: u64 = 900;
 /// spawns at the start.
 pub(crate) const HELLO_POINTS: [(f64, f64); 2] = [(-290_000.0, 680_000.0), (-289_000.0, 680_000.0)];
 
-const USAGE: &str = "usage: cargo xtask sidecar <name> [--part all|conformance|hello|template|static-template|shell [--template FILE]]";
+const USAGE: &str = "usage: cargo xtask sidecar <name> [--part all|conformance|hello|template|static-template|payload-preset|shell [--template FILE]]";
+
+/// The parts that drive one API test against the sidecar and stop it.
+const ONE_API_PART: [&str; 3] = ["template", "static-template", "payload-preset"];
 
 pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
     let (name, part, template) = match args {
@@ -88,6 +92,7 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
                 "hello",
                 "template",
                 "static-template",
+                "payload-preset",
                 "shell",
             ]
             .contains(p) =>
@@ -125,6 +130,8 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
         &["template"]
     } else if part == "static-template" {
         &["static_template"]
+    } else if part == "payload-preset" {
+        &["payload_preset"]
     } else if part == "shell" {
         &[
             "reload",
@@ -146,7 +153,11 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
         && keys
             .iter()
             .filter(|k| {
-                part == "all" || part == "shell" || part == "static-template" || k.starts_with(part)
+                part == "all"
+                    || part == "shell"
+                    || part == "static-template"
+                    || part == "payload-preset"
+                    || k.starts_with(part)
             })
             // A skipped item is reported, not failed.
             .all(|k| results[k]["pass"] == json!(true) || results[k]["skipped"].is_string())
@@ -590,12 +601,7 @@ fn with_map(
         }
     }
 
-    if part == "all"
-        || part == "hello"
-        || part == "shell"
-        || part == "template"
-        || part == "static-template"
-    {
+    if part == "all" || part == "hello" || part == "shell" || ONE_API_PART.contains(&part) {
         let token: String = (0..4)
             .map(|_| format!("{:016x}", nanoprobe_transport::random_nonzero()))
             .collect();
@@ -661,11 +667,13 @@ fn with_map(
             .port();
         let mut forward = Forward::start(&host.ssh, local, &ip, API_PORT)?;
         let endpoint = format!("http://127.0.0.1:{local}");
-        if part == "template" || part == "static-template" {
-            let r = if part == "template" {
-                crate::shell_live::template::drive(run, &endpoint, &token, results)
-            } else {
-                crate::shell_live::static_template::drive(run, &endpoint, &token, results)
+        if ONE_API_PART.contains(&part) {
+            let r = match part {
+                "template" => crate::shell_live::template::drive(run, &endpoint, &token, results),
+                "static-template" => {
+                    crate::shell_live::static_template::drive(run, &endpoint, &token, results)
+                }
+                _ => crate::shell_live::payload_preset::drive(run, &endpoint, &token, results),
             };
             results["sidecar_logs"] =
                 json!(host.text("docker logs --tail 200 \"$1\" 2>&1 || true", &[SIDECAR_C])?);

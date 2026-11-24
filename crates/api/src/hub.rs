@@ -3428,6 +3428,7 @@ mod tests {
     use super::*;
 
     mod group_template;
+    mod payload_preset;
     mod static_template;
 
     /// The committed Caucasus template.

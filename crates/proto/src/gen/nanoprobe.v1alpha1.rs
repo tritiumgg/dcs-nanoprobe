@@ -5230,6 +5230,33 @@ pub struct UnitSpec {
     /// Life is a percentage of the type's initial life, above 0 and up to 100.
     #[prost(double, optional, tag = "8")]
     pub life_percent: ::core::option::Option<f64>,
+    /// Request only: the unit's pylons from a payload preset of the DCS
+    /// Mission Editor. PutGroup reads the named preset and stores its pylons
+    /// as `extra.payload.pylons`; the field itself is never stored, so it is
+    /// always empty in a spec read back from WorldService or a capture. A
+    /// spec that names a preset and also carries `extra.payload.pylons` is
+    /// refused: a controller that sends a read-back spec again with a preset
+    /// removes the pylons first. Other keys of `extra.payload` (`fuel`,
+    /// `flare`, `chaff`, `gun`) are kept as the request gives them; a preset
+    /// holds none. The controller supplies `fuel`, in kilograms: an aircraft
+    /// spawned with pylons and no `fuel` had 45 % of its internal fuel
+    /// (spec/world.md, "Payload presets").
+    #[prost(message, optional, tag = "11")]
+    pub payload_preset: ::core::option::Option<PayloadPreset>,
+}
+/// A payload preset in a file the administrator provides (spec/world.md,
+/// "Payload presets").
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PayloadPreset {
+    /// The preset file, as the sidecar opens it: an absolute path to a file
+    /// in a folder that `\[missions\] template_dirs` lists (spec/config.md).
+    /// One file of the editor's form: the sidecar does not merge the
+    /// editor's folders.
+    #[prost(string, tag = "1")]
+    pub path: ::prost::alloc::string::String,
+    /// The preset's `name` in the file (not its `displayName`).
+    #[prost(string, tag = "2")]
+    pub name: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GroupSpec {

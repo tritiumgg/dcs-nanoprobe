@@ -842,6 +842,89 @@ that spawns them in the restore burst (spec/persistence.md, "Restore burst"). Ea
 entity can fail on its own in DCS, a country the mission does not hold or a type DCS
 does not have, and shows it in its own last error.
 
+## Payload presets
+
+A unit of a `PutGroup` spec can name a payload preset of the DCS Mission Editor in
+`payload_preset`, instead of writing its pylons in `extra.payload.pylons`. The sidecar
+reads the preset's pylons into `extra.payload.pylons` and journals the group as
+`PutGroup` journals one with those pylons written by hand. The field is a request
+field: the store never keeps it, so a spec read back from the World service or a
+capture has none. The file's path and the preset's name are written to the sidecar's
+standard error. Only `PutGroup` reads the field; the template calls build their specs
+themselves and never set it.
+
+**Files.** The editor gathers presets by aircraft type from
+`MissionEditor/data/scripts/UnitPayloads/` and from `UnitPayloads/` of every module in
+the install, then merges the user's presets over them by preset name, from the folder
+`ConfigHelper.getWriteDirUnitPayloads()` names, which is `MissionEditor/UnitPayloads/`
+of the Saved Games profile (the path is UNVERIFIED). Each file returns one table: the
+type in `unitType`, else `name`, and the presets in `payloads`, each with a `name`, an
+optional `displayName`, `pylons` (each `{CLSID, num, settings?}`) and `tasks`
+(ED-CODE, `MissionEditor/modules/me_loadoututils.lua`,
+docs/results/2026-11-24-payload-presets.md). The sidecar does not merge: a request
+names one file, by its path as the sidecar opens it, in a folder that
+`[missions] template_dirs` lists (spec/config.md), under the path rules of
+`SetCampaignTemplate` (spec/persistence.md, "Set a template"). The sidecar never lists
+a folder of the DCS install; an administrator copies the files to use, or lists the
+profile's `MissionEditor/UnitPayloads` folder.
+
+**Form.** The editor runs each file as Lua. Of the 153 files Eagle Dynamics ships, 140
+start with `local unitPayloads =`, 7 start with another `local` statement and 6 start
+with a blank line or a comment; all end with `return unitPayloads`, and 5 hold lines
+with `function`, `require` or `..` (ED-CODE, the same document). How many the reader
+takes whole is UNVERIFIED. The sidecar reads the file as data and runs none of it. It
+takes exactly `local <name> = <value>`, then `return <name>` with the same name, with
+only white space and comments around them: `<name>` is not a Lua reserved word, and no
+`;` follows the `return`. The value is read as a group template's is ("Group
+templates"). Anything else refuses the file whole, with the line of the first
+statement that is not this form and the advice to save the preset from the editor.
+That the editor saves a user's preset in this form is UNVERIFIED. A file over 1 MiB is
+refused; the largest shipped file is 223,869 bytes (ED-CODE).
+
+| In the file | In the spec |
+|---|---|
+| `unitType`, else `name` | Must equal the unit's `type` exactly, case included |
+| `payloads` | Two entries under one key refuse the file |
+| `payloads[i].name` | The preset the request's `name` names. Not `displayName`. Two presets with one `name` refuse the request |
+| `payloads[i].pylons` | A table, which may be empty; none refuses the request, and so do two entries under one key |
+| `payloads[i].pylons[j].num` | The pylon: the key of `extra.payload.pylons`, as a decimal string ("Lua tables in the API"). A whole number from 1 to 1,000; two entries for one pylon refuse the request |
+| `payloads[i].pylons[j].CLSID` | The pylon's `CLSID`, a non-empty string |
+| `payloads[i].pylons[j].settings` | The pylon's `settings`, as the file has it. A value that is not a table, a table holding `nil` (Lua keeps no such key), a table the store cannot encode, or one the API cannot carry unchanged refuses the request |
+| `displayName`, `tasks`, any other key | Dropped, and named in the sidecar's standard error |
+
+A preset with an empty `pylons` table gives the unit no pylons. When the editor applies
+a preset, it merges each pylon's `settings` over the launcher's defaults (ED-CODE,
+`MissionEditor/modules/me_loadoututils.lua`, `getUnitPylons` and
+`getAppropriateSettings`); the sidecar passes the file's `settings` as they are, and
+none for a pylon that has none. A preset
+holds no `fuel`, `flare`, `chaff` or `gun`; the request's `extra.payload` keeps those it
+gives. A unit spawned with pylons and no `fuel` had 45 % of its internal fuel: an
+F-4E-45MC read `getFuel` 0.45 of a `fuelMassMax` of 5,510.5 kg (LIVE, the same
+document). A controller that wants another amount gives `extra.payload.fuel` in
+kilograms, as the editor saves it (ED-CODE, `MissionEditor/modules/me_payload.lua`).
+
+A request that names a preset and also carries `extra.payload.pylons` is refused, and
+so is one whose `extra.payload` is not an object. A controller that sends a read-back
+spec again with a preset removes its pylons first.
+
+Each distinct path of a request is read and parsed once, before the call takes the
+store's lock, and each preset asked of it is converted then; a parsed file is dropped
+before the next is read. A file's presets are indexed by name when it is parsed, so a
+lookup does not scan it. A request names at most 16 distinct paths; one with more is
+refused, field `spec.units`, and no file is read. Every refusal comes before the first
+store write and makes no group. A repeat under an answered idempotency key returns the
+first answer, whatever has become of the file. A replacement (`group_id` not 0) that
+names a preset reads the file as it is then.
+
+Two F-4E-45MC aircraft spawned in the air, one from a preset of three pylons, two of
+them with fuze `settings`, and one with the same pylons written by hand, read the same
+ammunition from DCS (2 Mk-84, 1 AIM-7E-2 and 639 gun rounds), and their stored `extra`
+was the same, with the hand-written pylons and their `settings` (LIVE, DCS
+2.9.31.29434 dedicated server under Wine 10.0,
+docs/results/2026-11-24-payload-presets.md). DCS spawned both with `settings` in their
+pylons; whether it applied the fuze settings is UNVERIFIED, since the scripting API
+reads no fuze.
+
 ## Lua tables in the API
 
 The API carries DCS tables as JSON-like values (`google.protobuf.Struct`), whose keys
