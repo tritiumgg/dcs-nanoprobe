@@ -113,6 +113,7 @@ local CAPABILITIES = {
   'DCS.getMissionName',
   'DCS.getMissionTheatre',
   'DCS.setUserCallbacks',
+  'DCS.getAvailableSlots',
   'net.dostring_in',
   'net.load_mission',
   'net.kick',
@@ -402,6 +403,110 @@ local SERVER = 1
 -- MODERATE's actions (spec/commands.md, "Codes: moderation").
 local KICK, BAN, UNBAN, SLOT = 1, 2, 3, 4
 
+-- SLOT's side for the side the agent resolves, and the coalition names
+-- DCS.getAvailableSlots takes (spec/commands.md, "Slot moves").
+local KEEP = 4294967295
+local COALITIONS = { [1] = 'red', [2] = 'blue' }
+
+-- SLOT's refusals, each a fixed message (spec/commands.md, "Slot moves").
+local NO_SIDE = 'DCS gave no side for the player'
+local SEAT = 'a crew seat is not a slot the agent moves players into'
+local NO_LIST = 'DCS gave no slot list'
+local NOT_LISTED = 'the mission lists no slot with this ID'
+local OTHER = 'the slot belongs to the other coalition'
+local HELD = 'another player holds the slot'
+local NO_PLAYERS = 'DCS gave no player list'
+local NO_HOLDER = 'DCS gave no slot for another player'
+
+-- Whether DCS lists `slot` for coalition `side` (1 or 2): true or false, or
+-- nil when DCS gives no list. Entries are read with rawget and their
+-- unitId compared as text.
+local function lists_slot(side, slot)
+  local ok, list = pcall(DCS.getAvailableSlots, COALITIONS[side])
+  if not ok or type(list) ~= 'table' then
+    return nil
+  end
+  local i = 1
+  while true do
+    local entry = rawget(list, i)
+    if entry == nil then
+      return false
+    end
+    if type(entry) == 'table' and slot_text(rawget(entry, 'unitId')) == slot then
+      return true
+    end
+    i = i + 1
+  end
+end
+
+-- Whether a connected player other than `player` holds `slot`: true or
+-- false, or nil and a refusal when DCS gives no player list or a player's
+-- slot read raises. A slot read as nil is no slot: the player left.
+local function slot_held(player, slot)
+  local ok, ids = pcall(net.get_player_list)
+  if not ok or type(ids) ~= 'table' then
+    return nil, NO_PLAYERS
+  end
+  local i = 1
+  while true do
+    local q = rawget(ids, i)
+    if q == nil then
+      return false
+    end
+    if q ~= SERVER and q ~= player then
+      local got, held = pcall(net.get_player_info, q, 'slot')
+      if not got then
+        return nil, NO_HOLDER
+      end
+      if slot_text(held) == slot then
+        return true
+      end
+    end
+    i = i + 1
+  end
+end
+
+-- The side a SLOT move goes to, or nil and a refusal message.
+local function slot_side(player, side, slot)
+  if slot == '' then
+    if side ~= KEEP then
+      return side
+    end
+    local ok, own = pcall(net.get_player_info, player, 'side')
+    if ok and (own == 0 or own == 1 or own == 2) then
+      return own
+    end
+    return nil, NO_SIDE
+  end
+  if slot:find('^.+_%d+$') then
+    return nil, SEAT
+  end
+  local first = side == KEEP and 1 or side
+  local listed = lists_slot(first, slot)
+  if listed == nil then
+    return nil, NO_LIST
+  end
+  local to = first
+  if not listed then
+    local other = lists_slot(3 - first, slot)
+    if other == nil then
+      return nil, NO_LIST
+    elseif not other then
+      return nil, NOT_LISTED
+    elseif side ~= KEEP then
+      return nil, OTHER
+    end
+    to = 3 - first
+  end
+  local held, why = slot_held(player, slot)
+  if held == nil then
+    return nil, why
+  elseif held then
+    return nil, HELD
+  end
+  return to
+end
+
 local HANDLERS = {
   -- CHAT: everyone for player 0, else one connection. DCS returns nothing
   -- useful, so APPLIED says only that the call did not raise.
@@ -459,7 +564,11 @@ local HANDLERS = {
     elseif action == UNBAN then
       ok, returned = pcall(net.banlist_remove, ucid)
     elseif action == SLOT then
-      ok, returned = pcall(net.force_player_slot, player, a.side, a.slot)
+      local side, refused = slot_side(player, a.side, a.slot)
+      if not side then
+        return DCS_REFUSED, nil, refused
+      end
+      ok, returned = pcall(net.force_player_slot, player, side, a.slot)
     else
       return DCS_REFUSED, nil, 'not a moderation action'
     end

@@ -1236,8 +1236,9 @@ and no Lua error crosses a Rust frame that owns a value.
 ## Moderation
 
 `MODERATE` runs in the hook's state, where `net` is. `net.kick`, `net.banlist_add`,
-`net.banlist_add_by_ucid`, `net.banlist_remove`, `net.force_player_slot` and
-`net.get_player_info` are functions there (LIVE, `lua/mock/api/hook.txt`, written by
+`net.banlist_add_by_ucid`, `net.banlist_remove`, `net.force_player_slot`,
+`net.get_player_info`, `net.get_player_list` and `DCS.getAvailableSlots` are functions
+there (LIVE, `lua/mock/api/hook.txt`, written by
 `lua/probes/tools/api-dump.lua` on DCS 2.9.31.29434 under Wine, 2026-11-11).
 `net.kick(player, reason)`, `net.banlist_add(player, seconds, reason)`,
 `net.banlist_remove(ucid)` and `net.force_player_slot(player, 0, '')` do what the
@@ -1247,7 +1248,9 @@ with each side and slot is in "Slot moves" below. `net.banlist_add_by_ucid`'s
 argument order is UNVERIFIED. The sidecar names a player to the agent by connection ID
 and ucid; the API names a player by player key (spec/world.md, "Players"). The API
 refuses a ban of a player with no connection and a ban of seconds 0 with
-`UNIMPLEMENTED` and reason `UNVERIFIED` until E34 verifies them.
+`UNIMPLEMENTED` and reason `UNVERIFIED` until E34 verifies them. `MovePlayer` sends
+`KEEP` for `COALITION_UNSPECIFIED` and side 0, 1 or 2 for neutral, red or blue;
+`COALITION_NEUTRAL` with a slot is `INVALID_ARGUMENT` on `slot`.
 
 ### Layout: MODERATE
 
@@ -1309,8 +1312,9 @@ slot. Every DCS call here runs under `pcall`; a list entry's `unitId` is read wi
 1. With `KEEP` and an empty slot, the side is `net.get_player_info(player, 'side')`.
 2. A slot of the form `<unitId>_<n>`, a crew seat (spec/world.md, "Players"), is refused.
 3. With a slot, the handler reads `DCS.getAvailableSlots` for the coalition the side
-   names: `'red'` for 1, `'blue'` for 2, both for `KEEP`. With `KEEP`, the side is the
-   coalition whose list holds the slot. A slot that no list read holds is refused; a
+   names: `'red'` for 1, `'blue'` for 2. For `KEEP` it reads `'red'`, then `'blue'`
+   only when red does not list the slot, and the side is the coalition whose list
+   holds it. A slot that no list read holds is refused; a
    slot that only the other coalition's list holds is refused. With side 1 or 2, the
    handler reads the other coalition's list only to tell those two refusals apart, after
    the first list missed.
@@ -1330,6 +1334,7 @@ Each refusal is `DCS_REFUSED` with one of these messages, exactly:
 | Only the other coalition's list holds the slot | `the slot belongs to the other coalition` |
 | Another connected player holds the slot | `another player holds the slot` |
 | `net.get_player_list` raised or is not a table | `DCS gave no player list` |
+| Another player's `net.get_player_info(q, 'slot')` raised | `DCS gave no slot for another player` |
 
 The agent's read narrows the race with a player who changes side, to a change DCS has
 not applied by the frame of the call; it cannot catch that one. A side of 1 or 2 always

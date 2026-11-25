@@ -18,7 +18,8 @@
 //! naming check (`commands/world.rs`).
 //! `--part players --raw-lua on|off` and `--part moderation --client <target>
 //! [--miz FILE]` run the S16 live tests (`commands/players.rs`,
-//! `commands/moderation.rs`).
+//! `commands/moderation.rs`); `--part moves --client <target> [--miz FILE]`
+//! the slot moves (`commands/moves.rs`).
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -31,6 +32,7 @@ use crate::sampling::live::{self, Opened, Run};
 use crate::{bundle, link};
 
 mod moderation;
+mod moves;
 mod players;
 mod world;
 
@@ -113,6 +115,10 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
             let client = client.ok_or("--part moderation needs --client <windows-target>")?;
             return moderation::run(repository, name, client, miz.map(Path::new));
         }
+        "moves" => {
+            let client = client.ok_or("--part moves needs --client <windows-target>")?;
+            return moves::run(repository, name, client, miz.map(Path::new));
+        }
         "debris" => {
             // At most 5 units: the probe's column must stay 50 m clear of the
             // next group on its 150 m grid (`command-probe`'s own check).
@@ -150,7 +156,8 @@ const USAGE: &str = "usage: cargo xtask commands <name> [--seed N] [--commands 1
     | cargo xtask commands <name> --part debris [--groups 100] [--units 4] [--template FILE] \
     [--min-ground METERS] \
     | cargo xtask commands <name> --part players --raw-lua on|off \
-    | cargo xtask commands <name> --part moderation --client <windows-target> [--miz FILE]";
+    | cargo xtask commands <name> --part moderation --client <windows-target> [--miz FILE] \
+    | cargo xtask commands <name> --part moves --client <windows-target> [--miz FILE]";
 
 /// `old` with `[lua] raw = true`, every other key kept.
 fn raw_on(old: &str) -> Result<String, String> {

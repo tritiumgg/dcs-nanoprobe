@@ -22,8 +22,12 @@ service ModerationService {
   rpc Ban(BanRequest) returns (BanResponse);
   rpc Unban(UnbanRequest) returns (UnbanResponse);
   rpc ListBans(ListBansRequest) returns (ListBansResponse);
-  // Move a connected player to spectators. A move into a slot is refused
-  // with UNIMPLEMENTED and reason UNVERIFIED until E34 verifies it.
+  // Move a connected player to a coalition, or into a slot, or out of their
+  // slot on the same side. The agent refuses, with outcome REFUSED, a slot the
+  // mission does not list, a slot of the other coalition, a slot another
+  // player holds, a crew seat, and a move when DCS gives no side, slot list or
+  // player list, or no slot for another player (spec/commands.md, "Slot
+  // moves", has each message).
   rpc MovePlayer(MovePlayerRequest) returns (MovePlayerResponse);
 }
 
@@ -91,9 +95,14 @@ message ListBansResponse {
 message MovePlayerRequest {
   Write write = 1;
   string player_key = 2;
+  // Where the player goes. COALITION_UNSPECIFIED keeps the player's side
+  // with no slot, and takes the slot's coalition with a slot; the agent reads the
+  // player's side when the move runs. COALITION_NEUTRAL is spectators, and a
+  // slot with it is INVALID_ARGUMENT. COALITION_RED or COALITION_BLUE sets
+  // that side; a slot of the other coalition is refused.
   Coalition coalition = 3;
-  // The slot ID. Empty moves the player to spectators; a slot ID is refused
-  // with UNIMPLEMENTED and reason UNVERIFIED until E34 verifies it.
+  // The slot ID: the unit ID of a player slot of the mission, at most 128
+  // bytes. Empty for no slot.
   string slot = 4;
 }
 

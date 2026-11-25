@@ -651,6 +651,9 @@ pub mod moderation {
     pub const UNBAN: u32 = 3;
     /// `SLOT`
     pub const SLOT: u32 = 4;
+    /// `SLOT`'s side for the side the agent resolves (spec/commands.md,
+    /// "Slot moves").
+    pub const KEEP: u32 = nanoprobe_transport::layout::SLOT_KEEP;
 }
 
 impl Body {

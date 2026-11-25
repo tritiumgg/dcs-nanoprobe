@@ -2661,6 +2661,7 @@ scenario('moderate', nil, function(ctx)
   host:connect(2, { ucid = 'ucid-2', name = 'Alpha', side = 2, slot = 'slot-7' })
   host:connect(3, { ucid = 'ucid-3', name = 'Bravo', side = 1, slot = 'slot-8' })
   host:connect(4, { ucid = 'ucid-4', name = 'Charlie', side = 1, slot = 'slot-9' })
+  host.slots = { red = { { unitId = 's' } }, blue = { { unitId = 'blue-1' } } }
   local function calls()
     local out = {}
     for _, c in ipairs(host.moderation) do
@@ -2740,6 +2741,158 @@ scenario('moderate', nil, function(ctx)
     assert(not (S.read(ctx.profile .. f) or ''):find('ucid%-%d'), 'a ucid is in ' .. f)
   end
   S.ok('MODERATE: KICK, BAN, UNBAN and SLOT call DCS, a missing or changed ucid is NOT_BOUND, a bad payload is refused, a false return or a raise is DCS_REFUSED, and no ucid is in a message')
+end)
+
+-- SLOT's side resolution and refusals (spec/commands.md, "Slot moves").
+scenario('slot-moves', nil, function(ctx)
+  local sim, run, expect = effect_world(ctx)
+  local host = ctx.host
+  local KEEP = 4294967295
+  host.slots = {
+    red = { { unitId = '41' }, { unitId = '42' } },
+    blue = { { unitId = '8580' }, { unitId = 8581 } },
+  }
+  local function reset()
+    host.moderation, host.slot_reads, host.net_raises, host.net_returns = {}, {}, {}, {}
+    host.players[2] = { ucid = 'ucid-2', name = 'Alpha', side = 2, slot = '', ping = 0 }
+    host.players[3] = { ucid = 'ucid-3', name = 'Bravo', side = 1, slot = '41', ping = 0 }
+  end
+  local function calls()
+    local out = {}
+    for _, c in ipairs(host.moderation) do
+      out[#out + 1] = c.call .. '(' .. tostring(c.args[1]) .. ',' .. tostring(c.args[2]) .. ',' .. tostring(c.args[3]) .. ')'
+    end
+    return table.concat(out, ';')
+  end
+  local function move(player, side, slot)
+    return moderate(SLOT, player, side, 0, 'ucid-' .. player, slot, '')
+  end
+
+  -- Each resolution row: the side DCS gets, and the slot lists read.
+  local rows = {
+    { 'KEEP, no slot: the player side', 2, KEEP, '', 'force_player_slot(2,2,)', '' },
+    { 'KEEP, a blue slot', 2, KEEP, '8580', 'force_player_slot(2,2,8580)', 'red,blue' },
+    { 'KEEP, a red slot', 2, KEEP, '42', 'force_player_slot(2,1,42)', 'red' },
+    { 'KEEP, a numeric unitId', 2, KEEP, '8581', 'force_player_slot(2,2,8581)', 'red,blue' },
+    { 'neutral, no slot', 2, 0, '', 'force_player_slot(2,0,)', '' },
+    { 'red, no slot', 2, 1, '', 'force_player_slot(2,1,)', '' },
+    { 'blue, a blue slot', 2, 2, '8580', 'force_player_slot(2,2,8580)', 'blue' },
+    { 'red, a red slot', 2, 1, '42', 'force_player_slot(2,1,42)', 'red' },
+    { 'the slot the player holds', 3, 1, '41', 'force_player_slot(3,1,41)', 'red' },
+  }
+  for _, row in ipairs(rows) do
+    reset()
+    local r = run({ move(row[2], row[3], row[4]) }, row[1])
+    expect(r[1], APPLIED, row[1])
+    assert(calls() == row[5], row[1] .. ': DCS got ' .. calls())
+    assert(table.concat(host.slot_reads, ',') == row[6], row[1] .. ': read ' .. table.concat(host.slot_reads, ','))
+  end
+
+  -- The race: the player's side changed after the sidecar read it; KEEP
+  -- takes the side DCS holds when the handler runs.
+  reset()
+  host.players[2].side = 1
+  local r = run({ move(2, KEEP, '') }, 'the race')
+  expect(r[1], APPLIED, 'the race')
+  assert(calls() == 'force_player_slot(2,1,)', 'the race: DCS got ' .. calls())
+  assert(host.players[2].side == 1, 'the race: the player side was not kept')
+
+  -- Each refusal: DCS_REFUSED with its message, and no force_player_slot.
+  local NO_SIDE = 'DCS gave no side for the player'
+  local SEAT = 'a crew seat is not a slot the agent moves players into'
+  local NO_LIST = 'DCS gave no slot list'
+  local NOT_LISTED = 'the mission lists no slot with this ID'
+  local OTHER = 'the slot belongs to the other coalition'
+  local HELD = 'another player holds the slot'
+  local NO_PLAYERS = 'DCS gave no player list'
+  local NO_HOLDER = 'DCS gave no slot for another player'
+  local hostile = setmetatable({}, { __index = function()
+    error('a metamethod ran')
+  end })
+  local refusals = {
+    { 'a crew seat', move(2, KEEP, '8580_2'), SEAT },
+    { 'a crew seat with a side', move(2, 2, '8580_2'), SEAT },
+    { 'a slot no list holds, KEEP', move(2, KEEP, '999'), NOT_LISTED },
+    { 'a slot no list holds, blue', move(2, 2, '999'), NOT_LISTED },
+    { 'the other coalition slot', move(2, 2, '41'), OTHER },
+    { 'the other coalition slot, red', move(2, 1, '8580'), OTHER },
+    { 'a slot another player holds', move(2, 1, '41'), HELD },
+    { 'a slot another player holds, KEEP', move(2, KEEP, '41'), HELD },
+    { 'the side read raises', move(2, KEEP, ''), NO_SIDE, function()
+      host.net_raises['get_player_info.side'] = true
+    end },
+    { 'the side read is not a side', move(2, KEEP, ''), NO_SIDE, function()
+      host.net_returns['get_player_info.side'] = 3
+    end },
+    { 'the slot list raises', move(2, 2, '8580'), NO_LIST, function()
+      host.net_raises.getAvailableSlots = true
+    end },
+    { 'the slot list is not a table', move(2, KEEP, '8580'), NO_LIST, function()
+      host.net_returns.getAvailableSlots = 'none'
+    end },
+    { 'the slot list has a metamethod', move(2, 2, '8580'), NOT_LISTED, function()
+      host.net_returns.getAvailableSlots = hostile
+    end },
+    { 'the player list raises', move(2, 2, '8580'), NO_PLAYERS, function()
+      host.net_raises.get_player_list = true
+    end },
+    { 'the player list is not a table', move(2, 2, '8580'), NO_PLAYERS, function()
+      host.net_returns.get_player_list = 'none'
+    end },
+    { 'another player slot read raises', move(2, 2, '8580'), NO_HOLDER, function()
+      host.net_raises['get_player_info.slot'] = true
+    end },
+    { 'the second list raises, KEEP', move(2, KEEP, '8580'), NO_LIST, function()
+      host.net_raises['getAvailableSlots.blue'] = true
+    end, 'red,blue' },
+    { 'the second list raises, blue', move(2, 2, '41'), NO_LIST, function()
+      host.net_raises['getAvailableSlots.red'] = true
+    end, 'blue,red' },
+  }
+  for _, case in ipairs(refusals) do
+    reset()
+    if case[4] then
+      case[4]()
+    end
+    r = run({ case[2] }, case[1])
+    expect(r[1], 22, case[1])
+    assert(r[1].message == case[3], case[1] .. ': the message is ' .. tostring(r[1].message))
+    assert(calls() == '', case[1] .. ': DCS got ' .. calls())
+    if case[5] then
+      assert(table.concat(host.slot_reads, ',') == case[5], case[1] .. ': read ' .. table.concat(host.slot_reads, ','))
+    end
+  end
+
+  -- A listed player whose slot reads nil left between the reads: not a holder.
+  reset()
+  host.net_returns.get_player_list = { 1, 2, 3, 9 }
+  r = run({ move(2, 2, '8580') }, 'a player who left')
+  expect(r[1], APPLIED, 'a player who left')
+  assert(calls() == 'force_player_slot(2,2,8580)', 'a player who left: DCS got ' .. calls())
+
+  -- A list entry with a metamethod is skipped unread; the next entry matches.
+  reset()
+  host.net_returns.getAvailableSlots = { hostile, { unitId = '8580' } }
+  r = run({ move(2, 2, '8580') }, 'an entry with a metamethod')
+  expect(r[1], APPLIED, 'an entry with a metamethod')
+  assert(calls() == 'force_player_slot(2,2,8580)', 'an entry with a metamethod: DCS got ' .. calls())
+
+  -- What the decoder refuses: KEEP outside SLOT, a side above 2, side 0
+  -- with a slot.
+  reset()
+  r = run({
+    moderate(KICK, 2, KEEP, 0, 'ucid-2', '', 'x'),
+    moderate(BAN, 2, KEEP, 60, 'ucid-2', '', 'x'),
+    moderate(UNBAN, 0, KEEP, 0, 'ucid-2', '', ''),
+    move(2, 3, ''),
+    move(2, KEEP - 1, ''),
+    move(2, 0, '8580'),
+  }, 'bad sides')
+  for seq = 1, 6 do
+    expect(r[seq], BAD_PAYLOAD, 'bad side ' .. seq)
+  end
+  assert(calls() == '' and #host.slot_reads == 0, 'a refused SLOT reached DCS: ' .. calls())
+  S.ok('SLOT: KEEP resolves to the player side or the slot coalition at call time, only the needed slot lists are read, and every refusal has its message and no DCS move')
 end)
 
 -- emit (spec/commands.md, "emit"): the limits and the reasons, with EVAL as

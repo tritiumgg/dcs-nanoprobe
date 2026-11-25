@@ -9033,10 +9033,15 @@ pub struct MovePlayerRequest {
     pub write: ::core::option::Option<Write>,
     #[prost(string, tag = "2")]
     pub player_key: ::prost::alloc::string::String,
+    /// Where the player goes. COALITION_UNSPECIFIED keeps the player's side
+    /// with no slot, and takes the slot's coalition with a slot; the agent reads the
+    /// player's side when the move runs. COALITION_NEUTRAL is spectators, and a
+    /// slot with it is INVALID_ARGUMENT. COALITION_RED or COALITION_BLUE sets
+    /// that side; a slot of the other coalition is refused.
     #[prost(enumeration = "Coalition", tag = "3")]
     pub coalition: i32,
-    /// The slot ID. Empty moves the player to spectators; a slot ID is refused
-    /// with UNIMPLEMENTED and reason UNVERIFIED until E34 verifies it.
+    /// The slot ID: the unit ID of a player slot of the mission, at most 128
+    /// bytes. Empty for no slot.
     #[prost(string, tag = "4")]
     pub slot: ::prost::alloc::string::String,
 }
@@ -9234,8 +9239,12 @@ pub mod moderation_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        /// Move a connected player to spectators. A move into a slot is refused
-        /// with UNIMPLEMENTED and reason UNVERIFIED until E34 verifies it.
+        /// Move a connected player to a coalition, or into a slot, or out of their
+        /// slot on the same side. The agent refuses, with outcome REFUSED, a slot the
+        /// mission does not list, a slot of the other coalition, a slot another
+        /// player holds, a crew seat, and a move when DCS gives no side, slot list or
+        /// player list, or no slot for another player (spec/commands.md, "Slot
+        /// moves", has each message).
         pub async fn move_player(
             &mut self,
             request: impl tonic::IntoRequest<super::MovePlayerRequest>,
@@ -9298,8 +9307,12 @@ pub mod moderation_service_server {
             tonic::Response<super::ListBansResponse>,
             tonic::Status,
         >;
-        /// Move a connected player to spectators. A move into a slot is refused
-        /// with UNIMPLEMENTED and reason UNVERIFIED until E34 verifies it.
+        /// Move a connected player to a coalition, or into a slot, or out of their
+        /// slot on the same side. The agent refuses, with outcome REFUSED, a slot the
+        /// mission does not list, a slot of the other coalition, a slot another
+        /// player holds, a crew seat, and a move when DCS gives no side, slot list or
+        /// player list, or no slot for another player (spec/commands.md, "Slot
+        /// moves", has each message).
         async fn move_player(
             &self,
             request: tonic::Request<super::MovePlayerRequest>,

@@ -17,7 +17,7 @@ use nanoprobe_agent_link::sampler::{Rates, Report, Sampler, clock_cost};
 use nanoprobe_agent_link::{Admit, Link, Options};
 use nanoprobe_transport::codec::{Lv, Reader, Writer};
 use nanoprobe_transport::layout::{
-    HandlerState, kind, lifecycle, moderation, opcode as op, opcode_row, result, volume,
+    HandlerState, SLOT_KEEP, kind, lifecycle, moderation, opcode as op, opcode_row, result, volume,
 };
 use nanoprobe_transport::log::{Level, Value};
 use nanoprobe_transport::names::{self, Kind};
@@ -1307,11 +1307,15 @@ fn arguments_with(
                 moderation::UNBAN,
                 moderation::SLOT,
             ];
-            // Player 1 is the server itself.
+            let is_slot = u64::from(action) == moderation::SLOT;
+            // Player 1 is the server itself. A side is 0, 1, 2, or KEEP
+            // for SLOT only; spectators hold no slot.
             if !known.contains(&u64::from(action))
                 || ucid.is_empty()
                 || !(seconds.is_finite() && seconds >= 0.0)
                 || player == SERVER_PLAYER
+                || (side > 2 && !(side == SLOT_KEEP && is_slot))
+                || (is_slot && side == 0 && !slot.is_empty())
             {
                 return None;
             }
@@ -3075,6 +3079,58 @@ mod tests {
         }
         assert!(bad(vec![0; 23]));
         assert!(bad(moderate(1, 7, 0.0, "abc")[..30].to_vec()));
+    }
+
+    fn slot_move(action: u32, side: u32, slot: &str) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u32(action).u32(7).u32(side).pad(4).f64(0.0);
+        w.str("abc").str(slot).str("");
+        w.finish()
+    }
+
+    #[test]
+    fn moderate_takes_keep_for_slot_only_and_no_other_side_above_2() {
+        let h = header(0, 0);
+        let ok = |bytes: Vec<u8>| arguments(op::MODERATE as u16, &h, &bytes).is_some();
+        let slot = moderation::SLOT as u32;
+        for side in [0, 1, 2, SLOT_KEEP] {
+            assert!(
+                ok(slot_move(slot, side, "")),
+                "SLOT side {side} with no slot"
+            );
+        }
+        for side in [1, 2, SLOT_KEEP] {
+            assert!(
+                ok(slot_move(slot, side, "8580")),
+                "SLOT side {side} with a slot"
+            );
+        }
+        expect(
+            op::MODERATE,
+            &h,
+            &slot_move(slot, SLOT_KEEP, "8580"),
+            vec![
+                ("action", n(4.0)),
+                ("player", n(7.0)),
+                ("side", n(4_294_967_295.0)),
+                ("seconds", n(0.0)),
+                ("ucid", s("abc")),
+                ("slot", s("8580")),
+                ("reason", s("")),
+            ],
+        );
+        // Spectators hold no slot.
+        assert!(!ok(slot_move(slot, 0, "8580")));
+        for side in [3, 4, 0xFFFF_FFFE] {
+            assert!(!ok(slot_move(slot, side, "")), "SLOT side {side}");
+        }
+        for action in 1..=3u32 {
+            assert!(
+                !ok(slot_move(action, SLOT_KEEP, "")),
+                "action {action} with KEEP"
+            );
+            assert!(!ok(slot_move(action, 3, "")), "action {action} with side 3");
+        }
     }
 
     fn clear(shape: u32, v: [f64; 7]) -> Vec<u8> {

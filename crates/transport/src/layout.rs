@@ -230,6 +230,10 @@ codes! {
     moderation "moderation" { KICK = 1, BAN = 2, UNBAN = 3, SLOT = 4, }
 }
 
+/// `MODERATE SLOT`'s side for "the side the agent resolves": the player's
+/// own, or the slot's coalition (spec/commands.md, "Slot moves").
+pub const SLOT_KEEP: u32 = 0xFFFF_FFFF;
+
 codes! {
     /// `CLEAR_DEBRIS` volume shapes (spec/commands.md, "Codes: volume").
     volume "volume" { SPHERE = 1, BOX = 2, }

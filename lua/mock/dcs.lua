@@ -104,6 +104,11 @@ function M.new(o)
     players = { [1] = { ucid = 'server-ucid', name = 'server', side = 0, slot = '', ping = 0 } },
     bans = {},
     moderation = {},
+    -- The mission's player slots by coalition, as DCS.getAvailableSlots gives
+    -- them on the server: every slot, taken ones included (LIVE), and each
+    -- read in order by coalition name.
+    slots = { red = {}, blue = {} },
+    slot_reads = {},
     net_raises = {},
     net_returns = {},
     pending_load = nil,
@@ -389,6 +394,23 @@ function M.new(o)
     setUserCallbacks = function(callbacks)
       host.callbacks[#host.callbacks + 1] = callbacks
     end,
+    -- `net_raises.getAvailableSlots` makes it raise and
+    -- `net_returns.getAvailableSlots` is what it returns.
+    getAvailableSlots = function(coalition)
+      host.slot_reads[#host.slot_reads + 1] = coalition
+      -- `net_raises['getAvailableSlots.<coalition>']` raises for that one.
+      if host.net_raises.getAvailableSlots or host.net_raises['getAvailableSlots.' .. tostring(coalition)] then
+        error('mock: DCS.getAvailableSlots raises', 2)
+      end
+      if host.net_returns.getAvailableSlots ~= nil then
+        return host.net_returns.getAvailableSlots
+      end
+      local list = {}
+      for i, slot in ipairs(host.slots[coalition] or {}) do
+        list[i] = { unitId = slot.unitId, type = slot.type or 'A-10C_2', role = slot.role or 'Pilot' }
+      end
+      return list
+    end,
   })
   -- One moderation call: recorded, then raising or returning what the test
   -- set, else run and returning nothing, as the DCS calls return (UNVERIFIED).
@@ -402,7 +424,7 @@ function M.new(o)
     if forced ~= nil then
       return forced
     end
-    run()
+    return run()
   end
 
   hook.net = namespace('hook', 'net', {
@@ -444,7 +466,15 @@ function M.new(o)
     end,
     -- Players and moderation. A call is recorded in `host.moderation` as its
     -- name and arguments before it checks anything else.
+    -- `net_raises.get_player_list` makes it raise and
+    -- `net_returns.get_player_list` is what it returns.
     get_player_list = function()
+      if host.net_raises.get_player_list then
+        error('mock: net.get_player_list raises', 2)
+      end
+      if host.net_returns.get_player_list ~= nil then
+        return host.net_returns.get_player_list
+      end
       local ids = {}
       for id in pairs(host.players) do
         ids[#ids + 1] = id
@@ -455,6 +485,15 @@ function M.new(o)
     get_player_info = function(id, attribute)
       if type(id) ~= 'number' or (attribute ~= nil and type(attribute) ~= 'string') then
         error('mock: net.get_player_info takes a connection ID and an optional name', 2)
+      end
+      -- `net_raises['get_player_info.side']` makes a read of 'side' raise,
+      -- and `net_returns['get_player_info.side']` is what it returns.
+      local switch = 'get_player_info.' .. tostring(attribute)
+      if attribute ~= nil and host.net_raises[switch] then
+        error('mock: net.get_player_info(' .. attribute .. ') raises', 2)
+      end
+      if attribute ~= nil and host.net_returns[switch] ~= nil then
+        return host.net_returns[switch]
       end
       local p = host.players[id]
       if p == nil then
@@ -536,8 +575,18 @@ function M.new(o)
         if not p then
           error('mock: net.force_player_slot of a player who is not connected', 3)
         end
+        -- A slot of the other coalition returns false and changes nothing;
+        -- a slot the mission lacks is taken (LIVE,
+        -- docs/results/2026-11-24-player-moves.md).
+        local other = side == 1 and 'blue' or side == 2 and 'red' or nil
+        for _, s in ipairs(other and host.slots[other] or {}) do
+          if tostring(s.unitId) == slot then
+            return false
+          end
+        end
         p.side, p.slot = side, slot
         host:callback('onPlayerChangeSlot', id)
+        return true
       end)
     end,
   })
