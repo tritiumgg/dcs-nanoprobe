@@ -2,7 +2,7 @@
 
 A FARP static the platform spawns, by `PutStatic` or `PutFromStaticTemplate`, is `LIVE`
 in the World, and `RemoveEntity` removes it with its airbase
-([ADR NNNN](../adr/NNNN-spawned-farps-are-tracked-statics.md)). Its radio frequency,
+([ADR 0045](../adr/0045-spawned-farps-are-tracked-statics.md)). Its radio frequency,
 modulation and callsign pass through `StaticSpec.extra` and from a template. Before
 this, such a FARP reached `LOST` and stayed in DCS after `RemoveEntity`
 ([the template-heliports results](2026-11-24-template-heliports.md)).
