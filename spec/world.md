@@ -42,7 +42,17 @@ FARP the mission file places goes the same way when its static goes; that it has
 static's ID is UNVERIFIED. An airbase whose ID is not a static's of its name stays.
 The desired owner and stock the controller set for it are kept by name, and sent again
 once a FARP spawned again under the name is sampled. The platform destroys an airbase
-only by destroying its FARP. Owner and stock are settable. The store keeps a desired owner only for an airbase the controller set,
+only by destroying its FARP. The static of a FARP the platform spawns is a row like any
+static (spec/sampling.md, "Tiers"), so it is `LIVE` and `RemoveEntity` destroys it with
+its airbase. A FARP the mission file places is not read as a static. DCS takes
+that destroy only when the simulation runs: on a paused server the airbase stays until
+the mission resumes (LIVE, docs/results/2026-11-25-farp-fixes.md). Whether a player is
+offered a slot there meanwhile is UNVERIFIED; the platform assumes one may be. The agent
+applies `AIRBASE_OWNER` and `WAREHOUSE_SET` for a FARP it spawned to that FARP's own
+object, not to what a lookup of the name finds: on a paused server an older FARP of the
+name may still answer one (UNVERIFIED). A `STATIC_DESTROY` that finds only a removed
+FARP by its name (`isExist` false) is applied with nothing to destroy. The sidecar sends no `AIRBASE_OWNER` or `WAREHOUSE_SET` to the
+airbase of a FARP the store no longer holds. Owner and stock are settable. The store keeps a desired owner only for an airbase the controller set,
 and a desired count only for a warehouse item the controller set. The reconciler sends
 `AIRBASE_OWNER` or `WAREHOUSE_SET` when the agent's latest sample differs from it, once
 per desired revision and mission generation. A capture by DCS or stock DCS uses is a
@@ -808,7 +818,7 @@ revision, and `revision` is the store revision of the call's one commit.
 | `static.group[j].units[k]` | One static per unit: `type`, `x`, `y` and the unit's `heading` as for a vehicle unit; `category`, `shape_name`, `rate`, `mass`, `canCargo` and `livery_id` go to the static's further keys; the group's `dead = true` creates it destroyed ("Ruins"); its label is the group's `name`. Other keys are dropped and logged |
 | `ship`, `plane`, `helicopter`, `complex` | A file with any group of these kinds is refused whole |
 | A static with `linkOffset` true or a route point with `linkUnit` | Refused: the link to a unit is not built |
-| A static of category `Heliports` | Built as any static, so as `PutStatic` builds a FARP: DCS makes an airbase of its name, which the platform lists and samples ("Kinds"). Its `heliport_` keys are dropped and logged. With the group's `dead = true`, whether DCS makes the airbase is UNVERIFIED ("Ruins"). A `heliport_` key on a static of another category is dropped and logged |
+| A static of category `Heliports` | Built as any static, so as `PutStatic` builds a FARP: DCS makes an airbase of its name, which the platform lists and samples ("Kinds"). Its `heliport_frequency`, `heliport_modulation` and `heliport_callsign_id` pass as the file gives them (spec/commands.md, "Layout: STATIC_SPAWN"). With the group's `dead = true`, whether DCS makes the airbase is UNVERIFIED ("Ruins"). A `heliport_` key on a static of another category is dropped and logged |
 | A static of category `GrassAirfields`, or with a `grassairfield_` key | Refused: no live check has seen one make its airbase |
 | `name`, `desc`, `localization`, `requiredModules`, `customFormations` | Not used |
 

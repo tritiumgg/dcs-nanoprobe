@@ -118,6 +118,7 @@ for script in "$ROOT"/lua/tests/*.lua; do
             "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" deep-tables
             "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" world
             "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" world-gone
+            "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" farps
             "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" destroyed-overflow
             for name in hook-order hook-budget hook-no-result hook-no-shim sound clear-debris picture \
                 marks menus message extension-eval chat mission-load players moderate slot-moves \

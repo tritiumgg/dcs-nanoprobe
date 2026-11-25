@@ -59,7 +59,10 @@
 //! `{"ev":"result","seq":N,"epoch":N,"opcode":N,"code":N,"code_name":"..",
 //! "message":"..","cost_us":N,"object":N,"depth":N,"value":<json>}`, where `depth` is how
 //! deep the value's tables nest; one for each `OBJECT_GONE`,
-//! `{"ev":"gone","object":N,"reason":N,"entity":N}`; one for each `PLAYER`,
+//! `{"ev":"gone","object":N,"reason":N,"entity":N}`; one for each `OBJECT`,
+//! `{"ev":"object","object":N,"kind":N,"category":N,"enumeration":N,"life0":N,"name":".."}`;
+//! one for each `SEEN`, `{"ev":"seen","enumeration":N,"objects":[N,..]}`;
+//! one for each `PLAYER`,
 //! `{"ev":"player","event":N,"id":N,"side":N,"seat":N,"client":"..","name":"..","slot":"..","text":".."}`;
 //! one for each `MENU`, `{"ev":"menu","entity":N,"target":N,"scope":N,"player":N}`;
 //! one for each `AUTHOR_EVENT`, `{"ev":"author","name":"..","objects":[N,..],"payload":<json>}`;
@@ -84,7 +87,8 @@ use nanoprobe_sidecar::sim::SimAdapter;
 use nanoprobe_transport::codec::{Lv, Writer};
 use nanoprobe_transport::layout::{kind, opcode, result};
 use nanoprobe_transport::records::{
-    AuthorEvent, CommandHeader, CommandResult, ExtensionStats, Hello, Menu, ObjectGone, Player,
+    AuthorEvent, CommandHeader, CommandResult, ExtensionStats, Hello, Menu, Object, ObjectGone,
+    Player, Seen,
 };
 use serde_json::Value;
 
@@ -456,6 +460,30 @@ fn run(args: &[String]) -> Result<bool, String> {
             match u64::from(r.kind) {
                 kind::HELLO if epoch.is_none() => {
                     epoch = Hello::decode(&r.payload).ok().map(|h| h.epoch + 1);
+                }
+                kind::OBJECT => {
+                    if let Ok(o) = Object::decode(&r.payload) {
+                        println!(
+                            "{{\"ev\":\"object\",\"object\":{},\"kind\":{},\"category\":{},\
+                             \"enumeration\":{},\"life0\":{},\"name\":{}}}",
+                            o.object,
+                            o.kind,
+                            o.category,
+                            o.enumeration,
+                            o.life0,
+                            json_string(&o.name)
+                        );
+                    }
+                }
+                kind::SEEN => {
+                    if let Ok(v) = Seen::decode(&r.payload) {
+                        let ids: Vec<String> = v.objects.iter().map(u64::to_string).collect();
+                        println!(
+                            "{{\"ev\":\"seen\",\"enumeration\":{},\"objects\":[{}]}}",
+                            v.enumeration,
+                            ids.join(",")
+                        );
+                    }
                 }
                 kind::OBJECT_GONE => {
                     if let Ok(g) = ObjectGone::decode(&r.payload) {

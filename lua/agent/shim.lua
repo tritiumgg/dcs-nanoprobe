@@ -464,6 +464,9 @@ local TIER_STOPPED, TIER_VITALS, TIER_WAREHOUSE = 5, 6, 7
 local OBJECT_UNIT, OBJECT_STATIC = 1, 2
 -- DCS Object.Category.CARGO: a static that can move (LIVE, S10).
 local CATEGORY_CARGO = 6
+-- `Object.getCategory` of a FARP static, which is an airbase (LIVE,
+-- docs/results/2026-11-25-farp-fixes.md).
+local CATEGORY_BASE = 4
 
 -- The batch buffer: 256 entries, so the agent writes only entries that exist.
 local buf = {}
@@ -584,7 +587,8 @@ local function births(rows)
 end
 
 -- The enumeration's steps: every coalition and group category, then every
--- coalition's statics.
+-- coalition's statics. A last step, not in this list, visits the FARP
+-- statics this generation spawned.
 local STEPS = {}
 for side = 0, 2 do
   for category = 0, 4 do
@@ -660,13 +664,33 @@ local function enumerate(rows, start)
           end
         end
       end
-    else
-      local step = STEPS[e.step]
-      if step == nil then
+    elseif STEPS[e.step] == nil then
+      -- The FARP statics this generation spawned: `getStaticObjects` does
+      -- not list them (spec/sampling.md, "Tiers"). Each is visited through
+      -- its airbase entry's object, which is the static (LIVE), and counts
+      -- as one item; one whose `isExist` is not true is skipped. With no
+      -- spawned FARP this makes no DCS call.
+      e.fi = (e.fi or 0) + 1
+      local base = T.airbases[e.fi]
+      if base == nil then
         T.enum = nil
         agent.enum_done()
         return
       end
+      if base.spawned and not base.gone then
+        n = n + 1
+        local o = base.object
+        local ok, there = pcall(o.isExist, o)
+        if ok and there == true then
+          if visit(o, false) then
+            return true
+          end
+        elseif agent.item() then
+          return true
+        end
+      end
+    else
+      local step = STEPS[e.step]
       -- A coalition's static list is one call whose time grows with the
       -- statics: it runs in a batch of its own, so the batch holds no
       -- other enumeration work and `enum_step_max_us` reports its time.
@@ -837,18 +861,25 @@ local function stock(base)
   return n
 end
 
--- Whether an airbase a static makes is gone: its static, the one with the
--- airbase's ID, no longer exists, so it was destroyed, died or was replaced. Its entry then stays as a tombstone,
--- so the rows after it keep their index.
+-- Whether an airbase a static makes is gone: its static no longer exists,
+-- so it was destroyed, died or was replaced. Its entry then stays as a
+-- tombstone, so the rows after it keep their index. A spawned FARP's
+-- object is its static (LIVE, docs/results/2026-11-25-farp-fixes.md); a
+-- mission FARP's static is the one of its name with the airbase's ID.
 local function farp_gone(base)
   if base.gone then
     return true
   end
-  local ok, alive = pcall(function()
-    local s = StaticObject.getByName(base.name)
-    return s ~= nil and rawget(s, 'id_') == base.id and s:isExist() == true
-  end)
-  base.gone = not (ok and alive)
+  local ok, alive
+  if base.spawned then
+    ok, alive = pcall(base.object.isExist, base.object)
+  else
+    ok, alive = pcall(function()
+      local s = StaticObject.getByName(base.name)
+      return s ~= nil and rawget(s, 'id_') == base.id and s:isExist()
+    end)
+  end
+  base.gone = not (ok and alive == true)
   return base.gone
 end
 M.farp_gone = farp_gone
@@ -1363,9 +1394,22 @@ local function capture_group(group)
   return out
 end
 
+-- The airbase `name`. A spawned FARP's is the object its entry holds, while
+-- the entry stands: an older FARP of the name that DCS has not yet removed,
+-- on a paused server, may answer a lookup by name (UNVERIFIED). Any other
+-- airbase is looked up by name.
+local function airbase_named(name)
+  for _, base in ipairs(T.airbases) do
+    if base.spawned and not base.gone and base.name == name then
+      return base.object
+    end
+  end
+  return Airbase.getByName(name)
+end
+
 -- A warehouse of the airbase `name`, or nil and a code and message.
 local function warehouse_of(name)
-  local ab = Airbase.getByName(name)
+  local ab = airbase_named(name)
   if not ab then
     return nil, NOT_BOUND, 'no airbase ' .. tostring(name)
   end
@@ -1755,12 +1799,13 @@ local HANDLERS = {
     -- (LIVE, docs/results/2026-11-16-person-tests-2.md). It joins the
     -- airbases this generation samples; a static spawned again under the
     -- name, or one spawned over a mission FARP of the name, takes over its
-    -- entry.
-    -- The airbase has the static's ID (LIVE); an airbase of the name with
-    -- another ID is not this static's. A static of the name that is no FARP
-    -- leaves a tombstone.
-    local found, ab = pcall(Airbase.getByName, a.name)
-    local ab_id = found and ab and rawget(ab, 'id_') or nil
+    -- entry. A static of the name that is no FARP leaves a tombstone.
+    -- The object `addStaticObject` returns for a FARP is its airbase, of
+    -- category 4 (LIVE, docs/results/2026-11-25-farp-fixes.md); it is read
+    -- here, not looked up by name, since a FARP of the name that DCS has
+    -- not yet removed may still answer a lookup (UNVERIFIED).
+    local got, category = pcall(Object.getCategory, s)
+    local farp = got and category == CATEGORY_BASE
     local at
     for i, base in ipairs(T.airbases) do
       if base.static and base.name == a.name then
@@ -1768,8 +1813,15 @@ local HANDLERS = {
         break
       end
     end
-    if ab_id == id then
-      T.airbases[at or #T.airbases + 1] = { object = ab, id = ab_id, name = a.name, spawned = true, static = true }
+    if farp then
+      T.airbases[at or #T.airbases + 1] = { object = s, id = id, name = a.name, spawned = true, static = true }
+      -- Its birth event has category 4, which the event handler does not
+      -- queue, and `getStaticObjects` does not list it (LIVE): the static is
+      -- queued as a birth here, so the next pump adds its row.
+      if T.birth_tail - T.birth_head + 1 < MAX_BIRTHS then
+        T.birth_tail = T.birth_tail + 1
+        T.births[T.birth_tail] = { s, false }
+      end
     elseif at then
       T.airbases[at].gone = true
     end
@@ -1784,6 +1836,17 @@ local HANDLERS = {
     local s = StaticObject.getByName(a.name)
     if not s then
       return APPLIED
+    end
+    -- A FARP DCS removed is still found by name until the next mission load,
+    -- with `isExist` false (LIVE, docs/results/2026-11-25-farp-fixes.md): it
+    -- is gone, as a static the name no longer finds. A dead static, which
+    -- also reads false, is a ruin the destroy must still take (ADR 0026).
+    local cat_ok, category = pcall(Object.getCategory, s)
+    if cat_ok and category == CATEGORY_BASE then
+      local there_ok, there = pcall(s.isExist, s)
+      if there_ok and there == false then
+        return APPLIED
+      end
     end
     local id = rawget(s, 'id_')
     local ok, err = pcall(s.destroy, s)
@@ -2002,7 +2065,7 @@ local HANDLERS = {
   end,
   -- AIRBASE_OWNER: automatic capture off, then the owner.
   [23] = function(a)
-    local ab = Airbase.getByName(a.airbase)
+    local ab = airbase_named(a.airbase)
     if not ab then
       return NOT_BOUND, nil, 'no airbase ' .. tostring(a.airbase)
     end

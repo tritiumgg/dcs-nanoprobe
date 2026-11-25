@@ -8,10 +8,19 @@
 //! north of it: the twin. It reads each static back from DCS by its
 //! platform name with `StaticObject.getByName` and `Airbase.getByName`, and
 //! which of them `world.getAirbases` lists. It
-//! sets a fuel stock under each heliport's name and reads it from DCS. It
-//! records each static's state in the World, removes every entity and the
-//! file, also when a step fails, and records what DCS still holds. The
-//! template's heliport must go every way its twin goes.
+//! sets a fuel stock and the red owner under each heliport's name and reads
+//! both from DCS. It
+//! records each static's state in the World, which must be `LIVE`. The twin
+//! carries radio keys other than DCS's defaults, and each heliport's
+//! frequency, modulation and callsign are read from DCS. Before the spawns
+//! and once further helipads stand, it reads the agent's sampling report.
+//! It removes every entity and the file, also when a step fails. On a
+//! paused server it reads DCS once, resumes the mission until DCS has
+//! dropped the heliports, and pauses it again: DCS takes a FARP's destroy
+//! only while the simulation runs (LIVE,
+//! docs/results/2026-11-25-farp-fixes.md). It then reads that the agent
+//! holds each heliport's airbase entry as a tombstone. The template's
+//! heliport must go every way its twin goes.
 
 use std::time::Duration;
 
@@ -28,9 +37,139 @@ const NEAR_M: f64 = 1.0;
 /// The jet fuel the run stocks at each heliport's warehouse, in kg. DCS
 /// must read back this amount, which an empty warehouse does not hold.
 const FUEL_KG: f64 = 5_000.0;
+/// The owner the run gives each heliport's airbase: red, which the spawned
+/// blue heliports are not. DCS reads it as coalition 1.
+const OWNER: pb::Coalition = pb::Coalition::Red;
+const OWNER_IN_DCS: i64 = 1;
 /// How long the airbase and the stock may take to show. Not a design
 /// limit; only when this test gives up.
 const SHOW_LIMIT: Duration = Duration::from_secs(120);
+/// How many helipads the run adds by `PutStatic` beyond the twin, for the
+/// sampling read with several FARPs, and how far apart, in meters.
+const EXTRA_PADS: usize = 4;
+const EXTRA_STEP_M: f64 = 60.0;
+/// How long the run waits before each sampling read: past one report
+/// window of the agent (10 s), so the read covers the state it follows.
+const REPORT_WAIT: Duration = Duration::from_secs(12);
+/// The World's `LIVE` state (`LifecycleState`).
+const LIVE: i64 = 3;
+/// The twin's radio: values other than DCS's defaults (127.5 MHz, AM,
+/// London), the frequency as text, as a file gives it.
+const TWIN_RADIO: (&str, f64, f64) = ("131.25", 1.0, 4.0);
+/// The callsigns DCS gives the callsign IDs the run uses (LIVE,
+/// docs/results/2026-11-25-farp-fixes.md).
+const CALLSIGNS: &[(i64, &str)] = &[(1, "London"), (2, "Dallas"), (3, "Paris"), (4, "Moscow")];
+
+/// The radio DCS should read for a heliport of these further keys:
+/// frequency in Hz, modulation and callsign; DCS's defaults where a key is
+/// missing.
+fn expected_radio(extra: &[(String, Lv)]) -> Value {
+    let get = |k: &str| extra.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    let mhz = match get("heliport_frequency") {
+        Some(Lv::Number(n)) => Some(n),
+        Some(Lv::String(t)) => std::str::from_utf8(&t)
+            .ok()
+            .and_then(|t| t.trim().parse().ok()),
+        None => Some(127.5),
+        _ => None,
+    };
+    let modulation = match get("heliport_modulation") {
+        Some(Lv::Number(n)) => Some(n),
+        None => Some(0.0),
+        _ => None,
+    };
+    let callsign = match get("heliport_callsign_id") {
+        Some(Lv::Number(n)) => CALLSIGNS
+            .iter()
+            .find(|(id, _)| *id as f64 == n)
+            .map(|(_, c)| *c),
+        None => Some("London"),
+        _ => None,
+    };
+    json!({
+        "frequency": mhz.map(|m| (m * 1e6).round()),
+        "modulation": modulation,
+        "callsign": callsign,
+    })
+}
+
+/// Whether DCS's read of an airbase gives the radio `want`.
+fn radio_matches(want: &Value, ab: &Value) -> bool {
+    want["frequency"]
+        .as_f64()
+        .is_some_and(|f| ab["frequency"].as_f64() == Some(f))
+        && want["modulation"]
+            .as_f64()
+            .is_some_and(|m| ab["modulation"].as_f64() == Some(m))
+        && want["callsign"].is_string()
+        && ab["callsign"] == want["callsign"]
+}
+
+/// The agent's sampling report fields the run records (spec/sampling.md,
+/// "Reporting").
+const REPORT_FIELDS: &[&str] = &[
+    "share",
+    "frames",
+    "frames_over_250",
+    "frame_max_us",
+    "us_enumeration",
+    "rows_enumeration",
+    "enum_step_p99_us",
+    "enum_step_max_us",
+    "us_births",
+    "rows_births",
+    "us_warehouses",
+    "rows_warehouses",
+];
+
+/// The agent's last sampling report in its log, after [`REPORT_WAIT`], and
+/// how many airbase entries the shim holds.
+fn report(run: &dyn Live, api: &mut Api) -> Result<Value, String> {
+    std::thread::sleep(REPORT_WAIT);
+    api.renew()?;
+    let log = run
+        .profile()
+        .read("nanoprobe/logs/agent.log")?
+        .ok_or("no agent.log")?;
+    let text = String::from_utf8_lossy(&log);
+    let last = text
+        .lines()
+        .rev()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .find(|v| v["msg"] == json!("sampling"))
+        .ok_or("no sampling report in agent.log")?;
+    let mut out = serde_json::Map::new();
+    out.insert("wall".into(), last["wall"].clone());
+    for f in REPORT_FIELDS {
+        out.insert((*f).into(), last["data"][*f].clone());
+    }
+    out.insert(
+        "airbases".into(),
+        run.eval(
+            "server",
+            "template-heliport-entries",
+            "return __nanoprobe_shim and #__nanoprobe_shim.T.airbases\n",
+            60,
+        )?,
+    );
+    Ok(Value::Object(out))
+}
+
+/// The connections DCS lists, the server's own among them.
+const PLAYERS_LUA: &str = "return #net.get_player_list()\n";
+
+/// For each name, whether the agent's airbase entry of a spawned FARP of
+/// the name is a tombstone; `"none"` when it holds none.
+fn tombstones_lua(names: &[String]) -> String {
+    let list: Vec<String> = names.iter().map(|n| format!("{n:?}")).collect();
+    format!(
+        "local T = __nanoprobe_shim and __nanoprobe_shim.T\nlocal out = {{}}\n\
+         for i, n in ipairs({{ {} }}) do\n  out[i] = 'none'\n  \
+         for _, b in ipairs(T and T.airbases or {{}}) do if b.name == n and b.spawned then out[i] = b.gone == true end end\nend\n\
+         return out\n",
+        list.join(", ")
+    )
+}
 
 /// Whether the file's `i`-th static makes an airbase: its `category` is
 /// `Heliports`.
@@ -42,7 +181,9 @@ fn heliport(l: &Layout, i: usize) -> bool {
 }
 
 /// A read of every static by `StaticObject.getByName` and `Airbase.getByName`,
-/// and the names `world.getAirbases` lists among them.
+/// with each airbase's radio, and the names `world.getAirbases` lists among
+/// them that exist: it keeps listing a FARP DCS removed until the next
+/// mission load (LIVE, docs/results/2026-11-25-farp-fixes.md).
 fn read_lua(names: &[String]) -> String {
     let list: Vec<String> = names.iter().map(|n| format!("{n:?}")).collect();
     format!(
@@ -51,8 +192,8 @@ fn read_lua(names: &[String]) -> String {
          for i, n in ipairs(names) do\n  local s = StaticObject.getByName(n)\n  \
          if s and s:isExist() then local p = s:getPoint() out.statics[i] = {{ x = p.x, z = p.z, type = s:getTypeName(), country = s:getCountry() }} else out.statics[i] = false end\n  \
          local a = Airbase.getByName(n)\n  \
-         if a and a:isExist() then local p = a:getPoint() local d = a:getDesc() out.airbases[i] = {{ x = p.x, z = p.z, id = tonumber(a:getID()), category = d and d.category, type = a:getTypeName() }} else out.airbases[i] = false end\nend\n\
-         for _, b in ipairs(world.getAirbases()) do local n = b:getName() if want[n] then out.listed[#out.listed + 1] = n end end\n\
+         if a and a:isExist() then local p = a:getPoint() local d = a:getDesc() local c = a:getCommunicator() out.airbases[i] = {{ x = p.x, z = p.z, id = tonumber(a:getID()), category = d and d.category, type = a:getTypeName(), frequency = c:getFrequency(), modulation = c:getModulation(), callsign = a:getCallsign() }} else out.airbases[i] = false end\nend\n\
+         for _, b in ipairs(world.getAirbases()) do local n = b:getName() if want[n] and b:isExist() then out.listed[#out.listed + 1] = n end end\n\
          return out\n",
         list.join(", ")
     )
@@ -207,6 +348,15 @@ pub fn drive(
     let mut all = layout.clone();
     let mut twin = layout.statics[pad].clone();
     twin.x += TWIN_NORTH_M;
+    twin.extra.retain(|(k, _)| !k.starts_with("heliport_"));
+    twin.extra.extend([
+        (
+            "heliport_frequency".to_string(),
+            Lv::String(TWIN_RADIO.0.as_bytes().to_vec()),
+        ),
+        ("heliport_modulation".to_string(), Lv::Number(TWIN_RADIO.1)),
+        ("heliport_callsign_id".to_string(), Lv::Number(TWIN_RADIO.2)),
+    ]);
     all.statics.push(twin);
     let mut api = Api::connect(endpoint, token)?;
     let generation = api.status()?.now.map_or(0, |n| n.mission_generation);
@@ -263,6 +413,8 @@ fn steps(
     pad: usize,
     all: &Layout,
 ) -> Result<Value, String> {
+    println!("== template-heliport: the agent's report with no FARP");
+    let report_none = report(run, api)?;
     println!("== template-heliport: the file in place from {path}, and its heliport by PutStatic");
     let req = pb::PutFromStaticTemplateRequest {
         write: api.write("template-heliport", c),
@@ -278,17 +430,15 @@ fn steps(
         .map_err(status_text("PutFromStaticTemplate"))?
         .into_inner();
     let mut ids: Vec<u64> = made.statics.iter().map(|s| s.static_id).collect();
-    // The twin's spec is the template's own, moved north.
-    let specs = static_template::specs(l, None, 0.0, None, "").map_err(|r| r.text)?;
-    let mut spec = specs.statics[pad].clone();
-    if let Some(p) = spec.position.as_mut() {
-        p.north += TWIN_NORTH_M;
-    }
+    // The twin's spec is the template's own, moved north, with its radio:
+    // the last static of `all`.
+    let specs = static_template::specs(all, None, 0.0, None, "").map_err(|r| r.text)?;
+    let mut spec = specs.statics.last().cloned().ok_or("no twin spec")?;
     spec.label = "twin".into();
     let req = pb::PutStaticRequest {
         write: api.write("twin", c),
         static_id: 0,
-        spec: Some(spec),
+        spec: Some(spec.clone()),
     };
     let twin = api
         .rt
@@ -312,8 +462,41 @@ fn steps(
     } else {
         Err("the twin was not made".into())
     };
+    // Further helipads by `PutStatic`, north of the twin, for the report
+    // with several FARPs.
+    let mut extra_ids = Vec::new();
+    let report_several = if checked.is_ok() {
+        println!("== template-heliport: {EXTRA_PADS} more helipads, and the agent's report");
+        for k in 0..EXTRA_PADS {
+            let mut s = spec.clone();
+            if let Some(p) = s.position.as_mut() {
+                p.north += EXTRA_STEP_M * (k + 1) as f64;
+            }
+            s.label = format!("extra {k}");
+            let req = pb::PutStaticRequest {
+                write: api.write("extra", c),
+                static_id: 0,
+                spec: Some(s),
+            };
+            match api.rt.block_on(api.commands.put_static(req)) {
+                Ok(r) => extra_ids.push(r.into_inner().static_id),
+                Err(e) => println!("   FAIL PutStatic: {e}"),
+            }
+        }
+        report(run, api).ok()
+    } else {
+        None
+    };
+    let mut all_ids = ids.clone();
+    all_ids.extend(&extra_ids);
+    let all_names: Vec<String> = all_ids
+        .iter()
+        .map(|id| name(NameKind::Static, CampaignId(c), EntityId(*id)))
+        .collect();
+    let mut all_pads = pads.clone();
+    all_pads.extend(all_names[ids.len()..].iter().cloned());
     println!("== template-heliport: remove everything");
-    let left = remove(run, api, c, &ids, &names);
+    let left = remove(run, api, c, &all_ids, &all_names, &all_pads);
     if let Err(e) = &left {
         println!("   FAIL not removed: {e}");
     }
@@ -328,12 +511,25 @@ fn steps(
             && t["pass"] == json!(true)
     );
     v["twins"] = t;
-    v["heliports_removed"] = json!(pads.iter().all(|p| {
-        names
+    let heliports_removed = all_pads.iter().all(|p| {
+        all_names
             .iter()
             .position(|n| n == p)
             .is_some_and(|i| left["gone"][i] == json!(true))
-    }));
+    });
+    let tombstones = left["tombstones"].as_array().is_some_and(|t| {
+        all_names
+            .iter()
+            .zip(t)
+            .all(|(n, g)| !all_pads.contains(n) || g == &json!(true))
+    });
+    let extras = extra_ids.len() == EXTRA_PADS;
+    v["pass"] = json!(v["pass"] == json!(true) && heliports_removed && tombstones && extras);
+    v["heliports_removed"] = json!(heliports_removed);
+    v["tombstones"] = json!(tombstones);
+    v["extra_pads"] = json!(extra_ids);
+    v["report_no_farp"] = report_none;
+    v["report_farps"] = json!(report_several);
     v["answer"] = json!({
         "groups": made.groups.len(),
         "statics": made.statics.iter().map(|s| json!({ "static_id": s.static_id, "spec_revision": s.spec_revision })).collect::<Vec<_>>(),
@@ -385,22 +581,44 @@ fn check(
             .rt
             .block_on(api.commands.set_warehouse_stock(req))
             .map_err(status_text("SetWarehouseStock"));
-        stocked.push(json!({ "airbase": pad, "set": set.as_ref().err() }));
+        let req = pb::SetAirbaseOwnerRequest {
+            write: api.write("owner", c),
+            theater: theater.to_string(),
+            airbase: pad.clone(),
+            owner: OWNER as i32,
+        };
+        let owned = api
+            .rt
+            .block_on(api.commands.set_airbase_owner(req))
+            .map_err(status_text("SetAirbaseOwner"));
+        stocked.push(
+            json!({ "airbase": pad, "set": set.as_ref().err(), "owner": owned.as_ref().err() }),
+        );
     }
     let inv = format!(
-        "local out = {{}}\nfor i, n in ipairs({{ {} }}) do local a = Airbase.getByName(n) out[i] = a and a:getWarehouse():getLiquidAmount(0) or false end\nreturn out\n",
+        "local out = {{}}\nfor i, n in ipairs({{ {} }}) do local a = Airbase.getByName(n) out[i] = a and {{ fuel = a:getWarehouse():getLiquidAmount(0), coalition = a:getCoalition() }} or false end\nreturn out\n",
         pads.iter()
             .map(|n| format!("{n:?}"))
             .collect::<Vec<_>>()
             .join(", ")
     );
-    let fuel = wait(run, api, SHOW_LIMIT, "the stock in DCS", |_| {
-        let d = run.eval("server", "template-heliport-fuel", &inv, 60)?;
-        let ok = d.as_array().is_some_and(|a| {
-            a.len() == pads.len() && a.iter().all(|v| v.as_f64() == Some(FUEL_KG))
-        });
-        Ok(ok.then_some(d))
-    });
+    let fuel = wait(
+        run,
+        api,
+        SHOW_LIMIT,
+        "the stock and the owner in DCS",
+        |_| {
+            let d = run.eval("server", "template-heliport-fuel", &inv, 60)?;
+            let ok = d.as_array().is_some_and(|a| {
+                a.len() == pads.len()
+                    && a.iter().all(|v| {
+                        v["fuel"].as_f64() == Some(FUEL_KG)
+                            && v["coalition"].as_i64() == Some(OWNER_IN_DCS)
+                    })
+            });
+            Ok(ok.then_some(d))
+        },
+    );
     let fuel_ok = fuel.is_ok();
     let fuel = match fuel {
         Ok(d) => d,
@@ -409,11 +627,27 @@ fn check(
         }
     };
     let world = world(api, c)?;
+    // Every static is `LIVE`: the sidecar sees its object.
+    let live = world.as_array().is_some_and(|w| {
+        w.len() == names.len() && w.iter().all(|s| s["state"].as_i64() == Some(LIVE))
+    });
+    // Each heliport's radio, as its further keys ask.
+    let radio: Vec<Value> = (0..all.statics.len())
+        .filter(|i| heliport(all, *i))
+        .map(|i| {
+            let want = expected_radio(&all.statics[i].extra);
+            let ok = radio_matches(&want, &seen["airbases"][i]);
+            json!({ "index": i, "want": want, "ok": ok })
+        })
+        .collect();
+    let radio_ok = radio.iter().all(|r| r["ok"] == json!(true));
     seen.as_object_mut().map(|o| o.remove("names"));
     api.keep();
     Ok(json!({
-        "pass": dcs["pass"] == json!(true) && fuel_ok
-            && stocked.iter().all(|s| s["set"].is_null()),
+        "pass": dcs["pass"] == json!(true) && fuel_ok && live && radio_ok
+            && stocked.iter().all(|s| s["set"].is_null() && s["owner"].is_null()),
+        "live": live,
+        "radio": radio,
         "dcs": dcs,
         "seen": seen,
         "world": world,
@@ -433,6 +667,7 @@ fn remove(
     c: u64,
     ids: &[u64],
     names: &[String],
+    pads: &[String],
 ) -> Result<Value, String> {
     api.keep();
     let mut sent = Ok(());
@@ -463,22 +698,101 @@ fn remove(
             })
             .collect()
     };
+    // DCS takes a FARP's destroy only while the simulation runs: on a
+    // paused server, read once, then resume until DCS has dropped them, and
+    // pause again whatever the wait gave.
+    // The server is public: it resumes only with no player but the
+    // server's own connection, and stops the wait if one joins.
+    let alone = || -> Result<bool, String> {
+        let n = run.eval("hook", "template-heliport-players", PLAYERS_LUA, 60)?;
+        Ok(n.as_i64().is_some_and(|n| n <= 1))
+    };
+    let paused = run.eval(
+        "hook",
+        "template-heliport-paused",
+        "return DCS.getPause()\n",
+        60,
+    )?;
+    let mut while_paused = Value::Null;
+    let mut resumed = false;
+    if paused == json!(true) {
+        std::thread::sleep(REPORT_WAIT);
+        api.renew()?;
+        while_paused = run.eval("server", "template-heliport-left", &read, 60)?;
+        if !alone()? {
+            return Err("a player is connected: the mission was not resumed".into());
+        }
+        run.eval(
+            "hook",
+            "template-heliport-resume",
+            "DCS.setPause(false)\nreturn DCS.getPause()\n",
+            60,
+        )?;
+        resumed = true;
+    }
     let waited = wait(
         run,
         api,
         SHOW_LIMIT,
         "the statics and airbases gone",
         |_| {
+            if resumed && !alone()? {
+                return Err("a player joined while the mission ran".into());
+            }
             let seen = run.eval("server", "template-heliport-left", &read, 60)?;
             Ok(gone(&seen).iter().all(|g| *g).then_some(()))
         },
     );
+    let repaused = if paused == json!(true) {
+        Some(run.eval(
+            "hook",
+            "template-heliport-pause",
+            "DCS.setPause(true)\nreturn DCS.getPause()\n",
+            60,
+        ))
+    } else {
+        None
+    };
+    if let Err(e) = &waited
+        && e.contains("player")
+    {
+        if let Some(r) = repaused {
+            r?;
+        }
+        return Err(e.clone());
+    }
     let seen = run.eval("server", "template-heliport-left", &read, 60)?;
+    // The agent turns each heliport's airbase entry into a tombstone on its
+    // next warehouse pass.
+    let tomb = tombstones_lua(names);
+    let stones = wait(run, api, SHOW_LIMIT, "the tombstones", |_| {
+        let t = run.eval("server", "template-heliport-tombstones", &tomb, 60)?;
+        let done = t.as_array().is_some_and(|a| {
+            names
+                .iter()
+                .zip(a)
+                .all(|(n, g)| !pads.contains(n) || g == &json!(true))
+        });
+        Ok(done.then_some(t))
+    })
+    .or_else(|e| {
+        let mut t = run.eval("server", "template-heliport-tombstones", &tomb, 60)?;
+        if let Some(a) = t.as_array_mut() {
+            a.push(json!({ "timed_out": e }));
+        }
+        Ok::<Value, String>(t)
+    })?;
     let w = world(api, c)?;
     sent?;
+    if let Some(r) = repaused {
+        r?;
+    }
     Ok(json!({
         "gone": gone(&seen),
         "dcs": seen,
+        "paused": paused,
+        "while_paused": while_paused,
+        "tombstones": stones,
         "world_statics": w,
         "waited": waited.err(),
     }))
@@ -555,6 +869,39 @@ mod tests {
         for (what, c, r) in cases {
             assert_eq!(twins(&l, &ids, 1, &c, &r)["pass"], json!(false), "{what}");
         }
+    }
+
+    #[test]
+    fn the_radio_check_takes_the_keys_or_dcs_defaults() {
+        let read =
+            |f: f64, m: f64, c: &str| json!({ "frequency": f, "modulation": m, "callsign": c });
+        let none = expected_radio(&[]);
+        assert!(radio_matches(&none, &read(127_500_000.0, 0.0, "London")));
+        let twin = vec![
+            (
+                "heliport_frequency".to_string(),
+                Lv::String(b"131.25".to_vec()),
+            ),
+            ("heliport_modulation".to_string(), Lv::Number(1.0)),
+            ("heliport_callsign_id".to_string(), Lv::Number(4.0)),
+        ];
+        let want = expected_radio(&twin);
+        assert!(radio_matches(&want, &read(131_250_000.0, 1.0, "Moscow")));
+        for (what, ab) in [
+            ("the default frequency", read(127_500_000.0, 1.0, "Moscow")),
+            ("AM", read(131_250_000.0, 0.0, "Moscow")),
+            ("London", read(131_250_000.0, 1.0, "London")),
+            ("no read", json!(false)),
+        ] {
+            assert!(!radio_matches(&want, &ab), "{what}");
+        }
+        let number = vec![("heliport_frequency".to_string(), Lv::Number(129.5))];
+        assert_eq!(expected_radio(&number)["frequency"], json!(129_500_000.0));
+        let unknown = vec![("heliport_callsign_id".to_string(), Lv::Number(9.0))];
+        assert!(!radio_matches(
+            &expected_radio(&unknown),
+            &read(127_500_000.0, 0.0, "London")
+        ));
     }
 
     #[test]

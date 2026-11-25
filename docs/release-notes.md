@@ -8,6 +8,10 @@
   `PutStatic` does: DCS makes its airbase, and the platform samples its warehouse. A
   grass airfield is still refused
   ([ADR 0044](adr/0044-static-template-spawn-with-heliports.md)).
+- A FARP's radio: `heliport_frequency`, `heliport_modulation` and `heliport_callsign_id`
+  in `StaticSpec.extra` set its frequency, modulation and callsign, and
+  `PutFromStaticTemplate` passes them from the file
+  ([2026-11-25-farp-fixes.md](results/2026-11-25-farp-fixes.md)).
 
 ### Changed
 
@@ -29,10 +33,11 @@
 - The transport's `layout_version` is 2. A 0.1.0 agent and a sidecar of this version
   refuse each other; install both from the same release.
 
-### Known
+### Fixed
 
-- A FARP the platform spawns, by either call, stays in DCS after `RemoveEntity`
-  ([2026-11-24-template-heliports.md](results/2026-11-24-template-heliports.md)).
+- A FARP the platform spawns, by either call, is `LIVE` in the World, and
+  `RemoveEntity` removes it with its airbase. On a paused server DCS removes it when the
+  mission resumes ([2026-11-25-farp-fixes.md](results/2026-11-25-farp-fixes.md)).
 
 ## 0.1.0, the first release
 

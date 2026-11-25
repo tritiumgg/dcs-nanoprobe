@@ -236,7 +236,11 @@ static (6),
 the shim keeps the initiator's object table and resolves it on the agent's next
 sampling frame: under `pcall`, it reads the object's group, names, type, coalition,
 country, category and `getLife0()`, and adds the row only if `isExist()` is true. A
-birth that cannot be resolved is left to the next full enumeration.
+birth that cannot be resolved is left to the next full enumeration. A FARP static the
+agent spawns is read the same way, from the queue its `STATIC_SPAWN` fills, and its
+enumeration step (spec/sampling.md, "Tiers"): its `OBJECT` has kind `STATIC`, category
+`getDesc().category`, which is 1 for a `FARP` and a `SINGLE_HELIPAD`, and `life0`
+`getLife()`, 3600 for both (LIVE, docs/results/2026-11-25-farp-fixes.md).
 
 A row leaves the table when the agent's own destroy removes it, or when an existence
 check finds the object gone. Nothing else removes a row: a read, an event and an

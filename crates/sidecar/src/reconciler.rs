@@ -2577,6 +2577,9 @@ impl Reconciler {
     /// Send an owner or a stock the latest sample does not show, once per
     /// desired revision and mission generation.
     fn bases_plan(&mut self, store: &mut Store, sim: &mut dyn SimAdapter) {
+        // The airbase of a FARP the store no longer holds still samples until
+        // DCS takes its destroy, which a paused server holds back (LIVE,
+        // docs/results/2026-11-25-farp-fixes.md): it gets no owner or stock.
         if self.is_held(self.cmd_not_ready.get(&(EntityId(0), HOLD_BASES)), 0) {
             return;
         }
@@ -2587,6 +2590,9 @@ impl Reconciler {
             .map(|((_, a), d)| (a.clone(), d.coalition, d.rev))
             .collect();
         for (airbase, coalition, rev) in owners {
+            if removed_farp(store, &airbase) {
+                continue;
+            }
             let differs = self
                 .bases
                 .get(&airbase)
@@ -2613,6 +2619,9 @@ impl Reconciler {
             .map(|((_, a), d)| (a.clone(), d.stock.clone(), d.rev))
             .collect();
         for (airbase, desired, rev) in stocks {
+            if removed_farp(store, &airbase) {
+                continue;
+            }
             let Some(seen) = self.bases.get(&airbase).and_then(|b| b.stock.as_ref()) else {
                 continue;
             };
@@ -2961,6 +2970,19 @@ fn unit_names(group: &Lv, campaign: CampaignId, key: &str) -> Vec<EntityId> {
 /// The outcome a result code gives a command of an opcode.
 pub fn outcome_of(code: u16, opcode: u16) -> Outcome {
     classify(code, opcode)
+}
+
+/// Whether `airbase` is the platform name of a static of this campaign the
+/// store no longer holds: removed, its rows kept until the purge, or
+/// purged. It holds for any such static; only a FARP has an airbase of its
+/// name, which still samples after `RemoveEntity` until DCS takes the
+/// destroy (spec/world.md, "Kinds").
+fn removed_farp(store: &Store, airbase: &str) -> bool {
+    ids::parse(airbase).is_some_and(|n| {
+        n.kind == NameKind::Static
+            && ids::of_campaign(&n, store.campaign())
+            && store.group(n.entity).is_none_or(|g| g.removed)
+    })
 }
 
 #[cfg(test)]

@@ -147,6 +147,9 @@ function Sim:clear()
   self.units, self.by_name, self.dead, self.removed = {}, {}, {}, {}
   -- `dead_statics` holds killed statics, `gone_statics` removed ones.
   self.dead_statics, self.gone_statics = {}, {}
+  -- A FARP whose destroy waits for the simulation to run, by name, while a
+  -- newer FARP holds the name: it still answers lookups by name.
+  self.doomed_farps = {}
   self.groups, self.statics = {}, {}
   self.marks = {}
   -- F10 menu trees by scope key (`all`, `c<coalition>`, `g<group ID>`), and
@@ -229,6 +232,16 @@ end
 -- static that is destroyed too has nothing left to read.
 function Sim:remove_static(static)
   static.alive = false
+  if self.doomed_farps[static.name] == static then
+    self.doomed_farps[static.name] = nil
+  end
+  -- A FARP's airbase goes with it, and stays listed by `world.getAirbases`
+  -- until the next mission load (LIVE, docs/results/2026-11-25-farp-fixes.md).
+  for _, base in ipairs(self.airbases) do
+    if base.farp == static then
+      base.gone = true
+    end
+  end
   if self.statics[static.name] == static then
     self.statics[static.name] = nil
   end
@@ -415,6 +428,21 @@ function Sim:add_static(country, data)
     static = true,
     -- A static of the `Cargos` category can move (LIVE).
     cargo = data.category == 'Cargos',
+    -- A FARP (`Heliports`) is an object of category 4, base, that
+    -- `getStaticObjects` does not list; its birth has category 4, and DCS
+    -- takes its destroy only while the simulation runs (LIVE,
+    -- docs/results/2026-11-25-farp-fixes.md).
+    farp = data.category == 'Heliports',
+    -- Its life (LIVE, 3600 for a FARP and a helipad).
+    life = data.category == 'Heliports' and 3600 or nil,
+    -- Its radio as DCS reads it: the frequency in Hz from a number or
+    -- numeric text, AM, and the callsign ID; without the keys 127.5 MHz,
+    -- AM, ID 1 (LIVE).
+    radio = data.category == 'Heliports' and {
+      frequency = (tonumber(data.heliport_frequency) or 127.5) * 1e6,
+      modulation = tonumber(data.heliport_modulation) or 0,
+      callsign = tonumber(data.heliport_callsign_id) or 1,
+    } or nil,
   }
   -- A new object under a taken name removes the old holder with no event
   -- (LIVE for a live holder, docs/results/2026-11-15-s15-world-commands.md;
@@ -434,6 +462,13 @@ function Sim:add_static(country, data)
     self.statics[static.name] = nil
     self.dead_statics[static.id] = static
   else
+    -- A FARP whose destroy waits answers lookups of its name in place of
+    -- the newer one until DCS takes it (UNVERIFIED: the case the shim's
+    -- FARP code guards against).
+    local old = self.statics[static.name]
+    if static.farp and old and old.farp and old.doomed and old.alive then
+      self.doomed_farps[static.name] = old
+    end
     self.statics[static.name] = static
   end
   self.queue[#self.queue + 1] = { event = 'S_EVENT_BIRTH', initiator = static }
@@ -530,7 +565,8 @@ function Sim:flush(paused)
   local now = self.host.model or 0
   self.queue = {}
   for _, item in ipairs(queue) do
-    if (paused and item.destroy_group) or (item.at and item.at > now + 1e-9) then
+    local farp = item.destroy_static and item.destroy_static.farp
+    if (paused and (item.destroy_group or farp)) or (item.at and item.at > now + 1e-9) then
       self.queue[#self.queue + 1] = item
     else
       if item.event then
@@ -698,8 +734,12 @@ local function scripting(host, name)
       if sim.removed[self.id_] then
         return 0
       end
-      local static = static_of(self) or error('mock: UNVERIFIED: getCategory on an object that no longer exists', 2)
-      return static.cargo and 6 or 3
+      -- A removed FARP's handle still reads 4 (LIVE,
+      -- docs/results/2026-11-25-farp-fixes.md).
+      local removed = sim.gone_statics[self.id_]
+      local static = static_of(self) or (removed and removed.farp and removed)
+        or error('mock: UNVERIFIED: getCategory on an object that no longer exists', 2)
+      return static.farp and 4 or static.cargo and 6 or 3
     end,
     getPosition = function(self)
       local unit = sim.units[self.id_] or static_of(self)
@@ -724,6 +764,10 @@ local function scripting(host, name)
       return unit.kind.air == true and unit.y > 0
     end,
     destroy = function(self)
+      local removed = sim.gone_statics[self.id_]
+      if removed and removed.farp then
+        error("mock: Airbase doesn't exist", 2)
+      end
       local unit = sim.units[self.id_] or sim.dead[self.id_]
       if unit then
         sim.queue[#sim.queue + 1] = { remove = true, unit = unit }
@@ -744,6 +788,7 @@ local function scripting(host, name)
         if sim.destroy_keeps then
           return
         end
+        static.doomed = true
         sim.queue[#sim.queue + 1] = { destroy_static = static }
       end
     end,
@@ -907,7 +952,7 @@ local function scripting(host, name)
 
   state.StaticObject = ns(name, 'StaticObject', {
     getByName = function(static_name)
-      local static = sim.statics[static_name]
+      local static = sim.doomed_farps[static_name] or sim.statics[static_name]
       if not static then
         -- A dead static is found by its name too (LIVE,
         -- docs/results/2026-11-17-person-fixes.md).
@@ -918,7 +963,18 @@ local function scripting(host, name)
           end
         end
       end
-      return static and handle(STATIC, static.id) or nil
+      if not static then
+        -- A removed FARP is still found until the next mission load, with
+        -- `isExist` false (LIVE, docs/results/2026-11-25-farp-fixes.md): the
+        -- latest of the name.
+        for _, gone in pairs(sim.gone_statics) do
+          if gone.farp and gone.name == static_name and (not static or gone.id > static.id) then
+            static = gone
+          end
+        end
+      end
+      -- A FARP's is its airbase (LIVE).
+      return static and handle(static.farp and AIRBASE or STATIC, static.id) or nil
     end,
     getName = function(self)
       local static = static_of(self)
@@ -950,7 +1006,8 @@ local function scripting(host, name)
     end,
     getDesc = function(self)
       local static = static_of(self) or error('mock: getDesc on a static that no longer exists', 2)
-      return { typeName = static.type, category = 0 }
+      -- A FARP's reads 1, helipad (LIVE, docs/results/2026-11-25-farp-fixes.md).
+      return { typeName = static.type, category = static.farp and 1 or 0 }
     end,
   })
 
@@ -1026,13 +1083,53 @@ local function scripting(host, name)
   state.Airbase = ns(name, 'Airbase', {
     getByName = function(airbase_name)
       for _, airbase in ipairs(sim.airbases) do
-        if airbase.name == airbase_name then
+        if airbase.name == airbase_name and not airbase.gone then
           return handle(AIRBASE, airbase.id)
         end
       end
     end,
     getName = function(self)
       return airbase_of(self).name
+    end,
+    -- A FARP's airbase is its static: these read the static (LIVE). On an
+    -- airdrome they are not used.
+    getLife = function(self)
+      local base = airbase_of(self)
+      if not (base and base.farp) or base.gone then
+        error("mock: Airbase doesn't exist", 2)
+      end
+      return state.StaticObject.getLife(self)
+    end,
+    getCountry = function(self)
+      local base = airbase_of(self)
+      return base and base.farp and base.farp.country or error('mock: UNVERIFIED: getCountry on an airdrome', 2)
+    end,
+    getTypeName = function(self)
+      local base = airbase_of(self)
+      return base and base.farp and base.farp.type or error('mock: UNVERIFIED: getTypeName on an airdrome', 2)
+    end,
+    getCategory = function(self)
+      local base = airbase_of(self)
+      return base and base.farp and 4 or error('mock: UNVERIFIED: getCategory on an airdrome', 2)
+    end,
+    -- A FARP's radio. The callsigns of IDs 1 to 4 (LIVE); others UNVERIFIED.
+    getCallsign = function(self)
+      local base = airbase_of(self)
+      local radio = base and base.farp and base.farp.radio or error('mock: UNVERIFIED: getCallsign on an airdrome', 2)
+      return ({ 'London', 'Dallas', 'Paris', 'Moscow' })[radio.callsign]
+        or error('mock: UNVERIFIED: callsign ID ' .. tostring(radio.callsign), 2)
+    end,
+    getCommunicator = function(self)
+      local base = airbase_of(self)
+      local radio = base and base.farp and base.farp.radio or error('mock: UNVERIFIED: getCommunicator on an airdrome', 2)
+      return {
+        getFrequency = function()
+          return radio.frequency
+        end,
+        getModulation = function()
+          return radio.modulation
+        end,
+      }
     end,
     getID = function(self)
       return self.id_
@@ -1046,7 +1143,12 @@ local function scripting(host, name)
     end,
     -- Every mock airbase is an airdrome with one free fighter spot, in the
     -- fields a parking entry has (PRIOR).
-    getDesc = function()
+    -- A FARP's reads category 1, helipad (LIVE, docs/results/2026-11-25-farp-fixes.md).
+    getDesc = function(self)
+      local base = airbase_of(self)
+      if base and base.farp then
+        return { category = state.Airbase.Category.HELIPAD, typeName = base.farp.type }
+      end
       return { category = state.Airbase.Category.AIRDROME }
     end,
     getParking = function(self)
@@ -1087,15 +1189,19 @@ local function scripting(host, name)
       if data.category == 'Heliports' then
         local base = {
           id = static.id, name = static.name, coalition = side_of(state, country), x = static.x, z = static.z,
+          farp = static,
           stock = { aircraft = {}, weapon = {}, liquids = { [0] = 0, [1] = 0, [2] = 0, [3] = 0 } },
         }
         local at = #sim.airbases + 1
         for i, b in ipairs(sim.airbases) do
-          if b.name == static.name then
+          if b.name == static.name and not (b.farp and b.farp.doomed and not b.gone) then
             at = i
           end
         end
         sim.airbases[at] = base
+        -- DCS returns the FARP's airbase, which is the static (LIVE,
+        -- docs/results/2026-11-25-farp-fixes.md).
+        return handle(AIRBASE, static.id)
       end
       return handle(STATIC, static.id)
     end,
@@ -1120,7 +1226,7 @@ local function scripting(host, name)
     getStaticObjects = function(side)
       local out = {}
       for _, static in pairs(sim.statics) do
-        if side_of(state, static.country) == side then
+        if side_of(state, static.country) == side and not static.farp then
           out[#out + 1] = handle(STATIC, static.id)
         end
       end
@@ -1553,7 +1659,8 @@ local function scripting(host, name)
     if thing.static then
       return {
         coalition = side_of(state, thing.country),
-        object_category = thing.cargo and state.Object.Category.CARGO or state.Object.Category.STATIC,
+        object_category = thing.farp and 4 or thing.cargo and state.Object.Category.CARGO
+          or state.Object.Category.STATIC,
         object_id = thing.id,
         unit_name = thing.name,
         unit_type = thing.type,

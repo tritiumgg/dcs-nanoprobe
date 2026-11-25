@@ -991,7 +991,14 @@ scenario('world', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   assert(names[at] == '' and names[before_bases] == '', 'an airbase whose getCoalition raised was written')
   r = run({ { op = 'STATIC_DESTROY', entity = 15 } }, 'the FARP destroyed')
   expect(r[1], APPLIED, 'STATIC_DESTROY of the FARP')
-  ctx.run(0.2)
+  -- DCS takes a FARP's destroy when the simulation runs (LIVE,
+  -- docs/results/2026-11-25-farp-fixes.md).
+  local was_paused = ctx.host.paused
+  ctx.host:set_pause(false)
+  ctx.run(5, function()
+    return sampled()[at] == ''
+  end)
+  ctx.host:set_pause(was_paused)
   names = sampled()
   assert(names[at] == '' and names[before_bases] == mission_name and #shim.T.airbases == at,
     'a destroyed FARP is not a tombstone, or the airbase before it moved')
@@ -1313,6 +1320,421 @@ scenario('world-gone', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
     'pending_destroy ' .. tostring(status.pending_destroy) .. ', pending_expired '
     .. tostring(status.pending_expired) .. ', pending_overflow ' .. tostring(status.pending_overflow))
   S.ok('a destroy and a replacing spawn write OBJECT_GONE DESTROYED for the rows held, before the RESULT')
+end, '\n[lua]\nraw = true\n')
+
+-- A FARP static the agent spawns is read as a static (spec/sampling.md,
+-- "Tiers"; D272): its STATIC_SPAWN queues a birth, so it gets a row and an
+-- OBJECT, and the enumeration's last step visits it through its airbase
+-- entry. The mock's FARP is not in getStaticObjects, its birth has category
+-- 4, and its destroy waits while paused (LIVE,
+-- docs/results/2026-11-25-farp-fixes.md).
+scenario('farps', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
+  local host = ctx.host
+  host:load_mission('first', { paused = true })
+  local sim = host.sim
+  local shim = host.states.server.__nanoprobe_shim
+  local agent = shim.agent
+  local FARP, USA, DESTROYED = 'np#hGxF', 2, 2
+  local gen
+  assert(ctx.run(30, function()
+    gen = agent.status().gen
+    return gen ~= nil and gen > 0
+  end), 'the agent has no mission generation:\n' .. dump(ctx))
+  -- Every event seen, over all the sessions below.
+  local all = {}
+  -- Enumerations the shim finished.
+  local enums, real_done = 0, agent.enum_done
+  agent.enum_done = function(...)
+    enums = enums + 1
+    return real_done(...)
+  end
+  -- One sidecar session: the commands, then frames until `done` holds for
+  -- its events while attached (a detached agent samples nothing).
+  local function session(commands, done, what)
+    ctx.stop()
+    for _, c in ipairs(commands) do
+      c.gen, c.wait_result = gen, true
+    end
+    ctx.script(json({ campaign = 7, commands = commands }), 60000)
+    local events
+    assert(ctx.run(30, function()
+      events = ctx.events()
+      return agent.status().attached and done(events)
+    end), what .. ':\n' .. dump(ctx))
+    ctx.stop()
+    for _, e in ipairs(events) do
+      all[#all + 1] = e
+    end
+    return events
+  end
+  local function result(events, seq)
+    for _, e in ipairs(events) do
+      if e.ev == 'result' and e.seq == seq then
+        return e
+      end
+    end
+  end
+  local function find(events, ev, object)
+    local out = {}
+    for _, e in ipairs(events) do
+      if e.ev == ev and e.object == object then
+        out[#out + 1] = e
+      end
+    end
+    return out
+  end
+  local function spawn(rev)
+    return { op = 'STATIC_SPAWN', entity = 15, rev = rev, country = USA, name = FARP,
+      static = { name = FARP, type = 'FARP', category = 'Heliports', x = 900, y = 900, heading = 0 } }
+  end
+  -- An enumeration the sidecar asks for, run to its end.
+  -- How many times an enumeration reported `object`: an OBJECT with its
+  -- number, or a SEEN that lists it.
+  local function enumerated(events, object)
+    local n = 0
+    for _, e in ipairs(events) do
+      if e.ev == 'object' and e.object == object and e.enumeration > 0 then
+        n = n + 1
+      elseif e.ev == 'seen' then
+        for _, o in ipairs(e.objects) do
+          if o == object then
+            n = n + 1
+          end
+        end
+      end
+    end
+    return n
+  end
+  -- An enumeration ended, and, given `object`, one reported it. One may
+  -- already run when ENUMERATE arrives and end first, having passed the
+  -- object before this sidecar attached. Records reach the sidecar over the
+  -- next frames: half a second after.
+  local function enumerate(what, object)
+    local before, ended = enums, nil
+    return session({ { op = 'ENUMERATE' } }, function(events)
+      if enums > before and not ended and (not object or enumerated(events, object) > 0) then
+        ended = now()
+      end
+      return ended ~= nil and now() - ended > 0.5
+    end, what)
+  end
+  -- The warehouse tier's name for the FARP's airbase entry.
+  local function sampled(at)
+    local real, name = agent.airbase, nil
+    agent.airbase = function(_, _, _, n)
+      name = n
+      return false
+    end
+    local ok, err = pcall(shim.warehouse_rows, { at })
+    agent.airbase = real
+    assert(ok, tostring(err))
+    return name
+  end
+
+  -- No spawned FARP: the step reads nothing of any airbase entry. Each
+  -- entry's object is a proxy that counts every read made while the FARP
+  -- step's cursor is set; with no FARP the step is one pass in one call, so
+  -- the warehouse tier's own reads fall outside it.
+  -- The shim starts the generation while a sidecar is attached.
+  enumerate('a first enumeration')
+  assert(shim.T.gen == gen and #shim.T.airbases > 0, 'the shim has no airbase entries for the generation')
+  local touched, saved, proxies = 0, {}, {}
+  for i, base in ipairs(shim.T.airbases) do
+    local real = base.object
+    saved[i] = real
+    proxies[i] = setmetatable({ id_ = rawget(real, 'id_') }, { __index = function(_, k)
+      if shim.T.enum and shim.T.enum.fi then
+        touched = touched + 1
+      end
+      return real[k]
+    end })
+    base.object = proxies[i]
+  end
+  local before_enums = enums
+  enumerate('an enumeration with no FARP')
+  assert(enums > before_enums, 'no enumeration ran')
+  for i, base in ipairs(shim.T.airbases) do
+    assert(base.object == proxies[i], 'the airbase entries changed during the check')
+    base.object = saved[i]
+  end
+  assert(touched == 0, 'the FARP step read ' .. touched .. ' times from airbases with no FARP spawned')
+
+  -- A spawn gives a row and an OBJECT: kind STATIC, category 1.
+  local ev = session({ spawn(1) }, function(events)
+    local r = result(events, 1)
+    return r and #find(events, 'object', r.object) > 0
+  end, 'a spawned FARP')
+  local id = result(ev, 1).object
+  -- Its birth gives the row; a periodic enumeration's FARP step may write
+  -- the first OBJECT instead, which is as good.
+  local o = find(ev, 'object', id)[1]
+  assert(o.kind == 2 and o.category == 1 and o.life0 == 3600 and o.name == FARP,
+    'the FARP OBJECT is wrong:\n' .. dump(ctx))
+  assert(shim.T.slot_of[id], 'the shim holds no row for the FARP')
+  local at
+  for i, base in ipairs(shim.T.airbases) do
+    if base.name == FARP then
+      at = i
+    end
+  end
+  assert(at and shim.T.airbases[at].id == id, 'the FARP has no airbase entry')
+
+  -- An enumeration finds it: its OBJECT (the full flag) carries the
+  -- enumeration's number, and nothing goes.
+  ev = enumerate('an enumeration after the spawn', id)
+  local found = find(ev, 'object', id)
+  for _, f in ipairs(found) do
+    assert(f.enumeration > 0, 'an OBJECT of the FARP in an enumeration has no number:\n' .. dump(ctx))
+  end
+  assert(#find(ev, 'gone', id) == 0, 'the enumeration wrote the FARP gone:\n' .. dump(ctx))
+
+  -- The same name again: the old ID goes DESTROYED, the new one gets a row
+  -- and takes the entry.
+  ev = session({ spawn(2) }, function(events)
+    local r = result(events, 1)
+    return r and #find(events, 'object', r.object) > 0
+  end, 'the FARP spawned again')
+  local id2 = result(ev, 1).object
+  assert(id2 ~= id and find(ev, 'gone', id)[1] and find(ev, 'gone', id)[1].reason == DESTROYED,
+    'the replaced FARP was not written DESTROYED:\n' .. dump(ctx))
+  assert(shim.T.airbases[at].id == id2 and #shim.T.airbases == at, 'the new FARP did not take its entry')
+
+  -- Removed while paused: OBJECT_GONE DESTROYED at once, the airbase stays
+  -- until the simulation runs, and an enumeration meanwhile skips the
+  -- pending ID.
+  ev = session({ { op = 'STATIC_DESTROY', entity = 15 } }, function(events)
+    return result(events, 1) ~= nil
+  end, 'the FARP destroyed while paused')
+  assert(#find(ev, 'gone', id2) == 1 and find(ev, 'gone', id2)[1].reason == DESTROYED,
+    'the destroy wrote no OBJECT_GONE DESTROYED:\n' .. dump(ctx))
+  assert(sampled(at) == FARP, 'the airbase of a FARP DCS still holds is a tombstone while paused')
+  assert(agent.status().pending_destroy >= 1, 'the destroyed FARP is not pending')
+  ev = enumerate('an enumeration while the destroy is pending')
+  assert(#find(ev, 'object', id2) == 0 and #find(ev, 'gone', id2) == 0,
+    'the enumeration read the pending FARP:\n' .. dump(ctx))
+  -- A resume lets DCS take it; the entry turns into a tombstone, once.
+  host:set_pause(false)
+  assert(ctx.run(30, function()
+    return sampled(at) == '' and shim.T.airbases[at].gone
+  end), 'the FARP is no tombstone after a resume')
+  host:set_pause(true)
+  enumerate('an enumeration after the tombstone')
+  assert(#find(all, 'gone', id2) == 1, 'the FARP was written gone ' .. #find(all, 'gone', id2) .. ' times')
+  -- A second destroy finds only the removed FARP's handle, which DCS still
+  -- returns by name: it is gone, so APPLIED, and nothing is written gone.
+  ev = session({ { op = 'STATIC_DESTROY', entity = 15 } }, function(events)
+    return result(events, 1) ~= nil
+  end, 'a second destroy of the removed FARP')
+  assert(result(ev, 1).code == 0 and #find(all, 'gone', id2) == 1,
+    'a second destroy of a removed FARP was not APPLIED with nothing gone:\n' .. dump(ctx))
+
+  -- Removed while paused, then spawned again under the name before a
+  -- resume: the new FARP keeps its row and its entry when DCS takes the old.
+  local static_ns = host.states.server.StaticObject
+  local real_get, looked = static_ns.getByName, {}
+  static_ns.getByName = function(n)
+    local h = real_get(n)
+    if n == FARP and h then
+      looked[#looked + 1] = { id = rawget(h, 'id_'), exists = h:isExist() }
+    end
+    return h
+  end
+  ev = session({ spawn(3) }, function(events)
+    local r = result(events, 1)
+    return r and #find(events, 'object', r.object) > 0
+  end, 'the FARP after its tombstone')
+  static_ns.getByName = real_get
+  local id3 = result(ev, 1).object
+  local saw_old = false
+  for _, l in ipairs(looked) do
+    saw_old = saw_old or (l.id == id2 and l.exists == false)
+  end
+  assert(saw_old, 'the spawn did not find the removed FARP by name')
+  -- DCS still finds the removed FARP by name (LIVE), so the spawn names its
+  -- ID destroyed again; the agent holds no row of it and writes nothing.
+  assert(#find(all, 'gone', id2) == 1, 'the FARP was written gone ' .. #find(all, 'gone', id2) .. ' times')
+  -- The old FARP still answers lookups of the name until DCS takes it (the
+  -- mock's case, UNVERIFIED in DCS): the owner and the stock go to the new
+  -- FARP's own object all the same.
+  ev = session({ { op = 'STATIC_DESTROY', entity = 15 }, spawn(4),
+    { op = 'AIRBASE_OWNER', coalition = 1, airbase = FARP },
+    { op = 'WAREHOUSE_SET', airbase = FARP, stock = { liquids = { [0] = 4321 } } } }, function(events)
+    local r = result(events, 2)
+    return r and #find(events, 'object', r.object) > 0 and result(events, 4) ~= nil
+  end, 'a destroy and a spawn of the name while paused')
+  local id4 = result(ev, 2).object
+  assert(find(ev, 'gone', id3)[1], 'the destroyed FARP was not written gone:\n' .. dump(ctx))
+  host:set_pause(false)
+  assert(ctx.run(30, function()
+    for _, s in pairs(sim.gone_statics) do
+      if s.id == id3 then
+        return true
+      end
+    end
+    return false
+  end), 'DCS did not take the old FARP after a resume')
+  ctx.run(0.5)
+  host:set_pause(true)
+  assert(shim.T.airbases[at].id == id4 and not shim.T.airbases[at].gone and sampled(at) == FARP,
+    'the FARP spawned before the resume lost its entry')
+  assert(shim.T.slot_of[id4], 'the FARP spawned before the resume lost its row')
+  assert(#find(all, 'gone', id3) == 1, 'the old FARP was written gone ' .. #find(all, 'gone', id3) .. ' times')
+  local new_base
+  for _, b in ipairs(sim.airbases) do
+    if b.id == id4 then
+      new_base = b
+    end
+  end
+  assert(new_base and new_base.coalition == 1 and new_base.stock.liquids[0] == 4321,
+    'the owner or the stock did not reach the new FARP: ' .. tostring(new_base and new_base.coalition))
+  ev = enumerate('an enumeration after the resume', id4)
+  assert(#find(all, 'gone', id4) == 0,
+    'the FARP spawned before the resume is not found:\n' .. dump(ctx))
+
+  -- Spawned while an enumeration runs (D272 A6). The agent takes one item
+  -- per pump here, so the enumeration spans many pumps, and the spawn is
+  -- held until the enumeration reaches the point the case names: before
+  -- the FARP step, then (a same-name spawn) after the step's cursor has
+  -- passed the FARP's entry. Either way the FARP keeps its row: its birth
+  -- gives its OBJECT, and nothing writes it gone.
+  local real_item, real_seen = agent.item, agent.seen
+  local function slow(on)
+    if on then
+      agent.item = function()
+        real_item()
+        return true
+      end
+      agent.seen = function(object)
+        local slot = real_seen(object)
+        return slot, true
+      end
+    else
+      agent.item, agent.seen = real_item, real_seen
+    end
+  end
+  local marker = ctx.profile .. 'farp-spawn-now'
+  -- Where the enumeration stood when DCS got the spawn.
+  local coalition_ = host.states.server.coalition
+  local real_add = coalition_.addStaticObject
+  local at_spawn
+  local function mid(rev, ready, what)
+    os.remove(marker)
+    local before = enums
+    at_spawn = nil
+    coalition_.addStaticObject = function(country_, data)
+      if data.name == FARP then
+        local e = shim.T.enum
+        at_spawn = e and { fi = e.fi, step = e.step } or false
+      end
+      return real_add(country_, data)
+    end
+    slow(true)
+    local spawn_ = spawn(rev)
+    spawn_.wait_file = marker
+    local ev = session({ { op = 'ENUMERATE' }, spawn_ }, function(events)
+      if not S.read(marker) and ready() then
+        S.write(marker, 'go')
+      end
+      -- ENUMERATE is a control command with no sequence: the spawn is 1.
+      local r = result(events, 1)
+      return r ~= nil and enums > before and #find(events, 'object', r.object) > 0
+    end, what)
+    slow(false)
+    coalition_.addStaticObject = real_add
+    assert(S.read(marker), what .. ': the spawn was not held for the enumeration')
+    assert(at_spawn, what .. ': the spawn reached DCS after the enumeration ended')
+    return ev
+  end
+  local function farp_at()
+    for i, base in ipairs(shim.T.airbases) do
+      if base.name == FARP and base.spawned then
+        return i
+      end
+    end
+  end
+  ev = mid(5, function()
+    return shim.T.enum ~= nil and shim.T.enum.fi == nil and shim.T.enum.step > 1
+  end, 'a FARP spawned before the enumeration reaches its step')
+  local id5 = result(ev, 1).object
+  assert(at_spawn.fi == nil, 'the first spawn reached DCS after the FARP step began')
+  assert(#find(all, 'gone', id5) == 0 and shim.T.slot_of[id5], 'the FARP spawned mid-enumeration lost its row')
+  local at5 = farp_at()
+  -- A second FARP after it in the list, so the cursor can stand past the
+  -- first while the enumeration still runs.
+  -- Several, so the enumeration still runs for some pumps after the cursor
+  -- passes the first.
+  local others = {}
+  for k = 1, 150 do
+    local n = 'np#hGxH' .. k
+    others[#others + 1] = { op = 'STATIC_SPAWN', entity = 16 + k, rev = 1, country = USA, name = n,
+      static = { name = n, type = 'SINGLE_HELIPAD', category = 'Heliports', x = 960 + 20 * k, y = 940, heading = 0 } }
+  end
+  ev = session(others, function(events)
+    for seq = 1, #others do
+      local r = result(events, seq)
+      if not (r and #find(events, 'object', r.object) > 0) then
+        return false
+      end
+    end
+    return true
+  end, 'more FARPs')
+  assert(#shim.T.airbases >= at5 + 150, 'the further FARPs have no entries after the first')
+  ev = mid(6, function()
+    return shim.T.enum ~= nil and shim.T.enum.fi ~= nil and shim.T.enum.fi > at5
+  end, 'a FARP spawned after the step passed its entry')
+  local id6 = result(ev, 1).object
+  assert(at_spawn.fi and at_spawn.fi > at5, 'the second spawn reached DCS before the cursor passed its entry: fi ' .. tostring(at_spawn.fi) .. ' step ' .. tostring(at_spawn.step) .. ' at ' .. at5 .. ' of ' .. #shim.T.airbases)
+  assert(find(ev, 'gone', id5)[1] and find(ev, 'gone', id5)[1].reason == DESTROYED,
+    'the replaced FARP was not written DESTROYED:\n' .. dump(ctx))
+  assert(#find(all, 'gone', id6) == 0 and shim.T.slot_of[id6] and shim.T.airbases[at5].id == id6,
+    'the FARP spawned behind the cursor lost its row or its entry')
+  ev = enumerate('an enumeration after the mid-enumeration spawns', id6)
+  assert(#find(all, 'gone', id6) == 0,
+    'the next enumeration did not find the FARP spawned behind the cursor:\n' .. dump(ctx))
+
+  -- A FARP whose birth read adds no row is added by the enumeration's FARP
+  -- step, through its airbase object. The births queue being full, which
+  -- leaves the FARP unqueued, ends the same way; it is not driven here.
+  local real_wants = agent.wants
+  agent.wants = function()
+    return false, false
+  end
+  -- The births queue is read while the sidecar is attached: the session
+  -- lasts until it is empty.
+  ev = session({ spawn(7) }, function(events)
+    return result(events, 1) ~= nil and shim.T.birth_head > shim.T.birth_tail
+  end, 'a FARP whose birth adds no row')
+  agent.wants = real_wants
+  local id7 = result(ev, 1).object
+  assert(not shim.T.slot_of[id7] and #find(ev, 'object', id7) == 0, 'the birth gave the FARP a row')
+  ev = enumerate('an enumeration that adds the FARP', id7)
+  found = find(ev, 'object', id7)
+  assert(#found >= 1 and found[1].enumeration > 0 and found[1].kind == 2 and found[1].category == 1
+    and found[1].life0 == 3600, 'the enumeration did not add the FARP as a static:\n' .. dump(ctx))
+  assert(shim.T.slot_of[id7], 'the enumeration gave the FARP no row')
+
+  -- A new generation drops the spawned entries: the step visits none.
+  host:load_mission('first', { paused = true })
+  local old = gen
+  -- The shim drops its airbase entries when it starts the generation.
+  local function none_spawned()
+    for _, base in ipairs(shim.T.airbases) do
+      if base.spawned then
+        return false
+      end
+    end
+    return true
+  end
+  assert(ctx.run(30, function()
+    gen = agent.status().gen
+    return gen ~= nil and gen ~= old
+  end), 'no new generation')
+  -- The shim starts the generation while a sidecar is attached.
+  ev = enumerate('an enumeration in the new generation')
+  assert(shim.T.gen == gen and none_spawned(), 'a spawned FARP entry outlived its generation')
+  assert(#find(ev, 'object', id7) == 0, 'a FARP of the last generation was read:\n' .. dump(ctx))
+  agent.enum_done = real_done
+  S.ok('a spawned FARP gets a row and OBJECT, is enumerated, and is written gone once when removed while paused')
 end, '\n[lua]\nraw = true\n')
 
 -- A STATIC_DESTROY handler that returns 4,100 destroyed IDs: the agent takes

@@ -815,7 +815,8 @@ async fn a_helipad_in_a_static_template_is_the_put_static_farp() {
     assert_eq!(hub.lock().campaigns[&a].store.revision(), before);
 
     // The helipad is made, and is the static PutStatic makes from the
-    // keys the file passes.
+    // keys the file passes, its radio among them: the frequency as the
+    // file's text.
     let made = commands
         .put_from_static_template(from("pad", &pad))
         .await
@@ -826,6 +827,12 @@ async fn a_helipad_in_a_static_template_is_the_put_static_farp() {
     let mut fields = std::collections::BTreeMap::new();
     fields.insert("category".to_string(), text_value("Heliports"));
     fields.insert("shape_name".to_string(), text_value("FARP"));
+    fields.insert("heliport_frequency".to_string(), text_value("127.5"));
+    let number = |n: f64| prost_types::Value {
+        kind: Some(prost_types::value::Kind::NumberValue(n)),
+    };
+    fields.insert("heliport_modulation".to_string(), number(0.0));
+    fields.insert("heliport_callsign_id".to_string(), number(1.0));
     let hand = commands
         .put_static(pb::PutStaticRequest {
             write: write_of("hand"),
