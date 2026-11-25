@@ -34,6 +34,9 @@ pub struct Changes {
     /// The FARP or other static (by its unit ID) whose warehouse is made
     /// limited.
     pub limited_warehouse: Option<u32>,
+    /// A static group of `FARP` units and its warehouse entries
+    /// ([`crate::miz_heliport`]).
+    pub heliport_group: Option<crate::miz_heliport::Group>,
     /// Resource files to pack: `l10n/DEFAULT/<file>` members, each with a
     /// `mapResource` entry from its key to the file name.
     pub resources: Vec<Resource>,
@@ -211,6 +214,28 @@ pub fn generate(template: &[u8], changes: &Changes) -> Result<Vec<u8>, String> {
             .find(|(n, _)| n == "warehouses")
             .expect("checked above");
         warehouses.1 = limit_section(&warehouses.1, "warehouses", id)?;
+    }
+
+    if let Some(group) = &changes.heliport_group {
+        let take = |members: &mut Vec<(String, Vec<u8>)>, name: &str| {
+            std::mem::take(
+                &mut members
+                    .iter_mut()
+                    .find(|(n, _)| n == name)
+                    .expect("checked above")
+                    .1,
+            )
+        };
+        let mission = take(&mut members, "mission");
+        let warehouses = take(&mut members, "warehouses");
+        let (mission, warehouses, _) = crate::miz_heliport::add(&mission, &warehouses, group)?;
+        for (name, data) in [("mission", mission), ("warehouses", warehouses)] {
+            members
+                .iter_mut()
+                .find(|(n, _)| n == name)
+                .expect("checked above")
+                .1 = data;
+        }
     }
 
     if !changes.resources.is_empty() {

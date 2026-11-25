@@ -17,6 +17,7 @@ mod link;
 mod live;
 mod meter;
 mod miz;
+mod miz_heliport;
 mod peerkill;
 mod persistence;
 mod probes;
@@ -273,11 +274,14 @@ commands:
   api-dump <name>           Write lua/mock/api/<state>.txt from each state's globals
   snapshot <name>           List the profile's tree, outside Logs/
   miz <template> <out> [--start-time S] [--limited-airport ID] [--limited-warehouse ID]
-      [--sound-picture]
+      [--sound-picture] [--heliport-group X,Y,UNITS,first|each]
                             Write a shell mission from an empty Mission Editor
                             template, optionally starting S seconds after midnight.
                             --limited-warehouse limits the warehouse of a FARP or
-                            other static by its unit ID.
+                            other static by its unit ID. --heliport-group adds one
+                            blue static group `np-hg` of UNITS FARPs, the first at
+                            X,Y (north, east), with a limited warehouse entry for
+                            the first unit or each unit.
 
 Profiles are read from the file NANOPROBE_TARGETS names, or by default from
 ~/.config/nanoprobe/targets.toml (%APPDATA%\\nanoprobe\\targets.toml on Windows).";
@@ -1063,6 +1067,7 @@ fn miz(template: &str, out: &str, rest: &[&str]) -> Result<ExitCode, String> {
                         .map_err(|_| format!("--limited-airport {value:?} is not an airbase ID"))?,
                 )
             }
+            "--heliport-group" => changes.heliport_group = Some(miz_heliport::Group::parse(value)?),
             "--limited-warehouse" => {
                 changes.limited_warehouse = Some(
                     value
