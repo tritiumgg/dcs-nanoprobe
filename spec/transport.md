@@ -64,7 +64,7 @@ records that are consumed.
 | Offset | Type | Field | Writer | Meaning |
 |---|---|---|---|---|
 | 0x0000 | u64 | magic | agent | ASCII `npmap`, then three zero bytes |
-| 0x0008 | u32 | layout_version | agent | 1 |
+| 0x0008 | u32 | layout_version | agent | 2 |
 | 0x000C | u32 | interface | agent | The agent DLL's interface version: the ABI between the DLL and its Lua hook and shim, which the hook checks. The sidecar logs it and does not check it. |
 | 0x0010 | u64 | layout_hash | agent | The 16 hex digits of the hash line of `spec/transport.golden`, read as one hexadecimal number |
 | 0x0018 | u64 | file_size | agent | 4,096 + `out_capacity` + `in_capacity`: the bytes in use, at most the file's length |
