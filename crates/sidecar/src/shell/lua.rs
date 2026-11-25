@@ -38,6 +38,10 @@ pub struct Node {
     pub fields: Vec<(Key, Node)>,
     /// Whether it is a table.
     pub table: bool,
+    /// A bare name that `parse_returned` takes as a preset's task (see
+    /// there). It has no value: it never reads as a string, a number or a
+    /// table.
+    pub opaque: bool,
 }
 
 impl Node {
@@ -63,7 +67,11 @@ pub struct Doc {
 
 /// Parse `src`.
 pub fn parse(src: &[u8]) -> Result<Doc, String> {
-    let mut p = P { s: src, i: 0 };
+    let mut p = P {
+        s: src,
+        i: 0,
+        tasks: None,
+    };
     p.ws()?;
     let name = p.ident().ok_or_else(|| p.err("an assignment"))?;
     p.ws()?;
@@ -109,10 +117,19 @@ const RESERVED: [&[u8]; 21] = [
 /// (ED-CODE, docs/results/2026-11-24-payload-presets.md): exactly
 /// `local <name> = <value>` then `return <name>`, the same name, with only
 /// white space and comments around them. The value is read as `parse`
-/// reads one. The error names the line of the first text that is not this
-/// form.
+/// reads one, with one addition: a value directly inside a preset's
+/// `tasks` table, `payloads[*].tasks[*]` from the root, may be a single
+/// name followed by `,` or `}`, such as `[1] = CAS`. The editor runs the
+/// file in its global environment (ED-CODE), where what the name holds is
+/// UNVERIFIED; here the node is opaque
+/// ([`Node::opaque`]). A bare name anywhere else is refused. The error
+/// names the line of the first text that is not this form.
 pub fn parse_returned(src: &[u8]) -> Result<Doc, String> {
-    let mut p = P { s: src, i: 0 };
+    let mut p = P {
+        s: src,
+        i: 0,
+        tasks: Some(Vec::new()),
+    };
     p.ws()?;
     if p.ident() != Some(b"local".as_slice()) {
         p.i = 0;
@@ -157,6 +174,27 @@ const DEPTH_MAX: usize = 200;
 struct P<'a> {
     s: &'a [u8],
     i: usize,
+    /// For `parse_returned`, the place of the value being read: one mark
+    /// per table key from the root. `None` for `parse`, which takes no
+    /// bare name.
+    tasks: Option<Vec<Mark>>,
+}
+
+/// What a key on the way to a value is, for the one place a bare name is
+/// taken.
+#[derive(Clone, Copy, PartialEq)]
+enum Mark {
+    Payloads,
+    Tasks,
+    Other,
+}
+
+fn mark(k: &Key) -> Mark {
+    match k {
+        Key::Str(s) if s == b"payloads" => Mark::Payloads,
+        Key::Str(s) if s == b"tasks" => Mark::Tasks,
+        _ => Mark::Other,
+    }
 }
 
 impl<'a> P<'a> {
@@ -236,6 +274,31 @@ impl<'a> P<'a> {
         Ok(body.to_vec())
     }
 
+    /// Whether the value being read sits directly in a preset's `tasks`:
+    /// `payloads`, a preset, `tasks`, an entry.
+    fn in_tasks(&self) -> bool {
+        matches!(
+            self.tasks.as_deref(),
+            Some([Mark::Payloads, _, Mark::Tasks, _])
+        )
+    }
+
+    /// At a name: whether it is a task name `parse_returned` takes, a name
+    /// in a preset's `tasks` followed by `,` or `}`. Consumes nothing.
+    fn task_name_here(&mut self) -> bool {
+        if !self.in_tasks() {
+            return false;
+        }
+        let start = self.i;
+        let ok = match self.ident() {
+            Some(b"true" | b"false" | b"nil") | None => false,
+            Some(id) if RESERVED.contains(&id) => false,
+            Some(_) => self.ws().is_ok() && matches!(self.peek(), Some(b',' | b'}')),
+        };
+        self.i = start;
+        ok
+    }
+
     fn ident(&mut self) -> Option<&'a [u8]> {
         let start = self.i;
         if !self
@@ -269,6 +332,13 @@ impl<'a> P<'a> {
             Some(b) if b == b'-' || b == b'.' || b.is_ascii_digit() => {
                 self.number()?;
                 Ok(scalar(start, self.i))
+            }
+            _ if self.task_name_here() => {
+                self.ident();
+                Ok(Node {
+                    opaque: true,
+                    ..scalar(start, self.i)
+                })
             }
             _ => match self.ident() {
                 Some(b"true" | b"false" | b"nil") => Ok(scalar(start, self.i)),
@@ -306,7 +376,22 @@ impl<'a> P<'a> {
                 k
             } else {
                 let save = self.i;
+                // A task name as a positional field: the place is the
+                // field's, which the value check below needs.
+                if let Some(st) = self.tasks.as_mut() {
+                    st.push(Mark::Other);
+                }
+                let positional_task = self.task_name_here();
+                if let Some(st) = self.tasks.as_mut() {
+                    st.pop();
+                }
                 match self.ident() {
+                    Some(_) if positional_task => {
+                        self.i = save;
+                        let k = Key::Num(next);
+                        next += 1.0;
+                        k
+                    }
                     Some(id) if !matches!(id, b"true" | b"false" | b"nil") => {
                         let id = id.to_vec();
                         self.ws()?;
@@ -326,8 +411,14 @@ impl<'a> P<'a> {
                     }
                 }
             };
-            let v = self.value(depth + 1)?;
-            fields.push((key, v));
+            if let Some(st) = self.tasks.as_mut() {
+                st.push(mark(&key));
+            }
+            let v = self.value(depth + 1);
+            if let Some(st) = self.tasks.as_mut() {
+                st.pop();
+            }
+            fields.push((key, v?));
             self.ws()?;
             match self.peek() {
                 Some(b',' | b';') => self.i += 1,
@@ -342,6 +433,7 @@ impl<'a> P<'a> {
             span: start..self.i,
             fields,
             table: true,
+            opaque: false,
         })
     }
 
@@ -443,6 +535,7 @@ fn scalar(start: usize, end: usize) -> Node {
         span: start..end,
         fields: Vec::new(),
         table: false,
+        opaque: false,
     }
 }
 
@@ -470,7 +563,7 @@ fn number_of(text: &str) -> Option<f64> {
 
 /// Read a scalar node's value.
 pub fn scalar_value(src: &[u8], node: &Node) -> Option<Lv> {
-    if node.table {
+    if node.table || node.opaque {
         return None;
     }
     let text = &src[node.span.clone()];
@@ -485,6 +578,7 @@ pub fn scalar_value(src: &[u8], node: &Node) -> Option<Lv> {
             let mut p = P {
                 s: src,
                 i: node.span.start,
+                tasks: None,
             };
             if matches!(text[0], b'"' | b'\'') {
                 p.string().ok().map(Lv::String)
@@ -683,6 +777,80 @@ mod tests {
             Some(Lv::String(b"F-15C".to_vec()))
         );
         assert!(parse_returned(b"local x={1} --[[ c ]] return x -- end").is_ok());
+    }
+
+    /// A preset file with `body` as the first preset's `tasks` table.
+    fn with_tasks(body: &str) -> String {
+        format!(
+            "local p = {{\n\t[\"payloads\"] = {{\n\t\t[1] = {{\n\t\t\t[\"name\"] = \"a\",\n\t\t\t[\"tasks\"] = {body},\n\t\t}},\n\t}},\n}}\nreturn p\n"
+        )
+    }
+
+    #[test]
+    fn takes_a_bare_name_only_as_a_presets_task() {
+        for ok in [
+            "{ [1] = CAS, [2] = GroundAttack }",
+            "{ [1] = CAS }",
+            "{ CAS, Intercept }",
+            "{ [1] = CAS -- c\n, }",
+            "{ [1] = 31, [2] = CAP }",
+        ] {
+            let src = with_tasks(ok);
+            let d = parse_returned(src.as_bytes()).unwrap_or_else(|e| panic!("{ok}: {e}"));
+            let tasks = d
+                .root
+                .at(&[Key::s("payloads"), Key::Num(1.0), Key::s("tasks")])
+                .unwrap();
+            let first = &tasks.fields[0].1;
+            let b = src.as_bytes();
+            // Never a string, a number or a table, and its table has no
+            // value either.
+            if &b[first.span.clone()] != b"31" {
+                assert!(first.opaque && !first.table, "{ok}");
+                assert_eq!(scalar_value(b, first), None);
+                assert_eq!(value(b, tasks), None);
+            }
+        }
+        for bad in [
+            "{ [1] = CAS.x }",
+            "{ [1] = CAS[1] }",
+            "{ [1] = CAS() }",
+            "{ [1] = CAS CAP }",
+            "{ [1] = CAS; }",
+            "{ [1] = { CAS } }",
+            "{ [1] = end }",
+            // A name as a key in brackets; `CAS = 1` is a string key.
+            "{ [CAS] = 1 }",
+        ] {
+            assert!(parse_returned(with_tasks(bad).as_bytes()).is_err(), "{bad}");
+        }
+        // A bare name in any other place.
+        for bad in [
+            "local p = { [\"payloads\"] = { [1] = { [\"name\"] = CAS } } }\nreturn p",
+            "local p = { [\"payloads\"] = { [1] = { [\"pylons\"] = { [1] = { [\"CLSID\"] = X, [\"num\"] = 1 } } } } }\nreturn p",
+            "local p = { [\"payloads\"] = { [1] = { [\"pylons\"] = { [1] = { [\"num\"] = N } } } } }\nreturn p",
+            "local p = { [\"payloads\"] = { [1] = { [\"pylons\"] = { [1] = { [\"settings\"] = { [\"a\"] = B } } } } } }\nreturn p",
+            "local p = { [\"unitType\"] = F16, [\"payloads\"] = {} }\nreturn p",
+            "local p = { [\"name\"] = F16 }\nreturn p",
+            "local p = { CAS }\nreturn p",
+            "local p = { [\"tasks\"] = { [1] = CAS } }\nreturn p",
+            "local p = { [\"payloads\"] = { [\"tasks\"] = { [1] = CAS } } }\nreturn p",
+            "local p = { [\"payloads\"] = { [1] = { [\"tasks\"] = { [1] = { [1] = CAS } } } } }\nreturn p",
+            "local x = CAS\nreturn x",
+        ] {
+            assert!(parse_returned(bad.as_bytes()).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn parse_refuses_a_bare_name_even_as_a_task() {
+        let src = with_tasks("{ [1] = CAS }")
+            .replace("local p", "p")
+            .replace("\nreturn p\n", "\n");
+        assert!(parse(src.as_bytes()).is_err());
+        assert!(
+            parse(b"x = { [\"payloads\"] = { [1] = { [\"tasks\"] = { [1] = 31 } } } }").is_ok()
+        );
     }
 
     #[test]

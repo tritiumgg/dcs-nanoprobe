@@ -1,6 +1,9 @@
-//! `sidecar <name> --part static-template|payload-preset` on a windows-ssh
-//! target: the same API test as on docker-wine, with the product's sidecar
-//! a Windows program on the client.
+//! `sidecar <name> --part static-template|payload-preset|saved-files` on a
+//! windows-ssh target: the same API test as on docker-wine, with the
+//! product's sidecar a Windows program on the client. `saved-files` runs on
+//! Windows only: it makes a static template and a payload preset a person
+//! saved from the Mission Editor into the profile (`shell_live/saved_files.rs`),
+//! read where they are from the folders `sidecar.toml` lists beside `own`.
 //!
 //! A Windows PC has a DCS client and no dedicated server. The run refuses
 //! when DCS already runs (someone may be playing), deploys the agent with
@@ -41,6 +44,7 @@ use crate::profile::Target;
 use crate::sampling::live::{hold_source, hold_timeout};
 use crate::sampling::win::{listing_diff, listings};
 use crate::shell_live::Live;
+use crate::shell_live::saved_files::Saved;
 use crate::sidecar::{API_PORT, LEASE_TTL_S, MAP_DIR, MISSIONS_DIR, hex};
 use crate::ssh::{self, Forward};
 use crate::windows::Windows;
@@ -114,9 +118,17 @@ impl Live for Client {
 /// `agent.toml`, its token in the profile, a loopback listener, the store
 /// and logs in its own folder, and the profile's mission folder as both
 /// `dir` and `dcs_dir`, since the sidecar and DCS open it by one path.
-fn sidecar_toml(profile: &str, map_path: &str, port: u16) -> Result<String, String> {
+/// `extra` folders, paths under the profile, are listed after `own`.
+fn sidecar_toml(
+    profile: &str,
+    map_path: &str,
+    port: u16,
+    extra: &[String],
+) -> Result<String, String> {
     let dir = full(profile, MAP_DIR);
     let missions = full(profile, MISSIONS_DIR);
+    let mut listed = vec![format!("{missions}\\own")];
+    listed.extend(extra.iter().map(|d| full(profile, d)));
     let v = json!({
         "agent": {
             "map_path": map_path,
@@ -133,7 +145,7 @@ fn sidecar_toml(profile: &str, map_path: &str, port: u16) -> Result<String, Stri
         "missions": {
             "dir": missions,
             "dcs_dir": missions,
-            "template_dirs": [format!("{missions}\\own")],
+            "template_dirs": listed,
         },
         "health": { "heartbeat_stale_s": crate::shell_live::HEARTBEAT_STALE_S },
     });
@@ -179,10 +191,16 @@ fn passed(results: &Value, key: &str, restore: &Value) -> bool {
 }
 
 /// Run `part` on the windows-ssh target `name`.
-pub fn run(repository: &Path, name: &str, part: &str) -> Result<ExitCode, String> {
+pub fn run(
+    repository: &Path,
+    name: &str,
+    part: &str,
+    saved: Option<&Saved>,
+) -> Result<ExitCode, String> {
     let key = match part {
         "static-template" => "static_template",
         "payload-preset" => "payload_preset",
+        "saved-files" if saved.is_some() => "saved_files",
         _ => return Err(format!("--part {part} runs on a docker-wine target only")),
     };
     let target = crate::target(name)?;
@@ -256,6 +274,7 @@ pub fn run(repository: &Path, name: &str, part: &str) -> Result<ExitCode, String
         stop_task,
         &shell,
         &sidecar,
+        saved,
         &mut held,
         &mut results,
     );
@@ -359,6 +378,7 @@ fn attempt(
     stop_task: &str,
     shell: &[u8],
     sidecar: &[u8],
+    saved: Option<&Saved>,
     held: &mut Option<JoinHandle<Result<ssh::Output, String>>>,
     results: &mut Value,
 ) -> Result<(), String> {
@@ -396,6 +416,11 @@ fn attempt(
             &client.profile,
             &config.transport.map_path,
             config.transport.port,
+            &saved
+                .map(Saved::folders)
+                .transpose()?
+                .map(Vec::from)
+                .unwrap_or_default(),
         )?
         .as_bytes(),
     )?;
@@ -436,7 +461,10 @@ fn attempt(
         .port();
     let mut forward = Forward::start(ssh, local, "127.0.0.1", API_PORT)?;
     let endpoint = format!("http://127.0.0.1:{local}");
-    let r = if part == "static-template" {
+    let r = if let Some(saved) = saved {
+        let full = |rel: &str| full(&client.profile, rel);
+        crate::shell_live::saved_files::drive(client, &endpoint, &token, saved, &full, results)
+    } else if part == "static-template" {
         crate::shell_live::static_template::drive(client, &endpoint, &token, results)
     } else {
         crate::shell_live::payload_preset::drive(client, &endpoint, &token, results)
@@ -492,7 +520,7 @@ mod tests {
 
     #[test]
     fn the_sidecar_toml_names_native_paths_in_the_profile() {
-        let text = sidecar_toml(PROFILE, r"C:\p\nanoprobe.map", 47310).unwrap();
+        let text = sidecar_toml(PROFILE, r"C:\p\nanoprobe.map", 47310, &[]).unwrap();
         let t: toml::Table = toml::from_str(&text).unwrap();
         let s = |section: &str, key: &str| t[section][key].as_str().unwrap().to_owned();
         let base = r"C:\Users\someone's\Saved Games\DCS";
@@ -525,8 +553,37 @@ mod tests {
     }
 
     #[test]
+    fn saved_files_folders_are_listed_after_own() {
+        let extra = [
+            "StaticTemplate".to_owned(),
+            "MissionEditor/UnitPayloads".to_owned(),
+        ];
+        let text = sidecar_toml(PROFILE, r"C:\p\nanoprobe.map", 47310, &extra).unwrap();
+        let t: toml::Table = toml::from_str(&text).unwrap();
+        let listed: Vec<&str> = t["missions"]["template_dirs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        let base = r"C:\Users\someone's\Saved Games\DCS";
+        assert_eq!(
+            listed,
+            [
+                format!(r"{base}\nanoprobe\missions\own"),
+                format!(r"{base}\StaticTemplate"),
+                format!(r"{base}\MissionEditor\UnitPayloads"),
+            ]
+        );
+        assert_eq!(
+            full(PROFILE, "StaticTemplate/a b.stm"),
+            format!(r"{}\a b.stm", listed[1])
+        );
+    }
+
+    #[test]
     fn the_template_path_is_in_the_listed_folder() {
-        let text = sidecar_toml(PROFILE, r"C:\p\nanoprobe.map", 47310).unwrap();
+        let text = sidecar_toml(PROFILE, r"C:\p\nanoprobe.map", 47310, &[]).unwrap();
         let t: toml::Table = toml::from_str(&text).unwrap();
         let listed = t["missions"]["template_dirs"].as_array().unwrap()[0]
             .as_str()
