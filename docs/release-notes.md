@@ -1,5 +1,14 @@
 # Release notes
 
+## Unreleased
+
+- `PutFromStaticTemplate` builds a heliport static, such as a FARP or a helipad, as
+  `PutStatic` does: DCS makes its airbase, and the platform samples its warehouse. A
+  grass airfield is still refused
+  ([ADR 0043](adr/0043-static-template-spawn-with-heliports.md)).
+- Known: a FARP the platform spawns, by either call, stays in DCS after `RemoveEntity`
+  ([2026-11-24-template-heliports.md](results/2026-11-24-template-heliports.md)).
+
 ## 0.1.0, the first release
 
 The first release of nanoprobe, 0.1: an agent inside DCS World, a sidecar that owns a

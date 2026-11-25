@@ -31,17 +31,18 @@ entities by `EntityId` within a campaign.
 | Extension | name | yes | A registered Lua chunk (spec/commands.md, "Extensions") |
 
 The platform creates an airbase and its warehouse only as part of a static DCS makes
-one of: a FARP. `coalition.addStaticObject` of a FARP makes an airbase under the static's
-name, with the static's ID, and its own empty limited warehouse (LIVE,
+one of: a FARP, from `PutStatic` or a static template's `Heliports` static.
+`coalition.addStaticObject` of a FARP makes an airbase under the static's name, with the
+static's ID, and its own empty limited warehouse (LIVE,
 docs/results/2026-11-16-person-tests-2.md). Such an airbase is listed and sampled like
 the mission's from its `STATIC_SPAWN` until the static is destroyed or dies, when the
 sidecar drops it. A spawned FARP's airbase is gone at a new mission generation until
 its static is spawned again, and its warehouse starts empty each time. The airbase of a
 FARP the mission file places goes the same way when its static goes; that it has its
-static's ID is UNVERIFIED. An airbase whose ID is not a static's of its name stays. The desired owner and stock the controller set
-for it are kept by name, and sent again once a FARP spawned again under the name is
-sampled. The platform destroys an airbase only by destroying its FARP. Owner and stock
-are settable. The store keeps a desired owner only for an airbase the controller set,
+static's ID is UNVERIFIED. An airbase whose ID is not a static's of its name stays.
+The desired owner and stock the controller set for it are kept by name, and sent again
+once a FARP spawned again under the name is sampled. The platform destroys an airbase
+only by destroying its FARP. Owner and stock are settable. The store keeps a desired owner only for an airbase the controller set,
 and a desired count only for a warehouse item the controller set. The reconciler sends
 `AIRBASE_OWNER` or `WAREHOUSE_SET` when the agent's latest sample differs from it, once
 per desired revision and mission generation. A capture by DCS or stock DCS uses is a
@@ -807,14 +808,19 @@ revision, and `revision` is the store revision of the call's one commit.
 | `static.group[j].units[k]` | One static per unit: `type`, `x`, `y` and the unit's `heading` as for a vehicle unit; `category`, `shape_name`, `rate`, `mass`, `canCargo` and `livery_id` go to the static's further keys; the group's `dead = true` creates it destroyed ("Ruins"); its label is the group's `name`. Other keys are dropped and logged |
 | `ship`, `plane`, `helicopter`, `complex` | A file with any group of these kinds is refused whole |
 | A static with `linkOffset` true or a route point with `linkUnit` | Refused: the link to a unit is not built |
-| A static of category `Heliports` or `GrassAirfields`, or with a `heliport_` or `grassairfield_` key | Refused: such a static makes an airbase, which the world model has not seen |
+| A static of category `Heliports` | Built as any static, so as `PutStatic` builds a FARP: DCS makes an airbase of its name, which the platform lists and samples ("Kinds"). Its `heliport_` keys are dropped and logged. With the group's `dead = true`, whether DCS makes the airbase is UNVERIFIED ("Ruins"). A `heliport_` key on a static of another category is dropped and logged |
+| A static of category `GrassAirfields`, or with a `grassairfield_` key | Refused: no live check has seen one make its airbase |
 | `name`, `desc`, `localization`, `requiredModules`, `customFormations` | Not used |
 
 A coalition or country with two entries under one key, a list with two entries under
 one number, and a static value the store cannot encode refuse the file.
 
 The shipped files hold only vehicle groups (ED-CODE). The form of a static is taken
-from the editor's code that saves one, and is UNVERIFIED against a saved file. That the
+from the editor's code that saves one; a file the editor saved with a fortification and
+a helipad holds that form for the keys it has (LIVE,
+docs/results/2026-11-24-template-heliports.md); `hidden`, `linkOffset`, `linkUnit`,
+`mass`, `canCargo`, `livery_id`, `resourcePayload` and the grass-airfield keys stay
+ED-CODE. That the
 editor writes x as north and y as east follows from "Group templates": a unit table's
 `x` and `y` are the world's `x` and `z` (LIVE). Two units and two `Fortifications`
 statics made by this call stood on DCS within 15 µm of the places the file and the

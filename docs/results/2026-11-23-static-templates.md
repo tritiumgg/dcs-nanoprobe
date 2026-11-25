@@ -29,7 +29,7 @@ no file was copied. `MS` is `MissionEditor/modules/me_staticTemplate.lua` and `M
 | A static is a group of `groupId`, `name`, `heading`, `hidden`, `dead`, `linkOffset`, `route` (one point, which may carry `linkUnit`), `x`, `y` and `units`; each unit `unitId`, `name`, `type`, `category`, `shape_name`, `heading`, `x`, `y`, `rate`, `mass`, `canCargo`, `livery_id`, heliport and grass-airfield keys, and `resourcePayload` | ED-CODE | `MM` lines 4419 to 4500 |
 | A static's `category` is one of `Planes`, `Helicopters`, `Ships`, `Fortifications`, `Heliports`, `GrassAirfields`, `Warehouses`, `Cargos`, `LTAvehicles`, `WWII structures`, `Effects`, `Animal` and `Personnel`, by the type's own category | ED-CODE | `MissionEditor/modules/me_crutches.lua` lines 67 to 81 |
 | `FARP Tent` and `FARP Fuel Depot` are in the list `default_Fortifications` | ED-CODE | `Scripts/Database/db_countries.lua`, from line 45 |
-| What a static looks like in a file the editor saved | UNVERIFIED: no shipped file holds one; the form above is the editor's code |
+| What a static looks like in a file the editor saved | LIVE for the keys a saved file with a fortification and a helipad holds (docs/results/2026-11-24-template-heliports.md); `hidden`, `linkOffset`, `linkUnit`, `mass`, `canCargo`, `livery_id`, `resourcePayload` and the grass-airfield keys stay ED-CODE |
 
 ## What the call does
 
@@ -115,7 +115,8 @@ The verdict's rule is the place, the type and the country; its tolerances are th
 step's, as for group templates. It is tested on the host: a missing object, a place
 2 m off, a wrong type or country, the axes exchanged and a turn to the left each fail
 it. This run is the first read of a static spawned from a static template's form
-(LIVE). The form of a static in a file the editor saved stays UNVERIFIED: the run's file
+(LIVE). The form of a static in a file the editor saved is LIVE for the keys
+docs/results/2026-11-24-template-heliports.md read; this run's file
 was written by the run, after the editor's code.
 
 ## Live on Windows

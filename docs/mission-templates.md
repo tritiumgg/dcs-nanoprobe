@@ -110,8 +110,11 @@ with its units, and the statics, in the order the file holds them. The sidecar k
 what it made; the file can be changed, moved or deleted after the call. Give a group
 its orders afterwards with `SetOrder`: the routes and tasks in the file are not used.
 
-Only ground groups and statics are built. A file that holds planes, helicopters, ships,
-a complex, a static linked to a unit, a heliport or a grass airfield is refused whole.
+Only ground groups and statics are built. A heliport static, such as a FARP or a
+helipad, makes its airbase as one placed with `PutStatic` does. A FARP's warehouse
+starts empty. A helipad's is expected to start empty too; that is not checked. A file
+that holds planes, helicopters, ships, a complex, a static linked to a unit or a grass
+airfield is refused whole.
 While the mission runs, the objects spawn on DCS at the platform's usual pace, by
 default one at a time. While it is paused, they spawn together in the restore burst
 (spec/persistence.md, "Restore burst"). Each shows its own error if DCS refuses it

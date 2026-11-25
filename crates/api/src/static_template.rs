@@ -47,11 +47,13 @@ const STATIC_PASSED: &[&str] = &[
 /// Keys of a static's unit the conversion reads or ignores without a log.
 const STATIC_USED: &[&str] = &["type", "x", "y", "heading", "unitId", "name"];
 
-/// The static categories that make an airbase, and the keys only such a
-/// static has (ED-CODE, the editor's `unload_static_groups`). Refused: the
-/// world model has not seen a static make one.
-const AIRBASE_CATEGORIES: &[&str] = &["Heliports", "GrassAirfields"];
-const AIRBASE_KEY_PREFIXES: &[&str] = &["heliport_", "grassairfield_"];
+/// The static category of a grass airfield, and the key prefix only such a
+/// static has (ED-CODE, the editor's `unload_static_groups`). Refused: no
+/// live check has seen one make its airbase. A `Heliports` static is built
+/// as `PutStatic` builds a FARP (spec/world.md, "Kinds"); its `heliport_`
+/// keys are dropped and logged.
+const GRASS_CATEGORY: &str = "GrassAirfields";
+const GRASS_KEY_PREFIX: &str = "grassairfield_";
 
 /// Why a file is refused: the request field it is about and the message.
 #[derive(Clone, Debug, PartialEq)]
@@ -447,14 +449,13 @@ fn static_group(
         &format!("the units of {at}"),
     )? {
         let uat = format!("{at} unit [{ui}]");
-        let airbase = string(r.src, last(u, "category"))
-            .is_some_and(|c| AIRBASE_CATEGORIES.contains(&c.as_str()))
-            || u.fields.iter().any(|(k, _)| {
-                matches!(k, Key::Str(s) if AIRBASE_KEY_PREFIXES.iter().any(|p| s.starts_with(p.as_bytes())))
-            });
-        if airbase {
+        let grass = string(r.src, last(u, "category")).is_some_and(|c| c == GRASS_CATEGORY)
+            || u.fields.iter().any(
+                |(k, _)| matches!(k, Key::Str(s) if s.starts_with(GRASS_KEY_PREFIX.as_bytes())),
+            );
+        if grass {
             return Err(refuse(format!(
-                "{uat} is a heliport or a grass airfield, which is not built"
+                "{uat} is a grass airfield, which is not built"
             )));
         }
         out.push(Static {
@@ -837,6 +838,125 @@ of description",
 
     const UNIT: &str = "[\"type\"] = \"T\", [\"x\"] = 1, [\"y\"] = 2, [\"heading\"] = 0";
 
+    /// A static template of one helipad, made for these tests: the keys a
+    /// file the Mission Editor saved holds for a helipad's group and unit
+    /// (LIVE, docs/results/2026-11-24-template-heliports.md), its route
+    /// point included, without the top-level keys the conversion does not
+    /// read.
+    pub(crate) const HELIPAD: &str = r#"staticTemplate =
+{
+	["coalition"] =
+	{
+		["blue"] =
+		{
+			["name"] = "blue",
+			["country"] =
+			{
+				[28] =
+				{
+					["id"] = 2,
+					["static"] =
+					{
+						["group"] =
+						{
+							[1] =
+							{
+								["heading"] = 0,
+								["route"] = 
+								{
+									["points"] = 
+									{
+										[1] = 
+										{
+											["alt"] = 0,
+											["type"] = "",
+											["name"] = "",
+											["y"] = 619000.25,
+											["speed"] = 0,
+											["x"] = -356000.5,
+											["formation_template"] = "",
+											["action"] = "",
+										}, -- end of [1]
+									}, -- end of ["points"]
+								}, -- end of ["route"]
+								["groupId"] = 5,
+								["units"] =
+								{
+									[1] =
+									{
+										["tasks"] = {},
+										["category"] = "Heliports",
+										["shape_name"] = "FARP",
+										["type"] = "SINGLE_HELIPAD",
+										["unitId"] = 25,
+										["heliport_frequency"] = "127.5",
+										["y"] = 619000.25,
+										["x"] = -356000.5,
+										["name"] = "Pad-1-1",
+										["heliport_modulation"] = 0,
+										["heliport_callsign_id"] = 1,
+										["heading"] = 0.75,
+									}, -- end of [1]
+								}, -- end of ["units"]
+								["y"] = 619000.25,
+								["x"] = -356000.5,
+								["name"] = "Pad-1",
+								["dead"] = false,
+							}, -- end of [1]
+						}, -- end of ["group"]
+					}, -- end of ["static"]
+					["name"] = "USA",
+				}, -- end of [28]
+			}, -- end of ["country"]
+		}, -- end of ["blue"]
+	}, -- end of ["coalition"]
+	["theatre"] = "Caucasus",
+} -- end of staticTemplate"#;
+
+    #[test]
+    fn a_heliport_key_on_another_static_is_dropped() {
+        let l = read(
+            one("[\"static\"] = { [\"group\"] = { [1] = { [\"units\"] = { [1] = { [\"type\"] = \"F\", [\"heliport_frequency\"] = 127.5, [\"x\"] = 0, [\"y\"] = 0, [\"heading\"] = 0 } } } } }")
+                .as_bytes(),
+        )
+        .expect("read");
+        assert!(l.statics[0].extra.is_empty());
+        assert!(
+            l.dropped
+                .contains(&"static.units[].heliport_frequency".to_string()),
+            "{:?}",
+            l.dropped
+        );
+    }
+
+    #[test]
+    fn a_helipad_is_a_static_whose_heliport_keys_are_dropped() {
+        let l = read(HELIPAD.as_bytes()).expect("read");
+        assert_eq!(l.statics.len(), 1);
+        let s = &l.statics[0];
+        assert_eq!(
+            (s.name.as_str(), s.country, s.type_name.as_str(), s.dead),
+            ("Pad-1", 2, "SINGLE_HELIPAD", false)
+        );
+        assert_eq!((s.x, s.y, s.heading), (-356000.5, 619000.25, 0.75));
+        assert_eq!(
+            s.extra,
+            [
+                ("category".to_string(), Lv::String(b"Heliports".to_vec())),
+                ("shape_name".to_string(), Lv::String(b"FARP".to_vec())),
+            ]
+        );
+        for k in [
+            "static.units[].heliport_frequency",
+            "static.units[].heliport_modulation",
+            "static.units[].heliport_callsign_id",
+            "static.units[].tasks",
+            "static.route",
+        ] {
+            assert!(l.dropped.contains(&k.to_string()), "{k}: {:?}", l.dropped);
+        }
+    }
+
     #[test]
     fn reads_a_file_in_the_editors_form() {
         let l = read(FILE.as_bytes()).expect("read");
@@ -1109,16 +1229,12 @@ of description",
                 "has no `id` that is a DCS country number",
             ),
             (
-                one("[\"static\"] = { [\"group\"] = { [1] = { [\"units\"] = { [1] = { [\"type\"] = \"FARP\", [\"category\"] = \"Heliports\", [\"x\"] = 0, [\"y\"] = 0, [\"heading\"] = 0 } } } } }"),
-                "is a heliport or a grass airfield",
-            ),
-            (
                 one("[\"static\"] = { [\"group\"] = { [1] = { [\"units\"] = { [1] = { [\"type\"] = \"G\", [\"category\"] = \"GrassAirfields\", [\"x\"] = 0, [\"y\"] = 0, [\"heading\"] = 0 } } } } }"),
-                "is a heliport or a grass airfield",
+                "is a grass airfield, which is not built",
             ),
             (
-                one("[\"static\"] = { [\"group\"] = { [1] = { [\"units\"] = { [1] = { [\"type\"] = \"F\", [\"heliport_frequency\"] = 127.5, [\"x\"] = 0, [\"y\"] = 0, [\"heading\"] = 0 } } } } }"),
-                "is a heliport or a grass airfield",
+                one("[\"static\"] = { [\"group\"] = { [1] = { [\"units\"] = { [1] = { [\"type\"] = \"G\", [\"grassairfield_frequency\"] = 127.5, [\"x\"] = 0, [\"y\"] = 0, [\"heading\"] = 0 } } } } }"),
+                "is a grass airfield, which is not built",
             ),
             (
                 "staticTemplate = { [\"coalition\"] = { [\"blue\"] = { [\"country\"] = { [1] = { [\"id\"] = 4294967296, [\"vehicle\"] = {} } } } } }".into(),

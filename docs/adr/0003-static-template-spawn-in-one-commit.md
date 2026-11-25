@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by [ADR 0043](0043-static-template-spawn-with-heliports.md)
 
 ## Context
 
