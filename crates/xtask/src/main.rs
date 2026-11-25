@@ -22,6 +22,7 @@ mod persistence;
 mod probes;
 mod profile;
 mod proto;
+mod real_files;
 mod remote;
 mod routes;
 mod sampling;
@@ -208,6 +209,14 @@ commands:
                             mirror's row count. --no-sidecar is the
                             control: no link-probe, the heap by the eval channel, no
                             agent figures. Refuses a server with players.
+  real-files <name> shipped Read every static template and payload preset file the
+                            docker-wine target's DCS install ships, streamed over SSH
+                            into the sidecar's readers in memory, and print a table
+                            of names and counts or refusals. Writes nothing on the
+                            target and keeps no file.
+  real-files <name> profile <path>...
+                            The same for files under the target's Saved Games
+                            profile
   catalogue <name>          Experiment E9 on a docker-wine target: deploy with --dev,
                             restart DCS, load a fresh shell, record the agent's stream
                             with link-probe, run the scenarios in lua/catalogue, load
@@ -234,6 +243,11 @@ commands:
                             started through its task in a private session, the sidecar
                             a Windows program in the profile; refuses when DCS or a
                             sidecar runs or the profile holds a nanoprobe folder.
+  sidecar <name> --part saved-files --stm P --preset P --preset-name N
+                            On a windows-ssh target, as above: the static template P
+                            and the preset N of the preset file P, paths under the
+                            profile, made where they are from the folders the
+                            sidecar lists, and read back against the readers
   persistence <name>|rehearse [--only a,b,...]
                             The S18 live tests on a docker-wine target, the sidecar
                             as `sidecar` runs it with its store on disk: reload and
@@ -312,6 +326,7 @@ fn main() -> ExitCode {
         ["peerkill", rest @ ..] => peerkill::command(&repository(), rest),
         ["chaos", name, rest @ ..] => chaos::command(name, rest),
         ["faults", name, rest @ ..] => faults::command(name, rest),
+        ["real-files", name, rest @ ..] => real_files::command(name, rest),
         ["catalogue", rest @ ..] => catalogue::command(&repository(), rest),
         ["sampling", rest @ ..] => sampling::command(&repository(), rest),
         ["commands", rest @ ..] => commands::command(&repository(), rest),

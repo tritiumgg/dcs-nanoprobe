@@ -123,7 +123,7 @@ The Mission Editor keeps named loadouts per aircraft type as payload presets, on
 per type. DCS ships its own in `MissionEditor/data/scripts/UnitPayloads/` and in each
 module's `UnitPayloads/` folder in its install (ED-CODE,
 docs/results/2026-11-24-payload-presets.md). The editor saves a user's own in a folder
-of the Saved Games profile, `MissionEditor/UnitPayloads/` (UNVERIFIED).
+of the Saved Games profile, `MissionEditor/UnitPayloads/` (ED-CODE).
 
 A controller gives an aircraft a preset's pylons in `PutGroup`, with the unit's
 `payload_preset`:
@@ -144,8 +144,10 @@ keeps the pylons; the file can be changed, moved or deleted after the call, and 
 preset's name is not stored. The file is read as data and never run. Most shipped
 files start as plain data; a file with Lua code in it, such as a local constant or a
 function, which some shipped ones have, is refused whole. Save the preset from the
-editor instead, or copy the pylons into `extra.payload.pylons` by hand. That the editor
-saves a preset in the data form is UNVERIFIED (spec/world.md, "Payload presets").
+editor instead, or copy the pylons into `extra.payload.pylons` by hand: the editor saves
+a preset in the data form (spec/world.md, "Payload presets"). A bare task name in a
+preset's `tasks`, such as `CAS`, is the one exception the reader takes: `tasks` is not
+used. A pylon whose `CLSID` is `""` leaves that station empty.
 
 ## Check the templates
 

@@ -387,16 +387,11 @@ fn put_group_with_presets(
             .expect("every named preset was read")
             .clone()
             .map_err(|e| invalid(&format!("{f}.payload_preset.{}", e.field), e.text))?;
+        let note = got.note();
         set_pylons(u, got.pylons, &f)?;
         used.push(format!(
-            "unit {i} the preset {:?} of {:?}{}",
-            p.name,
-            p.path,
-            if got.dropped.is_empty() {
-                String::new()
-            } else {
-                format!(" (keys not used: {})", got.dropped.join(", "))
-            }
+            "unit {i} the preset {:?} of {:?}{note}",
+            p.name, p.path
         ));
     }
     let made = put_group(

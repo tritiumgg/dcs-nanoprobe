@@ -70,7 +70,7 @@ fn file() -> String {
     )
 }
 
-fn sv(v: Value) -> prost_types::Value {
+pub(super) fn sv(v: Value) -> prost_types::Value {
     use prost_types::value::Kind as K;
     let kind = match v {
         Value::Null => K::NullValue(0),
@@ -87,7 +87,7 @@ fn sv(v: Value) -> prost_types::Value {
     prost_types::Value { kind: Some(kind) }
 }
 
-fn obj(v: Value) -> prost_types::Struct {
+pub(super) fn obj(v: Value) -> prost_types::Struct {
     match sv(v).kind {
         Some(prost_types::value::Kind::StructValue(s)) => s,
         _ => prost_types::Struct::default(),
@@ -113,7 +113,7 @@ fn by_hand() -> Value {
 
 /// The keys every aircraft of the run has besides its payload: an
 /// aircraft spawned in the air (LIVE, docs/results/2026-11-15-s18-persistence-live.md).
-fn flying() -> Value {
+pub(super) fn flying() -> Value {
     json!({ "speed": 180, "alt_type": "BARO" })
 }
 
@@ -143,7 +143,11 @@ fn spec(
     }
 }
 
-fn put(api: &mut Api, c: u64, spec: pb::GroupSpec) -> Result<pb::PutGroupResponse, tonic::Status> {
+pub(super) fn put(
+    api: &mut Api,
+    c: u64,
+    spec: pb::GroupSpec,
+) -> Result<pb::PutGroupResponse, tonic::Status> {
     let req = pb::PutGroupRequest {
         write: api.write("payload-preset", c),
         group_id: 0,
@@ -259,7 +263,7 @@ fn steps(run: &dyn Live, api: &mut Api, c: u64, path: &str) -> Result<Value, Str
 }
 
 /// The DCS name of the one unit of each made group.
-fn dcs_names(c: u64, made: &[pb::PutGroupResponse]) -> Vec<String> {
+pub(super) fn dcs_names(c: u64, made: &[pb::PutGroupResponse]) -> Vec<String> {
     made.iter()
         .flat_map(|m| m.unit_ids.iter())
         .map(|u| name(NameKind::Unit, CampaignId(c), EntityId(*u)))
@@ -269,7 +273,7 @@ fn dcs_names(c: u64, made: &[pb::PutGroupResponse]) -> Vec<String> {
 /// A read of each aircraft: whether it exists, its type, its ammunition by
 /// type name, its fuel as a fraction of internal, and its fuel mass at
 /// full internal.
-fn read_lua(names: &[String]) -> String {
+pub(super) fn read_lua(names: &[String]) -> String {
     let list: Vec<String> = names.iter().map(|n| format!("{n:?}")).collect();
     format!(
         "local out = {{}}\nfor i, n in ipairs({{ {} }}) do\n  local u = Unit.getByName(n)\n  if u then\n    \
@@ -282,7 +286,7 @@ fn read_lua(names: &[String]) -> String {
 }
 
 /// The `extra` of each made unit's row in the campaign's export.
-fn stored(api: &mut Api, c: u64, units: &[u64]) -> Result<Vec<Value>, String> {
+pub(super) fn stored(api: &mut Api, c: u64, units: &[u64]) -> Result<Vec<Value>, String> {
     let mut campaigns = api.campaigns.clone();
     let rows: BTreeMap<u64, Value> = api.rt.block_on(async move {
         let mut s = campaigns
@@ -315,13 +319,16 @@ fn stored(api: &mut Api, c: u64, units: &[u64]) -> Result<Vec<Value>, String> {
 }
 
 /// A unit row's `extra` as JSON. The row holds it as the store's encoding
-/// of the Lua table, a byte string, which the export gives in base 64
-/// (spec/persistence.md, "Export"); a value in any other form is kept.
+/// of the Lua table, a byte string, which the export gives as a string when
+/// the bytes are UTF-8 and in base 64 otherwise (spec/persistence.md,
+/// "Export"); a value in any other form, or one that does not decode, is
+/// kept.
 fn extra_json(v: &Value) -> Value {
-    let decoded = v["bytes_b64"]
-        .as_str()
-        .and_then(unbase64)
-        .and_then(|b| nanoprobe_transport::codec::Reader::new(&b).lv().ok());
+    let bytes = match v {
+        Value::String(s) => Some(s.clone().into_bytes()),
+        _ => v["bytes_b64"].as_str().and_then(unbase64),
+    };
+    let decoded = bytes.and_then(|b| nanoprobe_transport::codec::Reader::new(&b).lv().ok());
     match decoded {
         Some(lv) => nanoprobe_sidecar::export::lv_json(&lv),
         None => v.clone(),
@@ -380,11 +387,13 @@ fn spawn_and_read(
 }
 
 /// The weapons an aircraft's ammunition read lists: the rows whose type
-/// name `getAmmo` puts under `weapons.`, which leaves out gun rounds.
-fn weapons(ammo: &Value) -> u64 {
+/// name `getAmmo` puts under `weapons.`, without gun rounds, which it puts
+/// under `weapons.shells.` (LIVE, docs/results/2026-11-24-real-files.md:
+/// a UH-1H's door guns read `weapons.shells.M134_7_62_T`).
+pub(super) fn weapons(ammo: &Value) -> u64 {
     ammo.as_object().map_or(0, |m| {
         m.iter()
-            .filter(|(k, _)| k.starts_with("weapons."))
+            .filter(|(k, _)| k.starts_with("weapons.") && !k.starts_with("weapons.shells."))
             .filter_map(|(_, n)| n.as_u64())
             .sum()
     })
@@ -424,7 +433,7 @@ fn verdict(seen: &Value, stored: &[Value]) -> Value {
 
 /// Remove both groups and hold the simulation running until DCS has
 /// dropped them. Every removal is tried; the first error is given.
-fn remove(
+pub(super) fn remove(
     run: &dyn Live,
     api: &mut Api,
     c: u64,
@@ -505,9 +514,23 @@ mod tests {
         let lv = nanoprobe_api::lua::struct_to_lua(&obj(extra.clone()));
         let mut w = nanoprobe_transport::codec::Writer::new();
         w.lv(&lv);
-        let row = json!({ "bytes_b64": base64(&w.finish()) });
+        let bytes = w.finish();
+        let row = json!({ "bytes_b64": base64(&bytes) });
         let got = extra_json(&row);
-        assert_eq!(sv(got.clone()), sv(extra));
+        assert_eq!(sv(got.clone()), sv(extra.clone()));
+        // Bytes that are UTF-8 come as a plain string, as a helicopter's
+        // row at 50 m/s with pylons and no `settings` did (LIVE,
+        // docs/results/2026-11-24-real-files.md).
+        let plain = json!({
+            "speed": 50,
+            "alt_type": "BARO",
+            "payload": { "pylons": { "2": { "CLSID": "{A}" } } },
+        });
+        let mut w = nanoprobe_transport::codec::Writer::new();
+        w.lv(&nanoprobe_api::lua::struct_to_lua(&obj(plain.clone())));
+        let text = String::from_utf8(w.finish()).expect("UTF-8");
+        assert_eq!(sv(extra_json(&json!(text))), sv(plain));
+        assert_eq!(extra_json(&json!("not a table")), json!("not a table"));
         let (seen, _) = good();
         assert_eq!(verdict(&seen, &[got.clone(), got])["pass"], json!(true));
         assert_eq!(extra_json(&json!({ "a": 1 })), json!({ "a": 1 }));

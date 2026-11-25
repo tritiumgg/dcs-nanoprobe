@@ -814,7 +814,9 @@ A coalition or country with two entries under one key, a list with two entries u
 one number, and a static value the store cannot encode refuse the file.
 
 The shipped files hold only vehicle groups (ED-CODE). The form of a static is taken
-from the editor's code that saves one, and is UNVERIFIED against a saved file. That the
+from the editor's code that saves one. A `Fortifications` static in a file the editor
+saved reads in this form and was made on DCS where the file and the request place it
+(LIVE, Windows client, docs/results/2026-11-24-real-files.md). That the
 editor writes x as north and y as east follows from "Group templates": a unit table's
 `x` and `y` are the world's `x` and `z` (LIVE). Two units and two `Fortifications`
 statics made by this call stood on DCS within 15 µm of the places the file and the
@@ -857,7 +859,7 @@ themselves and never set it.
 `MissionEditor/data/scripts/UnitPayloads/` and from `UnitPayloads/` of every module in
 the install, then merges the user's presets over them by preset name, from the folder
 `ConfigHelper.getWriteDirUnitPayloads()` names, which is `MissionEditor/UnitPayloads/`
-of the Saved Games profile (the path is UNVERIFIED). Each file returns one table: the
+of the Saved Games profile (ED-CODE, `Scripts/ConfigHelper.lua`). Each file returns one table: the
 type in `unitType`, else `name`, and the presets in `payloads`, each with a `name`, an
 optional `displayName`, `pylons` (each `{CLSID, num, settings?}`) and `tasks`
 (ED-CODE, `MissionEditor/modules/me_loadoututils.lua`,
@@ -871,14 +873,22 @@ profile's `MissionEditor/UnitPayloads` folder.
 **Form.** The editor runs each file as Lua. Of the 153 files Eagle Dynamics ships, 140
 start with `local unitPayloads =`, 7 start with another `local` statement and 6 start
 with a blank line or a comment; all end with `return unitPayloads`, and 5 hold lines
-with `function`, `require` or `..` (ED-CODE, the same document). How many the reader
-takes whole is UNVERIFIED. The sidecar reads the file as data and runs none of it. It
+with `function`, `require` or `..` (ED-CODE, the same document). The reader takes 143 of them; in
+2 of those one preset is refused, as two presets share its name (ED-CODE,
+docs/results/2026-11-24-real-files.md). The sidecar reads the file as data and runs none of it. It
 takes exactly `local <name> = <value>`, then `return <name>` with the same name, with
 only white space and comments around them: `<name>` is not a Lua reserved word, and no
 `;` follows the `return`. The value is read as a group template's is ("Group
-templates"). Anything else refuses the file whole, with the line of the first
+templates"), with one addition: a value directly inside a preset's `tasks` table
+(`payloads[i].tasks[j]`) may be a single name followed by `,` or `}`, such as
+`[1] = CAS`, which some shipped files have. The editor runs the file with `loadfile`
+in its own global environment (ED-CODE, `MissionEditor/modules/me_loadoututils.lua`);
+what such a name holds there, a task number or `nil`, is UNVERIFIED. Such a value is opaque: it is never read as a string or a number, and
+`tasks` is dropped anyway. A name anywhere else, a dotted or indexed name, or a call is
+refused. Anything else refuses the file whole, with the line of the first
 statement that is not this form and the advice to save the preset from the editor.
-That the editor saves a user's preset in this form is UNVERIFIED. A file over 1 MiB is
+The editor saves a user's preset in this form, and one such preset gave a helicopter
+its pylons (LIVE, docs/results/2026-11-24-real-files.md). A file over 1 MiB is
 refused; the largest shipped file is 223,869 bytes (ED-CODE).
 
 | In the file | In the spec |
@@ -888,7 +898,7 @@ refused; the largest shipped file is 223,869 bytes (ED-CODE).
 | `payloads[i].name` | The preset the request's `name` names. Not `displayName`. Two presets with one `name` refuse the request |
 | `payloads[i].pylons` | A table, which may be empty; none refuses the request, and so do two entries under one key |
 | `payloads[i].pylons[j].num` | The pylon: the key of `extra.payload.pylons`, as a decimal string ("Lua tables in the API"). A whole number from 1 to 1,000; two entries for one pylon refuse the request |
-| `payloads[i].pylons[j].CLSID` | The pylon's `CLSID`, a non-empty string |
+| `payloads[i].pylons[j].CLSID` | The pylon's `CLSID`, a string that is not white space alone. `""` leaves the station empty: the entry and its `settings` are dropped, and the file, preset and pylon are named in the sidecar's standard error; its `num` still counts for the checks. How DCS itself reads `""` is UNVERIFIED, and `""` is never sent |
 | `payloads[i].pylons[j].settings` | The pylon's `settings`, as the file has it. A value that is not a table, a table holding `nil` (Lua keeps no such key), a table the store cannot encode, or one the API cannot carry unchanged refuses the request |
 | `displayName`, `tasks`, any other key | Dropped, and named in the sidecar's standard error |
 

@@ -78,12 +78,37 @@ const LIMIT_S: u64 = 900;
 /// spawns at the start.
 pub(crate) const HELLO_POINTS: [(f64, f64); 2] = [(-290_000.0, 680_000.0), (-289_000.0, 680_000.0)];
 
-const USAGE: &str = "usage: cargo xtask sidecar <name> [--part all|conformance|hello|template|static-template|payload-preset|shell [--template FILE]]";
+const USAGE: &str = "usage: cargo xtask sidecar <name> [--part all|conformance|hello|template|static-template|payload-preset|shell [--template FILE]]
+       cargo xtask sidecar <windows-ssh name> --part saved-files --stm PATH --preset PATH --preset-name NAME";
 
 /// The parts that drive one API test against the sidecar and stop it.
 const ONE_API_PART: [&str; 3] = ["template", "static-template", "payload-preset"];
 
 pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
+    if let [
+        name,
+        "--part",
+        "saved-files",
+        "--stm",
+        stm,
+        "--preset",
+        preset,
+        "--preset-name",
+        preset_name,
+    ] = args
+    {
+        if !matches!(crate::target(name)?, Target::WindowsSsh { .. }) {
+            return Err("--part saved-files runs on a windows-ssh target".into());
+        }
+        let saved = crate::shell_live::saved_files::Saved {
+            stm: (*stm).to_owned(),
+            preset: (*preset).to_owned(),
+            preset_name: (*preset_name).to_owned(),
+        };
+        // Refused before anything touches the target.
+        saved.folders()?;
+        return crate::sidecar_windows::run(repository, name, "saved-files", Some(&saved));
+    }
     let (name, part, template) = match args {
         [name] => (*name, "all", None),
         [name, "--part", p]
@@ -107,7 +132,7 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
         .map(|t| std::fs::read(t).map_err(|e| format!("{t}: {e}")))
         .transpose()?;
     if matches!(crate::target(name)?, Target::WindowsSsh { .. }) {
-        return crate::sidecar_windows::run(repository, name, part);
+        return crate::sidecar_windows::run(repository, name, part, None);
     }
     let Target::DockerWine { ssh, container, .. } = crate::target(name)? else {
         return Err("sidecar runs on a docker-wine target".into());

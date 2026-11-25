@@ -77,6 +77,10 @@ pub struct Pylons {
     /// Keys of the preset that the conversion does not use, for the log:
     /// the first `DROPPED_MAX` distinct names met, sorted.
     pub dropped: Vec<String>,
+    /// The pylon numbers whose entry has `CLSID` `""`, in the file's order.
+    /// Such a station is left empty: the entry and its `settings` are not
+    /// converted.
+    pub empty: Vec<u32>,
 }
 
 /// The last field under a string key, which is the one Lua keeps when a
@@ -182,7 +186,35 @@ pub fn read(src: Vec<u8>) -> Result<File, Refusal> {
     })
 }
 
+impl Pylons {
+    /// What the log adds after the file and preset: the keys not used and
+    /// the pylons left empty, or nothing.
+    pub fn note(&self) -> String {
+        let mut out = String::new();
+        if !self.dropped.is_empty() {
+            out += &format!(" (keys not used: {})", self.dropped.join(", "));
+        }
+        if !self.empty.is_empty() {
+            let nums: Vec<String> = self.empty.iter().map(u32::to_string).collect();
+            out += &format!(" (pylons left empty, CLSID \"\": {})", nums.join(", "));
+        }
+        out
+    }
+}
+
 impl File {
+    /// How many entries `payloads` holds, a preset with a string `name` or
+    /// not.
+    pub fn entries(&self) -> usize {
+        last(&self.doc.root, "payloads").map_or(0, |p| p.fields.len())
+    }
+
+    /// The distinct string names of the file's presets, sorted, each with
+    /// how many presets carry it.
+    pub fn names(&self) -> impl Iterator<Item = (&str, usize)> {
+        self.names.iter().map(|(n, at)| (n.as_str(), at.len()))
+    }
+
     /// The pylons of the preset `name` for a unit of the DCS type
     /// `unit_type`.
     pub fn pylons(&self, unit_type: &str, name: &str) -> Result<Pylons, Refusal> {
@@ -222,6 +254,7 @@ impl File {
             )));
         }
         let mut pylons = Struct::default();
+        let mut empty = Vec::new();
         for (i, (_, row)) in rows.iter().enumerate() {
             let at = i + 1;
             let bad =
@@ -229,8 +262,10 @@ impl File {
             if !row.table {
                 return Err(bad("is not a table"));
             }
+            // `""` is an empty station (shipped files have it); white space
+            // alone is not a CLSID.
             let clsid = string(src, last(row, "CLSID"))
-                .filter(|s| !s.is_empty())
+                .filter(|s| s.is_empty() || !s.trim().is_empty())
                 .ok_or_else(|| bad("has no string `CLSID`"))?;
             let num = match last(row, "num").and_then(|n| lua::scalar_value(src, n)) {
                 Some(Lv::Number(n)) if n.fract() == 0.0 && (1.0..=PYLON_MAX).contains(&n) => {
@@ -243,10 +278,20 @@ impl File {
                 }
             };
             let key = num.to_string();
-            if pylons.fields.contains_key(&key) {
+            if pylons.fields.contains_key(&key) || empty.contains(&num) {
                 return Err(preset(format!(
                     "the preset {name:?} has two entries for pylon {num}"
                 )));
+            }
+            if clsid.is_empty() {
+                note_unused(
+                    &mut dropped,
+                    "pylons[].",
+                    row,
+                    &["CLSID", "num", "settings"],
+                );
+                empty.push(num);
+                continue;
             }
             let mut out = Struct::default();
             out.fields.insert(
@@ -275,6 +320,7 @@ impl File {
         Ok(Pylons {
             pylons,
             dropped: dropped.into_iter().collect(),
+            empty,
         })
     }
 }
