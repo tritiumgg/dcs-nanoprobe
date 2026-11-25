@@ -185,3 +185,15 @@ time run, and destroys it, so a recording shows that an AI birth gives no `AMMO`
 otherwise near the map origin.
 `lua/tests/loadout_experiments.lua` rehearses them on the mock. The results are in
 `docs/results/2026-11-17-s19-spawn-state.md`.
+
+## FARP pairs
+
+The snippets in `farp-pairs/` read what DCS makes of a static group of two FARPs. The
+runner does not pick them up. Load a mission made with
+`cargo xtask miz <template> <out> --heliport-group X,Y,2,first|each` with
+`cargo xtask load <server> <out>`, then run `read.lua`, `second.lua` (server) and
+`slots.lua` (hook) with `cargo xtask eval <server> <state> <file>`, and `parking.lua`
+and `make.lua` through `farp-pairs/run.sh <server> parking <airbase>` and
+`run.sh <server> make <try>`. Each try of `make.lua` adds FARPs that stay until the next
+mission load. `lua/tests/farp_pairs_experiments.lua` rehearses them on the mock. The
+results are in `docs/results/2026-11-25-farp-pairs.md`.
