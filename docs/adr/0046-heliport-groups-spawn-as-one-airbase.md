@@ -1,4 +1,4 @@
-# ADR NNNN: A heliport group spawns as one airbase
+# ADR 0046: A heliport group spawns as one airbase
 
 ## Status
 

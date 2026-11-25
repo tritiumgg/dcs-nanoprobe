@@ -5,7 +5,7 @@
 Accepted. Its rejection of the `heliport_` keys, and its consequences on the radio and
 on `LOST`, are superseded by [ADR 0045](0045-spawned-farps-are-tracked-statics.md). Its
 one static per unit for a static group of heliports is amended by
-[ADR NNNN](NNNN-heliport-groups-spawn-as-one-airbase.md).
+[ADR 0046](0046-heliport-groups-spawn-as-one-airbase.md).
 
 ## Context
 

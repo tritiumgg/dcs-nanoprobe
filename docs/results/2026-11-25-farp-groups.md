@@ -4,7 +4,7 @@
 one airbase under the first heliport's name, with every heliport's parking and one empty
 warehouse. Every other unit of the group is a static of its own. The platform spawns a
 heliport group this way, through `PutStatic` and `PutFromStaticTemplate`
-([ADR NNNN](../adr/NNNN-heliport-groups-spawn-as-one-airbase.md); spec/world.md,
+([ADR 0046](../adr/0046-heliport-groups-spawn-as-one-airbase.md); spec/world.md,
 "Heliport groups").
 
 ## Run 1: what DCS makes of a static group

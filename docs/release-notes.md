@@ -16,7 +16,7 @@
   airbase of the static and them, with one warehouse and every unit's parking.
   `PutFromStaticTemplate` builds a static group whose every unit is a heliport the same
   way, and answers it as one static
-  ([ADR NNNN](adr/NNNN-heliport-groups-spawn-as-one-airbase.md)).
+  ([ADR 0046](adr/0046-heliport-groups-spawn-as-one-airbase.md)).
 
 ### Changed
 
