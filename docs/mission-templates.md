@@ -111,7 +111,8 @@ what it made; the file can be changed, moved or deleted after the call. Give a g
 its orders afterwards with `SetOrder`: the routes and tasks in the file are not used.
 
 Only ground groups and statics are built. A heliport static, such as a FARP or a
-helipad, makes its airbase as one placed with `PutStatic` does. A FARP's warehouse
+helipad, makes its airbase as one placed with `PutStatic` does, with the radio
+frequency, modulation and callsign the file gives it. A FARP's warehouse
 starts empty. A helipad's is expected to start empty too; that is not checked. A file
 that holds planes, helicopters, ships, a complex, a static linked to a unit or a grass
 airfield is refused whole.

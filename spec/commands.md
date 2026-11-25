@@ -616,6 +616,9 @@ takes these keys from `StaticSpec.extra`; the sidecar adds none of them:
 | `allowHotStart` | `true`: those spawns may start hot. Whether dynamic spawn needs it is UNVERIFIED; the LIVE run set it |
 | `dynamicCargo` | `true`: dynamic cargo at the FARP. Set in the LIVE run that offered a spawn; whether dynamic spawn needs it is UNVERIFIED |
 | `hidden` | `false`: the static shows on the clients' F10 map. A static added by script without it is hidden there (LIVE) |
+| `heliport_frequency` | The FARP's radio frequency in MHz, a number or numeric text: `129.5` and `"131.25"` give 129.5 and 131.25 MHz. Without it, 127.5 MHz (LIVE, docs/results/2026-11-25-farp-fixes.md). Text that is not a number, and frequencies other than those tried, are UNVERIFIED |
+| `heliport_modulation` | 0 AM, 1 FM. Without it, AM (LIVE). Other values are UNVERIFIED |
+| `heliport_callsign_id` | The callsign: 1 London, 2 Dallas, 3 Paris, 4 Moscow. Without it, London (LIVE). Other values are UNVERIFIED |
 
 A dynamic spawn there takes an aircraft and fuel from the FARP's warehouse, which starts
 empty: the controller stocks it with `SetWarehouseStock` under the static's name (LIVE,

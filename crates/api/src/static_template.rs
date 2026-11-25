@@ -44,14 +44,28 @@ const STATIC_PASSED: &[&str] = &[
     "livery_id",
 ];
 
+/// Keys of a `Heliports` static's unit that also go to its DCS static table
+/// unchanged: its radio. `coalition.addStaticObject` reads the frequency as
+/// a number or as text, the modulation and the callsign ID (LIVE,
+/// docs/results/2026-11-25-farp-fixes.md). On a static of another category
+/// they are dropped and logged.
+const HELIPORT_PASSED: &[&str] = &[
+    "heliport_frequency",
+    "heliport_modulation",
+    "heliport_callsign_id",
+];
+
+/// The static category that makes a FARP.
+const HELIPORT_CATEGORY: &str = "Heliports";
+
 /// Keys of a static's unit the conversion reads or ignores without a log.
 const STATIC_USED: &[&str] = &["type", "x", "y", "heading", "unitId", "name"];
 
 /// The static category of a grass airfield, and the key prefix only such a
 /// static has (ED-CODE, the editor's `unload_static_groups`). Refused: no
 /// live check has seen one make its airbase. A `Heliports` static is built
-/// as `PutStatic` builds a FARP (spec/world.md, "Kinds"); its `heliport_`
-/// keys are dropped and logged.
+/// as `PutStatic` builds a FARP (spec/world.md, "Kinds"), with its radio
+/// keys ([`HELIPORT_PASSED`]).
 const GRASS_CATEGORY: &str = "GrassAirfields";
 const GRASS_KEY_PREFIX: &str = "grassairfield_";
 
@@ -458,6 +472,16 @@ fn static_group(
                 "{uat} is a grass airfield, which is not built"
             )));
         }
+        let heliport = string(r.src, last(u, "category")).is_some_and(|c| c == HELIPORT_CATEGORY);
+        let passed: Vec<&str> = if heliport {
+            STATIC_PASSED
+                .iter()
+                .chain(HELIPORT_PASSED)
+                .copied()
+                .collect()
+        } else {
+            STATIC_PASSED.to_vec()
+        };
         out.push(Static {
             name: name.clone(),
             country,
@@ -466,7 +490,7 @@ fn static_group(
             y: r.finite(u, "y", &uat)?,
             heading: r.finite(u, "heading", &uat)?,
             dead,
-            extra: r.sort_keys("static.units[].", u, STATIC_USED, STATIC_PASSED, &uat)?,
+            extra: r.sort_keys("static.units[].", u, STATIC_USED, &passed, &uat)?,
         });
     }
     if out.is_empty() {
@@ -930,7 +954,7 @@ of description",
     }
 
     #[test]
-    fn a_helipad_is_a_static_whose_heliport_keys_are_dropped() {
+    fn a_helipad_is_a_static_that_keeps_its_radio_keys() {
         let l = read(HELIPAD.as_bytes()).expect("read");
         assert_eq!(l.statics.len(), 1);
         let s = &l.statics[0];
@@ -939,22 +963,28 @@ of description",
             ("Pad-1", 2, "SINGLE_HELIPAD", false)
         );
         assert_eq!((s.x, s.y, s.heading), (-356000.5, 619000.25, 0.75));
+        // The frequency stays text, as the file holds it: DCS reads both.
         assert_eq!(
             s.extra,
             [
                 ("category".to_string(), Lv::String(b"Heliports".to_vec())),
                 ("shape_name".to_string(), Lv::String(b"FARP".to_vec())),
+                (
+                    "heliport_frequency".to_string(),
+                    Lv::String(b"127.5".to_vec())
+                ),
+                ("heliport_modulation".to_string(), Lv::Number(0.0)),
+                ("heliport_callsign_id".to_string(), Lv::Number(1.0)),
             ]
         );
-        for k in [
-            "static.units[].heliport_frequency",
-            "static.units[].heliport_modulation",
-            "static.units[].heliport_callsign_id",
-            "static.units[].tasks",
-            "static.route",
-        ] {
+        for k in ["static.units[].tasks", "static.route"] {
             assert!(l.dropped.contains(&k.to_string()), "{k}: {:?}", l.dropped);
         }
+        assert!(
+            !l.dropped.iter().any(|k| k.contains("heliport_")),
+            "{:?}",
+            l.dropped
+        );
     }
 
     #[test]

@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted
+Accepted. Its object and removal rules are superseded by
+[ADR NNNN](NNNN-spawned-farps-are-tracked-statics.md).
 
 ## Context
 

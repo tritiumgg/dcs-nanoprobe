@@ -2,11 +2,14 @@
 //! controller options, airbase owners, warehouse stock and adjustments,
 //! damage, sample rates, the country map, and attacks on units and statics.
 
+use nanoprobe_sidecar::ids::{self, CampaignId, EntityId, NameKind};
 use nanoprobe_sidecar::intents::Intent;
 use nanoprobe_sidecar::lifecycle::State;
 use nanoprobe_sidecar::sim::wire::{lv, opcode};
 use nanoprobe_sidecar::stock::{Item, Stock};
-use nanoprobe_sidecar::store::{Authority, Entry, LostPolicy, Outcome};
+use nanoprobe_sidecar::store::{
+    Authority, Entry, LostPolicy, NewGroup, NewUnit, Outcome, Point, UnitState,
+};
 use nanoprobe_sim_fake::harness::{CAMPAIGN, Op, THEATER, World};
 use nanoprobe_transport::records::Rates;
 
@@ -144,6 +147,99 @@ fn a_farp_spawned_again_gets_its_owner_and_stock_again() {
     ticks(&mut w, 30);
     assert_eq!(sent(&w, opcode::AIRBASE_OWNER), 2);
     assert_eq!(sent(&w, opcode::WAREHOUSE_SET), 2);
+}
+
+#[test]
+fn the_airbase_of_a_removed_farp_gets_no_owner_or_stock() {
+    // A FARP the store holds gets its owner and stock. Once it is removed,
+    // DCS keeps its airbase until the simulation runs (LIVE,
+    // docs/results/2026-11-25-farp-fixes.md), so the agent still samples
+    // it: the fake keeps the airbase, which carries the static's platform
+    // name, and a new owner and stock are not sent to it.
+    let mut w = world(0, 0);
+    let id = w
+        .store
+        .create_static(NewGroup {
+            theater: THEATER.into(),
+            country: 2,
+            category: 0,
+            coalition: 2,
+            units: vec![NewUnit::new(
+                "FARP",
+                UnitState {
+                    at: Point {
+                        x: -2_000.0,
+                        y: 0.0,
+                        z: 0.0,
+                    },
+                    ..UnitState::default()
+                },
+            )],
+            authority: Authority::Sim,
+            label: "farp".into(),
+            extra: lv::obj(vec![("category", lv::s("Heliports"))]),
+        })
+        .expect("static");
+    let name = ids::name(NameKind::Static, CampaignId(CAMPAIGN), id);
+    w.sim.add_airbase(&name, 1, Stock::default());
+    ticks(&mut w, 12);
+    w.store.set_airbase_owner(THEATER, &name, 2);
+    w.store.set_stock(THEATER, &name, &weapon("AIM-9X", 4.0));
+    ticks(&mut w, 12);
+    assert_eq!(w.sim.airbase_owner(&name), Some(2));
+    assert_eq!(sent(&w, opcode::AIRBASE_OWNER), 1);
+    assert_eq!(sent(&w, opcode::WAREHOUSE_SET), 1);
+
+    w.store.remove_entity(id).expect("remove");
+    ticks(&mut w, 12);
+    w.store.set_airbase_owner(THEATER, &name, 1);
+    w.store.set_stock(THEATER, &name, &weapon("AIM-9X", 8.0));
+    ticks(&mut w, 30);
+    assert_eq!(sent(&w, opcode::AIRBASE_OWNER), 1);
+    assert_eq!(sent(&w, opcode::WAREHOUSE_SET), 1);
+    assert_eq!(w.sim.airbase_owner(&name), Some(2));
+    assert!(
+        w.store.group(id).is_some_and(|g| g.removed),
+        "removed, not purged yet"
+    );
+
+    // Once purged the store holds nothing of the entity, as for a static
+    // name whose entity it never held: the same.
+    let gone = ids::name(
+        NameKind::Static,
+        CampaignId(CAMPAIGN),
+        EntityId(w.store.next_entity()),
+    );
+    w.sim.add_airbase(&gone, 1, Stock::default());
+    ticks(&mut w, 12);
+    w.store.set_airbase_owner(THEATER, &gone, 2);
+    w.store.set_stock(THEATER, &gone, &weapon("AIM-9X", 4.0));
+    ticks(&mut w, 30);
+    assert_eq!(sent(&w, opcode::AIRBASE_OWNER), 1);
+    assert_eq!(sent(&w, opcode::WAREHOUSE_SET), 1);
+}
+
+#[test]
+fn a_farps_radio_keys_reach_its_static_spawn_unchanged() {
+    // The store-to-`STATIC_SPAWN` step for the radio keys (D272 B): the
+    // frequency as text, as a template file gives it, the rest as numbers.
+    // The step before, a template's keys into the stored spec, is the API's
+    // test `a_helipad_in_a_static_template_is_the_put_static_farp`.
+    let mut w = world(0, 1);
+    let id = w.store.groups().next().unwrap().id;
+    let radio = lv::obj(vec![
+        ("category", lv::s("Heliports")),
+        ("heliport_frequency", lv::s("127.5")),
+        ("heliport_modulation", lv::n(1.0)),
+        ("heliport_callsign_id", lv::n(3.0)),
+    ]);
+    w.store.set_extra(id, radio).expect("extra");
+    ticks(&mut w, 20);
+    let name = ids::name(NameKind::Static, CampaignId(CAMPAIGN), id);
+    let table = w.sim.ledger().static_tables.get(&name).expect("spawned");
+    assert_eq!(lv::get(table, "heliport_frequency"), Some(&lv::s("127.5")));
+    assert_eq!(lv::get(table, "heliport_modulation"), Some(&lv::n(1.0)));
+    assert_eq!(lv::get(table, "heliport_callsign_id"), Some(&lv::n(3.0)));
 }
 
 #[test]

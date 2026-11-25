@@ -147,22 +147,38 @@ what is left goes on:
 | Order | Tier | Rows | Target period | Calls |
 |---|---|---|---|---|
 | 1 | Births | births waiting to be resolved | each pump | `isExist`, `getName`, `getTypeName`, `getGroup`, `getID`, `getCoalition`, `getCountry`, `getDesc().category`, `getLife0`, `Object.getCategory` for a static, and `getPoint` for one that cannot move |
-| 2 | Enumeration, while one runs | every group and static in DCS | `enumeration_s` | `coalition.getGroups`, `Group.getUnits`, `coalition.getStaticObjects`; the calls of a birth for an object the table lacks; `getPoint` for a static that cannot move |
+| 2 | Enumeration, while one runs | every group and static in DCS, and every FARP static a `STATIC_SPAWN` made in this generation | `enumeration_s` | `coalition.getGroups`, `Group.getUnits`, `coalition.getStaticObjects`; `isExist` on a spawned FARP's object; the calls of a birth for an object the table lacks; `getPoint` for a static that cannot move |
 | 3 | Subscribed positions | the rows `SUBSCRIBE` names | its `period_s` | as for positions, and `getPosition` when it asks for attitude |
 | 4 | Positions | every unit, and every static that can move | `position_s`; five times it for a row that has not moved | `DCS.getUnitPositionByObjectId` |
 | 5 | Attitude when stopped | units that stopped since their last attitude | each pump | `getPosition` |
 | 6 | Vitals | every row | `vitals_s` for a row `SUBSCRIBE` names; twelve times it for any other row, the slow sweep | `getLife`; `isExist` on each row the slow sweep visits |
-| 7 | Warehouses and airbases | every airbase of the mission, and of a FARP `STATIC_SPAWN` made in this generation | `warehouse_s` | `getCoalition`, `getWarehouse():getInventory()`; for an airbase a FARP static makes, `StaticObject.getByName` and `isExist` first |
+| 7 | Warehouses and airbases | every airbase of the mission, and of a FARP `STATIC_SPAWN` made in this generation | `warehouse_s` | `getCoalition`, `getWarehouse():getInventory()`; for an airbase a FARP static makes, `isExist` first: on its object for a FARP a `STATIC_SPAWN` made, on the static `StaticObject.getByName` finds with the airbase's ID for a mission FARP |
 
 The shim reads the mission's airbases when a generation starts, and marks each one a
 static of the same name and ID makes: a mission FARP. It adds the airbase of a FARP
-static when its `STATIC_SPAWN` applies: the airbase `Airbase.getByName` finds under the
-static's name with the static's ID (spec/world.md, "Kinds"). A FARP spawned again under
+static when its `STATIC_SPAWN` applies: the object `coalition.addStaticObject` returns,
+when `Object.getCategory` of it is 4, which is the airbase (spec/world.md, "Kinds"). It
+does not look the airbase up by name: a FARP of the name that DCS has not yet removed may
+still answer. A FARP spawned again under
 the name takes over its entry. When a FARP's static no longer exists, mission FARP or
 spawned, or a static of the name that is no FARP replaces a spawned one, the entry stays
 as a tombstone, so the airbases after it keep their index; the agent writes no record
 for it. Each `getCoalition` is under `pcall`; an airbase whose `getCoalition` raises
-writes no record in that pass, since coalition 0 would read as a capture.
+writes no record in that pass, since coalition 0 would read as a capture. A FARP a
+command destroyed exists in DCS until the simulation next runs (LIVE,
+docs/results/2026-11-25-farp-fixes.md): on a paused server its entry turns into a tombstone only
+then, when `isExist` reads false.
+
+A FARP static is an object of class `Airbase`, `Object.getCategory` 4, that
+`coalition.getStaticObjects` does not list; its birth event has category 4, which the
+shim does not queue (LIVE, docs/results/2026-11-25-farp-fixes.md). The shim reads a FARP it spawns
+as a static two other ways. When the FARP's `STATIC_SPAWN` applies, the handler queues the
+new object as a static birth, so the next pump adds its row. The enumeration's last step
+visits each airbase entry a `STATIC_SPAWN` made in this generation that is not a
+tombstone, through the entry's object: an entry whose `isExist` reads false or raises is
+skipped, and a pending-destroy ID is ignored as in every step. Each visit is one
+enumeration item, on the births' and the enumeration's account. With no spawned FARP the
+step makes no DCS call. A FARP the mission file places is not read as a static.
 
 Which rows a sweep reads:
 
@@ -607,7 +623,11 @@ sidecar then has an `ENUM_BEGIN` with no end, and uses nothing from it (spec/rec
 
 It reads `coalition.getGroups(side, category)` for each coalition and group category,
 then `coalition.getStaticObjects(side)` for each coalition, one call at a time, then
-each group's units. Each call is one row of the tier's cost, and each unit one more.
+each group's units, and last the FARP statics this generation's `STATIC_SPAWN`s made
+("Tiers"): one `isExist` for each airbase entry of a spawned FARP that is not a
+tombstone, and its row as for a static when that is true, one item each. An entry that
+is not a spawned FARP costs no call and no item. Each call is one row of the tier's
+cost, and each unit one more.
 For each unit and static it reports the row: a new row it adds as a birth would gets an
 `OBJECT`; a row the table has gets an `OBJECT` with the enumeration's number or its ID
 in a `SEEN` record (spec/records.md, "Layout: SEEN"). A known object costs the shim one

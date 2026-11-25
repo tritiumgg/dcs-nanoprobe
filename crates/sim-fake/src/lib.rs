@@ -359,6 +359,9 @@ pub struct Ledger {
     pub players_asked: u32,
     /// `BANS` queries the agent answered.
     pub bans_asked: u32,
+    /// The table of the last `STATIC_SPAWN` that reached the handler, by
+    /// name.
+    pub static_tables: BTreeMap<String, Lv>,
     /// `STATIC_SPAWN`s with `dead = true` that reached the handler: agent
     /// boot, generation, entity and spec revision.
     pub ruin_spawns: Vec<(u64, u32, u64, u64)>,
@@ -2930,6 +2933,9 @@ impl FakeSim {
                 self.spawn(&cmd, name, units, false);
             }
             Body::StaticSpawn { name, table, .. } => {
+                self.ledger
+                    .static_tables
+                    .insert(name.clone(), table.clone());
                 let t = lv::str_at(table, "type").unwrap_or_default();
                 if t.starts_with("Unknown") {
                     return self.result(&cmd, rc::DCS_REFUSED, 0, "unknown static type", Lv::Nil);
