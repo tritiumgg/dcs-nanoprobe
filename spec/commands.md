@@ -606,6 +606,16 @@ does not exist is `NOT_BOUND`. The sidecar keeps each group's options with the g
 
 The exists-guard applies as for a group.
 
+A spawn under the name of a static DCS holds replaces it: a revised static is spawned
+again under its name at its new revision (spec/world.md, "Revising a static"). The
+handler reads the static the name finds before the call, and names its ID in
+`destroyed` when the call applied and returned another ID. The agent then treats the
+old static as a destroyed one: it writes `OBJECT_GONE` with `DESTROYED` for its row and
+keeps its ID in the pending-destroy set, so an enumeration neither binds it again nor
+reports it as a new object. `addStaticObject` over a fortification's name took the old one
+at once, also while paused (LIVE, docs/results/2026-11-25-static-replace.md), and a
+heliport group's replace takes the old group at once ("Layout: STATIC_SPAWN", below).
+
 `static` takes one of two forms:
 
 - A table with no `units` key: the static's table. The handler calls

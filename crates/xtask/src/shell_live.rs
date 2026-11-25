@@ -52,6 +52,7 @@ use crate::sampling::live::Run;
 
 pub mod payload_preset;
 pub mod saved_files;
+pub mod static_replace;
 pub mod static_template;
 pub mod template;
 pub mod template_heliport;

@@ -93,6 +93,7 @@ Every failed call returns a gRPC status whose details hold one `ErrorDetail`: a
 | `INVALID_ARGUMENT` | `INVALID_FIELD`, `field` `next.start` | A `SetNextMission` whose start is not a date from year 1 to year 9999 |
 | `INVALID_ARGUMENT` | `INVALID_FIELD`, `field` `clock` | A `CreateCampaign` whose `clock` is not a date from year 1 to year 9999. Nothing is created |
 | `FAILED_PRECONDITION` | none (`UNSPECIFIED`), `field` `campaign_id` | A `DeleteCampaign` of the active campaign or of one with a backup running |
+| `FAILED_PRECONDITION` | none (`UNSPECIFIED`), `field` `static_id`, `spec.type` or `spec.further_units[i].type` | A `PutStatic` revision of a static in state `dead`, or one that changes a heliport's type or a kept further unit's type. Nothing is written (spec/world.md, "Revising a static") |
 | `INVALID_ARGUMENT` | `INVALID_FIELD`, `field` `confirm_name` | A `DeleteCampaign` whose `confirm_name` is not the campaign's name |
 | `INTERNAL` | `INTERNAL` | A `DeleteCampaign` whose folder could not be removed; the campaign stays listed with what is left |
 | `FAILED_PRECONDITION` | `UNMANAGED_ENTITY` | The call changes a spec or order of an unmanaged entity |

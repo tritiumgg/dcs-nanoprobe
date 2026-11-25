@@ -26,12 +26,13 @@ use nanoprobe_proto::v1alpha1::{
 };
 use nanoprobe_sidecar::ids::EntityId;
 use nanoprobe_sidecar::intents::Intent;
+use nanoprobe_sidecar::lifecycle::State;
 use nanoprobe_sidecar::reconciler::EffectResult;
 use nanoprobe_sidecar::sim::wire::{Body, Debris};
 use nanoprobe_sidecar::stock::{Item, Stock};
 use nanoprobe_sidecar::store::{
-    Authority, Kind, LostPolicy, NewFurther, NewGroup, NewUnit, Outcome, Point, Store, StoreError,
-    UnitState, check_lv,
+    Authority, Kind, LostPolicy, NewFurther, NewGroup, NewUnit, Outcome, Point, StaticRevision,
+    Store, StoreError, UnitState, check_lv,
 };
 use nanoprobe_transport::records::Rates;
 use prost::Message;
@@ -814,20 +815,126 @@ fn replace_group(
 }
 
 fn put_static(g: &mut Inner, c: u64, r: &PutStaticRequest) -> Result<PutStaticResponse, Status> {
-    if r.static_id != 0 {
-        return Err(invalid(
-            "static_id",
-            "replacing a static's spec is not built yet",
-        ));
-    }
     let spec = r
         .spec
         .as_ref()
         .ok_or_else(|| invalid("spec", "a spec is required"))?;
     let limit = g.backend.max_command();
     let slot = g.campaigns.get_mut(&c).expect("resolved campaign");
+    if r.static_id != 0 {
+        return revise_static(slot, r.static_id, spec, limit);
+    }
     let plan = plan_static(slot, spec, limit)?;
     write_static(&mut slot.store, plan)
+}
+
+/// `PutStatic` with a `static_id`: revise the static's spec in place, at
+/// one new spec revision (spec/world.md, "Revising a static"). The spec is
+/// checked as a new static's is, then against the static's own.
+fn revise_static(
+    slot: &mut Slot,
+    static_id: u64,
+    spec: &pb::StaticSpec,
+    limit: usize,
+) -> Result<PutStaticResponse, Status> {
+    let id = EntityId(static_id);
+    let cur = slot
+        .store
+        .group(id)
+        .filter(|x| x.kind == Kind::Static && !x.removed)
+        .ok_or_else(|| not_found(static_id))?
+        .clone();
+    // A dead static's spec is fixed whatever the request, an equal spec of
+    // a static created dead included (D278, R5): this refusal comes first.
+    if cur.state == State::Dead {
+        return Err(status(
+            Code::FailedPrecondition,
+            ErrorReason::Unspecified,
+            format!(
+                "static {static_id} is destroyed and its spec is fixed; remove it and create it again"
+            ),
+            static_id,
+            "static_id",
+        ));
+    }
+    let plan = plan_static(slot, spec, limit)?;
+    if plan.dead {
+        return Err(invalid(
+            "spec.dead",
+            "a revision does not destroy a static; remove it and create it destroyed",
+        ));
+    }
+    if spec.country != cur.country {
+        return Err(invalid(
+            "spec.country",
+            "changing a static's country is not built yet",
+        ));
+    }
+    if plan.group.theater != cur.theater {
+        return Err(invalid(
+            "spec.position.theater",
+            "a revision keeps the static's theater",
+        ));
+    }
+    let unit = slot.store.unit(id).expect("a static is its unit").clone();
+    let mut new = plan.group.units.into_iter().next().expect("one unit");
+    if is_heliport_lv(&new.extra) != is_heliport_lv(&unit.extra) {
+        return Err(invalid(
+            "spec.extra.category",
+            "a revision keeps whether a static is a heliport; remove it and create the other",
+        ));
+    }
+    // A heliport's type does not change: a `SINGLE_HELIPAD` spawned over a
+    // `FARP`'s name kept the `FARP`'s 4 spots (LIVE, runs 2 and 3 of
+    // docs/results/2026-11-25-static-replace.md). New further units may be
+    // of any heliport type.
+    if is_heliport_lv(&unit.extra) {
+        let old = &cur.further;
+        let kept = spec
+            .further_units
+            .iter()
+            .zip(old)
+            .position(|(n, o)| n.r#type != o.type_name);
+        if new.type_name != unit.type_name || kept.is_some() {
+            let field = kept.map_or("spec.type".to_owned(), |i| {
+                format!("spec.further_units[{i}].type")
+            });
+            return Err(status(
+                Code::FailedPrecondition,
+                ErrorReason::Unspecified,
+                "a heliport's type does not change in place: DCS keeps the old type's parking; remove it and create it again",
+                static_id,
+                &field,
+            ));
+        }
+    }
+    let s = &mut slot.store;
+    s.revise_static(
+        id,
+        StaticRevision {
+            type_name: std::mem::take(&mut new.type_name),
+            at: new.state.at,
+            heading: new.state.heading,
+            extra: new.extra,
+            further: plan.further,
+        },
+    )
+    .map_err(store_error)?;
+    // The label after the revision, which can still fail: a refused call
+    // writes nothing.
+    if cur.label != spec.label {
+        s.set_label(id, &spec.label).map_err(store_error)?;
+    }
+    Ok(PutStaticResponse {
+        static_id,
+        spec_revision: s.group(id).map_or(0, |x| x.spec_rev),
+        revision: s.revision(),
+    })
+}
+
+/// Whether stored further keys name the `Heliports` category.
+fn is_heliport_lv(extra: &Lv) -> bool {
+    matches!(nanoprobe_sidecar::sim::wire::lv::get(extra, "category"), Some(Lv::String(c)) if c == HELIPORTS.as_bytes())
 }
 
 /// A new static, checked and ready to write.

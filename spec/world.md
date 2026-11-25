@@ -223,9 +223,14 @@ with a death fact is never spawned alive again: DCS gets its ruin ("Ruins").
 
 A group's spec is its country, coalition, category, extra keys of its DCS table, and
 its units: each one's type, skill and extra keys. A static's is its country,
-coalition, type and extra keys. Positions and state are not spec; a spawn takes the
-last known ones. The author's label and components are not spec either: they never
-reach DCS, and a change to them moves only the store revision.
+coalition, type, place, heading, extra keys and further units: a static stays where it
+was spawned, so its place is spec ("Revising a static"): the `POSITIONS` rows the agent
+writes for it (spec/sampling.md) do not change it. A static whose spec's `extra.category`
+is `Cargos` keeps its last known place instead, which a revision's place replaces. The
+agent sends position rows for a static DCS reports as cargo (`Object.getCategory` 6); one
+whose spec lacks the `Cargos` key keeps its spec place (UNVERIFIED that DCS makes one). A group's positions and any state are not spec; a spawn takes the last known
+ones. The author's label and components are not spec either: they never reach DCS, and a
+change to them moves only the store revision.
 
 A group's controller options, by DCS option ID, are kept with the group and are not
 spec: a change moves only the store revision. The reconciler sends `GROUP_OPTION` for
@@ -816,9 +821,12 @@ A further unit has an `EntityId` of its own, given when the static is created, w
 its DCS name carries in the static form ("Names"). No other entity takes it. It has no
 object, state or binding of its own: the store keeps it in its static's spec, and a
 name that carries it stands for the static. So an object found under such a name is
-the static's, and never an object of a purged name ("Removal"). A static's spec does not
-change after it is created, so neither do its further units or their IDs; they go when
-the static is purged.
+the static's, and never an object of a purged name ("Removal"). A revision keeps further
+unit i's ID, gives units past the old count new IDs, and drops the units past the new
+count ("Revising a static"). A dropped unit's ID stays mapped to its static until the
+next mission load: the old group's handle still answers that name after the replace
+(LIVE, docs/results/2026-11-25-farp-groups.md). No other entity ever takes it. The IDs go
+when the static is purged.
 
 The count of further units is bound only by the size of one `STATIC_SPAWN`: the
 command's payload is at most an eighth of the ring's capacity (spec/transport.md), and
@@ -830,6 +838,91 @@ A group of 10 `FARP`s with their further keys fits the default ring with room to
 `Heliports`, a further unit whose own is not, a further unit on another theater, a
 `dead` key in a further unit's `extra`, and `dead` with further units: what DCS makes of
 a heliport group added dead is UNVERIFIED ("Ruins").
+
+## Revising a static
+
+`PutStatic` with a `static_id` revises that static's spec in place. The request carries
+the whole spec, checked as a new static's is. A static the store does not hold, a
+removed one, or a group's ID is `NOT_FOUND`.
+
+What may change, all at one new `spec_rev` per call:
+
+- its type, unless it is a heliport;
+- its place, on the same theater, and its heading;
+- its extra keys, keeping whether `category` is `Heliports`;
+- a heliport's further units: added, dropped, moved or turned, or their further keys
+  changed; a kept unit keeps its type, and a new one may be of any heliport type
+  ("Heliport groups").
+
+Its label changes with no new `spec_rev`, as a group's does. A spec equal to the stored
+one changes nothing and answers the current revisions. A revision that needs more
+`EntityId`s than are left changes nothing and fails as such a create does.
+
+`PutStatic` refuses, with nothing written, in this order: a request with no spec, as a
+create's (`INVALID_ARGUMENT`); a `static_id` the store does not hold as a static
+(`NOT_FOUND`); then the rows below, top to bottom, the spec's own checks as a create's
+coming after the first:
+
+| Request | Code | Why |
+|---|---|---|
+| A static in state `dead`, created dead or not, any spec, before the spec's checks | `FAILED_PRECONDITION` | A dead static's spec is fixed: its ruin is kept by generation, not by revision ("Ruins"). Remove it and create it again |
+| `dead` | `INVALID_ARGUMENT` | A revision does not destroy a static |
+| Another `country` | `INVALID_ARGUMENT` | A country change is not built, as for a group. A FARP's owner is `SetAirbaseOwner` |
+| A place on another theater | `INVALID_ARGUMENT` | A static is on one theater |
+| `extra.category` into or out of `Heliports` | `INVALID_ARGUMENT` | A heliport goes through `addGroup`, any other static through `addStaticObject`, and `addStaticObject` over a group's first name leaves the group (LIVE, docs/results/2026-11-25-farp-groups.md). Remove it and create the other |
+| Another type for a heliport, or for one of its kept further units | `FAILED_PRECONDITION` | A `SINGLE_HELIPAD` spawned over a `FARP`'s name took the type and kept the `FARP`'s 4 spots (LIVE, runs 2 and 3 of docs/results/2026-11-25-static-replace.md), so the platform would report a helipad where DCS has a `FARP`'s parking. Remove it and create it again |
+
+The reconciler applies a revision as any spec change: a `live` static whose spec is ahead
+of its applied spawn is spawned again under its name, at the new revision. That spawn
+counts against the materialization budget ("Authority"). A `virtual`, `materializing`,
+`lost`, `dematerializing` or `unspawnable` static takes the new spec at its next spawn,
+an `unspawnable` one becoming `virtual` first. A static under the campaign's authority
+keeps the new spec until it materializes. A cargo moved in play is compared at its last
+known place, so the spec it was created with moves it back.
+
+The spawn replaces the old object in DCS (spec/commands.md, "Layout: STATIC_SPAWN"). The
+handler names the old object in `destroyed`, the agent writes it `DESTROYED` and holds
+it pending, and the new object is bound from the result. A heliport group's spawn takes
+the old group at once, paused or running, at any change of size (LIVE,
+docs/results/2026-11-25-farp-groups.md). A plain static's spawn takes the old one at once
+too, also while paused (LIVE, docs/results/2026-11-25-static-replace.md). The agent
+holds the old ID pending either way, so an enumeration never binds it again.
+
+While the spawn is owed, a position row of a cargo's old object does not replace the
+revised place: the revised place is spawned.
+
+A death of the old object while the revision's spawn is in flight follows the death
+rules as written ("Lifecycle"): a static whose member has a death fact is `dead` and is
+not spawned alive again; the spawn's result names the new object, and an `OBJECT_GONE`
+or death of the old object never marks the new one dead.
+
+A heliport's revision makes a new airbase under the same name, with an empty warehouse
+and the coalition of the static's country (LIVE, docs/results/2026-11-25-farp-groups.md).
+The old airbase's state is carried to it:
+
+- When the `STATIC_SPAWN` of a `Heliports` static resolves, whatever its outcome, the
+  reconciler forgets what it saw and sent of that airbase's owner and stock, so the new
+  airbase's first samples are not read as play and the desired owner and stock are sent
+  again. For a `live` static spawned again in the generation, when the spawn applied or
+  its outcome is unknown, it first keeps what the last samples said of the old airbase,
+  its owner and every item and liquid. When the old object's `OBJECT_GONE` came first, it
+  keeps what the samples said before it. A spawn DCS did not take (refused, rejected, not
+  sent) builds no carry, so play on the airbase DCS kept is not undone; the old airbase's
+  last samples stay for the next spawn, and later samples of the kept airbase (the same
+  object) replace them.
+- Once the new airbase's owner and stock are sampled, the reconciler sends the kept owner
+  when no desired owner is set, and the kept count of every item that has no desired
+  count, each only where the new airbase's sample does not already show it, once
+  (`AIRBASE_OWNER`, `WAREHOUSE_SET`). A carried command that does not apply for now
+  (unknown, not sent, or `NOT_READY`) is sent again, as a desired one is. A desired value
+  wins where set, and the carry never sets or changes one. The carry is kept until a
+  sample after its commands were answered: a revision before then, or a spawn sent again
+  after an unknown outcome, carries the first airbase's state to the newest one. A
+  spawn's result from an earlier generation changes nothing of the airbase.
+- What DCS changed between the last sample and the replace is lost: a draw or a capture
+  since then is not carried. A new mission generation carries nothing.
+
+Whether players on the old airbase's pads keep their aircraft is UNVERIFIED.
 
 ## Static templates
 

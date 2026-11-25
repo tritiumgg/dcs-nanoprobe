@@ -1876,10 +1876,16 @@ fn load(path: &Path, conn: Connection, changes_keep: usize) -> Result<Store, Dis
             id.0, store.next_entity
         )));
     }
-    // A heliport group's further units hold EntityIds of their own: each is
-    // below the next ID, is no group or unit, and belongs to one static.
+    // A heliport group's further units hold EntityIds of their own, and so
+    // do the ones a revision dropped: each is below the next ID, is no group
+    // or unit, and belongs to one static.
     let mut held = BTreeSet::new();
-    for id in groups.values().flat_map(|g| g.further.iter().map(|f| f.id)) {
+    for id in groups.values().flat_map(|g| {
+        g.further
+            .iter()
+            .map(|f| f.id)
+            .chain(g.retired.iter().copied())
+    }) {
         if id.0 >= store.next_entity {
             return Err(DiskError::Corrupt(format!(
                 "further unit {} at or past the next EntityId {}",
@@ -2567,6 +2573,7 @@ fn enc_group(v: &Group) -> Lv {
         ruin_sent_in,
         ruin_in,
         further,
+        retired,
     } = v;
     let kind = match kind {
         Kind::Group => "group",
@@ -2617,6 +2624,14 @@ fn enc_group(v: &Group) -> Lv {
                 Lv::Nil
             } else {
                 list(further.iter().map(|f| nested(&enc_further(f))).collect())
+            },
+        ),
+        (
+            "retired",
+            if retired.is_empty() {
+                Lv::Nil
+            } else {
+                list(retired.iter().map(|id| u(id.0).or_zero()).collect())
             },
         ),
         (
@@ -2772,6 +2787,11 @@ fn dec_group(v: &Lv) -> Result<Group, DiskError> {
                 Lv::String(v) => dec_further(&decode(v)?),
                 _ => Err(DiskError::Corrupt("further is not nested".into())),
             })
+            .collect::<Result<_, _>>()?,
+        retired: r
+            .list("retired")?
+            .into_iter()
+            .map(|m| dec_u(m, "retired").map(EntityId))
             .collect::<Result<_, _>>()?,
         order_sent_in,
         observed_coalition: match r.list("observed_coalition")?.as_slice() {
@@ -3823,6 +3843,29 @@ mod tests {
         assert_eq!(back, group);
         assert_eq!(back.further[0].type_name, "Invisible FARP");
         assert_eq!(back.further[0].heading, 1.25);
+        assert!(back.retired.is_empty());
+        // A revision that drops the second unit keeps its ID as retired.
+        let u = s.unit(id).expect("unit").clone();
+        s.revise_static(
+            id,
+            super::super::StaticRevision {
+                type_name: u.type_name,
+                at: u.state.at,
+                heading: u.state.heading,
+                extra: u.extra,
+                further: vec![super::super::NewFurther {
+                    type_name: "Invisible FARP".into(),
+                    at: group.further[0].at,
+                    heading: 1.25,
+                    extra: group.further[0].extra.clone(),
+                }],
+            },
+        )
+        .expect("revise");
+        let group = s.group(id).expect("g").clone();
+        assert_eq!(group.retired.len(), 1);
+        let back = dec_group(&decode(&encode(&enc_group(&group))).expect("decode")).expect("group");
+        assert_eq!(back, group);
     }
 
     #[test]
@@ -4023,6 +4066,27 @@ mod tests {
         for (why, group, i, to) in cases {
             let r = heliports_damaged(|s| {
                 s.groups.get_mut(&EntityId(group)).expect("g").further[i].id = EntityId(to);
+            });
+            match r {
+                Err(DiskError::Corrupt(m)) => assert!(m.contains(why), "{why}: {m}"),
+                r => panic!("{why}: {r:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_heliport_groups_retired_ids_are_checked_on_load() {
+        // (what the check says, the group, the retired ID): past the next
+        // ID, a group's own ID, another group's further unit, its own.
+        let cases = [
+            ("at or past", 1, 7),
+            ("also a group or unit", 1, 4),
+            ("held twice", 4, 2),
+            ("held twice", 1, 3),
+        ];
+        for (why, group, to) in cases {
+            let r = heliports_damaged(|s| {
+                s.groups.get_mut(&EntityId(group)).expect("g").retired = vec![EntityId(to)];
             });
             match r {
                 Err(DiskError::Corrupt(m)) => assert!(m.contains(why), "{why}: {m}"),

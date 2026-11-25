@@ -105,7 +105,11 @@ outlives a mission generation, spec/world.md "Respawn gate"), and DCS object ID.
 group's body records whether it is a `group` or a `static`. A heliport group's static
 body also carries its further units (`further`), each with its `EntityId`, type, place,
 heading and further keys (spec/world.md, "Heliport groups"); a body without the key has
-none. A further unit has no `unit` row.
+none. It carries the `EntityId`s of the further units a revision dropped (`retired`),
+which still stand for the static until the next mission load; a body without the key
+has none. A further unit has no `unit` row. A load refuses a store whose further or
+retired IDs are at or past the next `EntityId`, are also a group or unit, or are held
+twice.
 
 The journal holds the entries spec/world.md says are journalled, each with its `kind`
 (`command`, `outcome`, `death`, `removed` with its `cause`, `controller` or `expired`
