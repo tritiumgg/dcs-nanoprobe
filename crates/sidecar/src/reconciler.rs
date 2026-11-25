@@ -39,8 +39,8 @@ mod players;
 mod ruins;
 
 use crate::store::{
-    Authority, CapturedMore, Entry, Journalled, Kind, LeftAs, Loaded, LostPolicy, Outcome, Point,
-    Store, UnitState,
+    Authority, CapturedMore, Entry, Group, Journalled, Kind, LeftAs, Loaded, LostPolicy, Outcome,
+    Point, Store, Unit, UnitState,
 };
 
 /// A `NOT_READY` hold: the revision, the lifecycle change count and the FRAME
@@ -1432,6 +1432,12 @@ impl Reconciler {
             self.counters.unmanaged += 1;
             return None;
         };
+        // A heliport group's further name stands for its static
+        // (spec/world.md, "Heliport groups").
+        let unit = match store.unit(unit) {
+            Some(_) => unit,
+            None => store.further_owner(unit).unwrap_or(unit),
+        };
         let Some(u) = store.unit(unit) else {
             if !self.orphan_seen(store, o) {
                 self.unresolved.entry(o.object).or_insert((unit, false)).0 = unit;
@@ -2312,18 +2318,7 @@ impl Reconciler {
                 let name = ids::name(NameKind::Static, campaign, id);
                 Body::StaticSpawn {
                     country: g.country,
-                    table: with_extra(
-                        lv::obj(vec![
-                            ("name", lv::s(&name)),
-                            ("type", lv::s(&u.type_name)),
-                            ("x", lv::n(u.state.at.x)),
-                            ("y", lv::n(u.state.at.z)),
-                            ("heading", lv::n(u.state.heading)),
-                        ]),
-                        // A live static never spawns destroyed, whatever
-                        // its further keys say.
-                        &ruins::without_dead(&u.extra),
-                    ),
+                    table: static_spawn_table(campaign, &g, u, false),
                     name,
                 }
             }
@@ -2935,6 +2930,77 @@ impl Reconciler {
 /// A life at or above this percentage is spawned as is: no `DAMAGE` follows.
 const FULL_LIFE: f64 = 99.95;
 
+/// The keys of a heliport group's first unit that its group table repeats:
+/// which of the two DCS reads is in docs/results/2026-11-25-farp-groups.md.
+const GROUP_COPIED: [&str; 4] = ["dynamicSpawn", "allowHotStart", "dynamicCargo", "hidden"];
+
+/// The `static` value of a static's `STATIC_SPAWN`: its static table, or for
+/// a heliport group the group table of `coalition.addGroup(country, -1, ...)`,
+/// whose first unit is the static (spec/commands.md, "Layout:
+/// STATIC_SPAWN"). With `dead` every table says `dead = true`, the ruin;
+/// without, a `dead` key among the further keys is dropped, so a live static
+/// never spawns destroyed.
+pub(super) fn static_spawn_table(campaign: CampaignId, g: &Group, u: &Unit, dead: bool) -> Lv {
+    let unit = |name: &str, type_name: &str, x: f64, z: f64, heading: f64, extra: &Lv| {
+        let mut pairs = vec![
+            ("name", lv::s(name)),
+            ("type", lv::s(type_name)),
+            ("x", lv::n(x)),
+            ("y", lv::n(z)),
+            ("heading", lv::n(heading)),
+        ];
+        if dead {
+            pairs.push((ruins::DEAD_KEY, Lv::Bool(true)));
+        }
+        with_extra(lv::obj(pairs), &ruins::without_dead(extra))
+    };
+    let first = unit(
+        &ids::name(NameKind::Static, campaign, g.id),
+        &u.type_name,
+        u.state.at.x,
+        u.state.at.z,
+        u.state.heading,
+        &u.extra,
+    );
+    // Every heliport goes through `addGroup`, a single one too: a group
+    // spawn under a name replaces what holds it, a group included, at once,
+    // where `addStaticObject` over a group's first name leaves the group
+    // standing (LIVE, docs/results/2026-11-25-farp-groups.md).
+    let heliport =
+        matches!(lv::get(&u.extra, "category"), Some(Lv::String(c)) if c == b"Heliports");
+    // A single heliport's ruin keeps `addStaticObject`, whose `dead` spawn
+    // DCS applies (LIVE for other statics, docs/results/2026-11-18-ruins.md);
+    // what `addGroup` makes of a dead heliport is UNVERIFIED.
+    if g.further.is_empty() && (!heliport || dead) {
+        return first;
+    }
+    let mut units = vec![first];
+    for f in &g.further {
+        units.push(unit(
+            &ids::name(NameKind::Static, campaign, f.id),
+            &f.type_name,
+            f.at.x,
+            f.at.z,
+            f.heading,
+            &f.extra,
+        ));
+    }
+    let mut pairs = vec![
+        ("name", lv::s(&ids::name(NameKind::Group, campaign, g.id))),
+        ("units", lv::list(units)),
+    ];
+    if dead {
+        pairs.push((ruins::DEAD_KEY, Lv::Bool(true)));
+    }
+    let mut table = lv::obj(pairs);
+    for key in GROUP_COPIED {
+        if let Some(v) = lv::get(&u.extra, key) {
+            table = with_extra(table, &lv::obj(vec![(key, v.clone())]));
+        }
+    }
+    table
+}
+
 fn with_extra(table: Lv, extra: &Lv) -> Lv {
     let (Lv::Table(mut pairs), Lv::Table(more)) = (table.clone(), extra) else {
         // No further keys (nil), or a value that is not a table.
@@ -2979,9 +3045,15 @@ pub fn outcome_of(code: u16, opcode: u16) -> Outcome {
 /// destroy (spec/world.md, "Kinds").
 fn removed_farp(store: &Store, airbase: &str) -> bool {
     ids::parse(airbase).is_some_and(|n| {
+        // A heliport group's further name stands for its static
+        // (spec/world.md, "Heliport groups").
+        let entity = match store.group(n.entity) {
+            Some(_) => n.entity,
+            None => store.further_owner(n.entity).unwrap_or(n.entity),
+        };
         n.kind == NameKind::Static
             && ids::of_campaign(&n, store.campaign())
-            && store.group(n.entity).is_none_or(|g| g.removed)
+            && store.group(entity).is_none_or(|g| g.removed)
     })
 }
 
@@ -3035,5 +3107,278 @@ mod tests {
         assert_eq!(lv::str_at(&t, "livery_id").as_deref(), Some("desert"));
         assert_eq!(with_extra(base.clone(), &Lv::Nil), base);
         assert_eq!(with_extra(base.clone(), &Lv::Number(1.0)), base);
+    }
+
+    fn farp_store(extra: Lv, further: usize) -> (Store, EntityId) {
+        use crate::store::{Authority, NewFurther, NewGroup, NewUnit, Point, UnitState};
+        let at = |x: f64| Point {
+            x,
+            y: 0.0,
+            z: x * 2.0,
+        };
+        let mut store = Store::new(CampaignId(1), 10);
+        let mut first = NewUnit::new(
+            "FARP",
+            UnitState {
+                at: at(1.0),
+                heading: 0.5,
+                ..UnitState::default()
+            },
+        );
+        first.extra = extra;
+        let spec = NewGroup {
+            theater: "Caucasus".into(),
+            country: 2,
+            category: 3,
+            coalition: 2,
+            units: vec![first],
+            authority: Authority::Sim,
+            label: String::new(),
+            extra: Lv::Nil,
+        };
+        let more = (0..further)
+            .map(|i| NewFurther {
+                type_name: "Invisible FARP".into(),
+                at: at(10.0 + i as f64),
+                heading: 1.0 + i as f64,
+                extra: lv::obj(vec![
+                    ("category", lv::s("Heliports")),
+                    ("dead", Lv::Bool(true)),
+                ]),
+            })
+            .collect();
+        let id = store.create_static_group(spec, more).expect("group");
+        (store, id)
+    }
+
+    fn table_for(store: &Store, id: EntityId, dead: bool) -> Lv {
+        let g = store.group(id).expect("g");
+        let u = store.unit(g.members[0]).expect("u");
+        static_spawn_table(CampaignId(1), g, u, dead)
+    }
+
+    #[test]
+    fn a_non_heliport_static_spawns_as_its_own_unit_table() {
+        let extra = lv::obj(vec![
+            ("category", lv::s("Fortifications")),
+            ("dynamicSpawn", Lv::Bool(true)),
+        ]);
+        let (store, id) = farp_store(extra, 0);
+        let t = table_for(&store, id, false);
+        let name = ids::name(NameKind::Static, CampaignId(1), id);
+        assert_eq!(lv::str_at(&t, "name"), Some(name));
+        assert_eq!(lv::str_at(&t, "type").as_deref(), Some("FARP"));
+        assert_eq!(lv::num_at(&t, "x"), Some(1.0));
+        assert_eq!(lv::num_at(&t, "y"), Some(2.0));
+        assert_eq!(lv::num_at(&t, "heading"), Some(0.5));
+        assert_eq!(
+            lv::str_at(&t, "category").as_deref(),
+            Some("Fortifications")
+        );
+        assert_eq!(lv::get(&t, "dynamicSpawn"), Some(&Lv::Bool(true)));
+        assert!(lv::get(&t, "units").is_none(), "not a group table");
+        assert!(lv::get(&t, "dead").is_none());
+        let ruin = table_for(&store, id, true);
+        assert_eq!(lv::get(&ruin, "dead"), Some(&Lv::Bool(true)));
+        // No extra at all is the plain table too.
+        let (store, id) = farp_store(Lv::Nil, 0);
+        assert!(lv::get(&table_for(&store, id, false), "units").is_none());
+    }
+
+    #[test]
+    fn a_single_heliport_spawns_as_a_one_unit_group_table() {
+        let extra = lv::obj(vec![
+            ("category", lv::s("Heliports")),
+            ("heliport_frequency", lv::s("127.5")),
+            ("dynamicSpawn", Lv::Bool(true)),
+            ("dynamicCargo", Lv::Bool(false)),
+        ]);
+        let (store, id) = farp_store(extra, 0);
+        let t = table_for(&store, id, false);
+        let c = CampaignId(1);
+        assert_eq!(
+            lv::str_at(&t, "name"),
+            Some(ids::name(NameKind::Group, c, id))
+        );
+        assert_eq!(lv::get(&t, "dynamicSpawn"), Some(&Lv::Bool(true)));
+        assert_eq!(lv::get(&t, "dynamicCargo"), Some(&Lv::Bool(false)));
+        assert!(lv::get(&t, "allowHotStart").is_none());
+        assert!(lv::get(&t, "type").is_none(), "the type is the unit's");
+        let units = lv::items(lv::get(&t, "units").expect("units"));
+        assert_eq!(units.len(), 1);
+        let u = units[0];
+        assert_eq!(
+            lv::str_at(u, "name"),
+            Some(ids::name(NameKind::Static, c, id))
+        );
+        assert_eq!(lv::str_at(u, "type").as_deref(), Some("FARP"));
+        assert_eq!(lv::num_at(u, "x"), Some(1.0));
+        assert_eq!(
+            lv::str_at(u, "heliport_frequency").as_deref(),
+            Some("127.5")
+        );
+        // A single heliport's ruin is its plain table, for addStaticObject.
+        let ruin = table_for(&store, id, true);
+        assert_eq!(lv::get(&ruin, "dead"), Some(&Lv::Bool(true)));
+        assert!(lv::get(&ruin, "units").is_none());
+        assert_eq!(lv::str_at(&ruin, "type").as_deref(), Some("FARP"));
+    }
+
+    #[test]
+    fn a_further_name_of_a_live_group_is_not_a_removed_farp() {
+        let extra = lv::obj(vec![("category", lv::s("Heliports"))]);
+        let (mut store, id) = farp_store(extra, 2);
+        let c = store.campaign();
+        let further = store.group(id).expect("g").further[1].id;
+        assert!(!removed_farp(&store, &ids::name(NameKind::Static, c, id)));
+        assert!(!removed_farp(
+            &store,
+            &ids::name(NameKind::Static, c, further)
+        ));
+        // A name past every ID the store gave is no entity it holds.
+        assert!(removed_farp(
+            &store,
+            &ids::name(NameKind::Static, c, EntityId(further.0 + 1))
+        ));
+        // Once the group is removed, its first and further names both read
+        // as a FARP the store no longer holds.
+        store.remove_entity(id).expect("removed");
+        assert!(removed_farp(&store, &ids::name(NameKind::Static, c, id)));
+        assert!(removed_farp(
+            &store,
+            &ids::name(NameKind::Static, c, further)
+        ));
+    }
+
+    #[test]
+    fn a_heliport_groups_spawn_table_names_the_group_and_every_unit_in_order() {
+        let extra = lv::obj(vec![
+            ("category", lv::s("Heliports")),
+            ("dynamicSpawn", Lv::Bool(true)),
+            ("hidden", Lv::Bool(false)),
+        ]);
+        let (store, id) = farp_store(extra, 2);
+        let t = table_for(&store, id, false);
+        let c = CampaignId(1);
+        assert_eq!(
+            lv::str_at(&t, "name"),
+            Some(ids::name(NameKind::Group, c, id))
+        );
+        // The copied keys are in the group table, only the ones set.
+        assert_eq!(lv::get(&t, "dynamicSpawn"), Some(&Lv::Bool(true)));
+        assert_eq!(lv::get(&t, "hidden"), Some(&Lv::Bool(false)));
+        assert!(lv::get(&t, "allowHotStart").is_none());
+        assert!(lv::get(&t, "dynamicCargo").is_none());
+        assert!(lv::get(&t, "dead").is_none());
+        let g = store.group(id).expect("g");
+        let units = lv::items(lv::get(&t, "units").expect("units"));
+        assert_eq!(units.len(), 3);
+        assert_eq!(
+            lv::str_at(units[0], "name"),
+            Some(ids::name(NameKind::Static, c, id))
+        );
+        assert_eq!(lv::str_at(units[0], "type").as_deref(), Some("FARP"));
+        for (i, f) in g.further.iter().enumerate() {
+            let u = units[i + 1];
+            assert_eq!(
+                lv::str_at(u, "name"),
+                Some(ids::name(NameKind::Static, c, f.id))
+            );
+            assert_eq!(lv::str_at(u, "type").as_deref(), Some("Invisible FARP"));
+            assert_eq!(lv::num_at(u, "x"), Some(10.0 + i as f64));
+            assert_eq!(lv::num_at(u, "y"), Some(2.0 * (10.0 + i as f64)));
+            assert_eq!(lv::num_at(u, "heading"), Some(1.0 + i as f64));
+            assert_eq!(lv::str_at(u, "category").as_deref(), Some("Heliports"));
+            // A live static never spawns destroyed.
+            assert!(lv::get(u, "dead").is_none());
+        }
+    }
+
+    #[test]
+    fn a_ruins_group_table_says_dead_on_the_group_and_every_unit() {
+        let extra = lv::obj(vec![("category", lv::s("Heliports"))]);
+        let (store, id) = farp_store(extra, 2);
+        let t = table_for(&store, id, true);
+        assert_eq!(lv::get(&t, "dead"), Some(&Lv::Bool(true)));
+        let units = lv::items(lv::get(&t, "units").expect("units"));
+        assert_eq!(units.len(), 3);
+        for u in units {
+            assert_eq!(lv::get(u, "dead"), Some(&Lv::Bool(true)));
+        }
+    }
+
+    #[test]
+    fn an_object_of_a_further_units_name_is_not_an_orphan() {
+        use crate::sim::wire::object_kind;
+        let (mut store, id) = farp_store(Lv::Nil, 2);
+        let c = CampaignId(1);
+        let object = |name: String, object: u64| Object {
+            object,
+            kind: object_kind::STATIC,
+            name,
+            ..Object::default()
+        };
+        let mut rec = Reconciler::new(Config::default(), &store);
+        let further = store.group(id).expect("g").further.clone();
+        for (i, f) in further.iter().enumerate() {
+            let o = object(ids::name(NameKind::Static, c, f.id), 90 + i as u64);
+            assert!(!rec.orphan_seen(&store, &o), "further unit {i}");
+        }
+        assert!(rec.orphans.is_empty(), "no drift destroy is kept");
+        // A static the store purged is one.
+        let gone = store.create_static(plain_static()).expect("static");
+        store.remove_entity(gone).expect("remove");
+        assert!(store.purge(gone).is_some());
+        let o = object(ids::name(NameKind::Static, c, gone), 99);
+        assert!(rec.orphan_seen(&store, &o));
+        assert_eq!(rec.orphans.len(), 1);
+        assert!(rec.orphans.contains_key(&gone));
+    }
+
+    #[test]
+    fn an_object_of_a_further_units_name_resolves_to_its_static() {
+        use crate::sim::wire::object_kind;
+        let (mut store, id) = farp_store(Lv::Nil, 2);
+        let c = CampaignId(1);
+        let object = |name: String, object: u64| Object {
+            object,
+            kind: object_kind::STATIC,
+            name,
+            ..Object::default()
+        };
+        let mut rec = Reconciler::new(Config::default(), &store);
+        rec.stamp = (1, 1, c.0);
+        let member = store.group(id).expect("g").members[0];
+        let own = object(ids::name(NameKind::Static, c, member), 50);
+        rec.object(&mut store, &own);
+        assert_eq!(store.unit(member).expect("u").object, 50);
+        let further = store.group(id).expect("g").further.clone();
+        let o = object(ids::name(NameKind::Static, c, further[0].id), 77);
+        let row = rec.resolve_object(&store, &o).expect("resolves");
+        assert_eq!((row.unit, row.group), (member, id), "the owner static");
+        rec.object(&mut store, &o);
+        let u = store.unit(member).expect("u");
+        assert!(
+            !u.dead && !u.missing && !u.removed,
+            "the static stays bound"
+        );
+        assert_eq!(rec.binding.get(&77).map(|b| b.unit), Some(member));
+        assert!(rec.orphans.is_empty(), "no orphan destroy");
+        assert!(rec.unresolved.is_empty(), "nothing waits to resolve");
+        assert!(store.group(id).is_some() && store.group(id).expect("g").further == further);
+    }
+
+    fn plain_static() -> crate::store::NewGroup {
+        use crate::store::{Authority, NewGroup, NewUnit, UnitState};
+        NewGroup {
+            theater: "Caucasus".into(),
+            country: 2,
+            category: 0,
+            coalition: 2,
+            units: vec![NewUnit::new("Tent", UnitState::default())],
+            authority: Authority::Sim,
+            label: String::new(),
+            extra: Lv::Nil,
+        }
     }
 }

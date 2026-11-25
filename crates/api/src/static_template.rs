@@ -130,6 +130,24 @@ pub struct Static {
     pub dead: bool,
     /// Keys passed to the DCS static table, in the file's order.
     pub extra: Vec<(String, Lv)>,
+    /// The further units of a heliport group, after this first one, in the
+    /// file's order; empty for anything else.
+    pub further: Vec<StaticUnit>,
+}
+
+/// A further unit of a heliport group.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StaticUnit {
+    /// The DCS type.
+    pub type_name: String,
+    /// The mission `x`, meters north.
+    pub x: f64,
+    /// The mission `y`, meters east.
+    pub y: f64,
+    /// Radians.
+    pub heading: f64,
+    /// Keys passed to its DCS unit table, in the file's order.
+    pub extra: Vec<(String, Lv)>,
 }
 
 /// A static template file.
@@ -144,6 +162,26 @@ pub struct Layout {
     /// Keys the conversion does not use, for the log: the first
     /// `DROPPED_MAX` distinct names met, sorted.
     pub dropped: Vec<String>,
+    /// The static groups that mix heliports with other statics, which are
+    /// built one static per unit, for the log: where each is in the file.
+    pub mixed: Vec<String>,
+}
+
+/// What the sidecar's log line adds about a file it read: the keys it did
+/// not use, and the static groups that mix heliports with other statics,
+/// built one static per unit (spec/world.md, "Static templates").
+pub fn log_notes(l: &Layout) -> String {
+    let mut out = String::new();
+    if !l.dropped.is_empty() {
+        out.push_str(&format!("; keys not used: {}", l.dropped.join(", ")));
+    }
+    if !l.mixed.is_empty() {
+        out.push_str(&format!(
+            "; static groups mixing heliports with other statics, one static per unit: {}",
+            l.mixed.join(", ")
+        ));
+    }
+    out
 }
 
 /// The last field under a string key, the one Lua keeps of two.
@@ -182,6 +220,7 @@ fn shown(k: &Key) -> String {
 struct Reader<'a> {
     src: &'a [u8],
     dropped: BTreeSet<String>,
+    mixed: Vec<String>,
 }
 
 impl Reader<'_> {
@@ -307,6 +346,7 @@ pub fn read(src: &[u8]) -> Result<Layout, Refusal> {
     let mut r = Reader {
         src,
         dropped: BTreeSet::new(),
+        mixed: Vec::new(),
     };
     let theatre = string(src, last(&doc.root, "theatre"));
     let coalitions = last(&doc.root, "coalition")
@@ -379,6 +419,7 @@ pub fn read(src: &[u8]) -> Result<Layout, Refusal> {
         groups,
         statics,
         dropped: r.dropped.into_iter().collect(),
+        mixed: r.mixed,
     })
 }
 
@@ -482,21 +523,45 @@ fn static_group(
         } else {
             STATIC_PASSED.to_vec()
         };
-        out.push(Static {
-            name: name.clone(),
-            country,
-            type_name: r.type_name(u, &uat)?,
-            x: r.finite(u, "x", &uat)?,
-            y: r.finite(u, "y", &uat)?,
-            heading: r.finite(u, "heading", &uat)?,
-            dead,
-            extra: r.sort_keys("static.units[].", u, STATIC_USED, &passed, &uat)?,
-        });
+        out.push((
+            heliport,
+            Static {
+                name: name.clone(),
+                country,
+                type_name: r.type_name(u, &uat)?,
+                x: r.finite(u, "x", &uat)?,
+                y: r.finite(u, "y", &uat)?,
+                heading: r.finite(u, "heading", &uat)?,
+                dead,
+                extra: r.sort_keys("static.units[].", u, STATIC_USED, &passed, &uat)?,
+                further: Vec::new(),
+            },
+        ));
     }
     if out.is_empty() {
         return Err(refuse(format!("{at} has no units")));
     }
-    Ok(out)
+    let heliports = out.iter().filter(|(h, _)| *h).count();
+    if out.len() > 1 && heliports == out.len() {
+        // A heliport group is one static with further units: DCS makes one
+        // airbase of it (spec/world.md, "Heliport groups").
+        let mut units = out.into_iter().map(|(_, s)| s);
+        let mut first = units.next().expect("not empty");
+        first.further = units
+            .map(|s| StaticUnit {
+                type_name: s.type_name,
+                x: s.x,
+                y: s.y,
+                heading: s.heading,
+                extra: s.extra,
+            })
+            .collect();
+        return Ok(vec![first]);
+    }
+    if heliports > 0 && heliports < out.len() {
+        r.mixed.push(at.to_string());
+    }
+    Ok(out.into_iter().map(|(_, s)| s).collect())
 }
 
 /// The specs a call makes from a layout, in the file's order.
@@ -513,11 +578,13 @@ pub struct Specs {
 /// The layout's origin: the center of the box that bounds every unit's and
 /// static's place, as mission `x` and `y`.
 pub fn origin(l: &Layout) -> (f64, f64) {
-    let places = l
-        .groups
-        .iter()
-        .flat_map(|g| g.units.iter().map(|u| (u.x, u.y)))
-        .chain(l.statics.iter().map(|s| (s.x, s.y)));
+    let places =
+        l.groups
+            .iter()
+            .flat_map(|g| g.units.iter().map(|u| (u.x, u.y)))
+            .chain(l.statics.iter().flat_map(|s| {
+                std::iter::once((s.x, s.y)).chain(s.further.iter().map(|f| (f.x, f.y)))
+            }));
     let (mut lo, mut hi) = (
         (f64::INFINITY, f64::INFINITY),
         (f64::NEG_INFINITY, f64::NEG_INFINITY),
@@ -625,25 +692,40 @@ pub fn specs(
         });
     }
     let mut statics = Vec::with_capacity(l.statics.len());
-    for (si, s) in l.statics.iter().enumerate() {
-        let extra = if s.extra.is_empty() {
+    let extra_of = |keys: &[(String, Lv)]| {
+        if keys.is_empty() {
             None
         } else {
             crate::convert::extra(&Lv::Table(
-                s.extra
-                    .iter()
+                keys.iter()
                     .map(|(k, v)| (Lv::String(k.as_bytes().to_vec()), v.clone()))
                     .collect(),
             ))
-        };
+        }
+    };
+    for (si, s) in l.statics.iter().enumerate() {
+        let mut further_units = Vec::with_capacity(s.further.len());
+        for (fi, f) in s.further.iter().enumerate() {
+            further_units.push(pb::StaticUnit {
+                r#type: f.type_name.clone(),
+                position: Some(place(
+                    f.x,
+                    f.y,
+                    &format!("unit {} of static {}", fi + 2, si + 1),
+                )?),
+                heading: turn(f.heading),
+                extra: extra_of(&f.extra),
+            });
+        }
         statics.push(pb::StaticSpec {
             label: label(prefix, &s.name),
             country: country.unwrap_or(s.country),
             r#type: s.type_name.clone(),
             position: Some(place(s.x, s.y, &format!("static {}", si + 1))?),
             heading: turn(s.heading),
-            extra,
+            extra: extra_of(&s.extra),
             dead: s.dead,
+            further_units,
         });
     }
     Ok(Specs {
@@ -951,6 +1033,148 @@ of description",
             "{:?}",
             l.dropped
         );
+    }
+
+    /// A file of one static group whose units are `(type, category, x)`,
+    /// each at y = 5 and heading 0.5; a heliport carries a radio.
+    pub(crate) fn static_group(units: &[(&str, &str, f64)]) -> String {
+        let units: String = units
+            .iter()
+            .enumerate()
+            .map(|(i, (t, category, x))| {
+                format!(
+                    "[{}] = {{ [\"type\"] = \"{t}\", [\"category\"] = \"{category}\", [\"heliport_frequency\"] = \"127.{i}\", [\"heliport_callsign_id\"] = {}, [\"x\"] = {x}, [\"y\"] = 5, [\"heading\"] = 0.5 }},",
+                    i + 1,
+                    i + 1
+                )
+            })
+            .collect();
+        one(&format!(
+            "[\"static\"] = {{ [\"group\"] = {{ [1] = {{ [\"name\"] = \"Farps\", [\"units\"] = {{ {units} }} }} }} }}"
+        ))
+    }
+
+    /// A group of three FARPs, for the tests of the service.
+    pub(crate) fn three_farps() -> String {
+        static_group(&[
+            ("FARP", "Heliports", 10.0),
+            ("Invisible FARP", "Heliports", 20.0),
+            ("Invisible FARP", "Heliports", 30.0),
+        ])
+    }
+
+    #[test]
+    fn a_group_of_heliports_is_one_static_with_further_units() {
+        let l = read(three_farps().as_bytes()).expect("read");
+        assert_eq!(l.statics.len(), 1);
+        assert!(l.mixed.is_empty());
+        let s = &l.statics[0];
+        assert_eq!((s.type_name.as_str(), s.x, s.y), ("FARP", 10.0, 5.0));
+        assert_eq!(s.further.len(), 2);
+        for (i, f) in s.further.iter().enumerate() {
+            assert_eq!(f.type_name, "Invisible FARP");
+            assert_eq!((f.x, f.y, f.heading), (20.0 + 10.0 * i as f64, 5.0, 0.5));
+            // Each unit keeps its own radio keys.
+            assert!(
+                f.extra.contains(&(
+                    "heliport_frequency".to_string(),
+                    Lv::String(format!("127.{}", i + 1).into_bytes())
+                )),
+                "{:?}",
+                f.extra
+            );
+            assert!(f.extra.iter().any(|(k, _)| k == "heliport_callsign_id"));
+            assert!(
+                f.extra
+                    .contains(&("category".to_string(), Lv::String(b"Heliports".to_vec())))
+            );
+        }
+        assert!(s.extra.contains(&(
+            "heliport_frequency".to_string(),
+            Lv::String(b"127.0".to_vec())
+        )));
+        assert!(
+            !l.dropped.iter().any(|k| k.contains("heliport_")),
+            "{:?}",
+            l.dropped
+        );
+    }
+
+    #[test]
+    fn a_group_mixing_heliports_and_other_statics_stays_one_static_a_unit() {
+        let l = read(
+            static_group(&[
+                ("FARP", "Heliports", 10.0),
+                ("Tent", "Fortifications", 20.0),
+                ("FARP", "Heliports", 30.0),
+            ])
+            .as_bytes(),
+        )
+        .expect("read");
+        assert_eq!(l.statics.len(), 3);
+        assert!(l.statics.iter().all(|s| s.further.is_empty()));
+        assert_eq!(l.mixed.len(), 1, "{:?}", l.mixed);
+        // The log line names the group.
+        assert!(
+            log_notes(&l).contains(&format!(
+                "static groups mixing heliports with other statics, one static per unit: {}",
+                l.mixed[0]
+            )),
+            "{}",
+            log_notes(&l)
+        );
+        // A group of one heliport, and one of other statics, are not mixed.
+        let l = read(static_group(&[("FARP", "Heliports", 10.0)]).as_bytes()).expect("read");
+        assert!(l.mixed.is_empty() && l.statics[0].further.is_empty());
+        let l = read(
+            static_group(&[
+                ("Tent", "Fortifications", 1.0),
+                ("Tent", "Fortifications", 2.0),
+            ])
+            .as_bytes(),
+        )
+        .expect("read");
+        assert!(l.mixed.is_empty());
+        assert_eq!(l.statics.len(), 2);
+    }
+
+    #[test]
+    fn a_heliport_group_makes_one_spec_with_further_units() {
+        let l = read(three_farps().as_bytes()).expect("read");
+        let s = specs(&l, None, 0.0, None, "").expect("specs");
+        assert_eq!(s.statics.len(), 1);
+        let st = &s.statics[0];
+        assert_eq!(st.further_units.len(), 2);
+        assert_eq!(st.further_units[1].r#type, "Invisible FARP");
+        assert!(st.further_units[0].extra.is_some());
+    }
+
+    #[test]
+    fn an_anchored_heliport_group_turns_about_its_middle() {
+        let l = read(three_farps().as_bytes()).expect("read");
+        let anchor = pb::Position {
+            theater: "Caucasus".into(),
+            north: 1000.0,
+            east: 2000.0,
+            alt: 0.0,
+        };
+        let s = specs(&l, Some(&anchor), FRAC_PI_2, None, "").expect("specs");
+        let st = &s.statics[0];
+        let at = |p: &Option<pb::Position>| {
+            let p = p.as_ref().expect("placed");
+            (p.north.round(), p.east.round())
+        };
+        // The units stand 10 m apart along north; the middle one is the
+        // box's center, and a quarter turn lays them along east.
+        assert_eq!(at(&st.position), (1000.0, 1990.0));
+        assert_eq!(at(&st.further_units[0].position), (1000.0, 2000.0));
+        assert_eq!(at(&st.further_units[1].position), (1000.0, 2010.0));
+        // Every unit's heading turns with the layout.
+        let turned = (0.5 + FRAC_PI_2) % TAU;
+        assert_eq!(st.heading, turned);
+        for u in &st.further_units {
+            assert_eq!(u.heading, turned);
+        }
     }
 
     #[test]

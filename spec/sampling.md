@@ -156,7 +156,9 @@ what is left goes on:
 
 The shim reads the mission's airbases when a generation starts, and marks each one a
 static of the same name and ID makes: a mission FARP. It adds the airbase of a FARP
-static when its `STATIC_SPAWN` applies: the object `coalition.addStaticObject` returns,
+static when its `STATIC_SPAWN` applies: the object the command's call returns
+(`coalition.addGroup` for a live heliport and a heliport group's ruin,
+`coalition.addStaticObject` for a single heliport's ruin),
 when `Object.getCategory` of it is 4, which is the airbase (spec/world.md, "Kinds"). It
 does not look the airbase up by name: a FARP of the name that DCS has not yet removed may
 still answer. A FARP spawned again under

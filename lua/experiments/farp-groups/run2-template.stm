@@ -1,0 +1,143 @@
+staticTemplate =
+{
+    ["coalition"] =
+    {
+        ["blue"] =
+        {
+            ["name"] = "blue",
+            ["country"] =
+            {
+                [1] =
+                {
+                    ["id"] = 2,
+                    ["name"] = "USA",
+                    ["static"] =
+                    {
+                        ["group"] =
+                        {
+                    [1] = {
+                        ["heading"] = 0,
+                        ["groupId"] = 1,
+                        ["hidden"] = false,
+                        ["dead"] = false,
+                        ["y"] = 0,
+                        ["x"] = 0,
+                        ["name"] = "FARP site",
+                        ["units"] =
+                        {
+                            [1] = {
+                                ["type"] = "FARP",
+                                ["unitId"] = 11,
+                                ["rate"] = 100,
+                                ["y"] = 619193.0,
+                                ["x"] = -356760.0,
+                                ["name"] = "Unit 11",
+                                ["category"] = "Heliports",
+                                ["shape_name"] = "FARPS",
+                                ["heading"] = 0,
+                                ["heliport_frequency"] = "129.5",
+                                ["heliport_modulation"] = 0,
+                                ["heliport_callsign_id"] = 2,
+                            },
+                            [2] = {
+                                ["type"] = "FARP",
+                                ["unitId"] = 12,
+                                ["rate"] = 100,
+                                ["y"] = 619193.0,
+                                ["x"] = -356560.0,
+                                ["name"] = "Unit 12",
+                                ["category"] = "Heliports",
+                                ["shape_name"] = "FARPS",
+                                ["heading"] = 0,
+                                ["heliport_frequency"] = "129.5",
+                                ["heliport_modulation"] = 0,
+                                ["heliport_callsign_id"] = 2,
+                            },
+                            [3] = {
+                                ["type"] = "FARP",
+                                ["unitId"] = 13,
+                                ["rate"] = 100,
+                                ["y"] = 619193.0,
+                                ["x"] = -356360.0,
+                                ["name"] = "Unit 13",
+                                ["category"] = "Heliports",
+                                ["shape_name"] = "FARPS",
+                                ["heading"] = 0,
+                                ["heliport_frequency"] = "129.5",
+                                ["heliport_modulation"] = 0,
+                                ["heliport_callsign_id"] = 2,
+                            }
+                        },
+                    },
+                    [2] = {
+                        ["heading"] = 0,
+                        ["groupId"] = 2,
+                        ["hidden"] = false,
+                        ["dead"] = false,
+                        ["y"] = 0,
+                        ["x"] = 0,
+                        ["name"] = "Pad site",
+                        ["units"] =
+                        {
+                            [1] = {
+                                ["type"] = "SINGLE_HELIPAD",
+                                ["unitId"] = 21,
+                                ["rate"] = 100,
+                                ["y"] = 619793.0,
+                                ["x"] = -356760.0,
+                                ["name"] = "Unit 21",
+                                ["category"] = "Heliports",
+                                ["shape_name"] = "FARP",
+                                ["heading"] = 0,
+                                ["heliport_frequency"] = "127.5",
+                                ["heliport_modulation"] = 0,
+                                ["heliport_callsign_id"] = 1,
+                            },
+                            [2] = {
+                                ["type"] = "SINGLE_HELIPAD",
+                                ["unitId"] = 22,
+                                ["rate"] = 100,
+                                ["y"] = 619793.0,
+                                ["x"] = -356560.0,
+                                ["name"] = "Unit 22",
+                                ["category"] = "Heliports",
+                                ["shape_name"] = "FARP",
+                                ["heading"] = 0,
+                                ["heliport_frequency"] = "127.5",
+                                ["heliport_modulation"] = 0,
+                                ["heliport_callsign_id"] = 1,
+                            }
+                        },
+                    },
+                    [3] = {
+                        ["heading"] = 0,
+                        ["groupId"] = 3,
+                        ["hidden"] = false,
+                        ["dead"] = false,
+                        ["y"] = 0,
+                        ["x"] = 0,
+                        ["name"] = "Hangar",
+                        ["units"] =
+                        {
+                            [1] = {
+                                ["type"] = "Hangar A",
+                                ["unitId"] = 31,
+                                ["rate"] = 100,
+                                ["y"] = 620393.0,
+                                ["x"] = -356760.0,
+                                ["name"] = "Unit 31",
+                                ["category"] = "Fortifications",
+                                ["shape_name"] = "angar_a",
+                                ["heading"] = 0,
+                            }
+                        },
+                    }
+                        },
+                    },
+                },
+            },
+        },
+    },
+    ["theatre"] = "Caucasus",
+    ["name"] = "np groups",
+}

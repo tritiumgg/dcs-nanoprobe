@@ -245,6 +245,11 @@ function Sim:remove_static(static)
   if self.statics[static.name] == static then
     self.statics[static.name] = nil
   end
+  for alias in pairs(static.aliases or {}) do
+    if self.statics[alias] == static then
+      self.statics[alias] = nil
+    end
+  end
   self.dead_statics[static.id] = nil
   self.gone_statics[static.id] = static
 end
@@ -438,6 +443,8 @@ function Sim:add_static(country, data)
     -- Its radio as DCS reads it: the frequency in Hz from a number or
     -- numeric text, AM, and the callsign ID; without the keys 127.5 MHz,
     -- AM, ID 1 (LIVE).
+    -- Its `dynamicSpawn` key, read at spawn (LIVE, ADR 0032).
+    dynamic = data.dynamicSpawn,
     radio = data.category == 'Heliports' and {
       frequency = (tonumber(data.heliport_frequency) or 127.5) * 1e6,
       modulation = tonumber(data.heliport_modulation) or 0,
@@ -968,7 +975,8 @@ local function scripting(host, name)
         -- `isExist` false (LIVE, docs/results/2026-11-25-farp-fixes.md): the
         -- latest of the name.
         for _, gone in pairs(sim.gone_statics) do
-          if gone.farp and gone.name == static_name and (not static or gone.id > static.id) then
+          local named = gone.name == static_name or (gone.aliases and gone.aliases[static_name])
+          if gone.farp and named and (not static or gone.id > static.id) then
             static = gone
           end
         end
@@ -1153,9 +1161,12 @@ local function scripting(host, name)
     end,
     getParking = function(self)
       local a = airbase_of(self)
-      return {
-        { Term_Index = 1, Term_Type = 104, TO_AC = false, vTerminalPos = { x = a.x + 200, y = 0, z = a.z + 50 } },
-      }
+      local spots = {}
+      for i = 1, a.farp and a.farp.parking or 1 do
+        spots[i] = { Term_Index = i, Term_Type = a.farp and 40 or 104, TO_AC = false,
+          vTerminalPos = { x = a.x + 200 * i, y = 0, z = a.z + 50 } }
+      end
+      return spots
     end,
     setCoalition = function(self, side)
       -- UNVERIFIED: DCS refuses a side that is not 0 (neutral), 1 (red) or 2 (blue).
@@ -1176,32 +1187,79 @@ local function scripting(host, name)
     end,
   })
 
+  -- A FARP (category `Heliports`) is also an airbase of its name, with the
+  -- static's ID and its own empty limited warehouse (LIVE,
+  -- docs/results/2026-11-16-person-tests-2.md). A FARP spawned again under
+  -- the name replaces the airbase. DCS returns the airbase, which is the
+  -- static (LIVE, docs/results/2026-11-25-farp-fixes.md).
+  local function farp_airbase(static, country)
+    local base = {
+      id = static.id, name = static.name, coalition = side_of(state, country), x = static.x, z = static.z,
+      farp = static,
+      stock = { aircraft = {}, weapon = {}, liquids = { [0] = 0, [1] = 0, [2] = 0, [3] = 0 } },
+    }
+    local at = #sim.airbases + 1
+    for i, b in ipairs(sim.airbases) do
+      if b.name == static.name and not (b.farp and b.farp.doomed and not b.gone) then
+        at = i
+      end
+    end
+    sim.airbases[at] = base
+    return handle(AIRBASE, static.id)
+  end
+
+  -- coalition.addGroup with category -1: a static group (LIVE,
+  -- docs/results/2026-11-25-farp-groups.md). Its `Heliports` units are one
+  -- FARP airbase under the first heliport's name, with every heliport's
+  -- parking (4 per `FARP`, 1 per `SINGLE_HELIPAD`), found by
+  -- `StaticObject.getByName` under every heliport's name and by nothing under
+  -- the group's name. Every other unit is a static of its own. DCS returns
+  -- the airbase, or with no heliport the last static. The group replaces what
+  -- holds its heliports' names.
+  local function sim_add_static_group(country, data)
+    if type(data) ~= 'table' or type(data.units) ~= 'table' or type(data.units[1]) ~= 'table' then
+      error('mock: coalition.addGroup(-1) needs a table with units', 3)
+    end
+    local base, last
+    for _, u in ipairs(data.units) do
+      if u.category ~= 'Heliports' then
+        last = sim:add_static(country, u)
+      elseif not base then
+        -- A group spawn removes the holder of its first name at once, also
+        -- while paused, where `addStaticObject` leaves a group standing.
+        local old = sim.statics[u.name]
+        if old then
+          sim:remove_static(old)
+        end
+        base = sim:add_static(country, u)
+        base.aliases, base.parking = {}, u.type == 'FARP' and 4 or 1
+      else
+        base.parking = base.parking + (u.type == 'FARP' and 4 or 1)
+        local old = sim.statics[u.name]
+        if old and old ~= base then
+          sim:remove_static(old)
+        end
+        base.aliases[u.name] = true
+        sim.statics[u.name] = base
+      end
+    end
+    if base then
+      return farp_airbase(base, country)
+    end
+    return handle(STATIC, last.id)
+  end
+
   state.coalition = ns(name, 'coalition', {
     addGroup = function(country, category, data)
+      if category == -1 then
+        return sim_add_static_group(country, data)
+      end
       return handle(GROUP, sim:add_group(country, category, data).id)
     end,
     addStaticObject = function(country, data)
       local static = sim:add_static(country, data)
-      -- A FARP (category `Heliports`) is also an airbase of its name, with
-      -- the static's ID and its own empty limited warehouse (LIVE,
-      -- docs/results/2026-11-16-person-tests-2.md). A FARP spawned again
-      -- under the name replaces the airbase.
       if data.category == 'Heliports' then
-        local base = {
-          id = static.id, name = static.name, coalition = side_of(state, country), x = static.x, z = static.z,
-          farp = static,
-          stock = { aircraft = {}, weapon = {}, liquids = { [0] = 0, [1] = 0, [2] = 0, [3] = 0 } },
-        }
-        local at = #sim.airbases + 1
-        for i, b in ipairs(sim.airbases) do
-          if b.name == static.name and not (b.farp and b.farp.doomed and not b.gone) then
-            at = i
-          end
-        end
-        sim.airbases[at] = base
-        -- DCS returns the FARP's airbase, which is the static (LIVE,
-        -- docs/results/2026-11-25-farp-fixes.md).
-        return handle(AIRBASE, static.id)
+        return farp_airbase(static, country)
       end
       return handle(STATIC, static.id)
     end,

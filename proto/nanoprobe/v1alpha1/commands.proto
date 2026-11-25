@@ -130,6 +130,21 @@ message StaticSpec {
   // would be in DCS. Some types have no destroyed model and show intact
   // (spec/world.md, "Ruins").
   bool dead = 7;
+  // The further heliports of a heliport group: DCS makes one airbase of the
+  // static and these, under the static's name, with one warehouse and every
+  // unit's parking (spec/world.md, "Heliport groups"). Only for a static
+  // whose `extra.category` is "Heliports", each unit's likewise, and not
+  // with `dead`. The count is bound only by the size of one spawn command.
+  repeated StaticUnit further_units = 8;
+}
+
+// A further unit of a heliport group.
+message StaticUnit {
+  string type = 1;
+  Position position = 2;
+  double heading = 3;
+  // Further keys of the DCS unit table. A `dead` key is refused.
+  google.protobuf.Struct extra = 4;
 }
 
 message Waypoint {
@@ -259,7 +274,9 @@ message PutFromStaticTemplateResponse {
   // The vehicle groups in the order of the file's text, across its
   // coalitions and countries.
   repeated StaticTemplateGroup groups = 1;
-  // The statics in the order of the file's text, likewise.
+  // The statics in the order of the file's text, likewise. A static group
+  // whose every unit is a heliport is one entry: one static with its
+  // further units (spec/world.md, "Heliport groups").
   repeated StaticTemplateStatic statics = 2;
   // The store revision of the one commit.
   uint64 revision = 3;

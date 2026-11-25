@@ -109,6 +109,7 @@ fn a_static(l: &Lease, k: &str, campaign: u64, north: f64, dead: bool) -> pb::Pu
         write: write(l, k, campaign),
         static_id: 0,
         spec: Some(pb::StaticSpec {
+            further_units: Vec::new(),
             label: k.into(),
             country: 2,
             r#type: "Tent".into(),

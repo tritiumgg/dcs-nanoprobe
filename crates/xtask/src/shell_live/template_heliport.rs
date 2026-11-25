@@ -21,6 +21,21 @@
 //! docs/results/2026-11-25-farp-fixes.md). It then reads that the agent
 //! holds each heliport's airbase entry as a tombstone. The template's
 //! heliport must go every way its twin goes.
+//!
+//! A heliport static with further units is a heliport group: DCS makes one
+//! airbase of it under the first unit's name (spec/world.md, "Heliport
+//! groups"). A file's heliport group, its twin and the extra helipads, which
+//! clone the twin's spec, are all read that way, and so is a group of
+//! [`BIG_GROUP`] FARPs made by `PutStatic` after the extra helipads. For
+//! each group the run reads that `StaticObject.getByName` finds the
+//! airbase's object under every further unit's name, that `Airbase.getByName`
+//! finds nothing under them, that `world.getAirbases` lists the airbase
+//! once, and the airbase's parking spots: 4 for each `FARP` unit, checked
+//! when every unit is a `FARP` and only recorded otherwise. The further
+//! units' names are the store's IDs after the static's own, in order: the
+//! store allocates a static's further IDs at once after its ID. After the
+//! removal the run reads every further name again: no live static, no
+//! airbase.
 
 use std::time::Duration;
 
@@ -48,6 +63,19 @@ const SHOW_LIMIT: Duration = Duration::from_secs(120);
 /// sampling read with several FARPs, and how far apart, in meters.
 const EXTRA_PADS: usize = 4;
 const EXTRA_STEP_M: f64 = 60.0;
+/// How many FARPs the large group has, made by one `PutStatic` after the
+/// extra helipads: many units, to read one airbase and every name finding it
+/// at a size beyond a pair.
+const BIG_GROUP: usize = 10;
+/// The parking spots DCS gives each `FARP` of a heliport group.
+const FARP_SPOTS: usize = 4;
+/// The DCS type of the large group's units.
+const FARP: &str = "FARP";
+/// How far apart the large group's FARPs stand, in meters: the spacing the
+/// Mission Editor gives a group's units (ED-CODE, `me_static.lua`), clear of
+/// each FARP's parking, which reaches 62 m (LIVE,
+/// docs/results/2026-11-25-farp-pairs.md).
+const GROUP_STEP_M: f64 = 200.0;
 /// How long the run waits before each sampling read: past one report
 /// window of the agent (10 s), so the read covers the state it follows.
 const REPORT_WAIT: Duration = Duration::from_secs(12);
@@ -243,6 +271,211 @@ fn ab_name(seen: &Value, i: usize) -> Value {
     seen["names"][i].clone()
 }
 
+/// A heliport group as DCS holds it: the airbase's name (the first unit's),
+/// the names of the further units, and the DCS type of every unit.
+struct Group {
+    airbase: String,
+    further: Vec<String>,
+    types: Vec<String>,
+}
+
+/// The names of a static's `n` further units. The store allocates them at
+/// once after the static's own ID `id`, in order (`create_static_group`), and
+/// `PutStatic` and `PutFromStaticTemplate` create nothing between a static
+/// and its further units, so they are `id + 1` to `id + n`.
+fn further_names(c: u64, id: u64, n: usize) -> Vec<String> {
+    (1..=n as u64)
+        .map(|k| name(NameKind::Static, CampaignId(c), EntityId(id + k)))
+        .collect()
+}
+
+/// The heliport groups among statics made from `specs` with these IDs, in
+/// order; a static without further units is not one.
+fn groups_of(c: u64, ids: &[u64], specs: &[pb::StaticSpec]) -> Vec<Group> {
+    ids.iter()
+        .zip(specs)
+        .filter(|(_, s)| !s.further_units.is_empty() || is_heliport_spec(s))
+        .map(|(id, s)| Group {
+            airbase: name(NameKind::Static, CampaignId(c), EntityId(*id)),
+            further: further_names(c, *id, s.further_units.len()),
+            types: std::iter::once(s.r#type.clone())
+                .chain(s.further_units.iter().map(|u| u.r#type.clone()))
+                .collect(),
+        })
+        .collect()
+}
+
+/// Whether a spec's `extra.category` is `Heliports`: a single heliport is
+/// sent as a one-unit group too, so the part judges its airbase the same way.
+fn is_heliport_spec(s: &pb::StaticSpec) -> bool {
+    s.extra
+        .as_ref()
+        .and_then(|e| e.fields.get("category"))
+        .is_some_and(|v| {
+            matches!(&v.kind, Some(prost_types::value::Kind::StringValue(c)) if c == "Heliports")
+        })
+}
+
+/// How far north of a heliport group's first unit its further units reach,
+/// in meters; 0 for a single heliport.
+fn reach_of(spec: &pb::StaticSpec) -> f64 {
+    let Some(p) = spec.position.as_ref() else {
+        return 0.0;
+    };
+    spec.further_units
+        .iter()
+        .filter_map(|u| u.position.as_ref())
+        .map(|q| q.north - p.north)
+        .fold(0.0, f64::max)
+}
+
+/// The spec of the large group: [`BIG_GROUP`] FARPs of the twin's spec,
+/// each [`GROUP_STEP_M`] north of the last, the first beyond the extra
+/// helipads and the reach of their further units, so nothing overlaps.
+fn big_group(spec: &pb::StaticSpec) -> pb::StaticSpec {
+    let mut s = spec.clone();
+    s.label = "big group".into();
+    s.r#type = FARP.into();
+    s.further_units.clear();
+    let Some(p) = spec.position.clone() else {
+        return s;
+    };
+    let reach = reach_of(spec);
+    let first = p.north + (EXTRA_STEP_M + reach) * (EXTRA_PADS + 1) as f64 + reach;
+    if let Some(q) = s.position.as_mut() {
+        q.north = first;
+    }
+    let mut extra = spec.extra.clone();
+    if let Some(e) = extra.as_mut() {
+        e.fields.retain(|k, _| !k.starts_with("heliport_"));
+    }
+    s.further_units = (1..BIG_GROUP)
+        .map(|k| pb::StaticUnit {
+            r#type: FARP.into(),
+            position: Some(pb::Position {
+                north: first + GROUP_STEP_M * k as f64,
+                ..p.clone()
+            }),
+            heading: spec.heading,
+            extra: extra.clone(),
+        })
+        .collect();
+    s
+}
+
+/// A read of each group by DCS: the airbase's `id_`, its parking spots, the
+/// entries of `world.getAirbases` with that `id_`, and under each further
+/// name the `id_` `StaticObject.getByName` finds and whether
+/// `Airbase.getByName` finds anything.
+fn groups_lua(groups: &[Group]) -> String {
+    let list: Vec<String> = groups
+        .iter()
+        .map(|g| {
+            let further: Vec<String> = g.further.iter().map(|n| format!("{n:?}")).collect();
+            format!("{{ {:?}, {{ {} }} }}", g.airbase, further.join(", "))
+        })
+        .collect();
+    format!(
+        "local groups = {{ {} }}\nlocal listed = world.getAirbases()\nlocal out = {{}}\n\
+         for i, g in ipairs(groups) do\n  local r = {{ listed = 0, further = {{}} }}\n  \
+         local a = Airbase.getByName(g[1])\n  \
+         if a and a:isExist() then\n    r.airbase_id = a.id_\n    local p = a:getParking()\n    r.parking = p and #p\n    \
+         for _, b in ipairs(listed) do if b.id_ == a.id_ then r.listed = r.listed + 1 end end\n  end\n  \
+         for j, n in ipairs(g[2]) do\n    local s = StaticObject.getByName(n)\n    \
+         r.further[j] = {{ static_id = s and s.id_, airbase = Airbase.getByName(n) ~= nil }}\n  end\n  \
+         out[i] = r\nend\nreturn out\n",
+        list.join(", ")
+    )
+}
+
+/// The verdict on DCS's read of `groups`: for each, one airbase found, every
+/// further name finding the airbase's object and no airbase, the airbase
+/// listed once, and 4 parking spots per unit when every unit is a `FARP`.
+/// Other types' spots are recorded and not judged.
+fn groups_verdict(groups: &[Group], seen: &Value) -> Value {
+    let seen = seen.as_array().cloned().unwrap_or_default();
+    let mut pass = groups.len() == seen.len();
+    let mut out = Vec::new();
+    for (g, s) in groups.iter().zip(&seen) {
+        let id = s["airbase_id"].as_f64();
+        let further = s["further"].as_array().cloned().unwrap_or_default();
+        let finds = further.len() == g.further.len()
+            && further
+                .iter()
+                .all(|f| id.is_some() && f["static_id"].as_f64() == id);
+        let no_airbase = further.iter().all(|f| f["airbase"] == json!(false));
+        let listed_once = s["listed"].as_f64() == Some(1.0);
+        let farps = g.types.iter().all(|t| t == FARP);
+        let want = farps.then(|| (FARP_SPOTS * g.types.len()) as f64);
+        let parking_ok = want.is_none_or(|w| s["parking"].as_f64() == Some(w));
+        let ok = id.is_some() && finds && no_airbase && listed_once && parking_ok;
+        pass &= ok;
+        out.push(json!({
+            "airbase": g.airbase,
+            "units": g.types.len(),
+            "types": g.types,
+            "further": g.further,
+            "airbase_id": s["airbase_id"],
+            "further_find_airbase_object": finds,
+            "further_find_no_airbase": no_airbase,
+            "listed": s["listed"],
+            "parking": s["parking"],
+            "parking_wanted": want,
+            "parking_ok": parking_ok,
+            "read": s["further"],
+            "ok": ok,
+        }));
+    }
+    json!({ "pass": pass, "groups": out })
+}
+
+/// Wait until DCS shows each group as one airbase (see [`groups_verdict`]),
+/// or the limit passes, and give the verdict on the last read.
+fn check_groups(
+    run: &dyn Live,
+    api: &mut Api,
+    groups: &[Group],
+    what: &str,
+) -> Result<Value, String> {
+    if groups.is_empty() {
+        return Ok(json!({ "pass": true, "groups": [] }));
+    }
+    let read = groups_lua(groups);
+    let seen = wait(run, api, SHOW_LIMIT, what, |_| {
+        let seen = run.eval("server", "template-heliport-groups", &read, 60)?;
+        Ok((groups_verdict(groups, &seen)["pass"] == json!(true)).then_some(seen))
+    })
+    .or_else(|_| run.eval("server", "template-heliport-groups", &read, 60))?;
+    Ok(groups_verdict(groups, &seen))
+}
+
+/// A group check's verdict for the record: an error is a failed check.
+fn recorded(r: Result<Value, String>) -> Value {
+    r.unwrap_or_else(|e| json!({ "pass": false, "error": e }))
+}
+
+/// A read of every further name after the removal: whether
+/// `StaticObject.getByName` finds nothing or an object that does not exist,
+/// and whether `Airbase.getByName` finds nothing.
+fn further_lua(names: &[String]) -> String {
+    let list: Vec<String> = names.iter().map(|n| format!("{n:?}")).collect();
+    format!(
+        "local out = {{}}\nfor i, n in ipairs({{ {} }}) do\n  local s = StaticObject.getByName(n)\n  \
+         out[i] = {{ static_gone = s == nil or not s:isExist(), airbase_nil = Airbase.getByName(n) == nil }}\nend\nreturn out\n",
+        list.join(", ")
+    )
+}
+
+/// Whether DCS's read after the removal ([`further_lua`]) shows all of the
+/// `n` names gone.
+fn further_gone(seen: &Value, n: usize) -> bool {
+    seen.as_array().map_or(n == 0, |a| {
+        a.len() == n
+            && a.iter()
+                .all(|f| f["static_gone"] == json!(true) && f["airbase_nil"] == json!(true))
+    })
+}
+
 /// What the World lists of the campaign's statics: ID, revision, state and
 /// last error. The World service serves no airbases
 /// (`crates/api/src/convert.rs`, the filter's kinds).
@@ -347,7 +580,17 @@ pub fn drive(
     // `PutStatic` as the template's spec, north of it.
     let mut all = layout.clone();
     let mut twin = layout.statics[pad].clone();
-    twin.x += TWIN_NORTH_M;
+    // A heliport group's further units move with it, so the twin's stand
+    // clear of the file's.
+    let reach = twin
+        .further
+        .iter()
+        .map(|f| f.x - twin.x)
+        .fold(0.0, f64::max);
+    twin.x += TWIN_NORTH_M + reach;
+    for f in &mut twin.further {
+        f.x += TWIN_NORTH_M + reach;
+    }
     twin.extra.retain(|(k, _)| !k.starts_with("heliport_"));
     twin.extra.extend([
         (
@@ -462,24 +705,48 @@ fn steps(
     } else {
         Err("the twin was not made".into())
     };
+    // The template's and the twin's heliport groups, read as one airbase each.
+    let first_groups = groups_of(c, &ids, &specs.statics);
+    let groups_first = if checked.is_ok() {
+        println!("== template-heliport: the heliport groups of the file and the twin");
+        check_groups(
+            run,
+            api,
+            &first_groups,
+            "the groups of the file and the twin",
+        )
+    } else {
+        Err("the twin was not checked".into())
+    };
     // Further helipads by `PutStatic`, north of the twin, for the report
     // with several FARPs.
     let mut extra_ids = Vec::new();
+    let mut extra_specs = Vec::new();
     let report_several = if checked.is_ok() {
         println!("== template-heliport: {EXTRA_PADS} more helipads, and the agent's report");
+        let step = EXTRA_STEP_M + reach_of(&spec);
         for k in 0..EXTRA_PADS {
             let mut s = spec.clone();
+            let dn = step * (k + 1) as f64;
             if let Some(p) = s.position.as_mut() {
-                p.north += EXTRA_STEP_M * (k + 1) as f64;
+                p.north += dn;
+            }
+            for u in &mut s.further_units {
+                if let Some(p) = u.position.as_mut() {
+                    p.north += dn;
+                }
             }
             s.label = format!("extra {k}");
             let req = pb::PutStaticRequest {
                 write: api.write("extra", c),
                 static_id: 0,
-                spec: Some(s),
+                spec: Some(s.clone()),
             };
             match api.rt.block_on(api.commands.put_static(req)) {
-                Ok(r) => extra_ids.push(r.into_inner().static_id),
+                Ok(r) => {
+                    extra_ids.push(r.into_inner().static_id);
+                    extra_specs.push(s);
+                }
                 Err(e) => println!("   FAIL PutStatic: {e}"),
             }
         }
@@ -487,8 +754,37 @@ fn steps(
     } else {
         None
     };
+    let extra_groups = groups_of(c, &extra_ids, &extra_specs);
+    let groups_extra = if checked.is_ok() {
+        check_groups(run, api, &extra_groups, "the groups of the extra helipads")
+    } else {
+        Err("the twin was not checked".into())
+    };
+    // The large group, one `PutStatic` of [`BIG_GROUP`] FARPs.
+    let big = big_group(&spec);
+    let mut big_ids = Vec::new();
+    let groups_big = if checked.is_ok() {
+        println!("== template-heliport: a group of {BIG_GROUP} FARPs");
+        let req = pb::PutStaticRequest {
+            write: api.write("big", c),
+            static_id: 0,
+            spec: Some(big.clone()),
+        };
+        match api.rt.block_on(api.commands.put_static(req)) {
+            Ok(r) => {
+                big_ids.push(r.into_inner().static_id);
+                let g = groups_of(c, &big_ids, std::slice::from_ref(&big));
+                check_groups(run, api, &g, "the group of the large group")
+            }
+            Err(e) => Err(status_text("PutStatic")(e)),
+        }
+    } else {
+        Err("the twin was not checked".into())
+    };
+    let big_groups = groups_of(c, &big_ids, std::slice::from_ref(&big));
     let mut all_ids = ids.clone();
     all_ids.extend(&extra_ids);
+    all_ids.extend(&big_ids);
     let all_names: Vec<String> = all_ids
         .iter()
         .map(|id| name(NameKind::Static, CampaignId(c), EntityId(*id)))
@@ -496,7 +792,12 @@ fn steps(
     let mut all_pads = pads.clone();
     all_pads.extend(all_names[ids.len()..].iter().cloned());
     println!("== template-heliport: remove everything");
-    let left = remove(run, api, c, &all_ids, &all_names, &all_pads);
+    let further: Vec<String> = [&first_groups, &extra_groups, &big_groups]
+        .into_iter()
+        .flatten()
+        .flat_map(|g| g.further.iter().cloned())
+        .collect();
+    let left = remove(run, api, c, &all_ids, &all_names, &all_pads, &further);
     if let Err(e) = &left {
         println!("   FAIL not removed: {e}");
     }
@@ -524,7 +825,26 @@ fn steps(
             .all(|(n, g)| !all_pads.contains(n) || g == &json!(true))
     });
     let extras = extra_ids.len() == EXTRA_PADS;
-    v["pass"] = json!(v["pass"] == json!(true) && heliports_removed && tombstones && extras);
+    let groups = json!({
+        "file_and_twin": recorded(groups_first),
+        "extra_pads": recorded(groups_extra),
+        "big_group": recorded(groups_big),
+    });
+    let groups_ok = ["file_and_twin", "extra_pads", "big_group"]
+        .iter()
+        .all(|k| groups[k]["pass"] == json!(true));
+    let further_ok = left["further"]["ok"] == json!(true);
+    v["pass"] = json!(
+        v["pass"] == json!(true)
+            && heliports_removed
+            && tombstones
+            && extras
+            && big_ids.len() == 1
+            && groups_ok
+            && further_ok
+    );
+    v["groups"] = groups;
+    v["big_group_id"] = json!(big_ids);
     v["heliports_removed"] = json!(heliports_removed);
     v["tombstones"] = json!(tombstones);
     v["extra_pads"] = json!(extra_ids);
@@ -668,6 +988,7 @@ fn remove(
     ids: &[u64],
     names: &[String],
     pads: &[String],
+    further: &[String],
 ) -> Result<Value, String> {
     api.keep();
     let mut sent = Ok(());
@@ -697,6 +1018,19 @@ fn remove(
                         .is_some_and(|l| l.iter().any(|x| x == &json!(n)))
             })
             .collect()
+    };
+    // Every further unit's name: no live static, no airbase.
+    let read_further = || -> Result<(bool, Value), String> {
+        if further.is_empty() {
+            return Ok((true, json!([])));
+        }
+        let seen = run.eval(
+            "server",
+            "template-heliport-further",
+            &further_lua(further),
+            60,
+        )?;
+        Ok((further_gone(&seen, further.len()), seen))
     };
     // DCS takes a FARP's destroy only while the simulation runs: on a
     // paused server, read once, then resume until DCS has dropped them, and
@@ -740,7 +1074,7 @@ fn remove(
                 return Err("a player joined while the mission ran".into());
             }
             let seen = run.eval("server", "template-heliport-left", &read, 60)?;
-            Ok(gone(&seen).iter().all(|g| *g).then_some(()))
+            Ok((gone(&seen).iter().all(|g| *g) && read_further()?.0).then_some(()))
         },
     );
     let repaused = if paused == json!(true) {
@@ -762,6 +1096,7 @@ fn remove(
         return Err(e.clone());
     }
     let seen = run.eval("server", "template-heliport-left", &read, 60)?;
+    let (further_ok, further_seen) = read_further()?;
     // The agent turns each heliport's airbase entry into a tombstone on its
     // next warehouse pass.
     let tomb = tombstones_lua(names);
@@ -789,6 +1124,7 @@ fn remove(
     }
     Ok(json!({
         "gone": gone(&seen),
+        "further": { "names": further, "seen": further_seen, "ok": further_ok },
         "dcs": seen,
         "paused": paused,
         "while_paused": while_paused,
@@ -969,5 +1305,138 @@ mod tests {
         for (what, v) in cases {
             assert_eq!(verdict(&l, &v)["pass"], json!(false), "{what}");
         }
+    }
+
+    fn group_spec(units: usize, kind: &str) -> pb::StaticSpec {
+        let at = |north: f64| pb::Position {
+            theater: "Caucasus".into(),
+            north,
+            east: 10.0,
+            alt: 0.0,
+        };
+        pb::StaticSpec {
+            r#type: kind.into(),
+            position: Some(at(1000.0)),
+            further_units: (1..units)
+                .map(|k| pb::StaticUnit {
+                    r#type: kind.into(),
+                    position: Some(at(1000.0 + 20.0 * k as f64)),
+                    ..pb::StaticUnit::default()
+                })
+                .collect(),
+            ..pb::StaticSpec::default()
+        }
+    }
+
+    #[test]
+    fn a_single_heliport_is_judged_as_a_one_unit_group() {
+        let mut single = group_spec(1, "FARP");
+        single.extra = Some(prost_types::Struct {
+            fields: [(
+                "category".to_string(),
+                prost_types::Value {
+                    kind: Some(prost_types::value::Kind::StringValue("Heliports".into())),
+                },
+            )]
+            .into(),
+        });
+        let g = groups_of(5, &[4, 6], &[single, group_spec(1, "Hangar A")]);
+        assert_eq!(g.len(), 1);
+        assert!(g[0].further.is_empty());
+        assert_eq!(g[0].types, vec!["FARP"]);
+    }
+
+    #[test]
+    fn further_names_follow_the_static_id_in_order() {
+        let n = |id| name(NameKind::Static, CampaignId(5), EntityId(id));
+        assert_eq!(further_names(5, 7, 3), vec![n(8), n(9), n(10)]);
+        assert!(further_names(5, 7, 0).is_empty());
+        let specs = [group_spec(1, "FARP"), group_spec(3, "FARP")];
+        let g = groups_of(5, &[4, 5], &specs);
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0].airbase, n(5));
+        assert_eq!(g[0].further, vec![n(6), n(7)]);
+        assert_eq!(g[0].types, vec!["FARP"; 3]);
+    }
+
+    #[test]
+    fn the_big_group_stands_beyond_the_extra_pads() {
+        let twin = group_spec(3, "SINGLE_HELIPAD");
+        let big = big_group(&twin);
+        assert_eq!(big.r#type, FARP);
+        assert_eq!(big.further_units.len(), BIG_GROUP - 1);
+        let north = |p: &Option<pb::Position>| p.as_ref().expect("placed").north;
+        let first = north(&big.position);
+        // Each extra pad is the twin moved by its reach (40 m) and the step;
+        // the last one's farthest unit is 40 m north of its first.
+        let step = EXTRA_STEP_M + 40.0;
+        assert!(first > 1000.0 + step * EXTRA_PADS as f64 + 40.0);
+        for (k, u) in big.further_units.iter().enumerate() {
+            assert_eq!(u.r#type, FARP);
+            assert_eq!(north(&u.position), first + GROUP_STEP_M * (k + 1) as f64);
+        }
+    }
+
+    fn seen_group(units: usize, parking: f64) -> Value {
+        json!([{
+            "airbase_id": 12,
+            "parking": parking,
+            "listed": 1,
+            "further": (1..units).map(|_| json!({ "static_id": 12, "airbase": false })).collect::<Vec<_>>(),
+        }])
+    }
+
+    #[test]
+    fn a_group_is_one_airbase_with_four_spots_per_farp() {
+        let g = groups_of(5, &[4], &[group_spec(10, "FARP")]);
+        assert_eq!(
+            groups_verdict(&g, &seen_group(10, 40.0))["pass"],
+            json!(true)
+        );
+        let mut cases = Vec::new();
+        cases.push(("39 spots", seen_group(10, 39.0)));
+        let mut v = seen_group(10, 40.0);
+        v[0]["listed"] = json!(2);
+        cases.push(("listed twice", v));
+        let mut v = seen_group(10, 40.0);
+        v[0]["further"][3]["static_id"] = json!(13);
+        cases.push(("a name finds another object", v));
+        let mut v = seen_group(10, 40.0);
+        v[0]["further"][3]["static_id"] = Value::Null;
+        cases.push(("a name finds nothing", v));
+        let mut v = seen_group(10, 40.0);
+        v[0]["further"][3]["airbase"] = json!(true);
+        cases.push(("a name finds an airbase", v));
+        cases.push(("a name not read", seen_group(9, 40.0)));
+        cases.push(("no airbase", json!([{ "listed": 0, "further": [] }])));
+        cases.push(("nothing read", json!([])));
+        for (what, v) in cases {
+            assert_eq!(groups_verdict(&g, &v)["pass"], json!(false), "{what}");
+        }
+    }
+
+    #[test]
+    fn another_type_has_its_spots_recorded_and_not_judged() {
+        let g = groups_of(5, &[4], &[group_spec(2, "SINGLE_HELIPAD")]);
+        let v = groups_verdict(&g, &seen_group(2, 2.0));
+        assert_eq!(v["pass"], json!(true));
+        assert_eq!(v["groups"][0]["parking"], json!(2.0));
+        assert_eq!(v["groups"][0]["parking_wanted"], Value::Null);
+    }
+
+    #[test]
+    fn every_further_name_must_be_gone_after_the_removal() {
+        let gone = json!({ "static_gone": true, "airbase_nil": true });
+        assert!(further_gone(&json!([gone, gone]), 2));
+        assert!(further_gone(&json!([]), 0));
+        assert!(!further_gone(&json!([gone]), 2));
+        assert!(!further_gone(
+            &json!([gone, { "static_gone": false, "airbase_nil": true }]),
+            2
+        ));
+        assert!(!further_gone(
+            &json!([gone, { "static_gone": true, "airbase_nil": false }]),
+            2
+        ));
     }
 }

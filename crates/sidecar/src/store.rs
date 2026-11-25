@@ -370,6 +370,41 @@ pub struct Group {
     /// DCS holds its dead object, the static that died or the ruin spawned
     /// for it.
     pub ruin_in: Option<(u64, u32)>,
+    /// A heliport group's further units, after the static itself; empty for
+    /// anything else. Spec, fixed at creation (spec/world.md, "Heliport
+    /// groups").
+    pub further: Vec<FurtherUnit>,
+}
+
+/// A further unit of a heliport group: part of its static's spec, with an
+/// `EntityId` of its own that names it in DCS and that no other entity
+/// takes. DCS reports the group as one object under the static's name, so
+/// the unit has no object, state or binding of its own.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FurtherUnit {
+    /// The ID its DCS name carries.
+    pub id: EntityId,
+    /// DCS type name.
+    pub type_name: String,
+    /// Its place.
+    pub at: Point,
+    /// True heading, radians.
+    pub heading: f64,
+    /// Further keys of its DCS unit table.
+    pub extra: Lv,
+}
+
+/// A further unit of a heliport group, before the store gives it an ID.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NewFurther {
+    /// DCS type name.
+    pub type_name: String,
+    /// Its place.
+    pub at: Point,
+    /// True heading, radians.
+    pub heading: f64,
+    /// Further keys of its DCS unit table.
+    pub extra: Lv,
 }
 
 /// The mission DCS has loaded, as last seen.
@@ -1747,10 +1782,49 @@ impl Store {
                 order_sent_in: None,
                 ruin_sent_in: None,
                 ruin_in: None,
+                further: Vec::new(),
             },
         );
         self.touch(id);
         Ok(id)
+    }
+
+    /// Create a heliport group: a static, in state `virtual`, and its
+    /// further units, each with an `EntityId` of its own. Every ID is
+    /// checked before the first is taken, so it makes all or nothing.
+    pub fn create_static_group(
+        &mut self,
+        spec: NewGroup,
+        further: Vec<NewFurther>,
+    ) -> Result<EntityId, StoreError> {
+        for f in &further {
+            check_lv(&f.extra).map_err(StoreError::TooLarge)?;
+        }
+        if self.ids_left() < 1 + further.len() as u64 {
+            return Err(StoreError::Exhausted);
+        }
+        let id = self.create_static(spec)?;
+        let mut units = Vec::with_capacity(further.len());
+        for f in further {
+            units.push(FurtherUnit {
+                id: self.allocate()?,
+                type_name: f.type_name,
+                at: f.at,
+                heading: f.heading,
+                extra: f.extra,
+            });
+        }
+        self.groups.get_mut(&id).expect("created").further = units;
+        Ok(id)
+    }
+
+    /// The static whose further unit the ID names, if any: the ID is held,
+    /// by that static (spec/world.md, "Heliport groups").
+    pub fn further_owner(&self, id: EntityId) -> Option<EntityId> {
+        self.groups
+            .values()
+            .find(|g| g.further.iter().any(|f| f.id == id))
+            .map(|g| g.id)
     }
 
     /// Create a static destroyed: its member has a death fact and it is
@@ -2758,6 +2832,68 @@ mod tests {
         assert_eq!(s.revision(), r + 2);
         assert_eq!(s.changes().count(), 3);
         assert_eq!(s.grid().len(), 3);
+    }
+
+    fn further(n: usize) -> Vec<NewFurther> {
+        (0..n)
+            .map(|i| NewFurther {
+                type_name: "FARP".into(),
+                at: Point {
+                    x: 100.0 + i as f64,
+                    y: 0.0,
+                    z: 5.0,
+                },
+                heading: 0.25,
+                extra: Lv::Table(vec![(Lv::String(b"k".to_vec()), Lv::Number(i as f64))]),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_static_group_gives_every_further_unit_an_id_after_the_statics() {
+        let mut s = Store::new(CampaignId(1), 3);
+        let id = s.create_static_group(spec(1), further(2)).unwrap();
+        assert_eq!(id, EntityId(1));
+        let g = s.group(id).unwrap();
+        let ids: Vec<EntityId> = g.further.iter().map(|f| f.id).collect();
+        assert_eq!(ids, vec![EntityId(2), EntityId(3)]);
+        assert_eq!(g.further[1].type_name, "FARP");
+        assert_eq!(g.further[1].at.x, 101.0);
+        assert_eq!(g.members, vec![id], "the static is the one member");
+        let next = s.create_static(spec(1)).unwrap();
+        assert_eq!(next, EntityId(4));
+        assert!(s.group(next).unwrap().further.is_empty());
+    }
+
+    #[test]
+    fn further_owner_finds_the_static_of_a_further_id_and_nothing_else() {
+        let mut s = Store::new(CampaignId(1), 3);
+        let a = s.create_static_group(spec(1), further(2)).unwrap();
+        let plain = s.create_static(spec(1)).unwrap();
+        assert_eq!(s.further_owner(EntityId(2)), Some(a));
+        assert_eq!(s.further_owner(EntityId(3)), Some(a));
+        assert_eq!(s.further_owner(a), None, "the static itself is not further");
+        assert_eq!(s.further_owner(plain), None);
+        assert_eq!(s.further_owner(EntityId(999)), None);
+    }
+
+    #[test]
+    fn a_static_group_that_does_not_fit_in_the_ids_left_makes_nothing() {
+        let mut s = Store::new(CampaignId(1), 3);
+        s.reserve_id(EntityId(MAX_ID - 2));
+        // MAX_ID - 1 and MAX_ID are left: two IDs, three needed.
+        assert_eq!(s.ids_left(), 2);
+        let next = s.next_entity();
+        let changes = s.changes().count();
+        let r = s.create_static_group(spec(1), further(2));
+        assert!(matches!(r, Err(StoreError::Exhausted)));
+        assert_eq!(s.next_entity(), next);
+        assert_eq!(s.changes().count(), changes);
+        assert_eq!(s.ids_left(), 2);
+        // Exactly enough works.
+        let id = s.create_static_group(spec(1), further(1)).unwrap();
+        assert_eq!(s.group(id).unwrap().further.len(), 1);
+        assert_eq!(s.ids_left(), 0);
     }
 
     #[test]

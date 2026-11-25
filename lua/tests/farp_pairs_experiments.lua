@@ -1,8 +1,9 @@
 -- The FARP-pair snippets of lua/experiments/farp-pairs under the strict mock:
 -- each finishes in its state and returns its reads, and the stock it sets is put
--- back. The mock makes a FARP airbase only from `coalition.addStaticObject`, one
--- per static, so the pair stands in as two such FARPs; what DCS does with a
--- static group of two is in docs/results/2026-11-25-farp-pairs.md.
+-- back. The mission's pair stands in as two `coalition.addStaticObject` FARPs,
+-- each with its own stock, so the shared-stock reads are checked to run and put
+-- back, not to share; what DCS does with a static group of two is in
+-- docs/results/2026-11-25-farp-pairs.md.
 
 local S = dofile((arg[0]:match('^(.*/)') or './') .. 'support.lua')
 local root = S.root()

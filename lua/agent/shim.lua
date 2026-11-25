@@ -1781,17 +1781,51 @@ local HANDLERS = {
     return controller_call(a.name, 'setOption', a.option, a.value)
   end,
   -- STATIC_SPAWN: the new static's ID. A static under the name is replaced;
-  -- its ID is `destroyed`.
+  -- its ID is `destroyed`. A `static` with `units` is a heliport group, one
+  -- `coalition.addGroup(country, -1, static)`: DCS makes one airbase under
+  -- the first unit's name, which is `a.name`, and returns it (LIVE,
+  -- docs/results/2026-11-25-farp-pairs.md).
   [21] = function(a)
     local had, old = pcall(StaticObject.getByName, a.name)
     local old_id = had and old and rawget(old, 'id_') or nil
-    local ok, s = pcall(coalition.addStaticObject, a.country, a.static)
+    local group = type(a.static) == 'table' and type(a.static.units) == 'table'
+    local ok, s
+    if group then
+      ok, s = pcall(coalition.addGroup, a.country, -1, a.static)
+    else
+      ok, s = pcall(coalition.addStaticObject, a.country, a.static)
+    end
     if not ok then
       return DCS_REFUSED, nil, tostring(s)
     elseif not s then
-      return DCS_REFUSED, nil, 'addStaticObject returned no static'
+      return DCS_REFUSED, nil, group and 'addGroup returned no airbase' or 'addStaticObject returned no static'
     end
     local id = rawget(s, 'id_')
+    local got, category = pcall(Object.getCategory, s)
+    local farp = got and category == CATEGORY_BASE
+    if group and not (farp and type(id) == 'number') then
+      -- A heliport group that made no airbase is refused, and what DCS made
+      -- of it is destroyed, so no untracked object stays. The old static is
+      -- named when the name no longer finds it, finds another object, or
+      -- finds its handle no longer existing: a replaced FARP's handle still
+      -- answers its name (LIVE, docs/results/2026-11-25-farp-groups.md)
+      -- (spec/commands.md, "Layout: STATIC_SPAWN").
+      pcall(function()
+        s:destroy()
+      end)
+      local ids = {}
+      if type(old_id) == 'number' then
+        local still, now = pcall(StaticObject.getByName, a.name)
+        local now_id = still and now and rawget(now, 'id_') or nil
+        local alive = now_id == old_id and select(2, pcall(function()
+          return now:isExist()
+        end)) == true
+        if not alive then
+          ids[1] = old_id
+        end
+      end
+      return DCS_REFUSED, nil, 'the heliport group made no airbase', ids
+    end
     if type(id) ~= 'number' then
       return DCS_REFUSED, nil, 'the new static has no ID'
     end
@@ -1802,10 +1836,8 @@ local HANDLERS = {
     -- entry. A static of the name that is no FARP leaves a tombstone.
     -- The object `addStaticObject` returns for a FARP is its airbase, of
     -- category 4 (LIVE, docs/results/2026-11-25-farp-fixes.md); it is read
-    -- here, not looked up by name, since a FARP of the name that DCS has
+    -- above, not looked up by name, since a FARP of the name that DCS has
     -- not yet removed may still answer a lookup (UNVERIFIED).
-    local got, category = pcall(Object.getCategory, s)
-    local farp = got and category == CATEGORY_BASE
     local at
     for i, base in ipairs(T.airbases) do
       if base.static and base.name == a.name then
@@ -2249,7 +2281,10 @@ local function commands()
       elseif type(code) ~= 'number' then
         agent.command_done(LUA_ERROR, 'the handler returned no code')
       else
-        local gone = code == APPLIED and destroyed or nil
+        -- A refused STATIC_SPAWN names the old static only when the handler
+        -- read it gone (spec/commands.md, "Layout: STATIC_SPAWN").
+        local takes = code == APPLIED or (opcode == 21 and code == DCS_REFUSED)
+        local gone = takes and destroyed or nil
         local taken = agent.command_done(code, message, value, gone)
         -- The agent freed the rows of the IDs it took, in order (at most
         -- READ_IDS, none when its read failed): the shim lets go of those

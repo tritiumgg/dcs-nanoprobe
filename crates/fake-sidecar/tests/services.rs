@@ -192,6 +192,7 @@ async fn orders_statics_authority_and_policy() {
             write: write(&l, "static", c),
             static_id: 0,
             spec: Some(pb::StaticSpec {
+                further_units: Vec::new(),
                 label: "tent".into(),
                 country: 2,
                 r#type: "Tent".into(),

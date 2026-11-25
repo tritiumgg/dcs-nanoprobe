@@ -133,6 +133,7 @@ async fn put_static(
             write: write(l, k, campaign),
             static_id: 0,
             spec: Some(pb::StaticSpec {
+                further_units: Vec::new(),
                 label: k.into(),
                 country: 2,
                 r#type: "Tent".into(),

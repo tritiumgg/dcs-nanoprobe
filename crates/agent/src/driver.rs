@@ -1579,6 +1579,16 @@ fn is_applied(code: u64) -> bool {
     code == result::APPLIED || code == result::TOO_LARGE
 }
 
+/// Whether a handler's `destroyed` is taken for its opcode and code: an
+/// applied command of an opcode that names what it destroyed, and a refused
+/// `STATIC_SPAWN`, which names the old static only when it read it gone after
+/// the refusal (spec/commands.md, "Layout: STATIC_SPAWN").
+fn takes_destroyed(opcode: u16, code: u64) -> bool {
+    reads_destroyed(opcode)
+        && (is_applied(code)
+            || (u64::from(opcode) == op::STATIC_SPAWN && code == result::DCS_REFUSED))
+}
+
 /// Whether the outstanding command's handler reports `destroyed`, so the
 /// entry reads the argument.
 pub fn wants_destroyed() -> bool {
@@ -1593,7 +1603,9 @@ pub fn wants_destroyed() -> bool {
 /// The shim's handler finished the outstanding command with `code`, a
 /// message, a value and the object IDs it destroyed. A call with none outstanding is logged and ignored.
 /// Returns how many of `destroyed` the agent took: all of them, or 0 when the
-/// command did not read them or did not apply.
+/// command does not read them or its code is not one whose `destroyed` is
+/// taken ([`takes_destroyed`]: an applied command, or a refused
+/// `STATIC_SPAWN`).
 pub fn command_done(
     code: u64,
     message: &str,
@@ -1622,7 +1634,7 @@ pub fn command_done(
             )
         };
         d.link.ran(code);
-        if reads_destroyed(o.opcode) && !destroyed.is_empty() && is_applied(code) {
+        if !destroyed.is_empty() && takes_destroyed(o.opcode, code) {
             // Before the RESULT: the rows leave as `DESTROYED`, and every ID
             // enters the pending-destroy set.
             d.sampler.destroyed(&mut d.link, destroyed);
@@ -3221,6 +3233,19 @@ mod tests {
             handler_state(op::MESSAGE as u16),
             Some(HandlerState::Server)
         );
+    }
+
+    #[test]
+    fn only_a_refused_static_spawn_of_the_refusals_takes_destroyed() {
+        let stat = op::STATIC_SPAWN as u16;
+        let group = op::GROUP_SPAWN as u16;
+        assert!(takes_destroyed(stat, result::APPLIED));
+        assert!(takes_destroyed(stat, result::TOO_LARGE));
+        assert!(takes_destroyed(stat, result::DCS_REFUSED));
+        assert!(takes_destroyed(group, result::APPLIED));
+        assert!(!takes_destroyed(group, result::DCS_REFUSED));
+        assert!(!takes_destroyed(stat, result::LUA_ERROR));
+        assert!(!takes_destroyed(op::MESSAGE as u16, result::APPLIED));
     }
 
     #[test]

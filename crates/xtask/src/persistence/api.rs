@@ -418,6 +418,7 @@ impl<'r> Api<'r> {
             write: self.write(campaign, "put-static"),
             static_id: 0,
             spec: Some(pb::StaticSpec {
+                further_units: Vec::new(),
                 label: label.into(),
                 country: super::scenarios::COUNTRY,
                 r#type: type_name.into(),

@@ -774,6 +774,7 @@ fn owned_and_stocked(
         write: api.write("farp", campaign),
         static_id: 0,
         spec: Some(pb::StaticSpec {
+            further_units: Vec::new(),
             label: "person-fixes FARP".into(),
             country: 2,
             r#type: "FARP".into(),

@@ -2936,6 +2936,11 @@ impl FakeSim {
                 self.ledger
                     .static_tables
                     .insert(name.clone(), table.clone());
+                // A heliport group: DCS makes one object, under the first
+                // unit's name, which is the command's (spec/commands.md,
+                // "Layout: STATIC_SPAWN"). The fake reads that unit.
+                let units = lv::get(table, "units").map(lv::items).unwrap_or_default();
+                let table = units.first().copied().unwrap_or(table);
                 let t = lv::str_at(table, "type").unwrap_or_default();
                 if t.starts_with("Unknown") {
                     return self.result(&cmd, rc::DCS_REFUSED, 0, "unknown static type", Lv::Nil);
