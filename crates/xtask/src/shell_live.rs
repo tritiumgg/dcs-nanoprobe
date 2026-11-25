@@ -51,6 +51,7 @@ use crate::install::Profile as _;
 use crate::sampling::live::Run;
 
 pub mod payload_preset;
+pub mod saved_files;
 pub mod static_template;
 pub mod template;
 

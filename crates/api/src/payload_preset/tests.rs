@@ -218,11 +218,127 @@ fn refuses_files_that_are_not_presets() {
     assert!(read(big).unwrap_err().text.contains("over"));
 }
 
+/// `FILE`'s first preset with `extra` pylon entries put between its own,
+/// in the place shipped files have them (`Tornado GR4.lua`,
+/// `MosquitoFBMkVI.lua`).
+fn with_empty(extra: &str) -> String {
+    FILE.replacen(
+        "\t\t\t\t[2] = {\n\t\t\t\t\t[\"CLSID\"] = \"{TEST-BOMB}\",",
+        &format!("{extra}\t\t\t\t[2] = {{\n\t\t\t\t\t[\"CLSID\"] = \"{{TEST-BOMB}}\","),
+        1,
+    )
+}
+
+#[test]
+fn an_empty_clsid_leaves_its_station_empty() {
+    // Tornado-shaped: two empty stations, no settings. Mosquito-shaped: an
+    // empty station with fuze settings.
+    for (extra, empty) in [
+        (
+            "\t\t\t\t[8] = {\n\t\t\t\t\t[\"CLSID\"] = \"\",\n\t\t\t\t\t[\"num\"] = 8,\n\t\t\t\t},\n\
+             \t\t\t\t[9] = {\n\t\t\t\t\t[\"CLSID\"] = \"\",\n\t\t\t\t\t[\"num\"] = 5,\n\t\t\t\t},\n",
+            vec![8, 5],
+        ),
+        (
+            "\t\t\t\t[8] = {\n\t\t\t\t\t[\"CLSID\"] = \"\",\n\t\t\t\t\t[\"num\"] = 2,\n\
+             \t\t\t\t\t[\"settings\"] = {\n\t\t\t\t\t\t[\"GUI_fuze_type\"] = 1,\n\
+             \t\t\t\t\t\t[\"arm_delay_ctrl\"] = 0.64,\n\t\t\t\t\t},\n\t\t\t\t},\n",
+            vec![2],
+        ),
+    ] {
+        let src = with_empty(extra);
+        assert!(src.contains("[\"CLSID\"] = \"\""), "{src}");
+        let p = file_of(&src)
+            .unwrap()
+            .pylons("Test-Jet", "Bombs*2, Fuel")
+            .unwrap();
+        // The preset without the empty entries, byte for byte as the API
+        // carries it.
+        assert_eq!(p.pylons, by_hand());
+        assert_eq!(p.dropped, vec!["displayName", "tasks"]);
+        let nums: Vec<String> = empty.iter().map(u32::to_string).collect();
+        assert_eq!(
+            p.note(),
+            format!(
+                " (keys not used: displayName, tasks) (pylons left empty, CLSID \"\": {})",
+                nums.join(", ")
+            )
+        );
+        assert_eq!(p.empty, empty);
+    }
+    let p = file_of(FILE)
+        .unwrap()
+        .pylons("Test-Jet", "Bombs*2, Fuel")
+        .unwrap();
+    assert!(p.empty.is_empty());
+    // A preset of empty stations only is a clean loadout.
+    let p = file_of(&one("{ [\"CLSID\"] = \"\", [\"num\"] = 3 }"))
+        .unwrap()
+        .pylons("T", "x")
+        .unwrap();
+    assert!(p.pylons.fields.is_empty());
+    assert_eq!(p.empty, vec![3]);
+    assert_eq!(p.note(), " (pylons left empty, CLSID \"\": 3)");
+    // A key the entry does not use is named, as for any pylon.
+    let p = file_of(&one("{ [\"CLSID\"] = \"\", [\"num\"] = 3, [\"odd\"] = 1 }"))
+        .unwrap()
+        .pylons("T", "x")
+        .unwrap();
+    assert_eq!(p.dropped, vec!["pylons[].odd"]);
+    // Two empty entries for one pylon are two entries, as for any pylon.
+    let e = file_of(&one(
+        "{ [\"CLSID\"] = \"\", [\"num\"] = 3 }, { [\"CLSID\"] = \"\", [\"num\"] = 3 }",
+    ))
+    .unwrap()
+    .pylons("T", "x")
+    .unwrap_err();
+    assert!(e.text.contains("two entries for pylon 3"), "{e:?}");
+}
+
+#[test]
+fn bare_task_names_read_and_are_dropped() {
+    // As `A6E.lua` has them, and positional as well.
+    for tasks in ["{ [1] = CAS, [2] = GroundAttack }", "{ CAS, 31 }"] {
+        let src = FILE.replacen(
+            "[\"tasks\"] = {\n\t\t\t\t[1] = 32,\n\t\t\t}",
+            &format!("[\"tasks\"] = {tasks}"),
+            1,
+        );
+        assert!(src.contains(tasks), "{src}");
+        let p = file_of(&src)
+            .unwrap()
+            .pylons("Test-Jet", "Bombs*2, Fuel")
+            .unwrap();
+        assert_eq!(p.pylons, by_hand());
+        assert_eq!(p.dropped, vec!["displayName", "tasks"]);
+    }
+    // Anywhere else a bare name refuses the file.
+    let src = FILE.replacen("[\"name\"] = \"Clean\"", "[\"name\"] = Clean", 1);
+    assert!(file_of(&src).is_err());
+}
+
 #[test]
 fn refuses_pylons_it_cannot_carry() {
     for (pylon, want) in [
         ("{ [\"num\"] = 1 }", "no string `CLSID`"),
-        ("{ [\"CLSID\"] = \"\", [\"num\"] = 1 }", "no string `CLSID`"),
+        (
+            "{ [\"CLSID\"] = \" \", [\"num\"] = 1 }",
+            "no string `CLSID`",
+        ),
+        (
+            "{ [\"CLSID\"] = \"\\t\", [\"num\"] = 1 }",
+            "no string `CLSID`",
+        ),
+        ("{ [\"CLSID\"] = 1, [\"num\"] = 1 }", "no string `CLSID`"),
+        ("{ [\"CLSID\"] = \"\" }", "no `num`"),
+        (
+            "{ [\"CLSID\"] = \"\", [\"num\"] = 2 }, { [\"CLSID\"] = \"b\", [\"num\"] = 2 }",
+            "two entries for pylon 2",
+        ),
+        (
+            "{ [\"CLSID\"] = \"b\", [\"num\"] = 2 }, { [\"CLSID\"] = \"\", [\"num\"] = 2 }",
+            "two entries for pylon 2",
+        ),
         ("{ [\"CLSID\"] = \"a\" }", "no `num`"),
         ("{ [\"CLSID\"] = \"a\", [\"num\"] = 0 }", "no `num`"),
         ("{ [\"CLSID\"] = \"a\", [\"num\"] = 1.5 }", "no `num`"),

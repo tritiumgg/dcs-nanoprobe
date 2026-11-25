@@ -23,13 +23,13 @@ no file was copied. `MS` is `MissionEditor/modules/me_staticTemplate.lua` and `M
 | The kinds it writes are `plane`, `helicopter`, `ship`, `vehicle`, `static` and `complex`, each a `group` list | ED-CODE | `MS` lines 56 to 73; `MM` lines 292 to 299 |
 | Every place is an absolute mission `x` and `y`. A static template has no origin and no offsets | ED-CODE | the shipped files; `MM` lines 4252 to 4300 and 4419 to 4500 |
 | The editor loads a static template where it was saved: no anchor and no turn. It renumbers the IDs and skips a country the mission does not hold | ED-CODE | `MS` lines 149 to 233; `MM` lines 3112 to 3200 |
-| The 23 shipped files hold only `vehicle` groups: 44 groups, 346 units. No `static`, `ship`, `plane`, `helicopter` or `complex` | ED-CODE | key counts over all 23 |
+| The 23 shipped files hold only `vehicle` groups: 37 groups, 346 units, in 20 files; `testx4.stm`, `testx5.stm` and `testx6.stm` hold countries with no objects. No `static`, `ship`, `plane`, `helicopter` or `complex` | ED-CODE | key counts over all 23; the reader, docs/results/2026-11-24-real-files.md |
 | A vehicle group has `groupId`, `name`, `x`, `y`, `start_time`, `task`, `taskSelected`, `tasks`, `route`, `hidden`, `visible` and `uncontrollable`; the editor also writes `lateActivation`, `condition`, `probability`, `manualHeading`, `hiddenOnPlanner` and `hiddenOnMFD`. The shipped routes are one point each | ED-CODE | the shipped files; `MM` lines 4252 to 4275 |
 | A vehicle unit has `unitId`, `name`, `type`, `skill`, `x`, `y`, `heading`, `playerCanDrive`, `transportable` and `AddPropVehicle`; the editor also writes `ammo`, `livery_id`, `coldAtStart`, `wagons`, `modulation`, `frequency` and `linksSources` | ED-CODE | the same, lines 4277 to 4300 |
 | A static is a group of `groupId`, `name`, `heading`, `hidden`, `dead`, `linkOffset`, `route` (one point, which may carry `linkUnit`), `x`, `y` and `units`; each unit `unitId`, `name`, `type`, `category`, `shape_name`, `heading`, `x`, `y`, `rate`, `mass`, `canCargo`, `livery_id`, heliport and grass-airfield keys, and `resourcePayload` | ED-CODE | `MM` lines 4419 to 4500 |
 | A static's `category` is one of `Planes`, `Helicopters`, `Ships`, `Fortifications`, `Heliports`, `GrassAirfields`, `Warehouses`, `Cargos`, `LTAvehicles`, `WWII structures`, `Effects`, `Animal` and `Personnel`, by the type's own category | ED-CODE | `MissionEditor/modules/me_crutches.lua` lines 67 to 81 |
 | `FARP Tent` and `FARP Fuel Depot` are in the list `default_Fortifications` | ED-CODE | `Scripts/Database/db_countries.lua`, from line 45 |
-| What a static looks like in a file the editor saved | UNVERIFIED: no shipped file holds one; the form above is the editor's code |
+| What a static looks like in a file the editor saved: the form above. One `Fortifications` static (`test2.stm`) loaded and was made on DCS where the file and the request (an anchor) place it; a second, in `test0.stm`, is in a file refused for its heliport | LIVE | docs/results/2026-11-24-real-files.md |
 
 ## What the call does
 
@@ -115,8 +115,8 @@ The verdict's rule is the place, the type and the country; its tolerances are th
 step's, as for group templates. It is tested on the host: a missing object, a place
 2 m off, a wrong type or country, the axes exchanged and a turn to the left each fail
 it. This run is the first read of a static spawned from a static template's form
-(LIVE). The form of a static in a file the editor saved stays UNVERIFIED: the run's file
-was written by the run, after the editor's code.
+(LIVE). A static from a file the editor saved was made the same way
+(docs/results/2026-11-24-real-files.md).
 
 ## Live on Windows
 
