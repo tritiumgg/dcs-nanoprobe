@@ -106,3 +106,5 @@ macOS (aarch64), the working tree of this commit, 2026-11-24.
 |---|---|
 | `cargo test -p nanoprobe-api --lib -- static_template` | 24 passed, the new helipad conversion and the service test against `PutStatic` among them |
 | `cargo test -p xtask template_heliport` | 5 passed: the live verdict passes good reads, with and without a found heliport static, and fails each missing, misplaced, wrong-typed or wrong-country object; the template-against-twin comparison passes run 2's recorded results and fails each difference; a file on another theater or without a heliport is refused before the run |
+| `mise run check` | Passes: 1,515 tests passed and 0 failed, and every other step |
+| `mise run dll` | Passes |
