@@ -1,7 +1,7 @@
 # Static replace: a static's spec revised in place
 
 `PutStatic` with a `static_id` revises a static's spec, and the sidecar spawns it again
-under its name ([ADR NNNN](../adr/NNNN-a-statics-spec-is-revised-in-place.md);
+under its name ([ADR 0047](../adr/0047-a-statics-spec-is-revised-in-place.md);
 spec/world.md, "Revising a static"). On a running DCS a fortification moves and turns, a
 cargo static moves, and a FARP grows to a group of four and shrinks back, paused and
 running, as one airbase each time with the old airbase's owner and stock carried over.

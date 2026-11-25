@@ -1,4 +1,4 @@
-# ADR NNNN: A static's spec is revised in place
+# ADR 0047: A static's spec is revised in place
 
 ## Status
 
