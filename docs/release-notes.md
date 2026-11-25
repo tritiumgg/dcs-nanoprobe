@@ -12,9 +12,17 @@
   in `StaticSpec.extra` set its frequency, modulation and callsign, and
   `PutFromStaticTemplate` passes them from the file
   ([2026-11-25-farp-fixes.md](results/2026-11-25-farp-fixes.md)).
+- Heliport groups: `StaticSpec.further_units` lists further heliports, and DCS makes one
+  airbase of the static and them, with one warehouse and every unit's parking.
+  `PutFromStaticTemplate` builds a static group whose every unit is a heliport the same
+  way, and answers it as one static
+  ([ADR NNNN](adr/NNNN-heliport-groups-spawn-as-one-airbase.md)).
 
 ### Changed
 
+- `PutStatic` and `PutFromStaticTemplate` refuse a `units` key in a static's `extra`
+  with `INVALID_FIELD`. List a heliport group's further units in
+  `StaticSpec.further_units`.
 - **`MovePlayer` keeps the player's coalition when `coalition` is
   `COALITION_UNSPECIFIED`.** In 0.1.0 it moved the player to spectators. With no `slot`,
   the player leaves their slot and stays on their side; with a `slot`, they go to that

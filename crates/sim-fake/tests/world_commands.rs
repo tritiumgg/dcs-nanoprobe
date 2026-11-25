@@ -236,7 +236,11 @@ fn a_farps_radio_keys_reach_its_static_spawn_unchanged() {
     w.store.set_extra(id, radio).expect("extra");
     ticks(&mut w, 20);
     let name = ids::name(NameKind::Static, CampaignId(CAMPAIGN), id);
-    let table = w.sim.ledger().static_tables.get(&name).expect("spawned");
+    let group = w.sim.ledger().static_tables.get(&name).expect("spawned");
+    // A heliport spawns as a group of one unit, which holds the keys.
+    let units = lv::items(lv::get(group, "units").expect("a group table"));
+    assert_eq!(units.len(), 1);
+    let table = units[0];
     assert_eq!(lv::get(table, "heliport_frequency"), Some(&lv::s("127.5")));
     assert_eq!(lv::get(table, "heliport_modulation"), Some(&lv::n(1.0)));
     assert_eq!(lv::get(table, "heliport_callsign_id"), Some(&lv::n(3.0)));

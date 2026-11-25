@@ -395,6 +395,7 @@ async fn damage_capture_and_attacks_on_units_and_statics() {
             write: write(&l, "static", c),
             static_id: 0,
             spec: Some(pb::StaticSpec {
+                further_units: Vec::new(),
                 label: "tent".into(),
                 country: 2,
                 r#type: "Tent".into(),

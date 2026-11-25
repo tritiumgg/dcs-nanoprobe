@@ -30,8 +30,8 @@ use nanoprobe_sidecar::reconciler::EffectResult;
 use nanoprobe_sidecar::sim::wire::{Body, Debris};
 use nanoprobe_sidecar::stock::{Item, Stock};
 use nanoprobe_sidecar::store::{
-    Authority, Kind, LostPolicy, NewGroup, NewUnit, Outcome, Point, Store, StoreError, UnitState,
-    check_lv,
+    Authority, Kind, LostPolicy, NewFurther, NewGroup, NewUnit, Outcome, Point, Store, StoreError,
+    UnitState, check_lv,
 };
 use nanoprobe_transport::records::Rates;
 use prost::Message;
@@ -671,7 +671,16 @@ fn put_from_static_template(
             check_lv(&u.extra).map_err(stored)?;
         }
     }
-    let ids = groups.iter().map(|p| ids_of(&p.group)).sum::<u64>() + statics.len() as u64;
+    for p in &statics {
+        for f in &p.further {
+            check_lv(&f.extra).map_err(stored)?;
+        }
+    }
+    let ids = groups.iter().map(|p| ids_of(&p.group)).sum::<u64>()
+        + statics
+            .iter()
+            .map(|p| 1 + p.further.len() as u64)
+            .sum::<u64>();
     if ids > slot.store.ids_left() {
         return Err(store_error(StoreError::Exhausted));
     }
@@ -704,11 +713,7 @@ fn put_from_static_template(
         groups.len(),
         statics.len(),
         r.path,
-        if l.dropped.is_empty() {
-            String::new()
-        } else {
-            format!("; keys not used: {}", l.dropped.join(", "))
-        }
+        static_template::log_notes(&l)
     );
     Ok(PutFromStaticTemplateResponse {
         groups,
@@ -828,12 +833,99 @@ fn put_static(g: &mut Inner, c: u64, r: &PutStaticRequest) -> Result<PutStaticRe
 /// A new static, checked and ready to write.
 struct StaticPlan {
     group: NewGroup,
+    further: Vec<NewFurther>,
     dead: bool,
 }
 
-/// The bytes of a static's spawn command, at most.
+/// The bytes of a static's spawn command, at most. A heliport group's
+/// table holds each further unit, and repeats some of the first unit's
+/// keys in the group's own (spec/commands.md, "Layout: STATIC_SPAWN").
 fn static_bound(spec: &pb::StaticSpec) -> usize {
-    2 * OVERHEAD + spec.r#type.len() + lv_len(&extra_to_lua(spec.extra.as_ref()))
+    let first = lv_len(&extra_to_lua(spec.extra.as_ref()));
+    // Every heliport is sent in the group form, a single one too.
+    if spec.further_units.is_empty() && !is_heliport(spec.extra.as_ref()) {
+        return 2 * OVERHEAD + spec.r#type.len() + first;
+    }
+    3 * OVERHEAD
+        + spec.r#type.len()
+        + 2 * first
+        + spec
+            .further_units
+            .iter()
+            .map(|u| OVERHEAD + u.r#type.len() + lv_len(&extra_to_lua(u.extra.as_ref())))
+            .sum::<usize>()
+}
+
+/// The `DCS category` a heliport group's units name in `extra`
+/// (spec/world.md, "Heliport groups").
+const HELIPORTS: &str = "Heliports";
+
+fn is_heliport(extra: Option<&prost_types::Struct>) -> bool {
+    extra.and_then(|e| e.fields.get("category")).is_some_and(
+        |v| matches!(&v.kind, Some(prost_types::value::Kind::StringValue(c)) if c == HELIPORTS),
+    )
+}
+
+/// The checks of a heliport group's further units, which write nothing.
+fn plan_further(
+    slot: &Slot,
+    spec: &pb::StaticSpec,
+    theater: &str,
+) -> Result<Vec<NewFurther>, Status> {
+    if spec.further_units.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !is_heliport(spec.extra.as_ref()) {
+        return Err(invalid(
+            "spec.further_units",
+            "only a static whose extra.category is \"Heliports\" takes further units",
+        ));
+    }
+    if spec.dead {
+        return Err(invalid(
+            "spec.dead",
+            "a heliport group cannot be created destroyed",
+        ));
+    }
+    let mut out = Vec::with_capacity(spec.further_units.len());
+    for (i, u) in spec.further_units.iter().enumerate() {
+        let field = format!("spec.further_units[{i}]");
+        if u.r#type.is_empty() {
+            return Err(invalid(
+                &format!("{field}.type"),
+                "a unit needs its DCS type",
+            ));
+        }
+        if !is_heliport(u.extra.as_ref()) {
+            return Err(invalid(
+                &format!("{field}.extra"),
+                "every further unit's extra.category is \"Heliports\"",
+            ));
+        }
+        if u.extra
+            .as_ref()
+            .is_some_and(|e| e.fields.contains_key("dead"))
+        {
+            return Err(invalid(
+                &format!("{field}.extra"),
+                "extra takes no dead key",
+            ));
+        }
+        let at = place(u.position.as_ref(), slot, &format!("{field}.position"))?;
+        if u.position.as_ref().expect("placed").theater != theater {
+            return Err(invalid(
+                &format!("{field}.position.theater"),
+                "every unit of a heliport group is on the static's theater",
+            ));
+        }
+        out.push(NewFurther {
+            type_name: u.r#type.clone(),
+            at,
+            heading: finite(u.heading, &format!("{field}.heading"))?,
+            extra: extra_to_lua(u.extra.as_ref()),
+        });
+    }
+    Ok(out)
 }
 
 /// The checks of a new static, which write nothing.
@@ -857,9 +949,23 @@ fn plan_static(slot: &Slot, spec: &pb::StaticSpec, limit: usize) -> Result<Stati
             "set spec.dead to create a static destroyed; extra takes no dead key",
         ));
     }
+    // A `units` key is how the handler tells a heliport group from a single
+    // static (spec/commands.md, "Layout: STATIC_SPAWN").
+    if spec
+        .extra
+        .as_ref()
+        .is_some_and(|e| e.fields.contains_key("units"))
+    {
+        return Err(invalid(
+            "spec.extra",
+            "extra takes no units key; list further heliports in spec.further_units",
+        ));
+    }
+    let further = plan_further(slot, spec, &theater)?;
     fits(static_bound(spec), limit, "spec")?;
     let extra = extra_to_lua(spec.extra.as_ref());
     Ok(StaticPlan {
+        further,
         group: NewGroup {
             theater,
             country: spec.country,
@@ -886,12 +992,14 @@ fn plan_static(slot: &Slot, spec: &pb::StaticSpec, limit: usize) -> Result<Stati
 
 /// Write a planned static.
 fn write_static(store: &mut Store, plan: StaticPlan) -> Result<PutStaticResponse, Status> {
-    let create = if plan.dead {
-        Store::create_ruin
+    let id = if plan.dead {
+        store.create_ruin(plan.group)
+    } else if plan.further.is_empty() {
+        store.create_static(plan.group)
     } else {
-        Store::create_static
-    };
-    let id = create(store, plan.group).map_err(store_error)?;
+        store.create_static_group(plan.group, plan.further)
+    }
+    .map_err(store_error)?;
     Ok(PutStaticResponse {
         static_id: id.0,
         spec_revision: store.group(id).map_or(0, |x| x.spec_rev),

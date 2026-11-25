@@ -31,7 +31,10 @@ entities by `EntityId` within a campaign.
 | Extension | name | yes | A registered Lua chunk (spec/commands.md, "Extensions") |
 
 The platform creates an airbase and its warehouse only as part of a static DCS makes
-one of: a FARP, from `PutStatic` or a static template's `Heliports` static.
+one of: a FARP, from `PutStatic` or a static template's `Heliports` static, or a
+heliport group, one airbase for all its units ("Heliport groups"). The platform spawns a
+live FARP as a one-unit heliport group; DCS returns the same airbase object as for
+`coalition.addStaticObject` (LIVE, docs/results/2026-11-25-farp-groups.md).
 `coalition.addStaticObject` of a FARP makes an airbase under the static's name, with the
 static's ID, and its own empty limited warehouse (LIVE,
 docs/results/2026-11-16-person-tests-2.md). Such an airbase is listed and sampled like
@@ -87,6 +90,10 @@ always 3 characters. A name is 7 to 15 characters, all of them in `[0-9A-Za-z!.#
 
 Example: in campaign 1,763,000,000,000 (tag `jqW`), `np!jqW1A` is group 72, `np.jqW1B`
 is unit 73 and `np#jqW1C` is static 74.
+
+A heliport group's DCS group is named in the group form of its static's entity, and
+each further unit in the static form of its own `EntityId` ("Heliport groups"). DCS
+finds no group under that group name (LIVE, docs/results/2026-11-25-farp-pairs.md).
 
 ### The campaign tag
 
@@ -400,7 +407,7 @@ theater is its own.
 | Case | The reconciler sends |
 |---|---|
 | The static died in the loaded generation | Nothing. Its own dead object stays in DCS and is the ruin. |
-| DCS should hold the ruin and does not: after a mission load, a DCS restart, an activation, or a `Materialize` | `STATIC_SPAWN` with the static's table and `dead = true` (spec/commands.md), at the static's spec revision |
+| DCS should hold the ruin and does not: after a mission load, a DCS restart, an activation, or a `Materialize` | `STATIC_SPAWN` with the static's table and `dead = true` (spec/commands.md), at the static's spec revision; for a heliport group its group table, `dead = true` on the group and every unit ("Heliport groups"; UNVERIFIED what DCS makes of it) |
 | DCS holds the dead object and should not: after a `Dematerialize` or a `RemoveEntity` | `STATIC_DESTROY` |
 | The binding holds a live object of the static: a script revived it, or a spawn of the live static was answered after its death | `STATIC_DESTROY`, then the ruin's `STATIC_SPAWN` |
 
@@ -784,6 +791,46 @@ UNVERIFIED. A `payload` is dropped as any other key.
 A country the loaded mission does not hold, or a unit type DCS does not have, is DCS's
 refusal: it shows as the group's last error, as with `PutGroup`.
 
+## Heliport groups
+
+A heliport group is a static with further units, each a static of category
+`Heliports`: `StaticSpec.further_units`, or a static group of a static template whose
+every unit is a heliport ("Static templates"). DCS makes it with one
+`coalition.addGroup(country, -1, group)` (spec/commands.md, "Layout: STATIC_SPAWN"),
+and makes one airbase of it, as the Mission Editor's group of FARPs is one (LIVE,
+docs/results/2026-11-25-farp-pairs.md, docs/results/2026-11-25-farp-groups.md):
+
+- The airbase has the first unit's name, and every unit's parking: 4 spots per `FARP`,
+  1 per `SINGLE_HELIPAD`.
+- It has one warehouse. The controller stocks it with `SetWarehouseStock` under the
+  static's name.
+- Its radio is the first unit's `heliport_frequency`, `heliport_modulation` and
+  `heliport_callsign_id` (LIVE, docs/results/2026-11-25-farp-groups.md).
+- `StaticObject.getByName` finds it under every unit's name. Every read the agent makes
+  of it, the births, the enumeration and the existence checks, sees one object under the
+  first unit's name (LIVE). So the static's `OBJECT`, row, owner, stock, tombstone and
+  removal are a single FARP's ("Kinds"; spec/sampling.md). One `destroy` on it removes
+  every unit once the simulation runs.
+
+A further unit has an `EntityId` of its own, given when the static is created, which
+its DCS name carries in the static form ("Names"). No other entity takes it. It has no
+object, state or binding of its own: the store keeps it in its static's spec, and a
+name that carries it stands for the static. So an object found under such a name is
+the static's, and never an object of a purged name ("Removal"). A static's spec does not
+change after it is created, so neither do its further units or their IDs; they go when
+the static is purged.
+
+The count of further units is bound only by the size of one `STATIC_SPAWN`: the
+command's payload is at most an eighth of the ring's capacity (spec/transport.md), and
+`PutStatic` refuses a spec whose spawn could be larger with `INVALID_FIELD` on `spec`.
+A group of 10 `FARP`s with their further keys fits the default ring with room to spare
+(host-tested).
+
+`PutStatic` refuses `further_units` on a static whose `extra.category` is not
+`Heliports`, a further unit whose own is not, a further unit on another theater, a
+`dead` key in a further unit's `extra`, and `dead` with further units: what DCS makes of
+a heliport group added dead is UNVERIFIED ("Ruins").
+
 ## Static templates
 
 `PutFromStaticTemplate` makes every vehicle group and static of a static template of the
@@ -816,6 +863,8 @@ revision, and `revision` is the store revision of the call's one commit.
 | `vehicle.group[j]` | A ground group. Its `name` is its label; every other group key, `route`, `task`, `tasks`, timing and activation keys included, is dropped and named in the sidecar's standard error |
 | `vehicle.group[j].units[k]` | A unit: `type` its DCS type, `x` meters north, `y` meters east, `heading` radians, `skill` when it is text. `unitId` and `name` are not used; every other key is dropped and logged. The unit's label is empty |
 | `static.group[j].units[k]` | One static per unit: `type`, `x`, `y` and the unit's `heading` as for a vehicle unit; `category`, `shape_name`, `rate`, `mass`, `canCargo` and `livery_id` go to the static's further keys; the group's `dead = true` creates it destroyed ("Ruins"); its label is the group's `name`. Other keys are dropped and logged |
+| `static.group[j]` with two or more units, every one of category `Heliports` | One static with further units: a heliport group ("Heliport groups"). The first unit is the static; the rest are its further units in the file's order, each with its own `type`, place, `heading` and further keys. The group's `dead = true` is refused for it, as `PutStatic` refuses one. The answer lists it once in `statics` |
+| `static.group[j]` that mixes units of category `Heliports` with others | One static per unit, as for any static group, and the group is named in the sidecar's standard error. The Mission Editor saves no such group: it adds units only to a heliport, of the first unit's type (ED-CODE, docs/results/2026-11-25-farp-groups.md) |
 | `ship`, `plane`, `helicopter`, `complex` | A file with any group of these kinds is refused whole |
 | A static with `linkOffset` true or a route point with `linkUnit` | Refused: the link to a unit is not built |
 | A static of category `Heliports` | Built as any static, so as `PutStatic` builds a FARP: DCS makes an airbase of its name, which the platform lists and samples ("Kinds"). Its `heliport_frequency`, `heliport_modulation` and `heliport_callsign_id` pass as the file gives them (spec/commands.md, "Layout: STATIC_SPAWN"). With the group's `dead = true`, whether DCS makes the airbase is UNVERIFIED ("Ruins"). A `heliport_` key on a static of another category is dropped and logged |
@@ -850,7 +899,8 @@ entity's label as `<label>/<name>`.
 
 Every check of every entity runs before the first store write: the checks of `PutGroup`
 and `PutStatic` on each converted spec, the size of each spawn command, each value's
-encoding, and that the campaign has an entity ID left for every group, unit and static.
+encoding, and that the campaign has an entity ID left for every group, unit, static and
+further unit of a heliport group.
 A refusal makes no entity.
 
 One store commit is not one DCS spawn. The entities materialize as every entity does:

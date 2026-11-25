@@ -954,10 +954,11 @@ scenario('world', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   local before_bases = #shim.T.airbases
   local at = before_bases + 1
   local FARP = 'np#hGxF'
+  -- The sidecar sends a live FARP as a one-unit heliport group.
   local function farp(entity, rev)
     return { op = 'STATIC_SPAWN', entity = entity, rev = rev, country = USA, name = FARP,
-      static = { name = FARP, type = 'FARP', category = 'Heliports', x = 900, y = 900, heading = 0,
-        dynamicSpawn = true, allowHotStart = true, dynamicCargo = true, hidden = false } }
+      static = { name = 'np!hGxFg', units = { { name = FARP, type = 'FARP', category = 'Heliports', x = 900, y = 900,
+        heading = 0 } }, dynamicSpawn = true, allowHotStart = true, dynamicCargo = true, hidden = false } }
   end
   -- The warehouse tier over the airbase before the FARP's and the FARP's:
   -- the names it writes, by index.
@@ -1036,7 +1037,8 @@ scenario('world', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   -- gives entity 16) takes over its entry; a static of the name that is no
   -- FARP leaves a tombstone.
   r = run({ { op = 'STATIC_SPAWN', entity = 16, rev = 1, country = USA, name = 'np#hGxG',
-    static = { name = 'np#hGxG', type = 'FARP', category = 'Heliports', x = 1200, y = 1200, heading = 0 } } },
+    static = { name = 'np!hGxGg', units = { { name = 'np#hGxG', type = 'FARP', category = 'Heliports', x = 1200,
+      y = 1200, heading = 0 } } } } },
     'a FARP over a mission FARP')
   expect(r[1], APPLIED, 'STATIC_SPAWN of a FARP over a mission FARP')
   assert(#shim.T.airbases == m and shim.T.airbases[m].id == r[1].object and rows({ m })[m] == 'np#hGxG',
@@ -1056,6 +1058,243 @@ scenario('world', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   sim:doom_static(mfarp3)
   local mnames = rows({ 1, m })
   assert(mnames[m] == '' and mnames[1] == shim.T.airbases[1].name, 'a dead mission FARP was sampled')
+
+  -- A heliport group is one `coalition.addGroup(country, -1, ...)`: one
+  -- airbase under the first unit's name, whose ID is the result's object,
+  -- and one birth.
+  -- The agent names the static from its entity: 40 is `e`, 41 is `f`.
+  local PG_GROUP, PG1, PG2 = 'np!hGxH', 'np#hGxe', 'np#hGxJ'
+  local function pg_unit(name, x)
+    return { name = name, type = 'FARP', category = 'Heliports', x = x, y = 3000, heading = 0 }
+  end
+  local airbases_before = #shim.T.airbases
+  r = run({ { op = 'STATIC_SPAWN', entity = 40, rev = 1, country = USA, name = PG1,
+    static = { name = PG_GROUP, units = { pg_unit(PG1, 3000), pg_unit(PG2, 3100) }, dynamicSpawn = true } } },
+    'a heliport group')
+  expect(r[1], APPLIED, 'STATIC_SPAWN of a heliport group')
+  assert(r[1].object ~= 0, 'the group spawn names no object')
+  assert(#shim.T.airbases == airbases_before + 1, 'a heliport group made other than one airbase entry')
+  local pg_entry = shim.T.airbases[#shim.T.airbases]
+  assert(pg_entry.name == PG1 and pg_entry.id == r[1].object and pg_entry.spawned and pg_entry.static,
+    'the heliport group is not an airbase entry under its first unit name')
+  assert(sim.statics[PG2] == sim.statics[PG1], 'the second unit is not found under its own name')
+  -- Its birth is queued by hand, since the event handler drops category 4:
+  -- the next pump gives the airbase a row.
+  assert(ctx.run(30, function()
+    return shim.T.slot_of[r[1].object] ~= nil
+  end), 'the heliport group has no row:\n' .. dump(ctx))
+
+  -- A group that makes no airbase is refused and what it made is destroyed.
+  local coalition_ = server.coalition
+  local real_add_group = coalition_.addGroup
+  local PLAIN = 'np#hGxf'
+  coalition_.addGroup = function(country_)
+    return coalition_.addStaticObject(country_, { name = PLAIN, type = 'Barrier', x = 3200, y = 3200, heading = 0 })
+  end
+  -- A static of the name is there; the refused group replaced it, so its
+  -- ID is reported destroyed with the refusal.
+  r = run({ { op = 'STATIC_SPAWN', entity = 41, rev = 1, country = USA, name = PLAIN,
+    static = { name = PLAIN, type = 'Barrier', x = 3150, y = 3150, heading = 0 } } }, 'a static to be replaced')
+  expect(r[1], APPLIED, 'STATIC_SPAWN of the static a refused group replaces')
+  local old_object = r[1].object
+  assert(ctx.run(30, function()
+    return shim.T.slot_of[old_object] ~= nil
+  end), 'the static a refused group replaces has no row:\n' .. dump(ctx))
+  local refused_before = #shim.T.airbases
+  r = run({ { op = 'STATIC_SPAWN', entity = 41, rev = 2, country = USA, name = PLAIN,
+    static = { name = 'np!hGxK', units = { pg_unit(PLAIN, 3200), pg_unit('np#hGxL', 3300) } } } },
+    'a heliport group that makes no airbase')
+  coalition_.addGroup = real_add_group
+  expect(r[1], DCS_REFUSED, 'STATIC_SPAWN of a heliport group that made no airbase')
+  assert(r[1].message == 'the heliport group made no airbase', 'the refusal says ' .. tostring(r[1].message))
+  -- The old object left with the refusal, in the same pump: its OBJECT_GONE
+  -- comes before the RESULT and its row is gone already.
+  assert(shim.T.slot_of[old_object] == nil, 'the replaced static still has a row after the refusal')
+  do
+    local gone_at, result_at
+    for i, e in ipairs(ctx.events()) do
+      if e.ev == 'gone' and e.object == old_object then
+        gone_at = gone_at or i
+      elseif e.ev == 'result' and e.seq == 1 then
+        result_at = i
+      end
+    end
+    assert(gone_at and result_at and gone_at < result_at,
+      'the replaced static was not written gone before the RESULT:\n' .. dump(ctx):sub(1, 3000))
+  end
+  ctx.run(0.2)
+  assert(sim.statics[PLAIN] == nil, 'what the refused group made stays in the world')
+  local gone = 0
+  for _, e in ipairs(ctx.events()) do
+    if e.ev == 'gone' and e.object == old_object then
+      gone = gone + 1
+    end
+  end
+  assert(gone == 1, 'the replaced static was reported gone ' .. gone .. ' times:\n' .. dump(ctx):sub(1, 3000))
+  assert(#shim.T.airbases == refused_before, 'a refused group left an airbase entry')
+
+  -- A group that makes a non-airbase static under another name leaves the
+  -- old static in place: it is not reported gone. The agent names a static
+  -- from its entity, so the old static of entity 42 is `np#hGxg`.
+  local KEEP, OTHER = 'np#hGxg', 'np#hGxN2'
+  r = run({ { op = 'STATIC_SPAWN', entity = 42, rev = 1, country = USA, name = KEEP,
+    static = { name = KEEP, type = 'Barrier', x = 3400, y = 3400, heading = 0 } } }, 'a static to be kept')
+  expect(r[1], APPLIED, 'STATIC_SPAWN of the static a refused group leaves')
+  local kept_object = r[1].object
+  assert(ctx.run(30, function()
+    return shim.T.slot_of[kept_object] ~= nil
+  end), 'the static a refused group leaves has no row:\n' .. dump(ctx))
+  coalition_.addGroup = function(country_)
+    return coalition_.addStaticObject(country_, { name = OTHER, type = 'Barrier', x = 3500, y = 3500, heading = 0 })
+  end
+  r = run({ { op = 'STATIC_SPAWN', entity = 42, rev = 2, country = USA, name = KEEP,
+    static = { name = 'np!hGxP', units = { pg_unit(KEEP, 3400), pg_unit('np#hGxQ', 3450) } } } },
+    'a heliport group that makes a static of another name')
+  coalition_.addGroup = real_add_group
+  expect(r[1], DCS_REFUSED, 'STATIC_SPAWN of a heliport group that made a static of another name')
+  assert(r[1].message == 'the heliport group made no airbase', 'the refusal says ' .. tostring(r[1].message))
+  ctx.run(0.2)
+  assert(sim.statics[KEEP] ~= nil, 'the old static was removed')
+  assert(sim.statics[OTHER] == nil, 'what the refused group made stays in the world')
+  assert(shim.T.slot_of[kept_object] ~= nil, 'the old static lost its row')
+  for _, e in ipairs(ctx.events()) do
+    assert(not (e.ev == 'gone' and e.object == kept_object), 'the old static was reported gone:\n' .. dump(ctx):sub(1, 3000))
+  end
+
+  -- The old static is a FARP the refused group removes from its name but
+  -- whose handle DCS still finds, with isExist false: it is reported
+  -- destroyed with the refusal all the same.
+  -- The agent names a static from its entity: 43 is `h`, 44 `i`, 45 `j`.
+  local OLDF, OTHERF = 'np#hGxh', 'np#hGxS'
+  r = run({ { op = 'STATIC_SPAWN', entity = 43, rev = 1, country = USA, name = OLDF,
+    static = { name = 'np!hGxR', units = { pg_unit(OLDF, 3600), pg_unit('np#hGxT', 3700) }, dynamicSpawn = true } } },
+    'a FARP to be removed by a refused group')
+  expect(r[1], APPLIED, 'STATIC_SPAWN of the FARP a refused group removes')
+  local farp_object = r[1].object
+  assert(ctx.run(30, function()
+    return shim.T.slot_of[farp_object] ~= nil
+  end), 'the FARP a refused group removes has no row:\n' .. dump(ctx))
+  coalition_.addGroup = function(country_)
+    sim:remove_static(sim.statics[OLDF])
+    return coalition_.addStaticObject(country_, { name = OTHERF, type = 'Barrier', x = 3800, y = 3800, heading = 0 })
+  end
+  r = run({ { op = 'STATIC_SPAWN', entity = 43, rev = 2, country = USA, name = OLDF,
+    static = { name = 'np!hGxU', units = { pg_unit(OLDF, 3600), pg_unit('np#hGxV', 3650) } } } },
+    'a heliport group that removes a FARP and makes no airbase')
+  coalition_.addGroup = real_add_group
+  expect(r[1], DCS_REFUSED, 'STATIC_SPAWN of a heliport group that removed a FARP and made no airbase')
+  assert(r[1].message == 'the heliport group made no airbase', 'the refusal says ' .. tostring(r[1].message))
+  assert(shim.T.slot_of[farp_object] == nil, 'the removed FARP still has a row after the refusal')
+  do
+    local gone_at, result_at
+    for i, e in ipairs(ctx.events()) do
+      if e.ev == 'gone' and e.object == farp_object then
+        gone_at = gone_at or i
+      elseif e.ev == 'result' and e.seq == 1 then
+        result_at = i
+      end
+    end
+    assert(gone_at and result_at and gone_at < result_at,
+      'the removed FARP was not written gone before the RESULT:\n' .. dump(ctx):sub(1, 3000))
+  end
+  ctx.run(0.2)
+  assert(sim.statics[OTHERF] == nil, 'what the refused group made stays in the world')
+
+  -- A group call that returns a table with no ID: it is destroyed, and the
+  -- old static is reported once when the group replaced it, never when not.
+  local function no_id(country_, replace)
+    local called = { n = 0 }
+    coalition_.addGroup = function(c)
+      if replace then
+        coalition_.addStaticObject(c, { name = replace, type = 'Barrier', x = 3900, y = 3900, heading = 0 })
+      end
+      return { destroy = function()
+        called.n = called.n + 1
+      end }
+    end
+    return called
+  end
+  local RPL, KEPT = 'np#hGxi', 'np#hGxj'
+  for _, case in ipairs({ { RPL, 44, true }, { KEPT, 45, false } }) do
+    local name, entity, replaced = case[1], case[2], case[3]
+    r = run({ { op = 'STATIC_SPAWN', entity = entity, rev = 1, country = USA, name = name,
+      static = { name = name, type = 'Barrier', x = 3900, y = 3900, heading = 0 } } }, 'a static for a no-ID group')
+    expect(r[1], APPLIED, 'STATIC_SPAWN of the static a no-ID group meets')
+    local object = r[1].object
+    assert(ctx.run(30, function()
+      return shim.T.slot_of[object] ~= nil
+    end), 'the static a no-ID group meets has no row:\n' .. dump(ctx))
+    local called = no_id(USA, replaced and name or nil)
+    r = run({ { op = 'STATIC_SPAWN', entity = entity, rev = 2, country = USA, name = name,
+      static = { name = 'np!hGxY', units = { pg_unit(name, 3900), pg_unit('np#hGxZ', 3950) } } } },
+      'a heliport group that returns no ID')
+    coalition_.addGroup = real_add_group
+    expect(r[1], DCS_REFUSED, 'STATIC_SPAWN of a heliport group that returned no ID')
+    assert(r[1].message == 'the heliport group made no airbase', 'the refusal says ' .. tostring(r[1].message))
+    assert(called.n == 1, 'the table with no ID was destroyed ' .. called.n .. ' times')
+    ctx.run(0.2)
+    local gones = 0
+    for _, e in ipairs(ctx.events()) do
+      if e.ev == 'gone' and e.object == object then
+        gones = gones + 1
+      end
+    end
+    assert(gones == (replaced and 1 or 0), 'the old static was reported gone ' .. gones .. ' times (replaced '
+      .. tostring(replaced) .. '):\n' .. dump(ctx):sub(1, 3000))
+  end
+
+  -- A one-unit group replaces a two-unit group of the same entity under its
+  -- first name: the airbase entry is taken over, the old ID is reported
+  -- destroyed once before the RESULT, and the old further name finds nothing.
+  -- Entity 46 is `k`.
+  local TW1, TW2 = 'np#hGxk', 'np#hGxV2'
+  r = run({ { op = 'STATIC_SPAWN', entity = 46, rev = 1, country = USA, name = TW1,
+    static = { name = 'np!hGxW', units = { pg_unit(TW1, 4000), pg_unit(TW2, 4100) }, dynamicSpawn = true } } },
+    'a two-unit heliport group')
+  expect(r[1], APPLIED, 'STATIC_SPAWN of a two-unit heliport group')
+  local two_object = r[1].object
+  assert(ctx.run(30, function()
+    return shim.T.slot_of[two_object] ~= nil
+  end), 'the two-unit heliport group has no row:\n' .. dump(ctx))
+  assert(sim.statics[TW2] ~= nil, 'the two-unit group made no second name')
+  local entries_before = #shim.T.airbases
+  r = run({ { op = 'STATIC_SPAWN', entity = 46, rev = 2, country = USA, name = TW1,
+    static = { name = 'np!hGxW', units = { pg_unit(TW1, 4000) }, dynamicSpawn = true } } },
+    'a one-unit group over a two-unit group')
+  expect(r[1], APPLIED, 'STATIC_SPAWN of a one-unit group over a two-unit group')
+  assert(r[1].object ~= two_object, 'the one-unit group kept the old ID')
+  assert(#shim.T.airbases == entries_before, 'the one-unit group made another airbase entry')
+  local entries = 0
+  for _, a in ipairs(shim.T.airbases) do
+    if a.name == TW1 then
+      entries = entries + 1
+      assert(a.id == r[1].object and a.spawned and not a.gone, 'the airbase entry was not taken over')
+    end
+  end
+  assert(entries == 1, 'the name has ' .. entries .. ' airbase entries')
+  do
+    local gone_at, result_at, gones = nil, nil, 0
+    for i, e in ipairs(ctx.events()) do
+      if e.ev == 'gone' and e.object == two_object then
+        gones = gones + 1
+        gone_at = gone_at or i
+      elseif e.ev == 'result' and e.seq == 1 then
+        result_at = i
+      end
+    end
+    assert(gone_at and result_at and gone_at < result_at,
+      'the old group was not written gone before the RESULT:\n' .. dump(ctx):sub(1, 3000))
+    ctx.run(0.2)
+    gones = 0
+    for _, e in ipairs(ctx.events()) do
+      if e.ev == 'gone' and e.object == two_object then
+        gones = gones + 1
+      end
+    end
+    assert(gones == 1, 'the old group was reported gone ' .. gones .. ' times')
+  end
+  local old_second = server.StaticObject.getByName(TW2)
+  assert(old_second == nil or not old_second:isExist(), 'the old further name still finds a live object')
 
   -- A 30-unit group is captured, not TOO_LARGE.
   local BIG, names = 'np!hGx9', {}
@@ -1385,6 +1624,14 @@ scenario('farps', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   end
   local function spawn(rev)
     return { op = 'STATIC_SPAWN', entity = 15, rev = rev, country = USA, name = FARP,
+      static = { name = 'np!hGxFg', units = { { name = FARP, type = 'FARP', category = 'Heliports', x = 900, y = 900,
+        heading = 0 } } } }
+  end
+  -- The plain form, `addStaticObject`: DCS keeps a doomed FARP answering its
+  -- name while paused, which a group spawn does not (the mock removes the
+  -- holder of the first name at once). Only the case that tests that uses it.
+  local function spawn_plain(rev)
+    return { op = 'STATIC_SPAWN', entity = 15, rev = rev, country = USA, name = FARP,
       static = { name = FARP, type = 'FARP', category = 'Heliports', x = 900, y = 900, heading = 0 } }
   end
   -- An enumeration the sidecar asks for, run to its end.
@@ -1556,7 +1803,7 @@ scenario('farps', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   -- The old FARP still answers lookups of the name until DCS takes it (the
   -- mock's case, UNVERIFIED in DCS): the owner and the stock go to the new
   -- FARP's own object all the same.
-  ev = session({ { op = 'STATIC_DESTROY', entity = 15 }, spawn(4),
+  ev = session({ { op = 'STATIC_DESTROY', entity = 15 }, spawn_plain(4),
     { op = 'AIRBASE_OWNER', coalition = 1, airbase = FARP },
     { op = 'WAREHOUSE_SET', airbase = FARP, stock = { liquids = { [0] = 4321 } } } }, function(events)
     local r = result(events, 2)
@@ -1615,18 +1862,18 @@ scenario('farps', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   local marker = ctx.profile .. 'farp-spawn-now'
   -- Where the enumeration stood when DCS got the spawn.
   local coalition_ = host.states.server.coalition
-  local real_add = coalition_.addStaticObject
+  local real_add = coalition_.addGroup
   local at_spawn
   local function mid(rev, ready, what)
     os.remove(marker)
     local before = enums
     at_spawn = nil
-    coalition_.addStaticObject = function(country_, data)
-      if data.name == FARP then
+    coalition_.addGroup = function(country_, category, data)
+      if category == -1 and data.units[1].name == FARP then
         local e = shim.T.enum
         at_spawn = e and { fi = e.fi, step = e.step } or false
       end
-      return real_add(country_, data)
+      return real_add(country_, category, data)
     end
     slow(true)
     local spawn_ = spawn(rev)
@@ -1640,7 +1887,7 @@ scenario('farps', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
       return r ~= nil and enums > before and #find(events, 'object', r.object) > 0
     end, what)
     slow(false)
-    coalition_.addStaticObject = real_add
+    coalition_.addGroup = real_add
     assert(S.read(marker), what .. ': the spawn was not held for the enumeration')
     assert(at_spawn, what .. ': the spawn reached DCS after the enumeration ended')
     return ev
@@ -1667,7 +1914,8 @@ scenario('farps', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   for k = 1, 150 do
     local n = 'np#hGxH' .. k
     others[#others + 1] = { op = 'STATIC_SPAWN', entity = 16 + k, rev = 1, country = USA, name = n,
-      static = { name = n, type = 'SINGLE_HELIPAD', category = 'Heliports', x = 960 + 20 * k, y = 940, heading = 0 } }
+      static = { name = 'np!' .. n, units = { { name = n, type = 'SINGLE_HELIPAD', category = 'Heliports',
+        x = 960 + 20 * k, y = 940, heading = 0 } } } }
   end
   ev = session(others, function(events)
     for seq = 1, #others do

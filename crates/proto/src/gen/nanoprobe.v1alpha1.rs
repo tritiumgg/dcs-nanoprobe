@@ -5303,6 +5303,26 @@ pub struct StaticSpec {
     /// (spec/world.md, "Ruins").
     #[prost(bool, tag = "7")]
     pub dead: bool,
+    /// The further heliports of a heliport group: DCS makes one airbase of the
+    /// static and these, under the static's name, with one warehouse and every
+    /// unit's parking (spec/world.md, "Heliport groups"). Only for a static
+    /// whose `extra.category` is "Heliports", each unit's likewise, and not
+    /// with `dead`. The count is bound only by the size of one spawn command.
+    #[prost(message, repeated, tag = "8")]
+    pub further_units: ::prost::alloc::vec::Vec<StaticUnit>,
+}
+/// A further unit of a heliport group.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct StaticUnit {
+    #[prost(string, tag = "1")]
+    pub r#type: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "2")]
+    pub position: ::core::option::Option<Position>,
+    #[prost(double, tag = "3")]
+    pub heading: f64,
+    /// Further keys of the DCS unit table. A `dead` key is refused.
+    #[prost(message, optional, tag = "4")]
+    pub extra: ::core::option::Option<::prost_types::Struct>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Waypoint {
@@ -5483,7 +5503,9 @@ pub struct PutFromStaticTemplateResponse {
     /// coalitions and countries.
     #[prost(message, repeated, tag = "1")]
     pub groups: ::prost::alloc::vec::Vec<StaticTemplateGroup>,
-    /// The statics in the order of the file's text, likewise.
+    /// The statics in the order of the file's text, likewise. A static group
+    /// whose every unit is a heliport is one entry: one static with its
+    /// further units (spec/world.md, "Heliport groups").
     #[prost(message, repeated, tag = "2")]
     pub statics: ::prost::alloc::vec::Vec<StaticTemplateStatic>,
     /// The store revision of the one commit.

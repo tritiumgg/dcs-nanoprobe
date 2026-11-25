@@ -102,7 +102,10 @@ generation DCS holds its dead object in; a body without those two reads them as
 absent); for a unit its spec, last observed state, death fact, missing or removed
 mark, whether the agent reported that mark in an `OBJECT_GONE` (only a reported mark
 outlives a mission generation, spec/world.md "Respawn gate"), and DCS object ID. A
-group's body records whether it is a `group` or a `static`.
+group's body records whether it is a `group` or a `static`. A heliport group's static
+body also carries its further units (`further`), each with its `EntityId`, type, place,
+heading and further keys (spec/world.md, "Heliport groups"); a body without the key has
+none. A further unit has no `unit` row.
 
 The journal holds the entries spec/world.md says are journalled, each with its `kind`
 (`command`, `outcome`, `death`, `removed` with its `cause`, `controller` or `expired`

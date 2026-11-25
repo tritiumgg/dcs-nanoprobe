@@ -310,7 +310,8 @@ command removed. The handler reads them before the DCS call: the group's unit ID
 a `GROUP_SPAWN` under the name of an existing group that group's unit IDs, and for a
 `STATIC_SPAWN` under the name of an existing static that static's ID. It passes them
 only with `APPLIED`, after the call returned without raising and, for a spawn, returned
-an object. The agent also acts on them when it turns that `APPLIED` into `TOO_LARGE`,
+an object, and with the `DCS_REFUSED` of a heliport group that made no airbase ("Layout:
+STATIC_SPAWN"), which names the old static only once it read it gone. The agent also acts on them when it turns that `APPLIED` into `TOO_LARGE`,
 since the destroy has happened. It reads `destroyed` only for those five opcodes, under
 the same `lua_pcall` that reads the value. It reads at most 4,096 IDs from one `destroyed`; the
 rest are counted in `pending_overflow` and leave through the existence checks.
@@ -601,9 +602,50 @@ does not exist is `NOT_BOUND`. The sidecar keeps each group's options with the g
 | 0x0000 | u32 | country | DCS country number |
 | 0x0004 | pad[4] | reserved | |
 | + | str | name | The static's platform name |
-| + | lv | static | The table for `coalition.addStaticObject` |
+| + | lv | static | The table for `coalition.addStaticObject`, or a heliport group's table |
 
 The exists-guard applies as for a group.
+
+`static` takes one of two forms:
+
+- A table with no `units` key: the static's table. The handler calls
+  `coalition.addStaticObject(country, static)`.
+- A table with a `units` key: a heliport, single or a group (spec/world.md, "Heliport
+  groups"). The handler calls `coalition.addGroup(country, -1, static)`. The group's `name` is the
+  group form of the static's entity (`np!`), and `units` lists the static's own table,
+  named `name`, then one table per further unit, each named by its own `EntityId`
+  (`np#`). The sidecar copies `dynamicSpawn`, `allowHotStart`, `dynamicCargo` and
+  `hidden` from the first unit's table into the group's, where the first unit sets them.
+  DCS reads `dynamicSpawn` from the first unit, not the group (LIVE,
+  docs/results/2026-11-25-farp-groups.md); which table it reads the other three from is
+  UNVERIFIED. It passes no `unitId` and no `groupId`.
+
+The sidecar sends every live static whose `category` is `Heliports` in the group form,
+one unit or more. A single heliport's ruin keeps the static table. A heliport group's
+ruin is its group table with `dead = true` on the group and on every unit, through
+`addGroup`. What DCS makes of a dead heliport by either call is UNVERIFIED, and a
+heliport group cannot be created dead (spec/world.md, "Heliport groups", "Ruins"). A group spawn of any size under a name replaces what holds it, a single
+FARP or a group, at once and also while paused; `addStaticObject` under a group's first
+name leaves the group standing, with its further names (LIVE,
+docs/results/2026-11-25-farp-groups.md). With the group form for every live heliport, a
+live spawn under a static's name never leaves an older group of it in DCS. A single
+heliport's ruin is sent only when the reconciler finds no bound live object of the
+static (spec/world.md, "Ruins"). The returned
+object is the airbase in both calls, so the rest of the handler is the same for a single
+FARP.
+
+DCS makes one airbase of a heliport group, under the first unit's name, and returns it,
+category 4, with an empty warehouse (LIVE, docs/results/2026-11-25-farp-pairs.md,
+docs/results/2026-11-25-farp-groups.md). Over a live group of the same names, the new
+group replaces the old at once, also while paused (LIVE). From there the handler treats
+it as it treats a single FARP: the returned object is the static and the airbase. When
+the group's call returns an object that is not category 4, or one with no ID, the
+handler calls `destroy` on it under `pcall` and refuses with `DCS_REFUSED`, "the
+heliport group made no airbase"; it reads the name again and names the old static's ID
+in `destroyed` when the name no longer finds it, finds another object, or finds the old
+handle with `isExist` not true: a replaced FARP's handle still answers its name (LIVE,
+docs/results/2026-11-25-farp-groups.md). This is the one refusal whose `destroyed` the agent
+takes ("Handler arguments"). A call that returns nothing is refused with nothing to destroy.
 
 A FARP static (`category` `Heliports`) also makes an airbase of its name with its own
 warehouse, which the shim samples (spec/sampling.md; spec/world.md, "Kinds"). The table

@@ -471,6 +471,7 @@ async fn a_static_template_makes_every_entity_in_one_call_or_none() {
                 heading: 0.5,
                 extra: Some(prost_types::Struct { fields }),
                 dead: false,
+                ..pb::StaticSpec::default()
             }),
         })
         .await
@@ -490,6 +491,7 @@ async fn a_static_template_makes_every_entity_in_one_call_or_none() {
                 heading: 0.0,
                 extra: Some(prost_types::Struct { fields }),
                 dead: true,
+                ..pb::StaticSpec::default()
             }),
         })
         .await
@@ -850,6 +852,7 @@ async fn a_helipad_in_a_static_template_is_the_put_static_farp() {
                 heading: 0.75,
                 extra: Some(prost_types::Struct { fields }),
                 dead: false,
+                ..pb::StaticSpec::default()
             }),
         })
         .await
@@ -860,6 +863,137 @@ async fn a_helipad_in_a_static_template_is_the_put_static_farp() {
         held(&hub, a, hand.static_id),
         "the template's helipad is the hand-written FARP"
     );
+    let _ = stop.send(());
+    task.await.expect("join").expect("serve");
+    hub.lock().close_all().expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_template_group_of_three_farps_is_one_static_with_two_further_units() {
+    let (dir, missions, mut cfg) = owed_setup();
+    let listed_dir = dir.path().join("templates");
+    std::fs::create_dir_all(&listed_dir).expect("listed");
+    cfg.template_dirs = vec![listed_dir.clone()];
+    let path = listed_dir.join("farps.stm");
+    std::fs::write(&path, crate::static_template::tests::three_farps()).expect("write");
+    let hub = Hub::open(
+        cfg.clone(),
+        Box::new(Folder(
+            nanoprobe_sim_fake::FakeSim::new(nanoprobe_sim_fake::Config::default()),
+            missions.clone(),
+        )),
+    )
+    .expect("hub");
+    let (channel, stop, task) = serve_hub(&hub).await;
+    let lease = lease_of(&channel).await;
+    let a = CampaignServiceClient::new(channel.clone())
+        .create_campaign(create(&lease, "a", "Caucasus", false))
+        .await
+        .expect("a")
+        .into_inner()
+        .campaign
+        .expect("campaign")
+        .id;
+    let made = CommandsServiceClient::new(channel.clone())
+        .put_from_static_template(pb::PutFromStaticTemplateRequest {
+            write: Some(pb::Write {
+                lease: Some(lease.clone()),
+                idempotency: Some(pb::Idempotency {
+                    key: "farps".into(),
+                }),
+                campaign_id: a,
+            }),
+            path: path.to_str().expect("utf-8").to_owned(),
+            anchor: None,
+            heading: 0.0,
+            country: None,
+            label: String::new(),
+        })
+        .await
+        .expect("farps")
+        .into_inner();
+    assert!(made.groups.is_empty());
+    assert_eq!(made.statics.len(), 1, "one entry for the whole group");
+    {
+        let g = hub.lock();
+        let s = &g.campaigns[&a].store;
+        let id = EntityId(made.statics[0].static_id);
+        let grp = s.group(id).expect("static");
+        assert_eq!(grp.further.len(), 2);
+        assert_eq!(grp.further[0].type_name, "Invisible FARP");
+        assert_eq!(grp.further[1].id.0, id.0 + 2);
+        assert_eq!(s.further_owner(grp.further[0].id), Some(id));
+        assert!(grp.further.iter().all(|f| {
+            nanoprobe_sidecar::sim::wire::lv::get(&f.extra, "heliport_frequency").is_some()
+        }));
+        assert_eq!(s.next_entity(), id.0 + 3, "the static and two more");
+    }
+    let _ = stop.send(());
+    task.await.expect("join").expect("serve");
+    hub.lock().close_all().expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_destroyed_template_group_of_heliports_is_refused_and_makes_nothing() {
+    let (dir, missions, mut cfg) = owed_setup();
+    let listed_dir = dir.path().join("templates");
+    std::fs::create_dir_all(&listed_dir).expect("listed");
+    cfg.template_dirs = vec![listed_dir.clone()];
+    let path = listed_dir.join("dead-farps.stm");
+    let dead = crate::static_template::tests::three_farps().replace(
+        "[\"name\"] = \"Farps\",",
+        "[\"name\"] = \"Farps\", [\"dead\"] = true,",
+    );
+    assert!(dead.contains("[\"dead\"] = true"), "the template is edited");
+    std::fs::write(&path, dead).expect("write");
+    let hub = Hub::open(
+        cfg.clone(),
+        Box::new(Folder(
+            nanoprobe_sim_fake::FakeSim::new(nanoprobe_sim_fake::Config::default()),
+            missions.clone(),
+        )),
+    )
+    .expect("hub");
+    let (channel, stop, task) = serve_hub(&hub).await;
+    let lease = lease_of(&channel).await;
+    let a = CampaignServiceClient::new(channel.clone())
+        .create_campaign(create(&lease, "a", "Caucasus", false))
+        .await
+        .expect("a")
+        .into_inner()
+        .campaign
+        .expect("campaign")
+        .id;
+    let before = hub.lock().campaigns[&a].store.revision();
+    let none = entities(&hub, a);
+    let e = CommandsServiceClient::new(channel.clone())
+        .put_from_static_template(pb::PutFromStaticTemplateRequest {
+            write: Some(pb::Write {
+                lease: Some(lease.clone()),
+                idempotency: Some(pb::Idempotency { key: "dead".into() }),
+                campaign_id: a,
+            }),
+            path: path.to_str().expect("utf-8").to_owned(),
+            anchor: None,
+            heading: 0.0,
+            country: None,
+            label: String::new(),
+        })
+        .await
+        .expect_err("a destroyed heliport group");
+    assert_eq!(e.code(), Code::InvalidArgument, "{e}");
+    assert_eq!(errors::reason(&e), ErrorReason::InvalidField);
+    assert_eq!(
+        errors::detail(&e).expect("detail").field,
+        "spec.dead",
+        "{e}"
+    );
+    assert_eq!(
+        hub.lock().campaigns[&a].store.revision(),
+        before,
+        "the refusal changed the store"
+    );
+    assert_eq!(entities(&hub, a), none, "the refusal made an entity");
     let _ = stop.send(());
     task.await.expect("join").expect("serve");
     hub.lock().close_all().expect("close");

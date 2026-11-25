@@ -265,7 +265,12 @@ impl Reconciler {
         let Some(n) = ids::parse(&o.name).filter(|n| ids::of_campaign(n, campaign)) else {
             return false;
         };
-        if n.entity.0 >= store.next_entity() || store.unit(n.entity).is_some() {
+        // A heliport group's further unit is held by its static, though DCS
+        // reports no object under its name (spec/world.md, "Heliport groups").
+        if n.entity.0 >= store.next_entity()
+            || store.unit(n.entity).is_some()
+            || store.further_owner(n.entity).is_some()
+        {
             return false;
         }
         let target = match n.kind {

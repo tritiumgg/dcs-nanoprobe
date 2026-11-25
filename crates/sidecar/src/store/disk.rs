@@ -19,8 +19,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use nanoprobe_transport::records::Rates;
 
 use super::{
-    Authority, CapturedMore, DesiredOwner, DesiredStock, Entry, Extension, Group, IdemRow,
-    Journalled, Kind, LeftAs, Loaded, LostPolicy, Outcome, OwedLoad, Point, RemoveCause,
+    Authority, CapturedMore, DesiredOwner, DesiredStock, Entry, Extension, FurtherUnit, Group,
+    IdemRow, Journalled, Kind, LeftAs, Loaded, LostPolicy, Outcome, OwedLoad, Point, RemoveCause,
     RouteEvent, Store, Unit, UnitState, check_lv,
 };
 use crate::ids::{CampaignId, EntityId};
@@ -1876,6 +1876,29 @@ fn load(path: &Path, conn: Connection, changes_keep: usize) -> Result<Store, Dis
             id.0, store.next_entity
         )));
     }
+    // A heliport group's further units hold EntityIds of their own: each is
+    // below the next ID, is no group or unit, and belongs to one static.
+    let mut held = BTreeSet::new();
+    for id in groups.values().flat_map(|g| g.further.iter().map(|f| f.id)) {
+        if id.0 >= store.next_entity {
+            return Err(DiskError::Corrupt(format!(
+                "further unit {} at or past the next EntityId {}",
+                id.0, store.next_entity
+            )));
+        }
+        if groups.contains_key(&id) || units.contains_key(&id) {
+            return Err(DiskError::Corrupt(format!(
+                "further unit {} is also a group or unit",
+                id.0
+            )));
+        }
+        if !held.insert(id) {
+            return Err(DiskError::Corrupt(format!(
+                "further unit {} held twice",
+                id.0
+            )));
+        }
+    }
     for un in units.values() {
         // A dead static stays in the grid: it is a ruin where it stood. A
         // removed entity's units are not in it.
@@ -2322,6 +2345,34 @@ fn dec_point(v: &Lv) -> Result<Point, DiskError> {
     }
 }
 
+fn enc_further(v: &FurtherUnit) -> Lv {
+    let FurtherUnit {
+        id,
+        type_name,
+        at,
+        heading,
+        extra,
+    } = v;
+    t(vec![
+        ("id", u(id.0)),
+        ("type", s(type_name)),
+        ("at", enc_point(at)),
+        ("heading", f(*heading)),
+        ("extra", nested(extra)),
+    ])
+}
+
+fn dec_further(v: &Lv) -> Result<FurtherUnit, DiskError> {
+    let r = Rd(v);
+    Ok(FurtherUnit {
+        id: EntityId(r.u("id")?),
+        type_name: r.s("type")?,
+        at: dec_point(r.get("at"))?,
+        heading: r.f("heading")?,
+        extra: r.nested("extra")?,
+    })
+}
+
 fn enc_unit_state(v: &UnitState) -> Lv {
     let UnitState { at, heading, life } = v;
     t(vec![
@@ -2515,6 +2566,7 @@ fn enc_group(v: &Group) -> Lv {
         last_lead,
         ruin_sent_in,
         ruin_in,
+        further,
     } = v;
     let kind = match kind {
         Kind::Group => "group",
@@ -2559,6 +2611,14 @@ fn enc_group(v: &Group) -> Lv {
         ("unknown_spawn_in", opt_pair(*unknown_spawn_in)),
         ("ruin_sent_in", opt_pair(*ruin_sent_in)),
         ("ruin_in", opt_pair(*ruin_in)),
+        (
+            "further",
+            if further.is_empty() {
+                Lv::Nil
+            } else {
+                list(further.iter().map(|f| nested(&enc_further(f))).collect())
+            },
+        ),
         (
             "order_sent_in",
             order_sent_in.map_or(Lv::Nil, |(a, g, r)| {
@@ -2705,6 +2765,14 @@ fn dec_group(v: &Lv) -> Result<Group, DiskError> {
         unknown_spawn_in: r.pair("unknown_spawn_in")?,
         ruin_sent_in: r.pair("ruin_sent_in")?,
         ruin_in: r.pair("ruin_in")?,
+        further: r
+            .list("further")?
+            .into_iter()
+            .map(|f| match f {
+                Lv::String(v) => dec_further(&decode(v)?),
+                _ => Err(DiskError::Corrupt("further is not nested".into())),
+            })
+            .collect::<Result<_, _>>()?,
         order_sent_in,
         observed_coalition: match r.list("observed_coalition")?.as_slice() {
             [] => None,
@@ -3418,6 +3486,55 @@ mod tests {
     /// write it after an intended change, with a new schema version.
     const GOLDEN: &str = include_str!("../../../../spec/persistence.golden");
 
+    /// A static with two further units, in a store of its own.
+    fn heliport_group() -> Group {
+        let mut s = Store::new(CampaignId(7), 10);
+        let id = s
+            .create_static_group(
+                super::super::NewGroup {
+                    theater: "Caucasus".into(),
+                    country: 2,
+                    category: 3,
+                    coalition: 2,
+                    units: vec![super::super::NewUnit::new(
+                        "FARP",
+                        UnitState {
+                            at: Point {
+                                x: 10.0,
+                                y: 0.0,
+                                z: 20.0,
+                            },
+                            heading: 0.5,
+                            life: 1.0,
+                        },
+                    )],
+                    authority: Authority::Sim,
+                    label: "h".into(),
+                    extra: Lv::Nil,
+                },
+                vec![
+                    super::super::NewFurther {
+                        type_name: "Invisible FARP".into(),
+                        at: Point {
+                            x: 30.0,
+                            y: 0.0,
+                            z: 40.0,
+                        },
+                        heading: 1.25,
+                        extra: Lv::Table(vec![(Lv::String(b"k".to_vec()), Lv::Number(3.0))]),
+                    },
+                    super::super::NewFurther {
+                        type_name: "FARP".into(),
+                        at: Point::default(),
+                        heading: 0.0,
+                        extra: Lv::Nil,
+                    },
+                ],
+            )
+            .expect("group");
+        s.group(id).expect("g").clone()
+    }
+
     fn golden_rows() -> Vec<(String, Vec<u8>)> {
         let mut s = Store::new(CampaignId(7), 10);
         let g = s
@@ -3520,6 +3637,12 @@ mod tests {
             (
                 "entry.purged".to_owned(),
                 encode(&enc_entry(&Entry::Purged { entity: g })),
+            ),
+            // A heliport group's static, with its further units
+            // (spec/world.md, "Heliport groups").
+            (
+                "group.further".to_owned(),
+                encode(&enc_group(&heliport_group())),
             ),
             // The S19 keys of `meta.world`, as the store writes them.
             (
@@ -3640,6 +3763,66 @@ mod tests {
         // The removal ends it: no ruin is kept for a removed static.
         s.remove_entity(id).expect("remove");
         assert!(!s.is_ruin(id));
+    }
+
+    /// A heliport group's further units read back; a body without the key
+    /// reads empty.
+    #[test]
+    fn a_heliport_groups_further_units_round_trip_and_are_empty_by_default() {
+        let mut s = Store::new(CampaignId(7), 10);
+        let spec = || super::super::NewGroup {
+            theater: "Caucasus".into(),
+            country: 2,
+            category: 3,
+            coalition: 2,
+            units: vec![super::super::NewUnit::new("FARP", UnitState::default())],
+            authority: Authority::Sim,
+            label: "f".into(),
+            extra: Lv::Nil,
+        };
+        let plain = s.create_static(spec()).expect("static");
+        let plain = s.group(plain).expect("g").clone();
+        let body = enc_group(&plain);
+        let Lv::Table(pairs) = &body else {
+            panic!("a table")
+        };
+        assert!(
+            !pairs
+                .iter()
+                .any(|(k, v)| *k == Lv::String(b"further".to_vec()) && *v != Lv::Nil),
+            "no further units, no key"
+        );
+        let back = dec_group(&decode(&encode(&body)).expect("decode")).expect("group");
+        assert!(back.further.is_empty());
+        let id = s
+            .create_static_group(
+                spec(),
+                vec![
+                    super::super::NewFurther {
+                        type_name: "Invisible FARP".into(),
+                        at: Point {
+                            x: 1.5,
+                            y: 0.0,
+                            z: -2.0,
+                        },
+                        heading: 1.25,
+                        extra: Lv::Table(vec![(Lv::String(b"k".to_vec()), Lv::Number(3.0))]),
+                    },
+                    super::super::NewFurther {
+                        type_name: "FARP".into(),
+                        at: Point::default(),
+                        heading: 0.0,
+                        extra: Lv::Nil,
+                    },
+                ],
+            )
+            .expect("group");
+        let group = s.group(id).expect("g").clone();
+        assert_eq!(group.further.len(), 2);
+        let back = dec_group(&decode(&encode(&enc_group(&group))).expect("decode")).expect("group");
+        assert_eq!(back, group);
+        assert_eq!(back.further[0].type_name, "Invisible FARP");
+        assert_eq!(back.further[0].heading, 1.25);
     }
 
     #[test]
@@ -3787,6 +3970,64 @@ mod tests {
         match Store::open(&p, 10) {
             Err(DiskError::Corrupt(m)) => assert!(m.contains("next EntityId"), "{m}"),
             r => panic!("{:?}", r.map(|_| ())),
+        }
+    }
+
+    /// A store with two heliport groups (IDs 1 to 3 and 4 to 6), written to
+    /// `path` after `damage` changed it in memory.
+    fn heliports_damaged(damage: impl FnOnce(&mut Store)) -> Result<(), DiskError> {
+        let d = tempfile::tempdir().expect("dir");
+        let p = d.path().join("store.sqlite");
+        let spec = || super::super::NewGroup {
+            theater: "Caucasus".into(),
+            country: 2,
+            category: 3,
+            coalition: 2,
+            units: vec![super::super::NewUnit::new("FARP", UnitState::default())],
+            authority: Authority::Sim,
+            label: "h".into(),
+            extra: Lv::Nil,
+        };
+        let further = || {
+            vec![
+                super::super::NewFurther {
+                    type_name: "FARP".into(),
+                    at: Point::default(),
+                    heading: 0.0,
+                    extra: Lv::Nil,
+                };
+                2
+            ]
+        };
+        let mut s = Store::new(CampaignId(7), 10);
+        let a = s.create_static_group(spec(), further()).expect("a");
+        let b = s.create_static_group(spec(), further()).expect("b");
+        assert_eq!((a, b), (EntityId(1), EntityId(4)));
+        damage(&mut s);
+        s.save_as(&p, record()).expect("save");
+        drop(s);
+        Store::open(&p, 10).map(|_| ())
+    }
+
+    #[test]
+    fn a_heliport_groups_further_ids_are_checked_on_load() {
+        heliports_damaged(|_| {}).expect("an undamaged store opens");
+        // (what the check says, the group, the further unit, the ID it holds)
+        let cases = [
+            ("at or past", 1, 0, 7),
+            ("also a group or unit", 1, 0, 4),
+            ("also a group or unit", 1, 1, 1),
+            ("held twice", 4, 0, 2),
+            ("held twice", 1, 1, 2),
+        ];
+        for (why, group, i, to) in cases {
+            let r = heliports_damaged(|s| {
+                s.groups.get_mut(&EntityId(group)).expect("g").further[i].id = EntityId(to);
+            });
+            match r {
+                Err(DiskError::Corrupt(m)) => assert!(m.contains(why), "{why}: {m}"),
+                r => panic!("{why}: {r:?}"),
+            }
         }
     }
 

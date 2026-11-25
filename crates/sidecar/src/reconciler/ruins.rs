@@ -21,7 +21,7 @@ use nanoprobe_transport::codec::Lv;
 use nanoprobe_transport::layout::result as rc;
 use nanoprobe_transport::records::CommandResult;
 
-use super::{HOLD_SPAWN, Reconciler, rejected_for_now, with_extra};
+use super::{HOLD_SPAWN, Reconciler, rejected_for_now};
 use crate::ids::{self, EntityId, NameKind};
 use crate::lifecycle::State;
 use crate::sim::SimAdapter;
@@ -135,17 +135,7 @@ impl Reconciler {
         let g = store.group(id).expect("group").clone();
         let u = store.unit(g.members[0]).expect("unit");
         let name = ids::name(NameKind::Static, store.campaign(), id);
-        let table = with_extra(
-            lv::obj(vec![
-                ("name", lv::s(&name)),
-                ("type", lv::s(&u.type_name)),
-                ("x", lv::n(u.state.at.x)),
-                ("y", lv::n(u.state.at.z)),
-                ("heading", lv::n(u.state.heading)),
-                (DEAD_KEY, Lv::Bool(true)),
-            ]),
-            &u.extra,
-        );
+        let table = super::static_spawn_table(store.campaign(), &g, u, true);
         // Before the write: DCS may hold the ruin from here on, and a
         // sidecar that restarts must know to destroy it.
         store.ruin_sent(id, now.0, now.1).expect("group");
@@ -254,6 +244,7 @@ impl Reconciler {
 
 #[cfg(test)]
 mod tests {
+    use super::super::with_extra;
     use super::*;
 
     #[test]

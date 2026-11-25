@@ -826,6 +826,7 @@ async fn refusals_before_any_write() {
             write: write(&l, "static-big", c),
             static_id: 0,
             spec: Some(pb::StaticSpec {
+                further_units: Vec::new(),
                 label: "big".into(),
                 country: 2,
                 r#type: "Tent".into(),
