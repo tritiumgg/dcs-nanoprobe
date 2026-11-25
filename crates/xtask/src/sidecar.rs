@@ -1,11 +1,14 @@
-//! `sidecar <name> [--part all|conformance|hello|template|static-template|payload-preset|shell [--template FILE]]`:
+//! `sidecar <name> [--part all|conformance|hello|template|static-template|template-heliport --file FILE|payload-preset|shell [--template FILE]]`:
 //! the S17 live test, with `--part shell` the S19 one (`shell_live.rs`),
 //! with `--part template` a group made from a group template file
 //! (`shell_live/template.rs`), with `--part static-template` the groups
 //! and statics of a static template file (`shell_live/static_template.rs`),
+//! with `--part template-heliport` a given static template that holds a
+//! heliport, its airbase and warehouse (`shell_live/template_heliport.rs`),
 //! and with `--part payload-preset` an aircraft given a payload preset
-//! (`shell_live/payload_preset.rs`), on a docker-wine target, and the last two also
-//! on a windows-ssh target (`sidecar_windows.rs`). On docker-wine the product's sidecar runs in a container of its own
+//! (`shell_live/payload_preset.rs`), on a docker-wine target, and
+//! static-template and payload-preset also on a windows-ssh target
+//! (`sidecar_windows.rs`); template-heliport runs on docker-wine only. On docker-wine the product's sidecar runs in a container of its own
 //! that shares the game container's network namespace, as the example
 //! compose overlay in `deploy/` sets it up, but started by hand and removed
 //! at the end: the target's compose file is not touched.
@@ -78,11 +81,16 @@ const LIMIT_S: u64 = 900;
 /// spawns at the start.
 pub(crate) const HELLO_POINTS: [(f64, f64); 2] = [(-290_000.0, 680_000.0), (-289_000.0, 680_000.0)];
 
-const USAGE: &str = "usage: cargo xtask sidecar <name> [--part all|conformance|hello|template|static-template|payload-preset|shell [--template FILE]]
+const USAGE: &str = "usage: cargo xtask sidecar <name> [--part all|conformance|hello|template|static-template|template-heliport --file FILE|payload-preset|shell [--template FILE]]
        cargo xtask sidecar <windows-ssh name> --part saved-files --stm PATH --preset PATH --preset-name NAME";
 
 /// The parts that drive one API test against the sidecar and stop it.
-const ONE_API_PART: [&str; 3] = ["template", "static-template", "payload-preset"];
+const ONE_API_PART: [&str; 4] = [
+    "template",
+    "static-template",
+    "template-heliport",
+    "payload-preset",
+];
 
 pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
     if let [
@@ -126,12 +134,22 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
             (*name, *p, None)
         }
         [name, "--part", "shell", "--template", t] => (*name, "shell", Some(*t)),
+        [name, "--part", "template-heliport", "--file", f] => {
+            (*name, "template-heliport", Some(*f))
+        }
         _ => return Err(USAGE.into()),
     };
     let template = template
         .map(|t| std::fs::read(t).map_err(|e| format!("{t}: {e}")))
         .transpose()?;
+    if part == "template-heliport" {
+        // FILE is checked before the target is touched.
+        crate::shell_live::template_heliport::layout(template.as_deref().unwrap_or_default())?;
+    }
     if matches!(crate::target(name)?, Target::WindowsSsh { .. }) {
+        if part == "template-heliport" {
+            return Err("template-heliport runs on a docker-wine target".into());
+        }
         return crate::sidecar_windows::run(repository, name, part, None);
     }
     let Target::DockerWine { ssh, container, .. } = crate::target(name)? else {
@@ -159,6 +177,8 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
         &["template"]
     } else if part == "static-template" {
         &["static_template"]
+    } else if part == "template-heliport" {
+        &["template_heliport"]
     } else if part == "payload-preset" {
         &["payload_preset"]
     } else if part == "shell" {
@@ -185,6 +205,7 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
                 part == "all"
                     || part == "shell"
                     || part == "static-template"
+                    || part == "template-heliport"
                     || part == "payload-preset"
                     || k.starts_with(part)
             })
@@ -695,6 +716,13 @@ fn with_map(
                 "static-template" => {
                     crate::shell_live::static_template::drive(run, &endpoint, &token, results)
                 }
+                "template-heliport" => crate::shell_live::template_heliport::drive(
+                    run,
+                    &endpoint,
+                    &token,
+                    template.ok_or("template-heliport needs --file")?,
+                    results,
+                ),
                 _ => crate::shell_live::payload_preset::drive(run, &endpoint, &token, results),
             };
             results["sidecar_logs"] =

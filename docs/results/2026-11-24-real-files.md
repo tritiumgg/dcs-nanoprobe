@@ -18,7 +18,7 @@ copies and writes none.
 
 | File | What it holds | Reader |
 |---|---|---|
-| `StaticTemplate/test0.stm` | Two statics, no group: `APFC fuel` (`Fortifications`) and `SINGLE_HELIPAD` (`Heliports`) | Refused whole, as built: "static group [2] unit [1] is a heliport or a grass airfield". The first static was read with no refusal |
+| `StaticTemplate/test0.stm` | Two statics, no group: `APFC fuel` (`Fortifications`) and `SINGLE_HELIPAD` (`Heliports`) | Refused whole by this run's tree: "static group [2] unit [1] is a heliport or a grass airfield". The first static was read with no refusal. The tree of docs/results/2026-11-24-template-heliports.md builds the file |
 | `StaticTemplate/test1.stm` | Two vehicle groups of one `AAV7` each, country 2, `theatre` Caucasus | Loaded: 2 groups, 2 units, no statics |
 | `StaticTemplate/test2.stm` | One static, `HESCO_wallperimeter_1` (`Fortifications`, with `shape_name` and `rate`), country 2, `theatre` Caucasus | Loaded: no group, 1 static |
 | `MissionEditor/UnitPayloads/UH-1H.lua` | Two presets of `UH-1H`; "Test Payload 0" is the new one: `M261_MK151` on pylons 2 and 5, `M134_SIDE_L` on 3, `M134_SIDE_R` on 4, no `settings` | Loaded; both presets give pylons |

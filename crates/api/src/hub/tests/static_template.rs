@@ -746,3 +746,114 @@ async fn a_static_template_makes_every_entity_in_one_call_or_none() {
     task.await.expect("join").expect("serve");
     hub.lock().close_all().expect("close");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_helipad_in_a_static_template_is_the_put_static_farp() {
+    let (dir, missions, mut cfg) = owed_setup();
+    let listed_dir = dir.path().join("templates");
+    std::fs::create_dir_all(&listed_dir).expect("listed");
+    cfg.template_dirs = vec![listed_dir.clone()];
+    let write = |name: &str, body: &str| {
+        let p = listed_dir.join(name);
+        std::fs::write(&p, body).expect("write");
+        p.to_str().expect("utf-8").to_owned()
+    };
+    let pad = write("pad.stm", crate::static_template::tests::HELIPAD);
+    let grass = write(
+        "grass.stm",
+        &crate::static_template::tests::HELIPAD.replace("\"Heliports\"", "\"GrassAirfields\""),
+    );
+    let hub = Hub::open(
+        cfg.clone(),
+        Box::new(Folder(
+            nanoprobe_sim_fake::FakeSim::new(nanoprobe_sim_fake::Config::default()),
+            missions.clone(),
+        )),
+    )
+    .expect("hub");
+    let (channel, stop, task) = serve_hub(&hub).await;
+    let lease = lease_of(&channel).await;
+    let a = CampaignServiceClient::new(channel.clone())
+        .create_campaign(create(&lease, "a", "Caucasus", false))
+        .await
+        .expect("a")
+        .into_inner()
+        .campaign
+        .expect("campaign")
+        .id;
+    let mut commands = CommandsServiceClient::new(channel.clone());
+    let write_of = |key: &str| {
+        Some(pb::Write {
+            lease: Some(lease.clone()),
+            idempotency: Some(pb::Idempotency { key: key.into() }),
+            campaign_id: a,
+        })
+    };
+    let from = |key: &str, path: &str| pb::PutFromStaticTemplateRequest {
+        write: write_of(key),
+        path: path.to_owned(),
+        anchor: None,
+        heading: 0.0,
+        country: None,
+        label: String::new(),
+    };
+
+    // A grass airfield is still refused, and makes nothing.
+    let before = hub.lock().campaigns[&a].store.revision();
+    let e = commands
+        .put_from_static_template(from("grass", &grass))
+        .await
+        .expect_err("grass");
+    assert_eq!(e.code(), Code::InvalidArgument, "{e}");
+    assert_eq!(errors::detail(&e).expect("detail").field, "path");
+    assert!(
+        e.message()
+            .contains("is a grass airfield, which is not built"),
+        "{}",
+        e.message()
+    );
+    assert_eq!(hub.lock().campaigns[&a].store.revision(), before);
+
+    // The helipad is made, and is the static PutStatic makes from the
+    // keys the file passes.
+    let made = commands
+        .put_from_static_template(from("pad", &pad))
+        .await
+        .expect("pad")
+        .into_inner();
+    assert!(made.groups.is_empty());
+    assert_eq!(made.statics.len(), 1);
+    let mut fields = std::collections::BTreeMap::new();
+    fields.insert("category".to_string(), text_value("Heliports"));
+    fields.insert("shape_name".to_string(), text_value("FARP"));
+    let hand = commands
+        .put_static(pb::PutStaticRequest {
+            write: write_of("hand"),
+            static_id: 0,
+            spec: Some(pb::StaticSpec {
+                label: "Pad-1".into(),
+                country: 2,
+                r#type: "SINGLE_HELIPAD".into(),
+                position: Some(pb::Position {
+                    theater: "Caucasus".into(),
+                    north: -356_000.5,
+                    east: 619_000.25,
+                    alt: 0.0,
+                }),
+                heading: 0.75,
+                extra: Some(prost_types::Struct { fields }),
+                dead: false,
+            }),
+        })
+        .await
+        .expect("by hand")
+        .into_inner();
+    assert_eq!(
+        held(&hub, a, made.statics[0].static_id),
+        held(&hub, a, hand.static_id),
+        "the template's helipad is the hand-written FARP"
+    );
+    let _ = stop.send(());
+    task.await.expect("join").expect("serve");
+    hub.lock().close_all().expect("close");
+}

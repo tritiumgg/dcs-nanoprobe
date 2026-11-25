@@ -2,6 +2,13 @@
 
 ## Next version, Draft
 
+### Added
+
+- `PutFromStaticTemplate` builds a heliport static, such as a FARP or a helipad, as
+  `PutStatic` does: DCS makes its airbase, and the platform samples its warehouse. A
+  grass airfield is still refused
+  ([ADR 0044](adr/0044-static-template-spawn-with-heliports.md)).
+
 ### Changed
 
 - **`MovePlayer` keeps the player's coalition when `coalition` is
@@ -21,6 +28,11 @@
   aircraft.
 - The transport's `layout_version` is 2. A 0.1.0 agent and a sidecar of this version
   refuse each other; install both from the same release.
+
+### Known
+
+- A FARP the platform spawns, by either call, stays in DCS after `RemoveEntity`
+  ([2026-11-24-template-heliports.md](results/2026-11-24-template-heliports.md)).
 
 ## 0.1.0, the first release
 

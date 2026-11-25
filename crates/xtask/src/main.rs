@@ -233,7 +233,8 @@ commands:
                             client_address and client_password_file; the password
                             goes to the client through SSH's standard input and is
                             never printed, logged or kept.
-  sidecar <name> [--part all|conformance|hello|template|static-template|payload-preset]
+  sidecar <name> [--part all|conformance|hello|template|static-template|payload-preset
+                  |template-heliport --file FILE]
                             The S17 live test on a docker-wine target: the sidecar in
                             its own container in the game container's network
                             namespace, the conformance suite through RealSim, and both
@@ -243,6 +244,8 @@ commands:
                             started through its task in a private session, the sidecar
                             a Windows program in the profile; refuses when DCS or a
                             sidecar runs or the profile holds a nanoprobe folder.
+                            template-heliport spawns FILE, a static template with a
+                            heliport, and checks its airbase and warehouse.
   sidecar <name> --part saved-files --stm P --preset P --preset-name N
                             On a windows-ssh target, as above: the static template P
                             and the preset N of the preset file P, paths under the
