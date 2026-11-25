@@ -24,7 +24,7 @@ use nanoprobe_proto::v1alpha1::{
 };
 use nanoprobe_sidecar::players::{Ctx, Keyring, Roster};
 use nanoprobe_sidecar::sim::RawRecord;
-use nanoprobe_sidecar::sim::wire::{Input, lv};
+use nanoprobe_sidecar::sim::wire::{Body, Input, lv, moderation};
 use nanoprobe_sim_fake::FakeSim;
 use nanoprobe_transport::records::Player;
 use prost::Message;
@@ -467,34 +467,96 @@ async fn the_moderation_service_works_end_to_end_without_a_ucid() {
         assert_eq!(r.outcome, pb::Outcome::Applied as i32, "{r:?}");
     };
 
-    // A move into an aircraft slot is not verified on DCS (E34): refused.
-    let e = m
-        .move_player(pb::MovePlayerRequest {
-            write: write(&l, "move1", c),
-            player_key: ka.clone(),
-            coalition: Coalition::Blue as i32,
-            slot: "55".into(),
+    // Slot moves (spec/commands.md, "Slot moves"). The mission offers blue
+    // slots 55 and 56 and red slot 41.
+    fake(&hub, |s| {
+        s.offer_slot("55", 2);
+        s.offer_slot("56", 2);
+        s.offer_slot("41", 1);
+    });
+    let mv = |k: &str, coalition: Coalition, slot: &str| pb::MovePlayerRequest {
+        write: write(&l, k, c),
+        player_key: ka.clone(),
+        coalition: coalition as i32,
+        slot: slot.into(),
+    };
+    let held = |hub: &Hub| {
+        fake(hub, |s| {
+            (s.clients()[&2].side, s.clients()[&2].slot.clone())
         })
-        .await
-        .expect_err("slot move");
-    assert_eq!(e.code(), Code::Unimplemented);
-    assert_eq!(reason(&e), ErrorReason::Unverified);
-    assert!(e.message().contains("E34"), "{e}");
-    assert_eq!(fake(&hub, |s| s.clients()[&2].slot.clone()), "");
-    out += e.message();
-    // A move to spectators works.
+    };
+    let sent_side = |hub: &Hub| {
+        fake(hub, |s| match s.ledger().moderations.last() {
+            Some(Body::Moderate { side, .. }) => *side,
+            _ => u32::MAX - 1,
+        })
+    };
+    // Into a blue slot with BLUE.
     let r = m
-        .move_player(pb::MovePlayerRequest {
-            write: write(&l, "move2", c),
-            player_key: ka.clone(),
-            coalition: Coalition::Unspecified as i32,
-            slot: String::new(),
-        })
+        .move_player(mv("move1", Coalition::Blue, "55"))
+        .await
+        .expect("blue slot")
+        .into_inner();
+    applied(r.result);
+    assert_eq!(held(&hub), (2, "55".to_owned()));
+    assert_eq!(sent_side(&hub), 2);
+    // UNSPECIFIED with no slot: out of the slot, the same side. The API
+    // sends KEEP; the agent resolves it.
+    let r = m
+        .move_player(mv("move2", Coalition::Unspecified, ""))
+        .await
+        .expect("keep")
+        .into_inner();
+    applied(r.result);
+    assert_eq!(held(&hub), (2, String::new()));
+    assert_eq!(sent_side(&hub), moderation::KEEP);
+    // UNSPECIFIED with a slot: the slot's coalition.
+    let r = m
+        .move_player(mv("move3", Coalition::Unspecified, "41"))
+        .await
+        .expect("red slot")
+        .into_inner();
+    applied(r.result);
+    assert_eq!(held(&hub), (1, "41".to_owned()));
+    // RED against a blue slot: refused by the agent, no move.
+    let r = m
+        .move_player(mv("move4", Coalition::Red, "56"))
+        .await
+        .expect("other")
+        .into_inner();
+    let res = r.result.expect("a result");
+    assert_eq!(res.outcome, pb::Outcome::Refused as i32, "{res:?}");
+    assert_eq!(res.message, "the slot belongs to the other coalition");
+    assert_eq!(held(&hub), (1, "41".to_owned()));
+    // A slot the mission does not list: refused.
+    let r = m
+        .move_player(mv("move5", Coalition::Blue, "99999999"))
+        .await
+        .expect("missing")
+        .into_inner();
+    let res = r.result.expect("a result");
+    assert_eq!(res.outcome, pb::Outcome::Refused as i32, "{res:?}");
+    assert_eq!(res.message, "the mission lists no slot with this ID");
+    out += &res.message;
+    // NEUTRAL with a slot: invalid, nothing sent.
+    let before = fake(&hub, |s| s.ledger().moderations.len());
+    let e = m
+        .move_player(mv("move6", Coalition::Neutral, "55"))
+        .await
+        .expect_err("neutral slot");
+    assert_eq!(e.code(), Code::InvalidArgument);
+    assert_eq!(field(&e), "slot");
+    assert_eq!(fake(&hub, |s| s.ledger().moderations.len()), before);
+    out += e.message();
+    // NEUTRAL with no slot: spectators.
+    let r = m
+        .move_player(mv("move7", Coalition::Neutral, ""))
         .await
         .expect("spectators")
         .into_inner();
     applied(r.result);
-    assert_eq!(fake(&hub, |s| s.clients()[&2].slot.clone()), "");
+    assert_eq!(held(&hub), (0, String::new()));
+    assert_eq!(sent_side(&hub), 0);
 
     // The connection ID now belongs to someone else: NOT_BOUND. The roster
     // is made to believe a ghost holds connection 4, where Cy is.
@@ -742,6 +804,11 @@ async fn the_moderation_service_works_end_to_end_without_a_ucid() {
     assert_eq!(
         seen,
         vec![
+            // move1, move2, move3 and move7; the refused and the invalid
+            // moves are no event.
+            (A::Move as i32, ka.as_str()),
+            (A::Move as i32, ka.as_str()),
+            (A::Move as i32, ka.as_str()),
             (A::Move as i32, ka.as_str()),
             (A::Kick as i32, kb.as_str()),
             (A::Ban as i32, ka.as_str()),
@@ -755,7 +822,7 @@ async fn the_moderation_service_works_end_to_end_without_a_ucid() {
             .iter()
             .all(|m| m.result.as_ref().unwrap().outcome == pb::Outcome::Applied as i32)
     );
-    assert_eq!(moderated[1].reason, "spam");
+    assert_eq!(moderated[4].reason, "spam");
     // The key filter finds a player's moderation events.
     let mine = events_of(
         &ch,

@@ -1,5 +1,27 @@
 # Release notes
 
+## Next version, Draft
+
+### Changed
+
+- **`MovePlayer` keeps the player's coalition when `coalition` is
+  `COALITION_UNSPECIFIED`.** In 0.1.0 it moved the player to spectators. With no `slot`,
+  the player leaves their slot and stays on their side; with a `slot`, they go to that
+  slot on its own coalition. Use `COALITION_NEUTRAL` to move a player to spectators.
+  This changes `v1alpha1` behavior a 0.1.0 controller may rely on.
+- **`MovePlayer` moves a player into a slot.** `slot` is the slot's unit ID, as the
+  mission lists it. `COALITION_RED` or `COALITION_BLUE` with a slot of the other
+  coalition is refused, and `COALITION_NEUTRAL` with a slot is `INVALID_ARGUMENT`.
+- The agent refuses these moves before DCS sees them, with outcome `REFUSED` and one of
+  these messages: `the mission lists no slot with this ID`, `the slot belongs to the
+  other coalition`, `another player holds the slot`, `a crew seat is not a slot the
+  agent moves players into`, `DCS gave no slot list`, `DCS gave no player list`, `DCS
+  gave no slot for another player` and `DCS gave no side for the player`. DCS itself
+  accepts a slot ID the mission does not have and leaves the player in a slot with no
+  aircraft.
+- The transport's `layout_version` is 2. A 0.1.0 agent and a sidecar of this version
+  refuse each other; install both from the same release.
+
 ## 0.1.0, the first release
 
 The first release of nanoprobe, 0.1: an agent inside DCS World, a sidecar that owns a

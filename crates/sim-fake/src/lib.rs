@@ -606,6 +606,9 @@ pub struct FakeSim {
     clients: BTreeMap<u32, FakeClient>,
     /// The server's ban list. It outlives the DCS process, as DCS's does.
     bans: Vec<FakeBan>,
+    /// The mission's player slots: slot ID to coalition, 1 red or 2 blue,
+    /// as `DCS.getAvailableSlots` lists them, taken slots included.
+    slots: BTreeMap<String, u32>,
     /// The objects the `SUBSCRIBE` last received named.
     subscribed: BTreeSet<u64>,
 }
@@ -725,6 +728,7 @@ impl FakeSim {
             burst: false,
             clients: BTreeMap::new(),
             bans: Vec::new(),
+            slots: BTreeMap::new(),
             subscribed: BTreeSet::new(),
         };
         f.load_mission();
@@ -1035,6 +1039,11 @@ impl FakeSim {
         }
     }
 
+    /// The mission offers a player slot of `side`, 1 red or 2 blue.
+    pub fn offer_slot(&mut self, slot: &str, side: u32) {
+        self.slots.insert(slot.to_owned(), side);
+    }
+
     /// The clients connected now.
     pub fn clients(&self) -> &BTreeMap<u32, FakeClient> {
         &self.clients
@@ -1241,11 +1250,14 @@ impl FakeSim {
         else {
             return;
         };
+        let is_slot = *action == moderation::SLOT;
         if !(moderation::KICK..=moderation::SLOT).contains(action)
             || ucid.is_empty()
             || !seconds.is_finite()
             || *seconds < 0.0
             || *player == 1
+            || (*side > 2 && !(*side == moderation::KEEP && is_slot))
+            || (is_slot && *side == 0 && !slot.is_empty())
         {
             return self.result(cmd, rc::BAD_PAYLOAD, 0, "", Lv::Nil);
         }
@@ -1282,8 +1294,12 @@ impl FakeSim {
                 }
             }
             _ => {
+                let side = match self.slot_side(*player, *side, slot) {
+                    Ok(side) => side,
+                    Err(message) => return self.result(cmd, rc::DCS_REFUSED, 0, message, Lv::Nil),
+                };
                 if let Some(c) = self.clients.get_mut(player) {
-                    c.side = *side;
+                    c.side = side;
                     c.slot = slot.clone();
                 }
                 self.player_record(pe::SLOT, *player, "");
@@ -1291,6 +1307,39 @@ impl FakeSim {
         }
         self.ledger.moderations.push(cmd.body.clone());
         self.result(cmd, rc::APPLIED, 0, "", Lv::Nil);
+    }
+
+    /// The side a `SLOT` move goes to, or its refusal, as the agent's handler
+    /// resolves it (spec/commands.md, "Slot moves").
+    fn slot_side(&self, player: u32, side: u32, slot: &str) -> Result<u32, &'static str> {
+        if slot.is_empty() {
+            if side != moderation::KEEP {
+                return Ok(side);
+            }
+            return self
+                .clients
+                .get(&player)
+                .map(|c| c.side)
+                .filter(|s| *s <= 2)
+                .ok_or("DCS gave no side for the player");
+        }
+        if is_seat(slot) {
+            return Err("a crew seat is not a slot the agent moves players into");
+        }
+        let Some(&listed) = self.slots.get(slot) else {
+            return Err("the mission lists no slot with this ID");
+        };
+        if side != moderation::KEEP && side != listed {
+            return Err("the slot belongs to the other coalition");
+        }
+        if self
+            .clients
+            .iter()
+            .any(|(id, c)| *id != player && c.slot == slot)
+        {
+            return Err("another player holds the slot");
+        }
+        Ok(listed)
     }
 
     /// The ground truth.
@@ -3594,4 +3643,12 @@ impl nanoprobe_sidecar::conformance::Target for FakeSim {
     fn spawn_point(&self) -> (f64, f64) {
         (0.0, 0.0)
     }
+}
+
+/// Whether a slot ID names a crew seat, `<unitId>_<n>`, as the agent's
+/// `SLOT` handler reads it.
+fn is_seat(slot: &str) -> bool {
+    slot.rsplit_once('_').is_some_and(|(base, n)| {
+        !base.is_empty() && !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit())
+    })
 }

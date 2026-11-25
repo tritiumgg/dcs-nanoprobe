@@ -72,6 +72,21 @@
 //! `slot` (the next `SLOT` record that shows spectators), with the `EVENT`
 //! ids that came in the 10 s after the record and whether a `BIRTH` was among
 //! them (the aircraft spawned).
+//!
+//! # `--scenario moves`
+//!
+//! Slot moves on the final agent (spec/commands.md, "Slot moves"), with a
+//! scripted client (`cargo xtask commands <server> --part moves`) that joins
+//! and holds no slot. The caller's `joined` answer is a blue slot ID the
+//! mission lists. Each step sends one `MODERATE SLOT` and reads the client's
+//! side and slot from `PLAYERS` until they match: `blue_no_slot`,
+//! `blue_slot`, `keep_leaves_slot`, `other_coalition_refused`,
+//! `missing_slot_refused`, `red_no_slot`, `keep_takes_slot_coalition` (from
+//! red), `keep_race` and `spectators`. Each step prints the handler's `cost_us`. In `keep_race`
+//! the caller makes the client change to red itself (`race_go`); the probe
+//! sends `KEEP` with no slot every 100 ms around the change and checks the
+//! client ends on red, where a side read before the change would have put it
+//! back on blue.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -662,8 +677,9 @@ pub fn run(args: &[String]) -> Result<bool, String> {
     let outcome = match r.o.scenario.as_str() {
         "functional" => functional(&mut r),
         "moderation" => moderated(&mut r),
+        "moves" => moves(&mut r),
         other => Err(format!(
-            "--scenario is functional or moderation, not {other}"
+            "--scenario is functional, moderation or moves, not {other}"
         )),
     };
     if outcome.is_err() {
@@ -1617,6 +1633,238 @@ fn e35(r: &mut Rig, who: &Who) -> Result<(), String> {
     r.pass("e35_slot_race", &detail.to_string());
     r.phase("e35_done", json!({}));
     r.wait_file("e35_checked", 120)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// The moves scenario.
+
+/// Where the client is: its side and slot as `PLAYERS` lists them.
+fn where_is(r: &mut Rig, who: &Who) -> Result<Option<(u32, String)>, String> {
+    let res = r.expect("PLAYERS", 0, 0, Body::Players, 0)?;
+    Ok(lv_items(&res.value).into_iter().find_map(|p| {
+        let id = match lv_field(p, "id")? {
+            Lv::Number(n) => *n as u32,
+            _ => return None,
+        };
+        if id != who.id {
+            return None;
+        }
+        let side = match lv_field(p, "side") {
+            Some(Lv::Number(n)) => *n as u32,
+            _ => u32::MAX,
+        };
+        let slot = lv_field(p, "slot").and_then(lv_text).unwrap_or_default();
+        Some((side, slot))
+    }))
+}
+
+/// Wait up to `secs` for the client to be at `want`; where it was last.
+fn settle(
+    r: &mut Rig,
+    who: &Who,
+    want: &(u32, String),
+    secs: u64,
+) -> Result<Option<(u32, String)>, String> {
+    let by = Instant::now() + Duration::from_secs(secs);
+    loop {
+        let at = where_is(r, who)?;
+        if at.as_ref() == Some(want) || Instant::now() > by {
+            return Ok(at);
+        }
+        r.until("a moment", 1, |_| false)?;
+    }
+}
+
+/// One move: `MODERATE SLOT` with `side` and `slot`, the answer `code` with
+/// `message` for a refusal, and the client at `want` afterwards.
+fn move_step(
+    r: &mut Rig,
+    who: &Who,
+    name: &str,
+    (side, slot): (u32, &str),
+    (code, message): (u16, &str),
+    want: (u32, &str),
+) -> Result<(), String> {
+    let body = moderate(who, moderation::SLOT, side, slot, "");
+    let res = r.call(0, 0, body)?;
+    if res.code != code || (code != result::APPLIED as u16 && res.message != message) {
+        return Err(r.fail(
+            name,
+            &format!(
+                "answered {} {:?}, wanted {} {message:?}",
+                code_name(res.code),
+                res.message,
+                code_name(code)
+            ),
+        ));
+    }
+    let want = (want.0, want.1.to_owned());
+    // A refusal changes nothing, so its read is the state the step wants.
+    let at = settle(r, who, &want, 10)?;
+    if at.as_ref() != Some(&want) {
+        return Err(r.fail(name, &format!("the client is at {at:?}, not {want:?}")));
+    }
+    r.pass(
+        name,
+        &format!(
+            "{} {:?}; side {}, slot {:?}; cost_us {}",
+            code_name(res.code),
+            res.message,
+            want.0,
+            want.1,
+            res.cost_us
+        ),
+    );
+    Ok(())
+}
+
+fn moves(r: &mut Rig) -> Result<(), String> {
+    let applied = result::APPLIED as u16;
+    let refused = result::DCS_REFUSED as u16;
+    let keep = moderation::KEEP;
+    r.ready()?;
+    r.pass(
+        "link",
+        &format!(
+            "campaign {}, generation {}, lifecycle {}",
+            r.o.campaign, r.generation, r.life
+        ),
+    );
+    // The moves act on one player: the server must hold no one else.
+    match r.listed() {
+        Ok(l) if l.is_empty() => r.pass("players_query", "PLAYERS answered with no player"),
+        Ok(l) => {
+            return Err(r.fail(
+                "players_query",
+                &format!("{} player(s) are connected", l.len()),
+            ));
+        }
+        Err(e) => return Err(r.fail("players_query", &e)),
+    }
+    r.phase("ready", json!({}));
+    let blue = r.wait_file("joined", 300)?;
+    if blue.is_empty() {
+        return Err(r.fail("connect", "the caller gave no blue slot"));
+    }
+    let Some(first) = wait_connect(r, 0, 60)? else {
+        return Err(r.fail("connect", "no CONNECT record after the client joined"));
+    };
+    let who = Who {
+        id: first.id,
+        ucid: first.ucid.clone(),
+    };
+    let tag = r.tag(&first.ucid);
+    match r.listed() {
+        Ok(l) if l.len() == 1 && l[0].0 == who.id && l[0].1 == tag => r.pass(
+            "players_query_client",
+            "PLAYERS lists the client and no one else",
+        ),
+        Ok(l) => {
+            return Err(r.fail(
+                "players_query_client",
+                &format!("PLAYERS lists {} players, not the client alone", l.len()),
+            ));
+        }
+        Err(e) => return Err(r.fail("players_query_client", &e)),
+    }
+    r.pass(
+        "connect",
+        &format!("connection {}, blue slot {blue}", who.id),
+    );
+    let blue = blue.as_str();
+    move_step(r, &who, "blue_no_slot", (2, ""), (applied, ""), (2, ""))?;
+    move_step(r, &who, "blue_slot", (2, blue), (applied, ""), (2, blue))?;
+    move_step(
+        r,
+        &who,
+        "keep_leaves_slot",
+        (keep, ""),
+        (applied, ""),
+        (2, ""),
+    )?;
+    move_step(
+        r,
+        &who,
+        "other_coalition_refused",
+        (1, blue),
+        (refused, "the slot belongs to the other coalition"),
+        (2, ""),
+    )?;
+    move_step(
+        r,
+        &who,
+        "missing_slot_refused",
+        (2, "99999999"),
+        (refused, "the mission lists no slot with this ID"),
+        (2, ""),
+    )?;
+    // From red, so KEEP can only reach blue from the slot's list.
+    move_step(r, &who, "red_no_slot", (1, ""), (applied, ""), (1, ""))?;
+    move_step(
+        r,
+        &who,
+        "keep_takes_slot_coalition",
+        (keep, blue),
+        (applied, ""),
+        (2, blue),
+    )?;
+
+    // The race: the client changes to red itself while KEEP moves go out.
+    r.phase("race_armed", json!({}));
+    r.wait_file("race_go", 60)?;
+    // Only a record after this mark is the client's own change.
+    let mark = r.players.len();
+    let (mut before, mut after, mut changed) = (0u32, 0u32, None::<Instant>);
+    let by = Instant::now() + Duration::from_secs(60);
+    while after < 5 {
+        if Instant::now() > by {
+            return Err(r.fail("keep_race", "the client did not change to red in 60 s"));
+        }
+        let res = r.call(0, 0, moderate(&who, moderation::SLOT, keep, "", ""))?;
+        if res.code != applied {
+            return Err(r.fail(
+                "keep_race",
+                &format!("KEEP answered {} {:?}", code_name(res.code), res.message),
+            ));
+        }
+        if changed.is_none()
+            && r.players
+                .iter()
+                .skip(mark)
+                .any(|p| p.id == who.id && p.event == SLOT && p.side == 1)
+        {
+            changed = Some(Instant::now());
+        }
+        if changed.is_some() {
+            after += 1;
+        } else {
+            before += 1;
+        }
+        r.until("a moment", 0, |_| false)?;
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    if before == 0 {
+        return Err(r.fail(
+            "keep_race",
+            "no KEEP move went out before the change, so the run shows nothing of the race",
+        ));
+    }
+    let want = (1, String::new());
+    let at = settle(r, &who, &want, 10)?;
+    if at.as_ref() != Some(&want) {
+        return Err(r.fail(
+            "keep_race",
+            &format!("after {before} KEEP moves before and {after} after the change the client is at {at:?}, not red"),
+        ));
+    }
+    r.pass(
+        "keep_race",
+        &format!("{before} KEEP moves before the change and {after} after; the client stays on red with no slot"),
+    );
+    r.phase("race_done", json!({}));
+    r.wait_file("race_checked", 60)?;
+    move_step(r, &who, "spectators", (0, ""), (applied, ""), (0, ""))?;
     Ok(())
 }
 

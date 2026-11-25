@@ -24,7 +24,7 @@ use tonic::{Code, Request, Response, Status};
 use super::commands::{dcs_not_ready, unleased};
 use super::players::connected;
 use crate::auth::{Access, require};
-use crate::convert::invalid;
+use crate::convert::{dcs_coalition, invalid};
 use crate::hub::{Call, Hub, Inner, Need, PendingModeration};
 use crate::idem::EffectKind;
 
@@ -355,12 +355,7 @@ impl ModerationService for Moderation {
             MovePlayerResponse,
             |g: &mut Inner, c, role, r: &MovePlayerRequest| {
                 check_text(&r.slot, "slot", 128)?;
-                if !r.slot.is_empty() {
-                    return Err(unverified(
-                        "slot",
-                        "a move into an aircraft slot (net.force_player_slot)",
-                    ));
-                }
+                let side = move_side(r.coalition, &r.slot)?;
                 let ucid = g
                     .roster
                     .ucid_of(&r.player_key)
@@ -376,12 +371,63 @@ impl ModerationService for Moderation {
                     r.player_key.clone(),
                     ucid,
                     conn,
-                    0,
+                    side,
                     0.0,
                     &r.slot,
                     "",
                 )
             }
         )
+    }
+}
+
+/// The `MODERATE SLOT` side of a `MovePlayer` coalition: `KEEP` for
+/// unspecified, which the agent resolves to the player's side or the slot's
+/// coalition, else the DCS side (spec/commands.md, "Slot moves"). Spectators
+/// hold no slot, and a value the API does not define is refused.
+fn move_side(coalition: i32, slot: &str) -> Result<u32, Status> {
+    if coalition == pb::Coalition::Unspecified as i32 {
+        return Ok(moderation::KEEP);
+    }
+    let side = dcs_coalition(coalition).ok_or_else(|| invalid("coalition", "not a coalition"))?;
+    if side == 0 && !slot.is_empty() {
+        return Err(invalid(
+            "slot",
+            "spectators hold no slot; leave it empty for COALITION_NEUTRAL",
+        ));
+    }
+    Ok(side)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_coalition_maps_to_a_dcs_side_and_unspecified_to_keep() {
+        let side = |c: pb::Coalition, slot: &str| move_side(c as i32, slot);
+        assert_eq!(
+            side(pb::Coalition::Unspecified, "").ok(),
+            Some(moderation::KEEP)
+        );
+        assert_eq!(
+            side(pb::Coalition::Unspecified, "8580").ok(),
+            Some(moderation::KEEP)
+        );
+        assert_eq!(side(pb::Coalition::Neutral, "").ok(), Some(0));
+        assert_eq!(side(pb::Coalition::Red, "").ok(), Some(1));
+        assert_eq!(side(pb::Coalition::Red, "41").ok(), Some(1));
+        assert_eq!(side(pb::Coalition::Blue, "").ok(), Some(2));
+        assert_eq!(side(pb::Coalition::Blue, "8580").ok(), Some(2));
+    }
+
+    #[test]
+    fn neutral_with_a_slot_and_an_unknown_coalition_are_invalid() {
+        let e = move_side(pb::Coalition::Neutral as i32, "8580").expect_err("neutral slot");
+        assert_eq!(e.code(), Code::InvalidArgument);
+        assert!(format!("{e:?}").contains("slot"), "{e:?}");
+        let e = move_side(9, "").expect_err("coalition 9");
+        assert_eq!(e.code(), Code::InvalidArgument);
+        assert!(format!("{e:?}").contains("coalition"), "{e:?}");
     }
 }

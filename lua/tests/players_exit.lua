@@ -20,6 +20,9 @@
 --   what E34 settles on a real server.
 -- * moderation-fails: the same, and a rejoin after the ban is let through: the
 --   probe fails `ban_refused`, unbans the client and stops.
+-- * moves:          slot moves (spec/commands.md, "Slot moves"): a client joins
+--   with no slot, the mission lists blue slot 8580, and the probe moves it, is
+--   refused twice, and sends KEEP while this script changes the client to red.
 --
 -- The mark panel fields and what a ban does to a connected player are
 -- UNVERIFIED; the live run settles them.
@@ -29,7 +32,7 @@ local root = S.root()
 local mock = dofile(root .. 'lua/mock/dcs.lua')
 
 local MODULE, _, PROBE, _, _, SCENARIO = ...
-local SCENARIOS = { 'functional-on', 'functional-off', 'mismatch', 'moderation', 'moderation-fails' }
+local SCENARIOS = { 'functional-on', 'functional-off', 'mismatch', 'moderation', 'moderation-fails', 'moves', 'moves-occupied' }
 local known = false
 for _, name in ipairs(SCENARIOS) do
   known = known or name == SCENARIO
@@ -345,12 +348,75 @@ local function check_moderation_fails()
   S.ok('a rejoin after a ban fails the run; the probe unbans the client and stops')
 end
 
+-- The DCS server's and the client's parts of the moves scenario.
+local function check_moves()
+  local current, go, frames = 2, false, 0
+  local function each(host)
+    if go then
+      frames = frames + 1
+      if frames == 50 then
+        host:change_slot(current, 1, '')
+      end
+    end
+  end
+  local function on_phase(host, e)
+    if e.name == 'ready' then
+      host.slots = { red = {}, blue = { { unitId = '8580' } } }
+      host:connect(current, { ucid = UCID, name = 'np-client', side = 0, slot = '' })
+      answer('joined', '8580')
+    elseif e.name == 'race_armed' then
+      go = true
+      answer('race_go')
+    elseif e.name == 'race_done' then
+      answer('race_checked')
+    end
+  end
+  local verdict, _, text, host = run('--scenario moves', false, on_phase, each)
+  assert(verdict.ev == 'verdict' and verdict.pass, 'failed:\n' .. text:sub(-8000))
+  local by = steps_of(verdict)
+  for _, name in ipairs({ 'link', 'players_query', 'players_query_client', 'connect', 'blue_no_slot', 'blue_slot', 'keep_leaves_slot',
+    'other_coalition_refused', 'missing_slot_refused', 'red_no_slot', 'keep_takes_slot_coalition', 'keep_race',
+    'spectators' }) do
+    assert(by[name] and by[name].verdict == 'pass', name .. ': ' .. tostring(by[name] and by[name].detail)
+      .. '\n' .. text:sub(-5000))
+  end
+  assert(by.other_coalition_refused.detail:find('the slot belongs to the other coalition', 1, true),
+    by.other_coalition_refused.detail)
+  -- The refused moves never reached DCS; every KEEP after the change kept red.
+  for _, m in ipairs(host.moderation) do
+    assert(m.call ~= 'force_player_slot' or m.args[3] ~= '99999999', 'the missing slot reached DCS')
+    assert(m.call ~= 'force_player_slot' or not (m.args[2] == 1 and m.args[3] == '8580'),
+      'the other coalition slot reached DCS')
+  end
+  assert(host.players[current].side == 0 and host.players[current].slot == '', 'the client is not a spectator at the end')
+  S.ok('moves: ' .. verdict.pass_steps .. ' steps pass; ' .. by.keep_race.detail)
+end
+
+-- A player already connected: the moves scenario fails before any move.
+local function check_moves_occupied()
+  local function each(host)
+    if not host.players[7] then
+      host.players[7] = { ucid = 'b1b2c3d4e5f60718293a4b5c6d7e8f90', name = 'np-visitor', side = 2, slot = '', ping = 0 }
+    end
+  end
+  local verdict, _, text, host = run('--scenario moves', false, function() end, each)
+  assert(verdict.ev == 'verdict' and not verdict.pass, 'a run with a visitor passed')
+  local by = steps_of(verdict)
+  assert(by.players_query and by.players_query.verdict == 'fail', text:sub(-3000))
+  for _, m in ipairs(host.moderation) do
+    assert(m.call ~= 'force_player_slot', 'a visitor was moved')
+  end
+  S.ok('moves: a connected visitor fails players_query before any move')
+end
+
 local checks = {
   ['functional-on'] = function() check_functional(true) end,
   ['functional-off'] = function() check_functional(false) end,
   mismatch = check_mismatch,
   moderation = check_moderation,
   ['moderation-fails'] = check_moderation_fails,
+  moves = check_moves,
+  ['moves-occupied'] = check_moves_occupied,
 }
 local ok, err = pcall(checks[SCENARIO])
 local pid = (S.read(pidfile) or ''):match('%d+')

@@ -289,7 +289,8 @@ fn every_moderation_call_reaches_the_player_and_ucid_mismatch_is_not_bound() {
     p.w.sim.connect_client(3, "ucid-2", "Bo", 1);
     p.ticks(4);
 
-    // A move to a slot, then to spectators.
+    // A move to a slot the mission lists, then to spectators.
+    p.w.sim.offer_slot("55", 2);
     assert_eq!(
         p.moderate(moderate(moderation::SLOT, 2, "ucid-1", "55", 2)),
         Outcome::Applied

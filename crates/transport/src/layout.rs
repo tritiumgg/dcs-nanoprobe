@@ -11,7 +11,7 @@ pub mod status {
     /// ASCII `npmap` and three zero bytes, read as a little-endian `u64`.
     pub const MAGIC_VALUE: u64 = u64::from_le_bytes(*b"npmap\0\0\0");
     /// The `layout_version` this crate writes and accepts.
-    pub const LAYOUT_VERSION_VALUE: u32 = 1;
+    pub const LAYOUT_VERSION_VALUE: u32 = 2;
 
     macro_rules! fields {
         ($($konst:ident $name:literal $off:literal $width:literal $count:literal $writer:ident;)*) => {
@@ -229,6 +229,10 @@ codes! {
     /// `MODERATE` actions (spec/commands.md, "Codes: moderation").
     moderation "moderation" { KICK = 1, BAN = 2, UNBAN = 3, SLOT = 4, }
 }
+
+/// `MODERATE SLOT`'s side for "the side the agent resolves": the player's
+/// own, or the slot's coalition (spec/commands.md, "Slot moves").
+pub const SLOT_KEEP: u32 = 0xFFFF_FFFF;
 
 codes! {
     /// `CLEAR_DEBRIS` volume shapes (spec/commands.md, "Codes: volume").

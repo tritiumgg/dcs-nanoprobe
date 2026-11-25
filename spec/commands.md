@@ -1236,17 +1236,21 @@ and no Lua error crosses a Rust frame that owns a value.
 ## Moderation
 
 `MODERATE` runs in the hook's state, where `net` is. `net.kick`, `net.banlist_add`,
-`net.banlist_add_by_ucid`, `net.banlist_remove`, `net.force_player_slot` and
-`net.get_player_info` are functions there (LIVE, `lua/mock/api/hook.txt`, written by
+`net.banlist_add_by_ucid`, `net.banlist_remove`, `net.force_player_slot`,
+`net.get_player_info`, `net.get_player_list` and `DCS.getAvailableSlots` are functions
+there (LIVE, `lua/mock/api/hook.txt`, written by
 `lua/probes/tools/api-dump.lua` on DCS 2.9.31.29434 under Wine, 2026-11-11).
 `net.kick(player, reason)`, `net.banlist_add(player, seconds, reason)`,
 `net.banlist_remove(ucid)` and `net.force_player_slot(player, 0, '')` do what the
 table below says, and a ban survives a DCS restart (LIVE, E34,
-docs/results/2026-11-15-s16-players-moderation.md). `net.banlist_add_by_ucid`'s
+docs/results/2026-11-15-s16-players-moderation.md). What `net.force_player_slot` does
+with each side and slot is in "Slot moves" below. `net.banlist_add_by_ucid`'s
 argument order is UNVERIFIED. The sidecar names a player to the agent by connection ID
 and ucid; the API names a player by player key (spec/world.md, "Players"). The API
-refuses a ban of a player with no connection, a ban of seconds 0 and a move into a slot
-with `UNIMPLEMENTED` and reason `UNVERIFIED` until E34 verifies them.
+refuses a ban of a player with no connection and a ban of seconds 0 with
+`UNIMPLEMENTED` and reason `UNVERIFIED` until E34 verifies them. `MovePlayer` sends
+`KEEP` for `COALITION_UNSPECIFIED` and side 0, 1 or 2 for neutral, red or blue;
+`COALITION_NEUTRAL` with a slot is `INVALID_ARGUMENT` on `slot`.
 
 ### Layout: MODERATE
 
@@ -1254,16 +1258,18 @@ with `UNIMPLEMENTED` and reason `UNVERIFIED` until E34 verifies them.
 |---|---|---|---|
 | 0x0000 | u32 | action | A `moderation` code |
 | 0x0004 | u32 | player | The DCS connection ID, 0 for none |
-| 0x0008 | u32 | side | The coalition to move to, for `SLOT`; 0 for spectators |
+| 0x0008 | u32 | side | For `SLOT`: the DCS side to move to, 0 for spectators, 1 red, 2 blue, or `KEEP` (0xFFFFFFFF) for the side the agent resolves. 0 for the other actions |
 | 0x000C | pad[4] | reserved | |
 | 0x0010 | f64 | seconds | How long a `BAN` lasts, 0 for DCS's default |
 | + | str | ucid | The client's ucid |
-| + | str | slot | The slot ID to move to, for `SLOT`; empty for spectators |
+| + | str | slot | The slot ID to move to, for `SLOT`; empty for no slot |
 | + | str | reason | Shown to the player, for `KICK` and `BAN` |
 
 The handler gets `action`, `player`, `side`, `seconds`, `ucid`, `slot` and `reason`.
 The agent refuses with `BAD_PAYLOAD` an action it does not know, an empty `ucid`, a
-`seconds` that is not finite or is below 0, and player 1, which is the server itself.
+`seconds` that is not finite or is below 0, player 1, which is the server itself, a
+`side` above 2 that is not `KEEP`, `KEEP` with any action but `SLOT`, and side 0 with
+a slot.
 
 For every action that names a player (`KICK`, `SLOT`, and `BAN` with a player) the
 handler first reads `net.get_player_info(player, 'ucid')`. A player who is not
@@ -1280,7 +1286,59 @@ belongs to someone else, or to no one.
 | 4 | SLOT | `net.force_player_slot(player, side, slot)` |
 
 A call that raises is `DCS_REFUSED`; one that returns `false` is `DCS_REFUSED` with the
-message `DCS returned false`. Otherwise `APPLIED`. `MODERATE` is an effect: a result
+message `DCS returned false`. Otherwise `APPLIED`.
+
+### Slot moves
+
+What `net.force_player_slot(player, side, slot)` does (LIVE, DCS 2.9.31.29434 server
+under Wine with a Windows client, docs/results/2026-11-24-player-moves.md):
+
+- With an empty slot it sets the side it is given, 0, 1 or 2, and the player holds no
+  slot. A move to the side the player is on changes nothing. A player in a slot moved
+  with their own side leaves the slot and keeps the side.
+- With a slot of the given side it puts the player in the slot, from no slot or from
+  the other side. With a slot of the other coalition it returns `false` and changes
+  nothing. With a slot ID the mission does not have it returns `true`, and the player
+  then holds that slot with no unit.
+- A slot ID is a string, the slot's `unitId` in `DCS.getAvailableSlots(coalition)`
+  (`'red'` or `'blue'`). On the server that list holds every slot of the coalition,
+  slots players hold included.
+- It applies the side it is given, whatever the player chose since.
+
+Before it calls `force_player_slot`, the `SLOT` handler resolves the side and checks the
+slot. Every DCS call here runs under `pcall`; a list entry's `unitId` is read with
+`rawget` and compared with `slot` as text.
+
+1. With `KEEP` and an empty slot, the side is `net.get_player_info(player, 'side')`.
+2. A slot of the form `<unitId>_<n>`, a crew seat (spec/world.md, "Players"), is refused.
+3. With a slot, the handler reads `DCS.getAvailableSlots` for the coalition the side
+   names: `'red'` for 1, `'blue'` for 2. For `KEEP` it reads `'red'`, then `'blue'`
+   only when red does not list the slot, and the side is the coalition whose list
+   holds it. A slot that no list read holds is refused; a
+   slot that only the other coalition's list holds is refused. With side 1 or 2, the
+   handler reads the other coalition's list only to tell those two refusals apart, after
+   the first list missed.
+4. With a slot, a slot that another connected player holds (`net.get_player_info(q,
+   'slot')` equal to `slot` as text, for every `q` in `net.get_player_list()` but the
+   server and `player`) is refused. A move into the slot the player already holds goes
+   to DCS (UNVERIFIED).
+
+Each refusal is `DCS_REFUSED` with one of these messages, exactly:
+
+| Refusal | Message |
+|---|---|
+| The player's side cannot be read: a raise, or not 0, 1 or 2 | `DCS gave no side for the player` |
+| A crew seat | `a crew seat is not a slot the agent moves players into` |
+| A list read raised or is not a table | `DCS gave no slot list` |
+| No list read holds the slot | `the mission lists no slot with this ID` |
+| Only the other coalition's list holds the slot | `the slot belongs to the other coalition` |
+| Another connected player holds the slot | `another player holds the slot` |
+| `net.get_player_list` raised or is not a table | `DCS gave no player list` |
+| Another player's `net.get_player_info(q, 'slot')` raised | `DCS gave no slot for another player` |
+
+The agent's read narrows the race with a player who changes side, to a change DCS has
+not applied by the frame of the call; it cannot catch that one. A side of 1 or 2 always
+overrides the player's own change, as the caller asked. `MODERATE` is an effect: a result
 that is lost is unknown, and the command is never sent again. Each `APPLIED` one is an
 event in the API's stream with the token that asked for it.
 

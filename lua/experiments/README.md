@@ -142,6 +142,20 @@ inventory lists an aircraft, and reads its warehouse. `lua/tests/warehouse_exper
 `step.lua` on the mock. The results are in
 `docs/results/2026-11-16-warehouse-player-deltas.md`.
 
+## Player moves
+
+What `net.force_player_slot(player, side, slot)` does with each side, into a slot, against
+a slot of another coalition, and when the player changes side just before the call. The
+server needs one connected client that holds no slot; it joins with `cargo xtask client
+join`.
+
+`run.sh <server> <steps> [settle]` fills the placeholders of `moves.lua` and runs it in
+the server's hook state; `moves.lua` describes the step list. A step with a `wait` side
+waits for the client to change to that side and calls in the same frame; `run.sh --client
+<client> <side>` runs `client-side.lua`, which makes that change with
+`net.set_coalition`. `lua/tests/player_moves_experiments.lua` rehearses both on the mock.
+The results are in `docs/results/2026-11-24-player-moves.md`.
+
 ## Junk
 
 The snippets in `junk/` settle what `world.removeJunk` clears (`junk.lua`) and whether
