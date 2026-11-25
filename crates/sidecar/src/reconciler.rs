@@ -18,7 +18,7 @@
 //! agent writes only for rows of its table: units and statics, never
 //! scenery. `EVENT` records are hints and are counted, not read.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use nanoprobe_transport::codec::Lv;
 use nanoprobe_transport::layout::{gap_class, kind, lifecycle as lc, result as rc};
@@ -157,6 +157,10 @@ pub struct Counters {
     /// Those that DCS did not apply, or that could not be sent: the unit
     /// runs at the life DCS gave it, and the next life sample says so.
     pub lives_lost: u64,
+    /// `AIRBASE_OWNER` and `WAREHOUSE_SET` commands that carried a revised
+    /// FARP's old owner or stock to its new airbase (spec/world.md,
+    /// "Revising a static").
+    pub carried: u64,
     /// Ruins DCS spawned: `STATIC_SPAWN`s with `dead = true` answered
     /// `APPLIED` (spec/world.md, "Ruins").
     pub ruins_spawned: u64,
@@ -202,6 +206,18 @@ impl Counters {
         self.purged_deaths += o.purged_deaths;
         self.orphan_destroys += o.orphan_destroys;
     }
+}
+
+/// A revised FARP's old owner and stock, owed to its newest airbase
+/// (spec/world.md, "Revising a static").
+#[derive(Clone, Debug)]
+struct Carry {
+    /// What the samples last said of the airbase before the first revision.
+    seen: BaseSeen,
+    /// Its commands are written for the newest airbase.
+    sent: bool,
+    /// Those commands not yet answered.
+    inflight: u32,
 }
 
 /// What the latest samples say about one airbase and its warehouse.
@@ -380,6 +396,18 @@ pub struct Reconciler {
     own_owner: HashMap<String, Vec<u32>>,
     /// The same for the stocks `WAREHOUSE_SET` commands applied.
     own_stock: HashMap<String, Vec<Stock>>,
+    /// What the samples said of an airbase whose object went
+    /// (`base_gone`), kept until a heliport's spawn of the name resolves or
+    /// the generation ends: the old FARP's owner and stock, for the carry.
+    gone_seen: HashMap<String, BaseSeen>,
+    /// The owner and stock of a revised FARP's old airbase, owed once to
+    /// its new airbase where no desired value is set (spec/world.md,
+    /// "Revising a static").
+    carry: HashMap<String, Carry>,
+    /// The `AIRBASE_OWNER` and `WAREHOUSE_SET` in flight that carry a
+    /// FARP's old owner or stock: one that does not apply for now goes back
+    /// into `carry`.
+    carry_sent: HashSet<(u64, u64)>,
     /// The airbase and delta of each `WAREHOUSE_ADJUST` in flight.
     adjust_sent: HashMap<(u64, u64), (String, Stock)>,
     /// The rates last written since the last `HELLO`.
@@ -539,6 +567,9 @@ impl Reconciler {
             base_sent: HashMap::new(),
             own_owner: HashMap::new(),
             own_stock: HashMap::new(),
+            gone_seen: HashMap::new(),
+            carry: HashMap::new(),
+            carry_sent: HashSet::new(),
             adjust_sent: HashMap::new(),
             rates_sent: None,
             subscribe_want: BTreeSet::new(),
@@ -785,7 +816,9 @@ impl Reconciler {
             Input::Positions(rows) => {
                 if self.current(store, r.agent_boot) {
                     for p in rows {
-                        if let Some(b) = self.binding.get(&p.object) {
+                        if let Some(b) = self.binding.get(&p.object)
+                            && !self.keeps_place(store, b.unit)
+                        {
                             let at = Point {
                                 x: p.x,
                                 y: p.y,
@@ -972,6 +1005,9 @@ impl Reconciler {
         self.base_sent.clear();
         self.own_owner.clear();
         self.own_stock.clear();
+        self.gone_seen.clear();
+        self.carry.clear();
+        self.carry_sent.clear();
         self.adjust_sent.clear();
         self.countries_held = false;
         store.set_countries(None);
@@ -1107,6 +1143,12 @@ impl Reconciler {
             .is_some_and(|l| l.agent_boot == c.agent_boot && l.mission_gen == c.mission_gen);
         let (id, state, spec_rev, captured) = (g.id, g.state, g.spec_rev, g.captured);
         let code = res.map(|r| u64::from(r.code));
+        // A result of an earlier generation says nothing of the airbase of
+        // the name in this one.
+        if c.opcode == opcode::STATIC_SPAWN && gen_now && is_heliport(store, id) {
+            let took = matches!(outcome, Outcome::Applied | Outcome::Unknown);
+            self.farp_spawn_resolved(store, id, state == State::Live, took);
+        }
         if matches!(c.opcode, opcode::GROUP_DESTROY | opcode::STATIC_DESTROY) {
             // Before the check for `dead`: a dead entity's drift destroy is
             // counted to the limit like any other.
@@ -2499,6 +2541,18 @@ impl Reconciler {
             .loaded()
             .map(|l| l.theater.clone())
             .unwrap_or_default();
+        // Another object under the name is another airbase, whose old one's
+        // `OBJECT_GONE` was lost: what was seen of the old one is kept as
+        // `base_gone` keeps it, and forgotten.
+        if let Some(old) = self.bases.get(&a.airbase)
+            && old.object != 0
+            && a.object != 0
+            && old.object != a.object
+        {
+            let old = old.clone();
+            self.gone_seen.insert(a.airbase.clone(), old);
+            self.forget_base(&a.airbase);
+        }
         let unresolved = self.base_unresolved(true, &a.airbase);
         let seen = self.bases.entry(a.airbase.clone()).or_default();
         seen.object = a.object;
@@ -2531,12 +2585,165 @@ impl Reconciler {
             .map(|(n, _)| n.clone())
             .collect();
         for name in names {
-            self.bases.remove(&name);
-            self.owner_sent.remove(&name);
-            self.stock_sent.remove(&name);
-            self.own_owner.remove(&name);
-            self.own_stock.remove(&name);
+            if let Some(seen) = self.bases.get(&name).cloned() {
+                self.gone_seen.insert(name.clone(), seen);
+            }
+            self.forget_base(&name);
         }
+    }
+
+    /// Forget what was seen and sent of an airbase's owner and stock.
+    fn forget_base(&mut self, name: &str) {
+        self.bases.remove(name);
+        self.owner_sent.remove(name);
+        self.stock_sent.remove(name);
+        self.own_owner.remove(name);
+        self.own_stock.remove(name);
+    }
+
+    /// A heliport's `STATIC_SPAWN` resolved, whatever its outcome: DCS may
+    /// hold a new airbase under the static's name, with an empty warehouse
+    /// and the coalition of the static's country (spec/world.md, "Revising
+    /// a static"). What was seen and sent of the name is forgotten, so the
+    /// new airbase's first samples are not read as play, and the desired
+    /// owner and stock are sent again. The `OBJECT_GONE` of the old object
+    /// does the same through `base_gone`, but a gap can lose it.
+    ///
+    /// For a `live` FARP spawned again in the generation, a revision, that
+    /// DCS took or may have taken (`took`: applied or unknown), what the
+    /// samples last said of the old airbase is kept, from what `base_gone`
+    /// kept when the old object's `OBJECT_GONE` came first, or else from
+    /// its entry. It is carried to the new airbase once its samples come
+    /// (`carry_plan`). A carry not yet confirmed by a sample is kept, and
+    /// sent again to the newest airbase: a revision soon after another, or
+    /// a spawn sent again after an unknown outcome, carries the first
+    /// airbase's state. A spawn DCS did not take builds no carry; it keeps
+    /// the old airbase's samples for the next one, which later samples of
+    /// the same object refresh. Every spawn resolves, by
+    /// its `RESULT` or as unknown at the next `HELLO`; an `OBJECT_GONE` can
+    /// be lost to a gap.
+    fn farp_spawn_resolved(&mut self, store: &Store, id: EntityId, revised: bool, took: bool) {
+        let name = ids::name(NameKind::Static, store.campaign(), id);
+        if revised && !took {
+            // DCS kept the old airbase, or dropped it with nothing in its
+            // place (a group that made no airbase). What the samples last
+            // said of it stays the seed of the next taken spawn's carry;
+            // newer samples of the kept airbase replace it.
+            // Every entry since is the kept airbase's.
+            let seed = refreshed(self.gone_seen.remove(&name), self.bases.get(&name), true);
+            if let Some(seed) = seed {
+                self.gone_seen.insert(name.clone(), seed);
+            }
+            self.forget_base(&name);
+            return;
+        }
+        // An entry now may be the new airbase's: only the same object refreshes.
+        let gone = refreshed(self.gone_seen.remove(&name), self.bases.get(&name), false);
+        if revised && took {
+            if let Some(c) = self.carry.get_mut(&name) {
+                c.sent = false;
+            } else if let Some(seen) = gone.or_else(|| self.bases.get(&name).cloned()) {
+                self.carry.insert(
+                    name.clone(),
+                    Carry {
+                        seen,
+                        sent: false,
+                        inflight: 0,
+                    },
+                );
+            }
+        }
+        self.forget_base(&name);
+    }
+
+    /// Send a revised FARP's old owner and stock to its new airbase, once,
+    /// after the new airbase's owner and stock are sampled: the owner when
+    /// no desired owner is set, and every item without a desired count
+    /// that the sample does not already show (spec/world.md, "Revising a
+    /// static"). A desired value wins where set: `bases_plan` sends it.
+    /// Returns false when a command could not be written.
+    fn carry_plan(&mut self, store: &mut Store, sim: &mut dyn SimAdapter, theater: &str) -> bool {
+        let ready: Vec<String> = self
+            .carry
+            .iter()
+            .filter(|(n, c)| {
+                !c.sent
+                    && self
+                        .bases
+                        .get(*n)
+                        .is_some_and(|b| b.coalition.is_some() && b.stock.is_some())
+            })
+            .map(|(n, _)| n.clone())
+            .collect();
+        for name in ready {
+            let now = self.bases.get(&name).expect("ready").clone();
+            if removed_farp(store, &name) {
+                self.carry.remove(&name);
+                continue;
+            }
+            // A write that fails leaves the carry unsent, for the next plan.
+            let old = self.carry.get(&name).expect("ready").seen.clone();
+            if let Some(c) = old.coalition
+                && store.desired_owner(theater, &name).is_none()
+                && now.coalition != Some(c)
+            {
+                let key = (self.epoch, self.next_seq);
+                let body = Body::AirbaseOwner {
+                    coalition: c,
+                    airbase: name.clone(),
+                };
+                if !self.send(store, sim, EntityId(0), 0, body) {
+                    return false;
+                }
+                self.counters.carried += 1;
+                self.carry_sent.insert(key);
+                self.carry.get_mut(&name).expect("ready").inflight += 1;
+                self.base_sent
+                    .insert(key, (true, name.clone(), c, Stock::default()));
+            }
+            let desired = store.desired_stock(theater, &name).map(|d| d.stock.clone());
+            let seen = now.stock.unwrap_or_default();
+            let mut diff = Stock::default();
+            for (item, count) in old.stock.unwrap_or_default().items() {
+                let set = desired.as_ref().is_some_and(|d| d.get(&item).is_some());
+                if !set && seen.get(&item) != Some(count) {
+                    diff.set(item, count);
+                }
+            }
+            if !diff.is_empty() {
+                let key = (self.epoch, self.next_seq);
+                let body = Body::WarehouseSet {
+                    airbase: name.clone(),
+                    stock: diff.to_lv(),
+                };
+                if !self.send(store, sim, EntityId(0), 0, body) {
+                    return false;
+                }
+                self.counters.carried += 1;
+                self.carry_sent.insert(key);
+                self.carry.get_mut(&name).expect("ready").inflight += 1;
+                self.base_sent.insert(key, (false, name.clone(), 0, diff));
+            }
+            self.carry.get_mut(&name).expect("ready").sent = true;
+        }
+        true
+    }
+
+    /// Whether a position row does not replace a static's place
+    /// (spec/world.md, "Revisions", "Revising a static"): a static that
+    /// cannot move keeps its spec place, and a cargo whose spawn is owed at
+    /// a newer revision keeps the revised place.
+    fn keeps_place(&self, store: &Store, unit: EntityId) -> bool {
+        store.unit(unit).is_some_and(|u| {
+            store.group(u.group).is_some_and(|g| {
+                g.kind == Kind::Static
+                    && (!matches!(lv::get(&u.extra, "category"), Some(Lv::String(c)) if c == b"Cargos")
+                        || self
+                            .spawn_applied
+                            .get(&g.id)
+                            .is_some_and(|applied| *applied < g.spec_rev))
+            })
+        })
     }
 
     /// `WAREHOUSE`: the stock of an airbase. A count that changes from the
@@ -2550,6 +2757,15 @@ impl Reconciler {
             .map(|l| l.theater.clone())
             .unwrap_or_default();
         let stock = Stock::from_lv(&w.stock);
+        // A sample after every carried command was answered: the carry
+        // stands in DCS, and a later revision carries this airbase's state.
+        if self
+            .carry
+            .get(&w.airbase)
+            .is_some_and(|c| c.sent && c.inflight == 0)
+        {
+            self.carry.remove(&w.airbase);
+        }
         let seen = self.bases.entry(w.airbase.clone()).or_default();
         let prev = seen.stock.replace(stock.clone());
         let own = self.own_stock.remove(&w.airbase).unwrap_or_default();
@@ -2579,6 +2795,9 @@ impl Reconciler {
             return;
         }
         let theater = store.loaded().expect("ready").theater.clone();
+        if !self.carry_plan(store, sim, &theater) {
+            return;
+        }
         let owners: Vec<(String, u32, u64)> = store
             .desired_owners()
             .filter(|((t, _), _)| *t == theater)
@@ -2649,6 +2868,7 @@ impl Reconciler {
         let Some((owner, name, coalition, stock)) = self.base_sent.remove(&(c.epoch, c.seq)) else {
             return;
         };
+        let carried = self.carry_sent.remove(&(c.epoch, c.seq));
         if outcome == Outcome::Applied {
             if owner {
                 self.own_owner
@@ -2656,7 +2876,10 @@ impl Reconciler {
                     .or_default()
                     .push(coalition);
             } else {
-                self.own_stock.entry(name.clone()).or_default().push(stock);
+                self.own_stock
+                    .entry(name.clone())
+                    .or_default()
+                    .push(stock.clone());
             }
         }
         let code = res.map(|r| r.code);
@@ -2665,7 +2888,16 @@ impl Reconciler {
             Outcome::Rejected => code.is_some_and(rejected_for_now),
             _ => false,
         };
-        if again {
+        if carried {
+            // A carried command that does not apply for now is not derived
+            // again from a desired value: its carry is sent again.
+            if let Some(e) = self.carry.get_mut(&name) {
+                e.inflight = e.inflight.saturating_sub(1);
+                if again {
+                    e.sent = false;
+                }
+            }
+        } else if again {
             if owner {
                 self.owner_sent.remove(&name);
             } else {
@@ -3036,6 +3268,31 @@ fn unit_names(group: &Lv, campaign: CampaignId, key: &str) -> Vec<EntityId> {
 /// The outcome a result code gives a command of an opcode.
 pub fn outcome_of(code: u16, opcode: u16) -> Outcome {
     classify(code, opcode)
+}
+
+/// The kept samples of an airbase (`seed`), refreshed field by field by
+/// the current entry when it is of the same object, or, when `kept` says
+/// DCS kept the airbase, whatever its object (a `WAREHOUSE` row before its
+/// `AIRBASE` has none yet). Otherwise an entry of another object is a new
+/// airbase's and leaves the seed as it is. With no seed, the entry.
+fn refreshed(seed: Option<BaseSeen>, now: Option<&BaseSeen>, kept: bool) -> Option<BaseSeen> {
+    match (seed, now) {
+        (Some(g), Some(b)) if kept || (b.object != 0 && b.object == g.object) => Some(BaseSeen {
+            object: if b.object != 0 { b.object } else { g.object },
+            coalition: b.coalition.or(g.coalition),
+            stock: b.stock.clone().or(g.stock),
+        }),
+        (Some(g), _) => Some(g),
+        (None, b) => b.cloned(),
+    }
+}
+
+/// Whether the static's further keys name the `Heliports` category: its
+/// spawn makes an airbase of its name (spec/world.md, "Heliport groups").
+fn is_heliport(store: &Store, id: EntityId) -> bool {
+    store.unit(id).is_some_and(
+        |u| matches!(lv::get(&u.extra, "category"), Some(Lv::String(c)) if c == b"Heliports"),
+    )
 }
 
 /// Whether `airbase` is the platform name of a static of this campaign the

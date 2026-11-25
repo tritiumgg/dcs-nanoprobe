@@ -135,6 +135,8 @@ message StaticSpec {
   // unit's parking (spec/world.md, "Heliport groups"). Only for a static
   // whose `extra.category` is "Heliports", each unit's likewise, and not
   // with `dead`. The count is bound only by the size of one spawn command.
+  // A revision may add or drop them, or move, turn or change the further
+  // keys of a kept one; a kept one's type does not change.
   repeated StaticUnit further_units = 8;
 }
 
@@ -284,6 +286,17 @@ message PutFromStaticTemplateResponse {
 
 message PutStaticRequest {
   Write write = 1;
+  // 0 creates a static; otherwise revises this one's spec in place, at one
+  // new spec revision: its type, place on the same theater, heading,
+  // `extra` and further units. Further unit i keeps its ID. The country, the
+  // theater, whether `extra.category` is "Heliports", and `dead` do not
+  // change. A heliport's type and its kept further units' types do not
+  // change, and a destroyed static's spec is fixed (FAILED_PRECONDITION).
+  // The static is spawned again under its name. A heliport's revision makes
+  // a new airbase: the owner and stock set with SetAirbaseOwner and
+  // SetWarehouseStock are sent to it, and the old airbase's last sampled
+  // owner and items are carried where none is set. A change in DCS since
+  // that sample is lost (spec/world.md, "Revising a static").
   uint64 static_id = 2;
   StaticSpec spec = 3;
 }

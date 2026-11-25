@@ -215,6 +215,26 @@ pub struct FakeMenu {
     pub order: u64,
 }
 
+/// How the fake answers a heliport's `STATIC_SPAWN` ([`FakeSim::farp_spawns`]).
+/// The default makes no airbase, as the fake did before it modeled one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FarpSpawns {
+    /// A heliport's spawn makes an airbase of its name, with an empty
+    /// warehouse and the coalition of the spawn's country, as DCS does
+    /// (LIVE, docs/results/2026-11-25-farp-groups.md). It replaces an
+    /// airbase of the name.
+    pub make_airbase: bool,
+    /// A replaced static's `OBJECT_GONE` is lost, as to a gap.
+    pub lose_gone: bool,
+    /// A replaced static's `OBJECT_GONE` comes after the spawn's `RESULT`.
+    pub gone_after_result: bool,
+    /// The new airbase keeps the replaced one's object ID.
+    pub same_object: bool,
+    /// The replaced static's `OBJECT_GONE`, then a sample of the new
+    /// airbase, then the spawn's `RESULT`.
+    pub sample_before_result: bool,
+}
+
 /// One airbase of the mission: its DCS object ID, owner and warehouse.
 #[derive(Clone, Debug, PartialEq)]
 struct FAirbase {
@@ -561,6 +581,14 @@ pub struct FakeSim {
     refuse_damages: u32,
     refuse_ruins: u32,
     reject_ruins: u32,
+    farp: FarpSpawns,
+    /// `WAREHOUSE_SET` commands still to answer `NOT_READY`.
+    stock_not_ready: u32,
+    /// `STATIC_SPAWN` commands still to answer `NOT_READY`.
+    static_not_ready: u32,
+    /// `AIRBASE` rows the agent drops, as a full ring drops a sample row
+    /// alone; their `WAREHOUSE` rows still go.
+    drop_airbase_rows: bool,
     /// The initial life an `OBJECT` record carries, by unit entity; 1 when
     /// absent.
     life0_of: HashMap<u64, f32>,
@@ -707,6 +735,10 @@ impl FakeSim {
             refuse_damages: 0,
             refuse_ruins: 0,
             reject_ruins: 0,
+            farp: FarpSpawns::default(),
+            stock_not_ready: 0,
+            static_not_ready: 0,
+            drop_airbase_rows: false,
             life0_of: HashMap::new(),
             refuse_loads: 0,
             orphans: BTreeSet::new(),
@@ -1916,6 +1948,43 @@ impl FakeSim {
         self.refuse_damages = n;
     }
 
+    /// From now on, drop every `AIRBASE` row, or stop dropping them.
+    pub fn drop_airbase_rows(&mut self, on: bool) {
+        self.drop_airbase_rows = on;
+    }
+
+    /// The frames run so far.
+    pub fn frame_count(&self) -> u64 {
+        self.frame
+    }
+
+    /// Move an object in the world, as play moves a cargo: its next
+    /// position row shows the place.
+    pub fn move_object(&mut self, object: u64, x: f64, z: f64) {
+        if let Some(o) = self.objects.get_mut(&object) {
+            o.at.x = x;
+            o.at.z = z;
+        }
+    }
+
+    /// The next `n` `STATIC_SPAWN` commands are answered `NOT_READY`, and
+    /// DCS changes nothing.
+    pub fn static_not_ready(&mut self, n: u32) {
+        self.static_not_ready = n;
+    }
+
+    /// The next `n` `WAREHOUSE_SET` commands are answered `NOT_READY`, and
+    /// DCS changes nothing.
+    pub fn stock_not_ready(&mut self, n: u32) {
+        self.stock_not_ready = n;
+    }
+
+    /// How a heliport's `STATIC_SPAWN` and the replace of a static are
+    /// answered from now on.
+    pub fn farp_spawns(&mut self, f: FarpSpawns) {
+        self.farp = f;
+    }
+
     /// The next `n` `STATIC_SPAWN` commands with `dead = true` are answered
     /// `DCS_REFUSED`, and DCS adds nothing.
     pub fn refuse_ruins(&mut self, n: u32) {
@@ -2544,11 +2613,13 @@ impl FakeSim {
                     .map(|(n, a)| (n.clone(), a.clone()))
                     .collect();
                 for (name, a) in bases {
-                    self.emit(Input::Airbase(Airbase {
-                        object: a.object,
-                        coalition: a.coalition,
-                        airbase: name.clone(),
-                    }));
+                    if !self.drop_airbase_rows {
+                        self.emit(Input::Airbase(Airbase {
+                            object: a.object,
+                            coalition: a.coalition,
+                            airbase: name.clone(),
+                        }));
+                    }
                     self.emit(Input::Warehouse(Warehouse {
                         airbase: name,
                         stock: a.stock.to_lv(),
@@ -2932,10 +3003,20 @@ impl FakeSim {
                 }
                 self.spawn(&cmd, name, units, false);
             }
-            Body::StaticSpawn { name, table, .. } => {
+            Body::StaticSpawn { .. } if self.static_not_ready > 0 => {
+                self.static_not_ready -= 1;
+                self.result(&cmd, rc::NOT_READY, 0, "injected: not ready", Lv::Nil);
+            }
+            Body::StaticSpawn {
+                name,
+                table,
+                country,
+            } => {
                 self.ledger
                     .static_tables
                     .insert(name.clone(), table.clone());
+                let heliport = lv::get(table, "units").is_some()
+                    || lv::str_at(table, "category").as_deref() == Some("Heliports");
                 // A heliport group: DCS makes one object, under the first
                 // unit's name, which is the command's (spec/commands.md,
                 // "Layout: STATIC_SPAWN"). The fake reads that unit.
@@ -2969,7 +3050,13 @@ impl FakeSim {
                     }
                     return self.spawn_ruin(&cmd, name, t, at, heading);
                 }
+                if heliport && self.farp.make_airbase && self.farp.sample_before_result {
+                    self.sample_new_airbase(name, *country);
+                }
                 self.spawn(&cmd, name, vec![(name.clone(), t, at, heading)], true);
+                if heliport && self.farp.make_airbase {
+                    self.farp_airbase(name, *country);
+                }
             }
             Body::GroupOrder(task) => {
                 let Some(gid) = self.group_of(h.entity) else {
@@ -3042,6 +3129,10 @@ impl FakeSim {
                 };
                 a.coalition = *coalition;
                 self.result(&cmd, rc::APPLIED, 0, "", Lv::Nil);
+            }
+            Body::WarehouseSet { .. } if self.stock_not_ready > 0 => {
+                self.stock_not_ready -= 1;
+                self.result(&cmd, rc::NOT_READY, 0, "injected: not ready", Lv::Nil);
             }
             Body::WarehouseSet { airbase, stock } => {
                 let Some(a) = self.airbases.get_mut(airbase) else {
@@ -3369,8 +3460,8 @@ impl FakeSim {
             }
             // A static's old object leaves first, as the agent writes it. A
             // group's leaves after the new units' `OBJECT` records (below).
-            if is_static {
-                self.destroy_group(old);
+            if is_static && !self.farp.gone_after_result {
+                self.replace_static(old);
             }
         }
         let gid = self.next_object;
@@ -3445,6 +3536,12 @@ impl FakeSim {
             }
         }
         self.result(cmd, rc::APPLIED, gid, "", Lv::Nil);
+        if is_static
+            && self.farp.gone_after_result
+            && let Some(old) = old
+        {
+            self.replace_static(old);
+        }
         if is_static {
             for m in members {
                 let o = &self.objects[&m];
@@ -3518,6 +3615,76 @@ impl FakeSim {
             .ruin_spawns
             .push((self.agent_boot, self.mission_gen_, h.entity, h.rev));
         self.result(cmd, rc::APPLIED, object, "", Lv::Nil);
+    }
+
+    /// A static replaced by a spawn under its name leaves DCS; its
+    /// `OBJECT_GONE` is lost when [`FarpSpawns::lose_gone`] says so.
+    fn replace_static(&mut self, gid: u64) {
+        if self.farp.lose_gone
+            && let Some(g) = self.groups.get(&gid)
+        {
+            for m in g.members.clone() {
+                self.table.remove(&m);
+            }
+        }
+        self.destroy_group(gid);
+    }
+
+    /// [`FarpSpawns::sample_before_result`]: the static of the name leaves
+    /// with its `OBJECT_GONE`, and the airbase the spawn will make is
+    /// sampled, before the spawn writes its `RESULT`.
+    fn sample_new_airbase(&mut self, name: &str, country: u32) {
+        if let Some(old) = self
+            .groups
+            .iter()
+            .find(|(_, g)| g.name == name)
+            .map(|(id, _)| *id)
+        {
+            self.replace_static(old);
+        }
+        let coalition = COUNTRY_COALITIONS
+            .iter()
+            .find(|(c, _)| *c == country)
+            .map_or(0, |(_, k)| *k);
+        self.emit(Input::Airbase(Airbase {
+            object: self.next_object,
+            coalition,
+            airbase: name.to_owned(),
+        }));
+        self.emit(Input::Warehouse(Warehouse {
+            airbase: name.to_owned(),
+            stock: Stock::default().to_lv(),
+        }));
+    }
+
+    /// The airbase a heliport's spawn makes under its name: the static's
+    /// object, an empty warehouse, the coalition of its country.
+    fn farp_airbase(&mut self, name: &str, country: u32) {
+        let Some(gid) = self
+            .groups
+            .iter()
+            .find(|(_, g)| g.name == name)
+            .map(|(id, _)| *id)
+        else {
+            return;
+        };
+        let old = self.airbases.get(name).map(|a| a.object);
+        let object = match old {
+            Some(o) if self.farp.same_object => o,
+            _ => gid,
+        };
+        let coalition = COUNTRY_COALITIONS
+            .iter()
+            .find(|(c, _)| *c == country)
+            .map_or(0, |(_, k)| *k);
+        self.airbases.insert(
+            name.to_owned(),
+            FAirbase {
+                object,
+                coalition,
+                stock: Stock::default(),
+            },
+        );
     }
 
     fn destroy_group(&mut self, gid: u64) {

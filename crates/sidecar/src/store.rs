@@ -371,9 +371,13 @@ pub struct Group {
     /// for it.
     pub ruin_in: Option<(u64, u32)>,
     /// A heliport group's further units, after the static itself; empty for
-    /// anything else. Spec, fixed at creation (spec/world.md, "Heliport
-    /// groups").
+    /// anything else. Spec: a revision may add, drop or change them, unit i
+    /// keeping its ID (spec/world.md, "Heliport groups").
     pub further: Vec<FurtherUnit>,
+    /// The IDs of further units a revision dropped. Each still stands for
+    /// this static until the next mission load: the replaced group's handle
+    /// answers its name (spec/world.md, "Heliport groups").
+    pub retired: Vec<EntityId>,
 }
 
 /// A further unit of a heliport group: part of its static's spec, with an
@@ -405,6 +409,21 @@ pub struct NewFurther {
     pub heading: f64,
     /// Further keys of its DCS unit table.
     pub extra: Lv,
+}
+
+/// A static's spec as a revision gives it (`Store::revise_static`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct StaticRevision {
+    /// DCS type name.
+    pub type_name: String,
+    /// Its place.
+    pub at: Point,
+    /// True heading, radians.
+    pub heading: f64,
+    /// Further keys of its DCS static table.
+    pub extra: Lv,
+    /// A heliport group's further units, in order.
+    pub further: Vec<NewFurther>,
 }
 
 /// The mission DCS has loaded, as last seen.
@@ -1783,6 +1802,7 @@ impl Store {
                 ruin_sent_in: None,
                 ruin_in: None,
                 further: Vec::new(),
+                retired: Vec::new(),
             },
         );
         self.touch(id);
@@ -1818,12 +1838,86 @@ impl Store {
         Ok(id)
     }
 
+    /// Revise a static's spec in place (spec/world.md, "Revising a
+    /// static"): its type, place, heading, further keys and further units,
+    /// at one new spec revision. Further unit i keeps its ID; units past
+    /// the old count take new IDs, and the IDs of dropped units move to
+    /// `retired`, still standing for the static until the next mission
+    /// load. Every new ID is checked before the first is taken, so
+    /// it changes all or nothing. Returns the new revision, or `None` when
+    /// the revision equals the stored spec and nothing changed.
+    pub fn revise_static(
+        &mut self,
+        id: EntityId,
+        r: StaticRevision,
+    ) -> Result<Option<u64>, StoreError> {
+        let g = self
+            .groups
+            .get(&id)
+            .filter(|g| g.kind == Kind::Static && !g.removed)
+            .ok_or(StoreError::NoSuchEntity(id))?;
+        check_lv(&r.extra).map_err(StoreError::TooLarge)?;
+        for f in &r.further {
+            check_lv(&f.extra).map_err(StoreError::TooLarge)?;
+        }
+        let u = &self.units[&id];
+        let same_further = g.further.len() == r.further.len()
+            && g.further.iter().zip(&r.further).all(|(a, b)| {
+                a.type_name == b.type_name
+                    && a.at == b.at
+                    && a.heading == b.heading
+                    && a.extra == b.extra
+            });
+        if same_further
+            && u.type_name == r.type_name
+            && u.state.at == r.at
+            && u.state.heading == r.heading
+            && u.extra == r.extra
+        {
+            return Ok(None);
+        }
+        let kept = g.further.len();
+        let new = r.further.len().saturating_sub(kept) as u64;
+        if self.ids_left() < new {
+            return Err(StoreError::Exhausted);
+        }
+        let theater = g.theater.clone();
+        let old: Vec<EntityId> = g.further.iter().map(|f| f.id).collect();
+        let dropped = old.iter().skip(r.further.len()).copied();
+        let mut retired = g.retired.clone();
+        retired.extend(dropped);
+        let mut further = Vec::with_capacity(r.further.len());
+        for (i, f) in r.further.into_iter().enumerate() {
+            let fid = match old.get(i) {
+                Some(fid) => *fid,
+                None => self.allocate()?,
+            };
+            further.push(FurtherUnit {
+                id: fid,
+                type_name: f.type_name,
+                at: f.at,
+                heading: f.heading,
+                extra: f.extra,
+            });
+        }
+        let u = self.units.get_mut(&id).expect("a static is its unit");
+        u.type_name = r.type_name;
+        u.state.at = r.at;
+        u.state.heading = r.heading;
+        u.extra = r.extra;
+        self.grid.set(id, &theater, r.at.x, r.at.z);
+        let g = self.group_mut(id)?;
+        g.further = further;
+        g.retired = retired;
+        self.spec_changed(id).map(Some)
+    }
+
     /// The static whose further unit the ID names, if any: the ID is held,
     /// by that static (spec/world.md, "Heliport groups").
     pub fn further_owner(&self, id: EntityId) -> Option<EntityId> {
         self.groups
             .values()
-            .find(|g| g.further.iter().any(|f| f.id == id))
+            .find(|g| g.further.iter().any(|f| f.id == id) || g.retired.contains(&id))
             .map(|g| g.id)
     }
 
@@ -2407,6 +2501,10 @@ impl Store {
         for id in cleared {
             self.touch(id);
         }
+        // A dropped further unit's name finds nothing in a new mission.
+        for g in self.groups.values_mut() {
+            g.retired.clear();
+        }
     }
 
     /// Whether a member is held out of spawns: it left DCS with no death
@@ -2894,6 +2992,157 @@ mod tests {
         let id = s.create_static_group(spec(1), further(1)).unwrap();
         assert_eq!(s.group(id).unwrap().further.len(), 1);
         assert_eq!(s.ids_left(), 0);
+    }
+
+    /// The revision that gives a static of `spec(1)` its own spec back,
+    /// with `further`.
+    fn same(s: &Store, id: EntityId, further: Vec<NewFurther>) -> StaticRevision {
+        let u = s.unit(id).unwrap();
+        StaticRevision {
+            type_name: u.type_name.clone(),
+            at: u.state.at,
+            heading: u.state.heading,
+            extra: u.extra.clone(),
+            further,
+        }
+    }
+
+    #[test]
+    fn a_revision_equal_to_the_spec_changes_nothing() {
+        let mut s = Store::new(CampaignId(1), 10);
+        let id = s.create_static_group(spec(1), further(2)).unwrap();
+        let (rev, spec_rev) = (s.revision(), s.group(id).unwrap().spec_rev);
+        assert_eq!(s.revise_static(id, same(&s, id, further(2))), Ok(None));
+        assert_eq!(s.revision(), rev);
+        assert_eq!(s.group(id).unwrap().spec_rev, spec_rev);
+    }
+
+    #[test]
+    fn a_revision_moves_turns_and_retypes_a_static_at_one_new_revision() {
+        let mut s = Store::new(CampaignId(1), 10);
+        let id = s.create_static(spec(1)).unwrap();
+        let mut r = same(&s, id, Vec::new());
+        r.type_name = "Hangar A".into();
+        r.at = Point {
+            x: 500.0,
+            y: 0.0,
+            z: 50.0,
+        };
+        r.heading = 1.5;
+        assert_eq!(s.revise_static(id, r), Ok(Some(2)));
+        let u = s.unit(id).unwrap();
+        assert_eq!(u.type_name, "Hangar A");
+        assert_eq!((u.state.at.x, u.state.heading), (500.0, 1.5));
+        assert_eq!(s.grid().within("Caucasus", 500.0, 50.0, 1.0), vec![id]);
+        assert!(s.grid().within("Caucasus", 0.0, 0.0, 1.0).is_empty());
+    }
+
+    #[test]
+    fn a_revision_keeps_further_ids_by_index_and_takes_new_ones_past_them() {
+        let mut s = Store::new(CampaignId(1), 10);
+        let id = s.create_static_group(spec(1), further(2)).unwrap();
+        let other = s.create_static(spec(1)).unwrap();
+        assert_eq!(other, EntityId(4));
+        let ids = |s: &Store| -> Vec<u64> {
+            s.group(id)
+                .unwrap()
+                .further
+                .iter()
+                .map(|f| f.id.0)
+                .collect()
+        };
+        // Grow 2 to 4: 2 and 3 kept, 5 and 6 new.
+        assert_eq!(s.revise_static(id, same(&s, id, further(4))), Ok(Some(2)));
+        assert_eq!(ids(&s), vec![2, 3, 5, 6]);
+        assert_eq!(s.further_owner(EntityId(6)), Some(id));
+        // Shrink 4 to 1: 2 kept; the dropped IDs stand for the static until
+        // the next mission load.
+        assert_eq!(s.revise_static(id, same(&s, id, further(1))), Ok(Some(3)));
+        assert_eq!(ids(&s), vec![2]);
+        assert_eq!(
+            s.group(id).unwrap().retired,
+            vec![EntityId(3), EntityId(5), EntityId(6)]
+        );
+        for gone in [3, 5, 6] {
+            assert_eq!(s.further_owner(EntityId(gone)), Some(id));
+        }
+        s.new_generation();
+        for gone in [3, 5, 6] {
+            assert_eq!(s.further_owner(EntityId(gone)), None);
+        }
+        assert_eq!(s.further_owner(EntityId(2)), Some(id));
+        // Grow again: a dropped ID is never given again.
+        assert_eq!(s.revise_static(id, same(&s, id, further(2))), Ok(Some(4)));
+        assert_eq!(ids(&s), vec![2, 7]);
+        // To none: a single heliport.
+        assert_eq!(s.revise_static(id, same(&s, id, Vec::new())), Ok(Some(5)));
+        assert!(ids(&s).is_empty());
+    }
+
+    #[test]
+    fn a_revision_that_does_not_fit_in_the_ids_left_changes_nothing() {
+        let mut s = Store::new(CampaignId(1), 10);
+        let id = s.create_static_group(spec(1), further(1)).unwrap();
+        s.reserve_id(EntityId(MAX_ID - 1));
+        assert_eq!(s.ids_left(), 1);
+        let rev = s.revision();
+        let r = s.revise_static(id, same(&s, id, further(3)));
+        assert_eq!(r, Err(StoreError::Exhausted));
+        assert_eq!(s.revision(), rev);
+        assert_eq!(s.group(id).unwrap().further.len(), 1);
+        assert_eq!(s.ids_left(), 1);
+        assert_eq!(s.revise_static(id, same(&s, id, further(2))), Ok(Some(2)));
+    }
+
+    #[test]
+    fn only_a_held_static_is_revised() {
+        let mut s = Store::new(CampaignId(1), 10);
+        let g = s.create_group(spec(1)).unwrap();
+        let r = StaticRevision {
+            type_name: "FARP".into(),
+            at: Point::default(),
+            heading: 0.0,
+            extra: Lv::Nil,
+            further: Vec::new(),
+        };
+        assert_eq!(
+            s.revise_static(g, r.clone()),
+            Err(StoreError::NoSuchEntity(g))
+        );
+        let st = s.create_static(spec(1)).unwrap();
+        s.remove_entity(st).unwrap();
+        assert_eq!(s.revise_static(st, r), Err(StoreError::NoSuchEntity(st)));
+    }
+
+    #[test]
+    fn a_moved_cargos_place_is_its_last_known_one_and_a_revision_replaces_it() {
+        let mut s = Store::new(CampaignId(1), 10);
+        let id = s.create_static(spec(1)).unwrap();
+        let first = same(&s, id, Vec::new());
+        let moved = Point {
+            x: 40.0,
+            y: 0.0,
+            z: 5.0,
+        };
+        s.observe_position(id, moved);
+        assert_eq!(s.unit(id).unwrap().state.at, moved, "play moved it");
+        // The spec as created is now a change: the cargo goes back.
+        assert_eq!(s.revise_static(id, first.clone()), Ok(Some(2)));
+        assert_eq!(s.unit(id).unwrap().state.at, first.at);
+        assert_eq!(s.revise_static(id, first), Ok(None));
+    }
+
+    #[test]
+    fn a_revision_makes_an_unspawnable_static_virtual() {
+        let mut s = Store::new(CampaignId(1), 10);
+        let id = s.create_static(spec(1)).unwrap();
+        s.transition(id, Trigger::Materialize).unwrap();
+        s.transition(id, Trigger::SpawnRefused).unwrap();
+        assert_eq!(s.group(id).unwrap().state, State::Unspawnable);
+        let mut r = same(&s, id, Vec::new());
+        r.heading = 1.0;
+        s.revise_static(id, r).unwrap();
+        assert_eq!(s.group(id).unwrap().state, State::Virtual);
     }
 
     #[test]

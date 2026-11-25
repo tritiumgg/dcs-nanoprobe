@@ -152,7 +152,7 @@ const REPORT_FIELDS: &[&str] = &[
 
 /// The agent's last sampling report in its log, after [`REPORT_WAIT`], and
 /// how many airbase entries the shim holds.
-fn report(run: &dyn Live, api: &mut Api) -> Result<Value, String> {
+pub(super) fn report(run: &dyn Live, api: &mut Api) -> Result<Value, String> {
     std::thread::sleep(REPORT_WAIT);
     api.renew()?;
     let log = run
@@ -184,7 +184,7 @@ fn report(run: &dyn Live, api: &mut Api) -> Result<Value, String> {
 }
 
 /// The connections DCS lists, the server's own among them.
-const PLAYERS_LUA: &str = "return #net.get_player_list()\n";
+pub(super) const PLAYERS_LUA: &str = "return #net.get_player_list()\n";
 
 /// For each name, whether the agent's airbase entry of a spawned FARP of
 /// the name is a tombstone; `"none"` when it holds none.
