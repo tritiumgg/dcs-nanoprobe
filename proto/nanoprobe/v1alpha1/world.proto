@@ -185,20 +185,63 @@ message Mark {
   bool read_only = 5;
   uint64 spec_revision = 6;
   // The revision DCS has applied, and the error if DCS refused the last one.
+  // 0 while its markup group is hidden.
   uint64 applied_spec_revision = 7;
   string last_error = 8;
+  // Unique among the campaign's live marks and drawings; empty for none.
+  string label = 9;
+  // The markup group it is drawn in; empty for none.
+  string markup_group = 10;
+  // The campaign model time it expires at, seconds (spec/world.md, "Labels
+  // and markup groups"). Absent when it does not expire.
+  optional double expires_at = 11;
+  // Output only: the DCS ID the item is drawn under. 0 while it is hidden or
+  // not yet drawn. It changes on every add: a full set, a show, a mission
+  // load, a restart. Set by the sidecar and ignored on input. To tell the
+  // platform's own mark events from a player's, read WorldEvent.platform_mark.
+  uint64 dcs_id = 12;
 }
 
 // A map drawing the controller set.
 message Drawing {
   uint64 id = 1;
   Audience audience = 2;
-  // The DCS shape ID.
+  // The DCS markupToAll shape number: 1 line, 3 polygon through its points (a line with
+  // two), 4 arrow, 5 text box, 6 quad (four points), 7 freeform. 2 is unknown.
   uint32 shape = 3;
   google.protobuf.ListValue args = 4;
   uint64 spec_revision = 5;
+  // 0 while its markup group is hidden.
   uint64 applied_spec_revision = 6;
   string last_error = 7;
+  // Unique among the campaign's live marks and drawings; empty for none.
+  string label = 8;
+  // The markup group it is drawn in; empty for none.
+  string markup_group = 9;
+  // The campaign model time it expires at, seconds. Absent when it does not
+  // expire.
+  optional double expires_at = 10;
+  // Output only: the DCS ID the item is drawn under. 0 while it is hidden or
+  // not yet drawn. It changes on every add: a full set, a show, a mission
+  // load, a restart. Set by the sidecar and ignored on input. To tell the
+  // platform's own mark events from a player's, read WorldEvent.platform_mark.
+  uint64 dcs_id = 11;
+}
+
+// A named set of marks and drawings, shown or hidden together (spec/world.md,
+// "Labels and markup groups").
+message MarkupGroup {
+  // 1 to 64 bytes with no control character; unique in the campaign.
+  string name = 1;
+  // PutMarkupGroup sets it as given: false hides the group. A group that a put of an
+  // item creates is visible.
+  bool visible = 2;
+  // Model seconds an item put in the group lives, when its put gives none.
+  optional double expire_after_s = 4;
+  // The most live items the group holds: a put over it removes the oldest.
+  optional uint32 cap = 5;
+  reserved 3, 6;
+  reserved "order", "slots_left";
 }
 
 // An F10 menu item the controller set.
@@ -239,6 +282,9 @@ message WorldFilter {
   double radius = 5;
   // Leave unmanaged entities out.
   bool managed_only = 6;
+  // Only marks and drawings in these markup groups; "" names items with no
+  // markup group. Empty does not filter. Other kinds pass.
+  repeated string markup_groups = 7;
 }
 
 message ListWorldRequest {
@@ -283,11 +329,14 @@ enum RemovalCause {
   REMOVAL_CAUSE_UNSPECIFIED = 0;
   // The controller, with RemoveEntity.
   REMOVAL_CAUSE_CONTROLLER = 1;
-  // The sidecar: a dead group past dead_keep_h.
+  // The sidecar: a dead group past dead_keep_h, or a mark or drawing past
+  // its expiry.
   REMOVAL_CAUSE_EXPIRED = 2;
+  // The sidecar: the oldest item of a markup group over its cap.
+  REMOVAL_CAUSE_EVICTED = 3;
 }
 
-// A group or static the watcher held was removed. It follows the upsert of
+// An entity the watcher held was removed. It follows the upsert of
 // the entity's last state.
 message Removal {
   uint64 id = 1;

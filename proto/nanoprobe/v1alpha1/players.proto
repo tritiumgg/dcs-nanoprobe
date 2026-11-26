@@ -23,6 +23,16 @@ service PlayersService {
   rpc PutMark(PutMarkRequest) returns (PutMarkResponse);
   rpc PutDrawing(PutDrawingRequest) returns (PutDrawingResponse);
   rpc PutMenuItem(PutMenuItemRequest) returns (PutMenuItemResponse);
+  // Create or change a markup group of marks and drawings.
+  rpc PutMarkupGroup(PutMarkupGroupRequest) returns (PutMarkupGroupResponse);
+  // Remove a markup group and every item in it.
+  rpc RemoveMarkupGroup(RemoveMarkupGroupRequest) returns (RemoveMarkupGroupResponse);
+  // Make a markup group hold exactly the items given, by label, in one write.
+  rpc ReplaceMarkupGroup(ReplaceMarkupGroupRequest) returns (ReplaceMarkupGroupResponse);
+  rpc ListMarkupGroups(ListMarkupGroupsRequest) returns (ListMarkupGroupsResponse);
+  // Remove a mark the platform does not hold, such as a player's, by its DCS
+  // ID. An effect.
+  rpc RemovePlayerMark(RemovePlayerMarkRequest) returns (RemovePlayerMarkResponse);
   // Erase one player's records, or move them to a new key.
   rpc ErasePlayer(ErasePlayerRequest) returns (ErasePlayerResponse);
 }
@@ -126,6 +136,14 @@ message PutMarkRequest {
   Position position = 4;
   string text = 5;
   bool read_only = 6;
+  // With mark_id 0, a label a live mark holds changes that mark. Empty sets
+  // no label. A label a drawing holds fails with ALREADY_EXISTS.
+  string label = 7;
+  // The markup group to draw it in, made with defaults if new. Empty for none.
+  string markup_group = 8;
+  // Model seconds from now until the mark is removed. Absent keeps the
+  // mark's expiry, or for a new mark takes its markup group's.
+  optional double expire_after_s = 9;
 }
 
 message PutMarkResponse {
@@ -139,10 +157,21 @@ message PutDrawingRequest {
   uint64 drawing_id = 2;
   // Everyone or one coalition.
   Audience audience = 3;
-  // The DCS shape ID.
+  // The DCS markupToAll shape number: 1 line (two points), 3 polygon through two or more
+  // points (a line with two), 4 arrow (two points), 5 text box (one point), 6 quad (four
+  // points), 7 freeform (three or more points). Any other shape is INVALID_ARGUMENT: DCS
+  // can crash on one.
   uint32 shape = 4;
-  // The shape's arguments, as DCS takes them.
+  // The shape's arguments, as DCS takes them: the points, each an object of finite x, y
+  // and z, then color and fill (each a list of four finite numbers), the line type (the
+  // font size for shape 5, a finite number), read only (a bool) and the message (a
+  // string). Any other layout is
+  // INVALID_ARGUMENT.
   google.protobuf.ListValue args = 5;
+  // As in PutMarkRequest.
+  string label = 6;
+  string markup_group = 7;
+  optional double expire_after_s = 8;
 }
 
 message PutDrawingResponse {
@@ -178,3 +207,90 @@ message ErasePlayerRequest {
 }
 
 message ErasePlayerResponse {}
+
+message PutMarkupGroupRequest {
+  Write write = 1;
+  // Every field is set as given.
+  MarkupGroup markup_group = 2;
+}
+
+message PutMarkupGroupResponse {
+  uint64 revision = 1;
+}
+
+message RemoveMarkupGroupRequest {
+  Write write = 1;
+  string name = 2;
+}
+
+message RemoveMarkupGroupResponse {
+  uint64 revision = 1;
+}
+
+// A mark or drawing of a ReplaceMarkupGroup call.
+message MarkupGroupItem {
+  // Required, unique in the call.
+  string label = 1;
+  Audience audience = 2;
+  optional double expire_after_s = 3;
+  oneof kind {
+    MarkupGroupMark mark = 4;
+    MarkupGroupDrawing drawing = 5;
+  }
+}
+
+message MarkupGroupMark {
+  Position position = 1;
+  string text = 2;
+  bool read_only = 3;
+}
+
+message MarkupGroupDrawing {
+  // As in PutDrawingRequest.
+  uint32 shape = 1;
+  google.protobuf.ListValue args = 2;
+}
+
+message ReplaceMarkupGroupRequest {
+  Write write = 1;
+  // The markup group, made with defaults if new.
+  string name = 2;
+  repeated MarkupGroupItem items = 3;
+}
+
+message ReplaceMarkupGroupResponse {
+  // Each item's entity, in the order given.
+  repeated uint64 ids = 1;
+  uint64 revision = 2;
+}
+
+message ListMarkupGroupsRequest {
+  // The campaign to read, 0 for the active one.
+  uint64 campaign_id = 1;
+}
+
+message ListMarkupGroupsResponse {
+  repeated MarkupGroup markup_groups = 1;
+  reserved 2, 3;
+  reserved "mark_slots_left", "ungrouped_slots_left";
+}
+
+message RemovePlayerMarkRequest {
+  Write write = 1;
+  // The DCS mark ID, from a mark event's mark_id. An ID the platform issued in
+  // the running DCS process (WorldEvent.platform_mark), held or retired, fails
+  // with INVALID_ARGUMENT.
+  uint64 mark_id = 2;
+  // The sequence number of that mark event (Event.sequence). The sidecar
+  // reads the event from its log: the call fails with FAILED_PRECONDITION
+  // when the event is no longer held, or when it is from another DCS process
+  // or mission generation than the running one, since DCS gives the ID to
+  // another mark there. A controller must act while the event is held. The
+  // event must be a mark event (25 to 27) with this mark_id, else the call
+  // fails with INVALID_ARGUMENT.
+  uint64 event_sequence = 3;
+}
+
+message RemovePlayerMarkResponse {
+  CommandResult result = 1;
+}

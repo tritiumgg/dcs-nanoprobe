@@ -32,7 +32,12 @@ CREATE TABLE player (key TEXT PRIMARY KEY, ucid TEXT NOT NULL, body BLOB NOT NUL
 CREATE TABLE idempotency (key TEXT PRIMARY KEY, at_ms INTEGER NOT NULL, campaign INTEGER, request_hash BLOB, response BLOB);
 CREATE TABLE extension (name TEXT PRIMARY KEY, body BLOB NOT NULL);
 CREATE TABLE deleted_campaign (id INTEGER PRIMARY KEY, at_ms INTEGER NOT NULL);
+CREATE TABLE dcs_issue (boot INTEGER PRIMARY KEY, next INTEGER NOT NULL);
 ";
+
+/// The `dcs_issue` table alone, made at open in a file written before it.
+const DCS_ISSUE: &str =
+    "CREATE TABLE IF NOT EXISTS dcs_issue (boot INTEGER PRIMARY KEY, next INTEGER NOT NULL);";
 
 /// One migration step of the server store, as a campaign store's.
 #[derive(Clone, Copy)]
@@ -216,6 +221,7 @@ impl ServerStore {
             put_meta(&tx, "schema", &Lv::Number(f64::from(known)))?;
             tx.commit()?;
         }
+        conn.execute_batch(DCS_ISSUE)?;
         let epoch = u_of(get_meta(&conn, "epoch")?, "epoch")?;
         put_meta(&conn, "open", &Lv::Bool(true))?;
         Ok(ServerStore {
@@ -463,6 +469,37 @@ impl ServerStore {
         Ok(out)
     }
 
+    /// The DCS ID mark of the running agent boot: the next slot the shared
+    /// pool gives, as the last campaign to close left it (spec/persistence.md,
+    /// "The server store"). None before any campaign closed.
+    pub fn dcs_mark(&self) -> Result<Option<(u64, u64)>, DiskError> {
+        let row: Option<(i64, i64)> = self
+            .conn
+            .query_row(
+                "SELECT boot, next FROM dcs_issue ORDER BY rowid DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        Ok(row.map(|(b, n)| (b as u64, n as u64)))
+    }
+
+    /// Keep the mark of agent boot `boot`. One row is kept: the boot's; a
+    /// row of another boot goes, and a mark of the same boot never goes down.
+    pub fn put_dcs_mark(&self, boot: u64, next: u64) -> Result<(), DiskError> {
+        let kept = match self.dcs_mark()? {
+            Some((b, n)) if b == boot => n.max(next),
+            _ => next,
+        };
+        self.conn
+            .execute("DELETE FROM dcs_issue WHERE boot != ?1", [boot as i64])?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO dcs_issue (boot, next) VALUES (?1, ?2)",
+            params![boot as i64, kept as i64],
+        )?;
+        Ok(())
+    }
+
     /// Server-scoped extension data by name.
     pub fn extension(&self, name: &str) -> Result<Option<Vec<u8>>, DiskError> {
         Ok(self
@@ -495,6 +532,21 @@ mod tests {
         assert_eq!(e.kind(), io::ErrorKind::WouldBlock);
         drop(a);
         lock(d.path()).expect("free again");
+    }
+
+    #[test]
+    fn the_dcs_mark_keeps_one_boot_and_never_goes_down_within_it() {
+        let d = tempfile::tempdir().expect("dir");
+        let mut s = ServerStore::open(d.path(), 0).expect("open");
+        assert_eq!(s.dcs_mark().unwrap(), None);
+        s.put_dcs_mark(7, 40).unwrap();
+        s.put_dcs_mark(7, 10).unwrap();
+        assert_eq!(s.dcs_mark().unwrap(), Some((7, 40)));
+        s.put_dcs_mark(8, 3).unwrap();
+        assert_eq!(s.dcs_mark().unwrap(), Some((8, 3)));
+        s.close().unwrap();
+        let s = ServerStore::open(d.path(), 0).expect("reopen");
+        assert_eq!(s.dcs_mark().unwrap(), Some((8, 3)));
     }
 
     #[test]

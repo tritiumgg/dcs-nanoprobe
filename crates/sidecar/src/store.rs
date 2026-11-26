@@ -94,7 +94,10 @@ pub fn check_lv(v: &Lv) -> Result<(), String> {
 }
 
 mod markers;
-pub use markers::{Marker, MarkerError, MarkerKind, MarkerSpec, Markers, scope};
+pub use markers::{
+    BootIssue, ISSUE_BOOTS_KEEP, LABEL_MAX, LAYER_NAME_MAX, Layer, Marker, MarkerError, MarkerKind,
+    MarkerPut, MarkerSpec, Markers, Put, dcs_ids, drawing_layout_ok, drawing_style_change, scope,
+};
 
 /// Who simulates a managed entity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -479,8 +482,11 @@ pub enum Outcome {
 pub enum RemoveCause {
     /// The controller, through the API.
     Controller,
-    /// The sidecar: a dead group past `dead_keep_h` (spec/world.md, "Expiry").
+    /// The sidecar: a dead group past `dead_keep_h` (spec/world.md, "Expiry"),
+    /// or a mark or drawing past its expiry.
     Expired,
+    /// The sidecar: the oldest item of a layer over its cap.
+    Evicted,
 }
 
 /// One journal entry. Every entry is written before what it describes is
@@ -505,6 +511,13 @@ pub enum Entry {
     ExtensionRemoved {
         /// The extension's name.
         name: String,
+    },
+    /// A layer of marks and drawings was made, changed or removed.
+    Layer {
+        /// The layer's name.
+        name: String,
+        /// It was removed.
+        removed: bool,
     },
     /// The controller removed a group, static or marker, or the sidecar
     /// expired a dead group.
@@ -2501,6 +2514,9 @@ impl Store {
         for id in cleared {
             self.touch(id);
         }
+        // DCS holds no mark or drawing. The marks of issued IDs stay: a
+        // load does not free them (spec/world.md, "DCS IDs").
+        self.forget_dcs_ids();
         // A dropped further unit's name finds nothing in a new mission.
         for g in self.groups.values_mut() {
             g.retired.clear();
@@ -2524,6 +2540,10 @@ impl Store {
     /// `FRAME`'s.
     pub fn set_sample_time(&mut self, t: f64) {
         self.sample_time = t;
+        if let Some(l) = &self.loaded {
+            let (b, g) = (l.agent_boot, l.mission_gen);
+            self.count_played(b, g, t);
+        }
         // The first sample of a generation sets its model time zero for the
         // campaign clock.
         if let Some(l) = &self.loaded
@@ -2784,6 +2804,8 @@ impl Store {
         // A campaign-level change: stamped under no entity.
         self.touch(EntityId(0));
         self.journal(Entry::Loaded(loaded.clone()));
+        // A new agent boot is a new DCS process: it starts with no ID used.
+        self.begin_dcs_boot(loaded.agent_boot);
         self.loaded = Some(loaded);
     }
 

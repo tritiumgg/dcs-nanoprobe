@@ -36,6 +36,7 @@ use nanoprobe_proto::v1alpha1::campaign_service_client::CampaignServiceClient;
 use nanoprobe_proto::v1alpha1::commands_service_client::CommandsServiceClient;
 use nanoprobe_proto::v1alpha1::events_service_client::EventsServiceClient;
 use nanoprobe_proto::v1alpha1::mission_service_client::MissionServiceClient;
+use nanoprobe_proto::v1alpha1::players_service_client::PlayersServiceClient;
 use nanoprobe_proto::v1alpha1::session_service_client::SessionServiceClient;
 use nanoprobe_proto::v1alpha1::world_service_client::WorldServiceClient;
 use nanoprobe_proto::v1alpha1::{self as pb, entity};
@@ -50,6 +51,7 @@ use tonic::transport::{Channel, Endpoint};
 use crate::install::Profile as _;
 use crate::sampling::live::Run;
 
+pub mod drawing_layers;
 pub mod payload_preset;
 pub mod saved_files;
 pub mod static_replace;
@@ -149,6 +151,7 @@ struct Api {
     campaigns: CampaignServiceClient<Svc>,
     commands: CommandsServiceClient<Svc>,
     world: WorldServiceClient<Svc>,
+    players: PlayersServiceClient<Svc>,
     mission: MissionServiceClient<Svc>,
     events: EventsServiceClient<Svc>,
     lease: Option<pb::Lease>,
@@ -183,6 +186,7 @@ impl Api {
             campaigns: CampaignServiceClient::new(c(&channel)),
             commands: CommandsServiceClient::new(c(&channel)),
             world: WorldServiceClient::new(c(&channel)),
+            players: PlayersServiceClient::new(c(&channel)),
             mission: MissionServiceClient::new(c(&channel)),
             events: EventsServiceClient::new(c(&channel)),
             rt,

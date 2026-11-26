@@ -15,7 +15,7 @@ use nanoprobe_sidecar::sim::wire::opcode;
 use nanoprobe_sidecar::stock::Stock;
 use nanoprobe_sidecar::store::{
     CampaignRecord, CampaignState, DiskError, Group, Kind, LostPolicy, Migration, REVISION_RESERVE,
-    Store, TierPeriod, Unit, schema_of,
+    SCHEMA, Store, TierPeriod, Unit, schema_of,
 };
 use nanoprobe_sim_fake::harness::{CAMPAIGN, Op, Schedule, THEATER, World, new_store_for};
 use nanoprobe_sim_fake::{Config, Left};
@@ -916,12 +916,16 @@ fn a_stored_campaign_migrates_from_one_schema_version_to_the_next() {
         copy
     };
     drop(std::mem::replace(&mut w.store, Store::new(id, 1)));
-    assert_eq!(schema_of(&c.store_path(id)).expect("schema"), 1);
+    // N is this sidecar's version; the test's steps go to N + 1.
+    assert_eq!(schema_of(&c.store_path(id)).expect("schema"), SCHEMA);
 
     // A failing step: nothing changes and the campaign does not open.
-    let bad = [Migration { to: 2, run: broken }];
+    let bad = [Migration {
+        to: SCHEMA + 1,
+        run: broken,
+    }];
     assert!(c.open_with(id, 1, &bad).is_err());
-    assert_eq!(schema_of(&c.store_path(id)).expect("schema"), 1);
+    assert_eq!(schema_of(&c.store_path(id)).expect("schema"), SCHEMA);
     let half: i64 = rusqlite::Connection::open(c.store_path(id))
         .expect("conn")
         .query_row(
@@ -931,17 +935,17 @@ fn a_stored_campaign_migrates_from_one_schema_version_to_the_next() {
         )
         .expect("count");
     assert_eq!(half, 0, "the failed step's work is rolled back");
-    let mut unchanged = Store::open(&c.store_path(id), 10_000).expect("open at 1");
+    let mut unchanged = Store::open(&c.store_path(id), 10_000).expect("open at N");
     same_world(&before, &unchanged);
     unchanged.close().expect("close");
     drop(unchanged);
 
     let steps = [Migration {
-        to: 2,
+        to: SCHEMA + 1,
         run: add_notes,
     }];
     let after = c.open_with(id, 2, &steps).expect("migrate");
-    assert_eq!(schema_of(&c.store_path(id)).expect("schema"), 2);
+    assert_eq!(schema_of(&c.store_path(id)).expect("schema"), SCHEMA + 1);
     same_world(&before, &after);
     drop(after);
     let notes: i64 = rusqlite::Connection::open(c.store_path(id))
@@ -970,14 +974,18 @@ fn a_stored_campaign_migrates_from_one_schema_version_to_the_next() {
         .join("backups")
         .join(migration[0].number.to_string())
         .join("store.sqlite");
-    assert_eq!(schema_of(&copy).expect("schema"), 1, "the backup is at N");
+    assert_eq!(
+        schema_of(&copy).expect("schema"),
+        SCHEMA,
+        "the backup is at N"
+    );
 
-    // A sidecar that knows only version 1 refuses the file.
+    // A sidecar that knows only version N refuses the file.
     match Store::open(&c.store_path(id), 10_000) {
-        Err(DiskError::Newer { found: 2, known: 1 }) => {}
+        Err(DiskError::Newer { found, known }) if found == SCHEMA + 1 && known == SCHEMA => {}
         other => panic!("{other:?}"),
     }
-    // Opening at version 2 again runs no step and takes no backup.
+    // Opening at version N + 1 again runs no step and takes no backup.
     let n = c.backups(id).expect("backups").len();
     c.open_with(id, 3, &steps).expect("open");
     assert_eq!(c.backups(id).expect("backups").len(), n);
@@ -1041,8 +1049,11 @@ fn pre_migration_backups_are_kept_apart_and_not_repeated() {
     let mut s = c.create(id, record("a")).expect("create");
     s.close().expect("close");
     drop(s);
-    // Version 1 opened by a sidecar that knows version 2: a backup first.
-    let steps = [nanoprobe_sidecar::store::Migration { to: 2, run: step }];
+    // Version N opened by a sidecar that knows version N + 1: a backup first.
+    let steps = [nanoprobe_sidecar::store::Migration {
+        to: SCHEMA + 1,
+        run: step,
+    }];
     let backup_file = |n: u32| c.folder(id).join(format!("backups/{n}/backup.txt"));
     let mut s = c.open_with(id, 1, &steps).expect("migrate");
     assert!(backup_file(1).exists());
@@ -1063,7 +1074,7 @@ fn pre_migration_backups_are_kept_apart_and_not_repeated() {
     );
     s.close().expect("close");
     drop(s);
-    // The file is at version 2 now: reopening it at version 2 takes none.
+    // The file is at version N + 1 now: reopening it there takes none.
     let n = c.backups(id).expect("backups").len();
     drop(c.open_with(id, 2, &steps).expect("open"));
     assert_eq!(c.backups(id).expect("backups").len(), n);

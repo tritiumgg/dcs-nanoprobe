@@ -74,6 +74,14 @@ message WorldEvent {
   // is never rewritten; this is a separate attribution.
   repeated string launch_players = 16;
   LaunchRule launch_rule = 17;
+  // The DCS mark ID of a mark event (added, changed, removed).
+  optional uint64 mark_id = 18;
+  // True when the platform issued mark_id in the DCS process that made the
+  // event: the mark is one of the platform's own marks or drawings, shown or
+  // retired. False for a player's mark and when mark_id is absent. A
+  // controller uses it to tell the platform's own mark events from a
+  // player's.
+  bool platform_mark = 19;
 }
 
 // How launch_players was found (spec/world.md, "Launch attribution").

@@ -86,6 +86,15 @@ message ServerStatus {
   // Why that backup failed or was skipped, naming the store, with SQLite's
   // extended result code when SQLite failed; empty for none.
   string backup_error = 23;
+  // The DCS IDs left in the DCS process now running, for marks and drawings
+  // of every campaign together: the pool is 2^30 to 2^31-1, each add takes
+  // one, and none is given back until DCS restarts. A put that adds more than
+  // are left is RESOURCE_EXHAUSTED (DCS_IDS_FULL) with nothing written; items
+  // already shown stay and every other call works.
+  uint64 dcs_ids_left = 24;
+  // The pool is low: dcs_ids_left is under 1% of the pool (about 10.7
+  // million IDs). Not part of health: restarting DCS is the owner's call.
+  bool dcs_ids_low = 25;
 }
 
 // What the active campaign's store holds and how fast it is bounded

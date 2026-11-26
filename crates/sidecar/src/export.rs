@@ -113,6 +113,25 @@ fn export_paged(
             return Ok(());
         }
     }
+    // Marks, drawings, menu items and layers, from schema 2.
+    let mut markers = s.prepare("SELECT id, body FROM marker ORDER BY id")?;
+    let rows = markers.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?;
+    for row in rows {
+        let (id, b) = row?;
+        if !emit(json!({"kind": "marker", "id": id, "body": body(&b)})) {
+            return Ok(());
+        }
+    }
+    let mut layers = s.prepare("SELECT name, body FROM layer ORDER BY name")?;
+    let rows = layers.query_map([], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+    })?;
+    for row in rows {
+        let (name, b) = row?;
+        if !emit(json!({"kind": "layer", "name": name, "body": body(&b)})) {
+            return Ok(());
+        }
+    }
     let mut seq = 0i64;
     loop {
         let mut q = s.prepare(
@@ -387,6 +406,8 @@ mod tests {
             ("meta", "meta"),
             ("entity", "entity"),
             ("extension", "extension"),
+            ("marker", "marker"),
+            ("layer", "layer"),
             ("journal", "journal"),
             ("inflight", "inflight"),
             ("template", "template"),
@@ -402,6 +423,8 @@ mod tests {
             "meta",
             "entity",
             "extension",
+            "marker",
+            "layer",
             "journal",
             "inflight",
             "template",

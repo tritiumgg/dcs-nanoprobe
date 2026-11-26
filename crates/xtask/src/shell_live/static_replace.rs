@@ -674,7 +674,7 @@ fn retype_probe_lua(action: &str, at: (f64, f64)) -> String {
         .replace("@COUNTRY@", &COUNTRY.to_string())
 }
 
-const PAUSED_LUA: &str = "return DCS.getPause()\n";
+pub(super) const PAUSED_LUA: &str = "return DCS.getPause()\n";
 
 fn set_pause_lua(want: bool) -> String {
     format!("DCS.setPause({want})\nreturn DCS.getPause()\n")
@@ -847,7 +847,7 @@ fn ensure_running(run: &dyn Live, api: &mut Api) -> Result<Value, String> {
 }
 
 /// Put the mission in the pause state the run found.
-fn restore_pause(run: &dyn Live, api: &mut Api, found: &Value) -> Result<Value, String> {
+pub(super) fn restore_pause(run: &dyn Live, api: &mut Api, found: &Value) -> Result<Value, String> {
     let want = found == &json!(true);
     let now = run.eval("hook", "static-replace-paused", PAUSED_LUA, 60)?;
     if now == json!(want) {

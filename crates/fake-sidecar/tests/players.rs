@@ -108,6 +108,41 @@ fn number(n: f64) -> Value {
     }
 }
 
+fn point(x: f64) -> Value {
+    Value {
+        kind: Some(Kind::StructValue(prost_types::Struct {
+            fields: [("x", number(x)), ("y", number(0.0)), ("z", number(0.0))]
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v))
+                .collect(),
+        })),
+    }
+}
+
+/// A text box (shape 5) at `x`: one point, color, fill, font size, read only
+/// and the text.
+fn text_args(x: f64) -> ListValue {
+    let rgba = || Value {
+        kind: Some(Kind::ListValue(ListValue {
+            values: vec![number(1.0), number(1.0), number(1.0), number(1.0)],
+        })),
+    };
+    ListValue {
+        values: vec![
+            point(x),
+            rgba(),
+            rgba(),
+            number(14.0),
+            Value {
+                kind: Some(Kind::BoolValue(true)),
+            },
+            Value {
+                kind: Some(Kind::StringValue("label".into())),
+            },
+        ],
+    }
+}
+
 fn mark_request(l: &Lease, k: &str, c: u64, id: u64, text: &str) -> pb::PutMarkRequest {
     pb::PutMarkRequest {
         write: write(l, k, c),
@@ -121,6 +156,7 @@ fn mark_request(l: &Lease, k: &str, c: u64, id: u64, text: &str) -> pb::PutMarkR
         }),
         text: text.into(),
         read_only: true,
+        ..Default::default()
     }
 }
 
@@ -225,18 +261,115 @@ async fn marks_drawings_and_menus_are_set_replaced_removed_and_set_again() {
             write: write(&l, "d1", c),
             drawing_id: 0,
             audience: all(),
-            shape: 7,
-            args: Some(ListValue {
-                values: vec![number(1.0), number(2.0)],
-            }),
+            shape: 5,
+            args: Some(text_args(1.0)),
+            ..Default::default()
         })
         .await
         .expect("drawing")
         .into_inner();
     until_fake(&hub, |s| s.drawing(d.drawing_id).is_some()).await;
     let held = fake(&hub, |s| s.drawing(d.drawing_id).cloned()).unwrap();
-    assert_eq!((held.shape, held.scope), (7, 1));
-    assert_eq!(held.args, lv::list(vec![lv::n(1.0), lv::n(2.0)]));
+    assert_eq!((held.shape, held.scope), (5, 1));
+    let items = lv::items(&held.args);
+    assert_eq!(items.len(), 6);
+    assert_eq!(lv::get(items[0], "x"), Some(&lv::n(1.0)));
+    assert_eq!(items[5], &lv::s("label"));
+
+    // Only the known shapes with their layouts are taken: DCS can crash
+    // inside markupToAll on another. Nothing is stored.
+    let text = |k: &str, x: f64| pb::PutDrawingRequest {
+        write: write(&l, k, c),
+        drawing_id: 0,
+        audience: all(),
+        shape: 5,
+        args: Some(text_args(x)),
+        ..Default::default()
+    };
+    let before = players
+        .put_drawing(text("d2", 2.0))
+        .await
+        .expect("a second text")
+        .into_inner();
+    let step = before.revision - d.revision;
+    let one_point = text_args(1.0);
+    let mut two_points = text_args(1.0);
+    two_points.values.insert(0, point(5.0));
+    let mut no_message = text_args(1.0);
+    no_message.values.pop();
+    let mut struct_color = text_args(1.0);
+    struct_color.values[1] = Value {
+        kind: Some(Kind::StructValue(prost_types::Struct {
+            fields: [("r", 1.0), ("g", 0.0), ("b", 0.0), ("a", 1.0)]
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), number(v)))
+                .collect(),
+        })),
+    };
+    let mut nan_size = text_args(1.0);
+    nan_size.values[3] = number(f64::NAN);
+    for (i, (shape, args)) in [
+        (8, two_points.clone()),
+        (12, two_points.clone()),
+        (2, two_points.clone()),
+        (0, one_point.clone()),
+        (5, two_points.clone()),
+        (1, one_point.clone()),
+        (5, no_message),
+        (5, struct_color),
+        (5, nan_size),
+        (
+            5,
+            ListValue {
+                values: vec![number(1.0), number(2.0)],
+            },
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let e = players
+            .put_drawing(pb::PutDrawingRequest {
+                write: write(&l, &format!("bad{i}"), c),
+                drawing_id: 0,
+                audience: all(),
+                shape,
+                args: Some(args),
+                ..Default::default()
+            })
+            .await
+            .expect_err("a drawing of an unknown layout");
+        assert_eq!(e.code(), tonic::Code::InvalidArgument, "case {i}: {e:?}");
+    }
+    let e = players
+        .replace_markup_group(pb::ReplaceMarkupGroupRequest {
+            write: write(&l, "badgroup", c),
+            name: "bad".into(),
+            items: vec![pb::MarkupGroupItem {
+                label: "x".into(),
+                audience: all(),
+                expire_after_s: None,
+                kind: Some(pb::markup_group_item::Kind::Drawing(
+                    pb::MarkupGroupDrawing {
+                        shape: 9,
+                        args: Some(one_point),
+                    },
+                )),
+            }],
+        })
+        .await
+        .expect_err("a markup group with an unknown layout");
+    assert_eq!(e.code(), tonic::Code::InvalidArgument, "{e:?}");
+    let after = players
+        .put_drawing(text("d3", 3.0))
+        .await
+        .expect("a third text")
+        .into_inner();
+    assert_eq!(
+        after.revision - before.revision,
+        step,
+        "a refused layout changed the store"
+    );
 
     // A submenu and a command under it.
     let sub = players

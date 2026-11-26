@@ -1410,6 +1410,9 @@ pub fn effect_response(
         .encode_to_vec(),
         EffectKind::Message => pb::SendMessageResponse { result: result_pb }.encode_to_vec(),
         EffectKind::Chat => pb::SendChatResponse { result: result_pb }.encode_to_vec(),
+        EffectKind::PlayerMark => {
+            pb::RemovePlayerMarkResponse { result: result_pb }.encode_to_vec()
+        }
         EffectKind::Invoke => pb::InvokeLuaResponse {
             result: result_pb,
             value: lua_value(result),

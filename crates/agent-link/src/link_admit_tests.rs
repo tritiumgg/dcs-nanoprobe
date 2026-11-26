@@ -441,3 +441,16 @@ fn a_spawn_clears_the_order_and_a_destroy_clears_both() {
     assert_eq!(l.revisions().get(&RevKey::Spec(9)), 0);
     assert_eq!(l.revisions().get(&RevKey::Order(9)), 0);
 }
+
+#[test]
+fn a_mark_set_again_at_its_revision_runs_after_a_remove_clears_the_entity() {
+    let (mut l, _d) = link("admit-mark-reset");
+    let g = generation(&l);
+    let ok = result::APPLIED;
+    let set = |l: &mut Link, seq| run(l, &header(seq, 5, 9, 4, g), opcode::MARK_SET, None, ok);
+    assert_eq!(set(&mut l, 1), ok);
+    assert_eq!(set(&mut l, 2), result::AT_REVISION);
+    // The driver clears the entity when MARK_REMOVE applies.
+    l.clear_entity(9);
+    assert_eq!(set(&mut l, 3), ok);
+}

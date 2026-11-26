@@ -73,10 +73,35 @@ fn message(scope: u32, target: u64, clear: bool, seconds: f64, text: &str) -> Bo
     }
 }
 
+/// A drawing of `shape` with as many points as the shape takes (two for a
+/// shape of unknown layout), then the style.
 fn drawing(shape: u32) -> MarkerSpec {
+    let points = match shape {
+        5 => 1,
+        6 => 4,
+        7 => 3,
+        _ => 2,
+    };
+    let rgba = || lv::list(vec![lv::n(1.0), lv::n(0.0), lv::n(0.0), lv::n(1.0)]);
+    let mut args: Vec<Lv> = (0..points)
+        .map(|i| {
+            lv::obj(vec![
+                ("x", lv::n(f64::from(i))),
+                ("y", lv::n(0.0)),
+                ("z", lv::n(2.0)),
+            ])
+        })
+        .collect();
+    args.extend([
+        rgba(),
+        rgba(),
+        lv::n(1.0),
+        Lv::Bool(true),
+        Lv::String(b"m".to_vec()),
+    ]);
     MarkerSpec::Drawing {
         shape,
-        args: lv::list(vec![lv::obj(vec![("x", lv::n(1.0)), ("z", lv::n(2.0))])]),
+        args: lv::list(args),
     }
 }
 
@@ -140,13 +165,13 @@ fn drawings_are_set_replaced_and_removed() {
     let d = w.sim.drawing(id.0).expect("set in DCS");
     assert_eq!((d.shape, d.scope, d.rev), (7, scope::ALL, 1));
     w.store
-        .put_marker(id, scope::COALITION, 1, drawing(9))
+        .put_marker(id, scope::COALITION, 1, drawing(4))
         .unwrap();
     ticks(&mut w, 10);
     let d = w.sim.drawing(id.0).unwrap();
     assert_eq!(
         (d.shape, d.scope, d.target, d.rev),
-        (9, scope::COALITION, 1, 2)
+        (4, scope::COALITION, 1, 2)
     );
     // A drawing takes no group.
     assert!(
@@ -158,6 +183,41 @@ fn drawings_are_set_replaced_and_removed() {
     ticks(&mut w, 10);
     assert!(w.sim.drawing(id.0).is_none());
     assert_eq!(sent(&w, opcode::DRAWING_REMOVE), 1);
+}
+
+#[test]
+fn a_drawing_of_an_unknown_layout_never_reaches_dcs() {
+    // The store takes any layout; the API refuses unknown ones. A store
+    // that holds one (an older store file) is refused by the shim, so DCS
+    // never sees it.
+    let mut w = world(0);
+    for shape in [1, 3, 4, 5, 6, 7] {
+        let (id, _) = w
+            .store
+            .put_marker(EntityId(0), scope::ALL, 0, drawing(shape))
+            .unwrap();
+        ticks(&mut w, 10);
+        assert!(w.sim.drawing(id.0).is_some(), "shape {shape} not drawn");
+    }
+    for shape in [0, 2, 8, 9, 10, 11, 12] {
+        let (id, _) = w
+            .store
+            .put_marker(EntityId(0), scope::ALL, 0, drawing(shape))
+            .unwrap();
+        ticks(&mut w, 10);
+        assert!(w.sim.drawing(id.0).is_none(), "shape {shape} drawn");
+    }
+    let one_point = MarkerSpec::Drawing {
+        shape: 1,
+        args: lv::list(vec![lv::obj(vec![("x", lv::n(1.0)), ("z", lv::n(2.0))])]),
+    };
+    let (id, _) = w
+        .store
+        .put_marker(EntityId(0), scope::ALL, 0, one_point)
+        .unwrap();
+    ticks(&mut w, 10);
+    assert!(w.sim.drawing(id.0).is_none(), "a line of one point drawn");
+    assert_eq!(w.sim.ledger().drawing_layouts_refused, 8);
 }
 
 #[test]
@@ -336,6 +396,30 @@ fn a_marker_set_before_its_group_exists_in_dcs_is_set_when_it_does() {
 }
 
 #[test]
+fn a_mark_that_waits_for_its_group_goes_on_top_when_it_binds() {
+    // spec/world.md, "Redraw order": an item that waits for its audience is
+    // added when it can be and goes on top; the items after it are not held.
+    let mut w = world(1);
+    let g = w.store.groups().next().unwrap().id;
+    w.store.set_authority(g, Authority::Campaign).unwrap();
+    ticks(&mut w, 12);
+    let (m, _) = w
+        .store
+        .put_marker(EntityId(0), scope::GROUP, g.0, mark("waits"))
+        .unwrap();
+    let (d, _) = w
+        .store
+        .put_marker(EntityId(0), scope::ALL, 0, drawing(7))
+        .unwrap();
+    ticks(&mut w, 20);
+    assert!(w.sim.mark(m.0).is_none(), "the group is not in DCS");
+    let drawn = w.sim.drawing(d.0).expect("not held back").dcs_id;
+    w.store.set_authority(g, Authority::Sim).unwrap();
+    ticks(&mut w, 20);
+    assert!(w.sim.mark(m.0).expect("set").dcs_id > drawn, "on top");
+}
+
+#[test]
 fn markers_survive_a_sidecar_restart_and_a_dcs_restart() {
     let mut w = world(0);
     let (m, _) = w
@@ -343,13 +427,17 @@ fn markers_survive_a_sidecar_restart_and_a_dcs_restart() {
         .put_marker(EntityId(0), scope::ALL, 0, mark("a"))
         .unwrap();
     ticks(&mut w, 10);
-    // A restart builds a new reconciler: it sends the revision again and
-    // the agent answers AT_REVISION, which counts as held.
+    let first = w.sim.mark(m.0).unwrap().dcs_id;
+    // A restart builds a new reconciler: it adds the mark again under a new
+    // ID at a new revision, since DCS shows nothing for an ID it held.
     w.apply(&Op::SidecarRestart).unwrap();
     ticks(&mut w, 20);
-    assert_eq!(w.sim.ledger().pin_sets[&m.0], 1);
-    assert_eq!(w.rec.marker_applied(m), 1);
+    assert_eq!(w.sim.ledger().pin_sets[&m.0], 2);
+    assert_eq!(w.rec.marker_applied(m), 2);
     assert_eq!(sent(&w, opcode::MARK_SET), 2);
+    let held = w.sim.mark(m.0).unwrap();
+    assert!(held.dcs_id > first);
+    assert_eq!(held.dcs_id, w.store.marker(m).unwrap().dcs_id);
     // A removal sent after a restart reaches the agent that holds it.
     w.store.remove_marker(m).unwrap();
     w.apply(&Op::SidecarRestart).unwrap();

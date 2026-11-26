@@ -27,7 +27,7 @@ use tonic::{Code, Request, Response, Status};
 
 use super::{Out, end, push};
 use crate::auth::{Access, require};
-use crate::convert::{Filter, entity, invalid};
+use crate::convert::{Filter, entity, invalid, marker_entity, removal_cause};
 use crate::hub::{Hub, Inner};
 
 /// The service.
@@ -45,14 +45,30 @@ const SLOW_PERIOD: Duration = Duration::from_secs(5);
 
 fn snapshot(g: &Inner, campaign: u64, filter: &Filter) -> (u64, Vec<pb::Entity>) {
     let store = g.read_store(campaign);
-    let entities = filter
+    let mut entities: Vec<pb::Entity> = filter
         .candidates(store)
         .into_iter()
         .filter_map(|id| store.group(id))
         .filter(|grp| filter.passes(store, grp))
         .map(|grp| entity(store, grp))
         .collect();
+    entities.extend(
+        store
+            .markers()
+            .filter(|m| filter.marker_passes(m))
+            .filter_map(|m| marker_of(g, campaign, store, m.id)),
+    );
     (store.revision(), entities)
+}
+
+/// The API entity of a mark or drawing, with what the active campaign's
+/// reconciler knows of it in DCS.
+fn marker_of(g: &Inner, campaign: u64, store: &Store, id: EntityId) -> Option<pb::Entity> {
+    let m = store.marker(id)?;
+    let rec = g.rec.as_ref().filter(|_| g.active == Some(campaign));
+    let applied = rec.map_or(0, |r| r.marker_applied(id));
+    let refused = rec.is_some_and(|r| r.marker_refused(id, store));
+    marker_entity(m, applied, refused)
 }
 
 /// The longest position period a watch may ask for.
@@ -208,6 +224,45 @@ impl Watch {
                 if !seen.insert(gid) {
                     continue;
                 }
+                if let Some(m) = store.marker(gid) {
+                    if m.removed {
+                        if self.held.remove(&gid) || !self.caught_up {
+                            self.shapes.remove(&gid);
+                            // A menu item is never served, so no watch
+                            // holds it and a Removal would name an ID the
+                            // client cannot resolve.
+                            if let Some(e) = marker_of(g, self.campaign, store, gid) {
+                                changes.push(WorldChange {
+                                    change: Some(world_change::Change::Upsert(e)),
+                                });
+                                changes.push(WorldChange {
+                                    change: Some(world_change::Change::Removal(pb::Removal {
+                                        id: gid.0,
+                                        cause: removal_cause(m.removed_cause) as i32,
+                                    })),
+                                });
+                            }
+                        }
+                    } else if self.filter.marker_passes(m) {
+                        if let Some(e) = marker_of(g, self.campaign, store, gid) {
+                            let d = shape(&e);
+                            self.held.insert(gid);
+                            if self.shapes.insert(gid, d) != Some(d) {
+                                changes.push(WorldChange {
+                                    change: Some(world_change::Change::Upsert(e)),
+                                });
+                            }
+                        }
+                    } else if self.held.remove(&gid) || !self.caught_up {
+                        self.shapes.remove(&gid);
+                        changes.extend(marker_of(g, self.campaign, store, gid).map(|e| {
+                            WorldChange {
+                                change: Some(world_change::Change::Upsert(e)),
+                            }
+                        }));
+                    }
+                    continue;
+                }
                 let Some(grp) = store.group(gid) else {
                     // Purged: a watcher that held it, or one that resumed
                     // from before it may have, is told it left the store.
@@ -244,9 +299,11 @@ impl Watch {
                 .iter()
                 .copied()
                 .filter(|id| {
-                    store
-                        .group(*id)
-                        .is_none_or(|grp| !self.filter.passes(store, grp))
+                    // Marks and drawings leave through store changes only.
+                    store.marker(*id).is_none()
+                        && store
+                            .group(*id)
+                            .is_none_or(|grp| !self.filter.passes(store, grp))
                 })
                 .collect();
             let mut purged = false;
@@ -644,5 +701,45 @@ mod tests {
         assert!(store.purge(id).is_some(), "purged");
         w.next(&g, true).expect("next");
         assert!(!w.shapes.contains_key(&id), "shapes holds a purged group");
+    }
+
+    /// A watch that resumes past a removed menu item gets no Removal for
+    /// it: menu items are never served.
+    #[test]
+    fn a_resume_past_a_removed_menu_item_gets_no_removal() {
+        use nanoprobe_sidecar::store::MarkerSpec;
+        let hub = hub();
+        let mut g = hub.lock();
+        let store = &mut g.campaigns.get_mut(&1).expect("slot").store;
+        store.set_now(1_000);
+        let before = store.revision();
+        let (id, _) = store
+            .put_marker(
+                EntityId(0),
+                1,
+                0,
+                MarkerSpec::MenuItem {
+                    parent: EntityId(0),
+                    submenu: false,
+                    text: "go".into(),
+                },
+            )
+            .expect("menu item");
+        store.remove_marker(id).expect("remove");
+        assert!(store.purge_marker(id));
+        let mut w = watch_from(before, false);
+        let m = w.next(&g, false).expect("next");
+        let removals = m.map_or(0, |m| {
+            m.changes
+                .iter()
+                .filter(|c| {
+                    matches!(
+                        c.change,
+                        Some(world_change::Change::Removal(_) | world_change::Change::RemovedId(_))
+                    )
+                })
+                .count()
+        });
+        assert_eq!(removals, 0, "a removal for a menu item");
     }
 }

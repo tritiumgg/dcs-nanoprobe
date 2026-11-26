@@ -9,13 +9,15 @@ use nanoprobe_proto::v1alpha1::{
 use nanoprobe_sidecar::ids::EntityId;
 use nanoprobe_sidecar::intents::{Intent, Waypoint};
 use nanoprobe_sidecar::lifecycle::State;
-use nanoprobe_sidecar::store::{Group, Kind, Loadout, Point, ReadStamp, Store, Unit};
+use nanoprobe_sidecar::store::{
+    Group, Kind, Loadout, Marker, MarkerSpec, Point, ReadStamp, RemoveCause, Store, Unit, scope,
+};
 use nanoprobe_transport::codec::Lv;
 use nanoprobe_transport::records::Ammo;
 use prost::Message;
 use tonic::{Code, Status};
 
-use crate::lua::lua_to_struct;
+use crate::lua::{from_lua, lua_to_struct};
 
 /// `INVALID_FIELD` about a request field.
 pub fn invalid(field: &str, message: impl Into<String>) -> Status {
@@ -321,6 +323,73 @@ pub fn entity(store: &Store, g: &Group) -> pb::Entity {
     pb::Entity { kind: Some(kind) }
 }
 
+/// The API entity of a mark or drawing; `None` for a menu item. `applied`
+/// and `refused` come from the reconciler of the active campaign.
+pub fn marker_entity(m: &Marker, applied: u64, refused: bool) -> Option<pb::Entity> {
+    let audience = Some(pb::Audience {
+        to: Some(match m.scope {
+            scope::COALITION => pb::audience::To::Coalition(coalition_of_dcs(
+                u32::try_from(m.target).unwrap_or(0),
+            ) as i32),
+            scope::GROUP => pb::audience::To::GroupId(m.target),
+            _ => pb::audience::To::All(true),
+        }),
+    });
+    let last_error = if refused {
+        "DCS refused this revision".to_owned()
+    } else {
+        String::new()
+    };
+    let kind = match &m.spec {
+        MarkerSpec::Mark {
+            theater,
+            at,
+            text,
+            read_only,
+        } => entity::Kind::Mark(pb::Mark {
+            id: m.id.0,
+            audience,
+            position: Some(position(theater, *at)),
+            text: text.clone(),
+            read_only: *read_only,
+            spec_revision: m.spec_rev,
+            applied_spec_revision: applied,
+            last_error,
+            label: m.label.clone(),
+            markup_group: m.layer.clone(),
+            expires_at: m.expires_at,
+            dcs_id: m.dcs_id,
+        }),
+        MarkerSpec::Drawing { shape, args } => entity::Kind::Drawing(pb::Drawing {
+            id: m.id.0,
+            audience,
+            shape: *shape,
+            args: match from_lua(args).kind {
+                Some(prost_types::value::Kind::ListValue(l)) => Some(l),
+                _ => Some(prost_types::ListValue::default()),
+            },
+            spec_revision: m.spec_rev,
+            applied_spec_revision: applied,
+            last_error,
+            label: m.label.clone(),
+            markup_group: m.layer.clone(),
+            expires_at: m.expires_at,
+            dcs_id: m.dcs_id,
+        }),
+        MarkerSpec::MenuItem { .. } => return None,
+    };
+    Some(pb::Entity { kind: Some(kind) })
+}
+
+/// The API's removal cause.
+pub fn removal_cause(c: Option<RemoveCause>) -> pb::RemovalCause {
+    match c {
+        Some(RemoveCause::Expired) => pb::RemovalCause::Expired,
+        Some(RemoveCause::Evicted) => pb::RemovalCause::Evicted,
+        _ => pb::RemovalCause::Controller,
+    }
+}
+
 /// The further DCS keys of a group, unit or static, as the API shows them.
 pub fn extra(v: &nanoprobe_transport::codec::Lv) -> Option<prost_types::Struct> {
     lua_to_struct(v)
@@ -331,8 +400,12 @@ pub fn extra(v: &nanoprobe_transport::codec::Lv) -> Option<prost_types::Struct> 
 pub struct Filter {
     groups: bool,
     statics: bool,
+    marks: bool,
+    drawings: bool,
     coalitions: Vec<i32>,
     area: Option<(String, f64, f64, f64)>,
+    /// Marks and drawings only in these markup groups, "" for none.
+    markup_groups: Option<Vec<String>>,
 }
 
 impl Filter {
@@ -341,10 +414,14 @@ impl Filter {
         let f = f.cloned().unwrap_or_default();
         let mut groups = f.kinds.is_empty();
         let mut statics = f.kinds.is_empty();
+        let mut marks = f.kinds.is_empty();
+        let mut drawings = f.kinds.is_empty();
         for k in &f.kinds {
             match EntityKind::try_from(*k) {
                 Ok(EntityKind::Group) => groups = true,
                 Ok(EntityKind::Static) => statics = true,
+                Ok(EntityKind::Mark) => marks = true,
+                Ok(EntityKind::Drawing) => drawings = true,
                 Ok(EntityKind::Unit) => {
                     return Err(invalid(
                         "filter.kinds",
@@ -354,7 +431,7 @@ impl Filter {
                 Ok(EntityKind::Unspecified) | Err(_) => {
                     return Err(invalid("filter.kinds", format!("unknown kind {k}")));
                 }
-                // Airbases, marks, drawings and menu items are not served yet.
+                // Airbases and menu items are not served yet.
                 Ok(_) => {}
             }
         }
@@ -388,8 +465,11 @@ impl Filter {
         Ok(Filter {
             groups,
             statics,
+            marks,
+            drawings,
             coalitions: f.coalitions,
             area,
+            markup_groups: (!f.markup_groups.is_empty()).then_some(f.markup_groups),
         })
     }
 
@@ -443,6 +523,36 @@ impl Filter {
                 v
             }
         }
+    }
+
+    /// Whether a live mark or drawing passes: its kind, its markup group, its
+    /// coalition when it is for one (an item for everyone or a group passes
+    /// any coalition filter), and for a mark its place in the area. A drawing
+    /// has no place of its own and passes no area filter.
+    pub fn marker_passes(&self, m: &Marker) -> bool {
+        let kind_ok = match &m.spec {
+            MarkerSpec::Mark { .. } => self.marks,
+            MarkerSpec::Drawing { .. } => self.drawings,
+            MarkerSpec::MenuItem { .. } => false,
+        };
+        kind_ok
+            && !m.removed
+            && self
+                .markup_groups
+                .as_ref()
+                .is_none_or(|l| l.contains(&m.layer))
+            && (self.coalitions.is_empty()
+                || m.scope != scope::COALITION
+                || u32::try_from(m.target)
+                    .is_ok_and(|c| self.coalitions.contains(&(coalition_of_dcs(c) as i32))))
+            && match (&self.area, &m.spec) {
+                (None, _) => true,
+                (Some((theater, n, e, r)), MarkerSpec::Mark { theater: t, at, .. }) => {
+                    let (dx, dz) = (at.x - n, at.z - e);
+                    t == theater && dx * dx + dz * dz <= r * r
+                }
+                (Some(_), _) => false,
+            }
     }
 
     /// Whether a unit is in the filter's area, for position batches.

@@ -1024,11 +1024,31 @@ impl Fields {
     }
 }
 
+/// A DCS mark ID from a layout, as the Lua number the shim passes on: 1 to
+/// 2^53 - 1, so no digit is lost (spec/commands.md, "Layout: MARK_SET").
+fn mark_id(v: u64) -> Option<f64> {
+    (1..(1u64 << 53)).contains(&v).then_some(v as f64)
+}
+
 /// The next `lv` of the payload, as the bytes it occupies.
 fn lv_bytes<'a>(rd: &mut Reader<'a>, body: &'a [u8]) -> Option<&'a [u8]> {
     let from = rd.position();
     rd.lv().ok()?;
     Some(&body[from..rd.position()])
+}
+
+/// Whether an applied command of this opcode sets its entity's applied
+/// revisions to 0: every destroy and every remove.
+fn clears_revisions(opcode: u64) -> bool {
+    matches!(
+        opcode,
+        op::GROUP_DESTROY
+            | op::GROUP_CAPTURE_DESTROY
+            | op::STATIC_DESTROY
+            | op::MARK_REMOVE
+            | op::DRAWING_REMOVE
+            | op::MENU_REMOVE
+    )
 }
 
 /// A command's arguments for its Lua handler, as an `lv` table, encoded:
@@ -1230,8 +1250,10 @@ fn arguments_with(
             let read_only = rd.u32().ok()?;
             let target = rd.u64().ok()?;
             let (x, y, z) = (rd.f64().ok()?, rd.f64().ok()?, rd.f64().ok()?);
+            let dcs_id = mark_id(rd.u64().ok()?)?;
             let text = rd.str().ok()?;
             f.text("entity", &h.entity.to_string());
+            f.num("dcs_id", dcs_id);
             scoped(&mut f, scope, target, h, &[1, 2, 3], held)?;
             f.push("read_only", &Lv::Bool(read_only != 0));
             f.num("x", x);
@@ -1243,10 +1265,21 @@ fn arguments_with(
             let scope = rd.u32().ok()?;
             let shape = rd.u32().ok()?;
             let target = rd.u64().ok()?;
+            let dcs_id = mark_id(rd.u64().ok()?)?;
             f.text("entity", &h.entity.to_string());
+            f.num("dcs_id", dcs_id);
             scoped(&mut f, scope, target, h, &[1, 2], held)?;
             f.num("shape", f64::from(shape));
             f.raw("args", lv_bytes(&mut rd, body)?);
+        }
+        op::DRAWING_UPDATE => {
+            let dcs_id = mark_id(rd.u64().ok()?)?;
+            f.text("entity", &h.entity.to_string());
+            f.num("dcs_id", dcs_id);
+            f.raw("changes", lv_bytes(&mut rd, body)?);
+        }
+        op::MARK_CLEAR => {
+            f.num("dcs_id", mark_id(rd.u64().ok()?)?);
         }
         op::MENU_SET => {
             let parent = rd.u64().ok()?;
@@ -1647,13 +1680,9 @@ pub fn command_done(
             // The new group has no task (spec/commands.md, "Layout: GROUP_SPAWN").
             d.link.clear_order(o.header.entity);
         }
-        if code == result::APPLIED
-            && matches!(
-                u64::from(o.opcode),
-                op::GROUP_DESTROY | op::GROUP_CAPTURE_DESTROY | op::STATIC_DESTROY
-            )
-        {
-            // A destroy sets the applied revisions of what it removed to 0.
+        if code == result::APPLIED && clears_revisions(u64::from(o.opcode)) {
+            // A destroy or a remove sets the applied revisions of what it
+            // removed to 0 (spec/commands.md, "Layout: GROUP_ORDER").
             d.link.clear_entity(o.header.entity);
         }
         let counted = answer(
@@ -2390,6 +2419,150 @@ mod tests {
     }
 
     #[test]
+    fn every_destroy_and_remove_clears_the_applied_revisions() {
+        for opcode in [
+            op::GROUP_DESTROY,
+            op::GROUP_CAPTURE_DESTROY,
+            op::STATIC_DESTROY,
+            op::MARK_REMOVE,
+            op::DRAWING_REMOVE,
+            op::MENU_REMOVE,
+        ] {
+            assert!(clears_revisions(opcode), "{opcode}");
+        }
+        for opcode in [op::MARK_SET, op::DRAWING_SET, op::MENU_SET, op::GROUP_SPAWN] {
+            assert!(!clears_revisions(opcode), "{opcode}");
+        }
+    }
+
+    /// A driver on a link in its own folder, as `start` builds one, with
+    /// campaign 7 active in a new generation.
+    fn driver_in(dir: &Path) -> Driver {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let mut link = Link::open(Options {
+            map_path: dir.join("map"),
+            port,
+            token: Some("test".into()),
+            out_capacity: 256 << 10,
+            in_capacity: 256 << 10,
+            event_queue: 64 << 10,
+            control_queue: 64,
+            build: 1,
+            interface: 2,
+            raw_lua: false,
+            overhead_share: 0.003,
+            dcs_version: "test".into(),
+        })
+        .unwrap();
+        link.set_campaign(7);
+        link.new_generation();
+        Driver {
+            sampler: Sampler::new(Rates::default(), clock_cost()),
+            deaths: Vec::new(),
+            life_events: Vec::new(),
+            birth_events: Vec::new(),
+            watch_events: Vec::new(),
+            loadout_birth_events: Vec::new(),
+            loadout_takeoff_events: Vec::new(),
+            held_slots: Vec::new(),
+            open: false,
+            link,
+            root: dir.to_path_buf(),
+            commanded: Duration::from_millis(1),
+            theater: String::new(),
+            mission: String::new(),
+            payload: Vec::new(),
+            reload_failed: false,
+            shim: false,
+            syscall: false,
+            waiting: false,
+            hook_waiting: false,
+            ext_active: false,
+            forced: false,
+            pumped: false,
+            handler_time: Duration::ZERO,
+            pump_started: Instant::now(),
+            ran: false,
+            spent: Duration::ZERO,
+            outstanding: None,
+            begun: None,
+            pump_commands: Duration::ZERO,
+            staged: Vec::new(),
+        }
+    }
+
+    /// Admit a command at `rev` for `entity` as the pump does, leave it
+    /// outstanding, and finish it through `command_done` with `APPLIED`.
+    /// Returns what admission decided: `APPLIED` when the handler ran.
+    fn through_the_driver(seq: u64, entity: u64, opcode: u64, rev: u64) -> u64 {
+        let h = CommandHeader {
+            seq,
+            epoch: 5,
+            campaign: 7,
+            entity,
+            rev,
+            mission_gen: with(|d| d.link.stamps().mission_gen).unwrap(),
+        };
+        let admitted = with(|d| match d.link.admit(&h, opcode as u16, None) {
+            Admit::Run => {
+                d.outstanding = Some(Outstanding {
+                    opcode: opcode as u16,
+                    header: h,
+                    started: Instant::now(),
+                });
+                None
+            }
+            Admit::Answer(code) => Some(code),
+            Admit::Control => panic!("not a control command"),
+        })
+        .unwrap();
+        match admitted {
+            Some(code) => code,
+            None => {
+                command_done(result::APPLIED, "", Lv::Nil, &[], 0);
+                result::APPLIED
+            }
+        }
+    }
+
+    #[test]
+    fn a_set_again_at_its_revision_runs_after_a_remove_applies() {
+        let dir = std::env::temp_dir().join(format!(
+            "nanoprobe-driver-remove-{}",
+            nanoprobe_transport::random_nonzero()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        *DRIVER.lock().unwrap() = Some(driver_in(&dir));
+        let mut seq = 0;
+        // One entity per kind: a mark, a drawing and a menu share the
+        // revision key of an entity ID.
+        for (entity, (set, remove)) in [
+            (op::MARK_SET, op::MARK_REMOVE),
+            (op::DRAWING_SET, op::DRAWING_REMOVE),
+            (op::MENU_SET, op::MENU_REMOVE),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let entity = 9 + entity as u64;
+            let mut step = |opcode: u64, rev: u64| {
+                seq += 1;
+                through_the_driver(seq, entity, opcode, rev)
+            };
+            assert_eq!(step(set, 1), result::APPLIED, "{set}");
+            assert_eq!(step(set, 1), result::AT_REVISION, "{set} twice");
+            assert_eq!(step(remove, 2), result::APPLIED, "{remove}");
+            assert_eq!(step(set, 1), result::APPLIED, "{set} after {remove}");
+        }
+        *DRIVER.lock().unwrap() = None;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn an_entity_out_of_range_is_a_bad_payload() {
         for e in [0, names::MAX_ENTITY + 1, u64::MAX] {
             assert_eq!(
@@ -2733,7 +2906,7 @@ mod tests {
     fn mark(scope: u32, target: u64) -> Vec<u8> {
         let mut w = Writer::new();
         w.u32(scope).u32(1).u64(target);
-        w.f64(1.5).f64(2.5).f64(-3.5).str("hi");
+        w.f64(1.5).f64(2.5).f64(-3.5).u64(1 << 30).str("hi");
         w.finish()
     }
 
@@ -2753,6 +2926,7 @@ mod tests {
             &mark(1, 0),
             vec![
                 entity.clone(),
+                ("dcs_id", n(1_073_741_824.0)),
                 ("scope", n(1.0)),
                 ("name", s("")),
                 ("read_only", Lv::Bool(true)),
@@ -2768,6 +2942,7 @@ mod tests {
             &mark(2, 2),
             vec![
                 entity.clone(),
+                ("dcs_id", n(1_073_741_824.0)),
                 ("scope", n(2.0)),
                 ("target", n(2.0)),
                 ("name", s("")),
@@ -2823,12 +2998,25 @@ mod tests {
         }
         assert!(arguments(op::MARK_SET as u16, &h, &mark(2, 1 << 32)).is_none());
         assert!(arguments(op::MARK_SET as u16, &h, &mark(3, 1 << 53)).is_none());
-        assert!(arguments(op::MARK_SET as u16, &h, &[0; 39]).is_none());
+        assert!(arguments(op::MARK_SET as u16, &h, &[0; 47]).is_none());
+        // A DCS mark ID is 1 to 2^53 - 1.
+        for bad in [0u64, 1 << 53] {
+            let mut w = Writer::new();
+            w.u32(1)
+                .u32(1)
+                .u64(0)
+                .f64(1.5)
+                .f64(2.5)
+                .f64(-3.5)
+                .u64(bad)
+                .str("hi");
+            assert!(arguments(op::MARK_SET as u16, &h, &w.finish()).is_none());
+        }
 
         let shape = table(vec![("0", n(1.0))]);
         let drawing = |scope: u32, target: u64| {
             let mut w = Writer::new();
-            w.u32(scope).u32(7).u64(target).lv(&shape);
+            w.u32(scope).u32(7).u64(target).u64(77).lv(&shape);
             w.finish()
         };
         expect(
@@ -2837,6 +3025,7 @@ mod tests {
             &drawing(2, 1),
             vec![
                 entity.clone(),
+                ("dcs_id", n(77.0)),
                 ("scope", n(2.0)),
                 ("target", n(1.0)),
                 ("name", s("")),
@@ -2847,7 +3036,29 @@ mod tests {
         for scope in [0, 3, 4, 5] {
             assert!(arguments(op::DRAWING_SET as u16, &h, &drawing(scope, 1)).is_none());
         }
-        assert!(arguments(op::DRAWING_SET as u16, &h, &[0; 16]).is_none());
+        assert!(arguments(op::DRAWING_SET as u16, &h, &[0; 24]).is_none());
+        let update = {
+            let mut w = Writer::new();
+            w.u64(78).lv(&shape);
+            w.finish()
+        };
+        expect(
+            op::DRAWING_UPDATE,
+            &h,
+            &update,
+            vec![
+                entity.clone(),
+                ("dcs_id", n(78.0)),
+                ("changes", shape.clone()),
+            ],
+        );
+        expect(
+            op::MARK_CLEAR,
+            &h,
+            &79u64.to_le_bytes(),
+            vec![("dcs_id", n(79.0))],
+        );
+        assert!(arguments(op::MARK_CLEAR as u16, &h, &0u64.to_le_bytes()).is_none());
 
         let menu = |parent: u64, scope: u32, submenu: u32| {
             let mut w = Writer::new();
