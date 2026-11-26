@@ -535,6 +535,26 @@ async fn a_mark_event_from_before_a_dcs_restart_is_refused_at_the_same_generatio
     })
     .await
     .expect("the mission loads in the new DCS process");
+    // The store shows the mission before the reconciler is ready to command
+    // it: wait until it is attached, has announced the campaign and sees the
+    // mission run, which an effect needs.
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let announced = fake(&hub, |s| s.campaign() == c);
+            let ready = {
+                let g = hub.lock();
+                g.rec
+                    .as_ref()
+                    .is_some_and(|r| r.ready(&g.campaigns[&c].store))
+            };
+            if announced && ready {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the sidecar can command the new DCS process");
     // A mark event the old process made, stamped with the generation now running.
     let seq = {
         let mut g = hub.lock();

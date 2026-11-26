@@ -1478,6 +1478,11 @@ impl FakeSim {
         self.agent_boot
     }
 
+    /// The campaign the agent is bound to: the last `CAMPAIGN` command's.
+    pub fn campaign(&self) -> u64 {
+        self.campaign
+    }
+
     /// The mission generation.
     pub fn mission_gen(&self) -> u32 {
         self.mission_gen_
