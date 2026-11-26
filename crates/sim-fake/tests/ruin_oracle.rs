@@ -168,3 +168,57 @@ fn a_death_read_while_the_spawn_waits_in_the_ring_counts_as_not_known() {
     let (_, _, _, entity, spawned, known) = l.ruins_replaced[0];
     assert_eq!((entity, spawned, known), (id.0, false, false));
 }
+
+/// The static's object removed with an event, then revived: its `OBJECT`
+/// is in the ring.
+fn revived(w: &mut World, id: EntityId) -> u64 {
+    let o = object_of(w, id);
+    w.sim.remove_with_event(o);
+    assert!(w.sim.revive(o));
+    o
+}
+
+/// A ruin spawn over a revived static counts as a replacement of a group
+/// DCS held only when the sidecar had read and acknowledged the revival's
+/// `OBJECT` before it wrote the spawn.
+#[test]
+fn a_ruin_spawned_over_a_revival_counts_only_when_the_revival_was_read() {
+    let (mut w, id) = world();
+    revived(&mut w, id);
+    plant_ruin_spawn(&mut w, id, 0);
+    w.sim.frame();
+    let l = w.sim.ledger();
+    assert_eq!(
+        (l.replacements, l.ruins_over_unread_revivals),
+        (0, 1),
+        "unread: not counted"
+    );
+
+    let (mut w, id) = world();
+    revived(&mut w, id);
+    w.sim.read();
+    w.sim.flush();
+    plant_ruin_spawn(&mut w, id, 0);
+    w.sim.frame();
+    let l = w.sim.ledger();
+    assert_eq!(
+        (l.replacements, l.ruins_over_unread_revivals),
+        (1, 0),
+        "read first: a replacement"
+    );
+}
+
+/// A revival read by a sidecar that detached before acknowledging it counts
+/// as unread: only the next sidecar's acknowledged read makes it known.
+#[test]
+fn a_revival_read_and_never_acknowledged_counts_as_unread() {
+    let (mut w, id) = world();
+    revived(&mut w, id);
+    w.sim.read();
+    w.sim.detach();
+    w.sim.attach(99);
+    plant_ruin_spawn(&mut w, id, 0);
+    w.sim.frame();
+    let l = w.sim.ledger();
+    assert_eq!((l.replacements, l.ruins_over_unread_revivals), (0, 1));
+}

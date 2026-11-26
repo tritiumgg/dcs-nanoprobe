@@ -451,6 +451,26 @@ fn commands(w: &World, entity: nanoprobe_sidecar::ids::EntityId, opcode: u16) ->
         .count()
 }
 
+/// `NOT_BOUND`, as the fake's ledger records a result code.
+const NOT_BOUND: u16 = nanoprobe_transport::layout::result::NOT_BOUND as u16;
+
+/// The result codes DCS gave the group's `GROUP_ORDER`s, in the order sent.
+fn order_codes(w: &World, entity: nanoprobe_sidecar::ids::EntityId) -> Vec<u16> {
+    use nanoprobe_sidecar::sim::wire::opcode;
+    use nanoprobe_sidecar::store::Entry;
+    let results = &w.sim.ledger().results;
+    w.store
+        .entries()
+        .iter()
+        .filter_map(|e| match e {
+            Entry::Command(c) if c.entity == entity && c.opcode == opcode::GROUP_ORDER => {
+                results.get(&(c.agent_boot, c.epoch, c.seq)).copied()
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// An `unspawnable` group whose spec is fixed goes `virtual`, and from there
 /// materializes because its authority is DCS and its theater is loaded.
 #[test]
@@ -550,6 +570,154 @@ fn a_refused_order_is_sent_again_when_a_member_is_revived() {
     assert!(commands(&w, id, opcode::GROUP_ORDER) > sent);
     assert_eq!(w.sim.applied_order(id.0), rev);
     assert_eq!(w.store.group(id).unwrap().state, State::Live);
+}
+
+/// A `NOT_BOUND` refusal waits for a member's `OBJECT`: none comes while
+/// DCS holds none of the group, so the order is not sent in a loop.
+#[test]
+fn an_order_refused_not_bound_is_not_sent_again_while_dcs_holds_no_member() {
+    use nanoprobe_sidecar::sim::wire::opcode;
+    use nanoprobe_sim_fake::harness::Op;
+
+    let mut w = World::new(1, 0, LostPolicy::Report);
+    w.settle().unwrap();
+    let id = w.store.groups().next().unwrap().id;
+    // One member is removed with an event, then the others die: the group
+    // stays `live` and DCS holds none of its members.
+    let objects: Vec<u64> = w
+        .sim
+        .objects()
+        .into_iter()
+        .filter(|(_, _, entity)| *entity != 0)
+        .map(|(o, _, _)| o)
+        .collect();
+    let (last, dead) = objects.split_last().unwrap();
+    w.sim.remove_with_event(*last);
+    w.apply(&Op::Frames(2)).unwrap();
+    for o in dead {
+        w.sim.kill(*o);
+        w.apply(&Op::Frames(2)).unwrap();
+    }
+    w.apply(&Op::Order(0)).unwrap();
+    assert_eq!(w.store.group(id).unwrap().state, State::Live);
+    w.apply(&Op::Frames(4)).unwrap();
+    assert_eq!(w.sim.applied_order(id.0), 0);
+    assert_eq!(order_codes(&w, id), [NOT_BOUND], "DCS held no group");
+    let sent = commands(&w, id, opcode::GROUP_ORDER);
+    // A reattach's enumeration reads no member: the order is not sent again.
+    w.apply(&Op::Detach).unwrap();
+    w.apply(&Op::Reattach).unwrap();
+    w.apply(&Op::Frames(8)).unwrap();
+    assert_eq!(commands(&w, id, opcode::GROUP_ORDER), sent);
+    assert_eq!(w.store.group(id).unwrap().state, State::Lost);
+}
+
+/// A group with one member dead: one living member removed with no record,
+/// the other with an event. Its order is answered `NOT_BOUND`; the silently
+/// removed member is revived, and its `OBJECT` sends the order again.
+#[test]
+fn an_order_refused_not_bound_is_sent_again_when_any_member_is_read() {
+    use nanoprobe_sim_fake::harness::Op;
+
+    let mut w = World::new(1, 0, LostPolicy::Report);
+    w.settle().unwrap();
+    let id = w.store.groups().next().unwrap().id;
+    let objects: Vec<u64> = w
+        .sim
+        .objects()
+        .into_iter()
+        .filter(|(_, _, entity)| *entity != 0)
+        .map(|(o, _, _)| o)
+        .collect();
+    let [dead, silent, removed] = objects[..] else {
+        panic!("three members: {objects:?}");
+    };
+    w.sim.kill(dead);
+    w.apply(&Op::Frames(2)).unwrap();
+    w.sim.remove_silently(silent);
+    w.sim.remove_with_event(removed);
+    w.apply(&Op::Frames(2)).unwrap();
+    w.apply(&Op::Order(0)).unwrap();
+    w.apply(&Op::Frames(4)).unwrap();
+    assert_eq!(w.store.group(id).unwrap().state, State::Live);
+    assert_eq!(order_codes(&w, id), [NOT_BOUND]);
+    assert_eq!(w.sim.applied_order(id.0), 0);
+    assert!(w.sim.revive(silent));
+    w.apply(&Op::Frames(4)).unwrap();
+    assert_eq!(order_codes(&w, id).len(), 2, "sent again");
+    assert_eq!(
+        w.sim.applied_order(id.0),
+        w.store.group(id).unwrap().order_rev
+    );
+}
+
+/// A member leaves, its group takes an attack order, and the rest leave:
+/// the revived member brings the group back with that task, not the one it
+/// held when the member left (the fake's model; UNVERIFIED in DCS).
+#[test]
+fn a_revived_member_brings_back_the_task_its_group_took_after_it_left() {
+    use nanoprobe_sim_fake::harness::Op;
+
+    let mut w = World::new(2, 0, LostPolicy::Report);
+    w.settle().unwrap();
+    let ids: Vec<_> = w.store.groups().map(|g| g.id).collect();
+    let (a, t) = (ids[0], ids[1]);
+    let members: Vec<u64> = w
+        .sim
+        .objects()
+        .into_iter()
+        .filter(|(_, _, e)| {
+            w.store
+                .unit(nanoprobe_sidecar::ids::EntityId(*e))
+                .is_some_and(|u| u.group == a)
+        })
+        .map(|(o, _, _)| o)
+        .collect();
+    let (first, rest) = members.split_first().unwrap();
+    w.sim.remove_silently(*first);
+    w.store
+        .set_order(a, nanoprobe_sidecar::intents::Intent::Attack { target: t })
+        .unwrap();
+    w.apply(&Op::Frames(4)).unwrap();
+    let target = w.sim.attack_of(CAMPAIGN, t.0).unwrap().0;
+    assert_eq!(w.sim.attack_of(CAMPAIGN, a.0).unwrap().1, Some(target));
+    for o in rest {
+        w.sim.remove_silently(*o);
+    }
+    assert!(
+        w.sim.attack_of(CAMPAIGN, a.0).is_none(),
+        "DCS holds none of it"
+    );
+    assert!(w.sim.revive(*first));
+    assert_eq!(w.sim.attack_of(CAMPAIGN, a.0).unwrap().1, Some(target));
+}
+
+/// An order DCS refused for a group it holds stays refused when the
+/// group's members are read again, by the enumeration after a reattach:
+/// only a `NOT_BOUND` refusal waits for any member.
+#[test]
+fn an_order_dcs_refused_is_not_sent_again_when_members_are_read_again() {
+    use nanoprobe_sidecar::sim::wire::opcode;
+    use nanoprobe_sim_fake::harness::Op;
+
+    let mut w = World::new(1, 0, LostPolicy::Report);
+    w.settle().unwrap();
+    let id = w.store.groups().next().unwrap().id;
+    w.sim.refuse_orders(1);
+    w.apply(&Op::Order(0)).unwrap();
+    w.apply(&Op::Frames(4)).unwrap();
+    assert_eq!(w.sim.applied_order(id.0), 0, "refused");
+    let sent = commands(&w, id, opcode::GROUP_ORDER);
+    assert_eq!(sent, 1);
+    let enumerations = w.rec.counters().enumerations;
+    w.apply(&Op::Detach).unwrap();
+    w.apply(&Op::Reattach).unwrap();
+    w.apply(&Op::Frames(8)).unwrap();
+    assert!(
+        w.rec.counters().enumerations > enumerations,
+        "the members were read again"
+    );
+    assert_eq!(commands(&w, id, opcode::GROUP_ORDER), sent);
 }
 
 /// A group whose last present member left DCS with no death, its other
@@ -2584,4 +2752,141 @@ fn a_revision_answered_after_a_lost_result_and_a_restart_is_confirmed() {
     }
     assert_eq!(sent(&w, id, rev), n, "nothing more once confirmed");
     assert_eq!(w.store.group(id).unwrap().state, State::Live);
+}
+
+/// One living member removed with no record, then the group's other living
+/// member removed with one (`REMOVED`): DCS holds none of the group when its
+/// attack order runs, and answers `NOT_BOUND`. The silently removed member is revived.
+/// Its `OBJECT` says DCS got back a member it lacked, so the order is sent
+/// again and the attacker aims at its target.
+#[test]
+fn an_order_refused_not_bound_is_sent_again_when_a_silently_removed_member_is_revived() {
+    let ops = [
+        Op::Frames(1),
+        Op::RestartDcs,
+        Op::Frames(1),
+        Op::KillRemoved(0),
+        Op::KillRemoved(0),
+        Op::Revive(0),
+        Op::KillRemoved(4433),
+        Op::Kill(0),
+        Op::Revive(0),
+        Op::KillRemoved(36),
+        Op::KillRemoved(56295),
+        Op::RemoveSilently(9429),
+        Op::Revive(22365),
+        Op::Attack(26367, 7488),
+        Op::KillRemoved(23429),
+        Op::Revive(669),
+    ];
+    let mut w = World::new(4, 0, LostPolicy::Report);
+    for op in &ops {
+        w.apply(op).unwrap();
+    }
+    w.settle().unwrap();
+    assert!(
+        w.store
+            .groups()
+            .any(|g| order_codes(&w, g.id).contains(&NOT_BOUND)),
+        "the seed reaches a NOT_BOUND order"
+    );
+}
+
+/// An attacker whose members all leave DCS after its attack order ran, one
+/// of them revived: the fake brings the group back as it last held it, with
+/// its task, so the attacker still aims at its target. UNVERIFIED: whether
+/// DCS keeps the task of a group it emptied when a member is revived.
+#[test]
+fn a_group_revived_after_its_last_member_left_keeps_the_task_it_took() {
+    let ops = [
+        Op::Frames(4),
+        Op::Kill(0),
+        Op::Kill(0),
+        Op::Revive(0),
+        Op::Kill(25135),
+        Op::KillRemoved(40137),
+        Op::RemoveSilently(1016),
+        Op::KillRemoved(5393),
+        Op::KillRemoved(14812),
+        Op::Kill(21086),
+        Op::Detach,
+        Op::RemoveWithEvent(0),
+        Op::Kill(0),
+        Op::RemoveSilently(46550),
+        Op::KillRemoved(435),
+        Op::Reattach,
+        Op::KillRemoved(4691),
+        Op::SidecarCrashInWrite(0),
+        Op::RestartDcs,
+        Op::Frames(5),
+        Op::Kill(43391),
+        Op::RemoveWithEvent(57642),
+        Op::Detach,
+        Op::Attack(18136, 23282),
+        Op::RestartDcs,
+        Op::ForeignCampaign,
+        Op::Reattach,
+        Op::Kill(0),
+        Op::RemoveWithEvent(11197),
+        Op::Detach,
+        Op::Revive(10718),
+        Op::Kill(0),
+        Op::Kill(0),
+        Op::KillRemoved(3),
+        Op::Kill(22657),
+        Op::Kill(29349),
+        Op::Revive(29301),
+    ];
+    let mut w = World::new_late(5, 2, LostPolicy::Report, 188_053_969_804_328_414);
+    for op in &ops {
+        w.apply(op).unwrap();
+    }
+    w.settle().unwrap();
+}
+
+/// A static's object removed with an event, the lost policy marking it
+/// dead, and a foreign campaign clearing the agent's applied revisions: the
+/// ruin's spawn is written while DCS holds no object of the static, and a
+/// script revives the object before the spawn runs. The spawn replaces it.
+/// Nothing told the sidecar that DCS holds the object, so this is no
+/// violation, and the static ends `dead` with its ruin in DCS.
+#[test]
+fn a_ruin_spawned_before_a_revival_is_read_replaces_the_revived_object() {
+    let ops = [
+        Op::FixSpec(0),
+        Op::Crash,
+        Op::BreakSpec(30416),
+        Op::RestartDcs,
+        Op::BreakSpec(27009),
+        Op::Frames(3),
+        Op::Frames(1),
+        Op::Kill(26203),
+        Op::KillRemoved(54052),
+        Op::RemoveWithEvent(26273),
+        Op::ForeignCampaign,
+        Op::SidecarRestart,
+        Op::Revive(7647),
+        Op::Order(19883),
+        Op::Revive(38696),
+    ];
+    let mut w = World::new(2, 2, LostPolicy::Dead);
+    for op in &ops {
+        w.apply(op).unwrap();
+    }
+    w.settle().unwrap();
+    let l = w.sim.ledger();
+    assert_eq!(
+        l.ruins_over_unread_revivals, 1,
+        "the revived object, unread"
+    );
+    assert_eq!(l.replacements, l.in_place);
+    let dead: Vec<_> = w
+        .store
+        .groups()
+        .filter(|g| {
+            g.state == State::Dead && w.sim.ruins(CAMPAIGN).iter().any(|r| r.entity == g.id.0)
+        })
+        .map(|g| g.id)
+        .collect();
+    assert!(!dead.is_empty(), "a dead static holds its ruin");
 }

@@ -430,6 +430,10 @@ pub struct Ledger {
     pub ruins_replaced: Vec<(u64, u32, u64, u64, bool, bool)>,
     /// Spawns of a live static under the name of a dead one.
     pub ruins_replaced_alive: u64,
+    /// Ruin spawns that replaced a revived static whose `OBJECT` a sidecar
+    /// had not read before the spawn was written. Not counted in
+    /// [`Ledger::replacements`].
+    pub ruins_over_unread_revivals: u64,
 }
 
 /// A death's key in [`Ledger::reported_deaths`]: agent boot, generation,
@@ -588,6 +592,16 @@ pub struct FakeSim {
     /// Deaths read and not yet acknowledged: the record, its key, and the
     /// link clock of the read.
     deaths_unacked: Vec<((u64, u64), DeathKey, u64)>,
+    /// Revived objects DCS holds now, each with the link clock at the first
+    /// read and acknowledgement of its `OBJECT` after the revival: None
+    /// until a sidecar has read it.
+    revived: HashMap<u64, Option<u64>>,
+    /// The `OBJECT` records of those revivals, by agent boot and record
+    /// number.
+    revival_records: HashMap<(u64, u64), u64>,
+    /// Revivals read and not yet acknowledged: the record, its object, and
+    /// the link clock of the read.
+    revivals_unacked: Vec<((u64, u64), u64, u64)>,
     /// The link clock at which each command in the ring was written, by its
     /// position.
     written_at: HashMap<u64, u64>,
@@ -626,6 +640,7 @@ pub struct FakeSim {
     /// `MARK_SET`s and `DRAWING_SET`s still to refuse as at or below the
     /// process mark, whatever their ID.
     refuse_adds: u32,
+    refuse_orders: u32,
     reject_ruins: u32,
     farp: FarpSpawns,
     /// `WAREHOUSE_SET` commands still to answer `NOT_READY`.
@@ -764,6 +779,9 @@ impl FakeSim {
             unacked: Vec::new(),
             link_clock: 0,
             death_records: HashMap::new(),
+            revived: HashMap::new(),
+            revival_records: HashMap::new(),
+            revivals_unacked: Vec::new(),
             deaths_unacked: Vec::new(),
             written_at: HashMap::new(),
             handling_written_at: None,
@@ -785,6 +803,7 @@ impl FakeSim {
             refuse_damages: 0,
             refuse_ruins: 0,
             refuse_adds: 0,
+            refuse_orders: 0,
             reject_ruins: 0,
             farp: FarpSpawns::default(),
             stock_not_ready: 0,
@@ -1570,6 +1589,10 @@ impl FakeSim {
                 self.death_records
                     .insert((self.agent_boot, self.number + 1), key);
             }
+            Input::Object(o) if self.revived.get(&o.object) == Some(&None) => {
+                self.revival_records
+                    .insert((self.agent_boot, self.number + 1), o.object);
+            }
             _ => {}
         }
         let (kind, payload) = input.encode();
@@ -1792,6 +1815,7 @@ impl FakeSim {
         // A generation change clears the agent's memory of rows that left.
         self.late.clear();
         self.graves.clear();
+        self.revived.clear();
         self.ruins.clear();
         self.applied_spec.clear();
         self.applied_order.clear();
@@ -2065,6 +2089,12 @@ impl FakeSim {
         self.refuse_adds = n;
     }
 
+    /// The next `n` `GROUP_ORDER`s for a group DCS holds are answered
+    /// `DCS_REFUSED`, and the group's task is left as it was.
+    pub fn refuse_orders(&mut self, n: u32) {
+        self.refuse_orders = n;
+    }
+
     /// The next `n` `STATIC_SPAWN` commands with `dead = true` are answered
     /// `DCS_REFUSED`, and DCS adds nothing.
     pub fn refuse_ruins(&mut self, n: u32) {
@@ -2101,8 +2131,9 @@ impl FakeSim {
         self.inbound.clear();
         self.held.clear();
         self.written_at.clear();
-        // A death read and never acknowledged is read again.
+        // A death or a revival read and never acknowledged is read again.
         self.deaths_unacked.clear();
+        self.revivals_unacked.clear();
         // Records the last sidecar read and never acknowledged come first:
         // they are older than anything still in the ring. Those of an agent
         // boot that is gone went with it.
@@ -2265,6 +2296,7 @@ impl FakeSim {
         };
         self.objects.insert(object, o);
         self.table.insert(object, bound);
+        self.revived.insert(object, None);
         let r = self.object_record(object, 0);
         self.emit(r);
         true
@@ -2446,10 +2478,20 @@ impl FakeSim {
         if let Some(g) = self.groups.get(&gid) {
             self.graves.insert(object, (o.clone(), g.clone()));
         }
+        self.revived.remove(&object);
         if let Some(g) = self.groups.get_mut(&gid) {
             g.members.retain(|m| *m != object);
             if g.members.is_empty() {
-                self.groups.remove(&gid);
+                // A revival brings the group back as DCS last held it, with
+                // the task it took after its other members left. UNVERIFIED:
+                // whether a group DCS emptied keeps its task when a member
+                // is revived; the fake assumes it does.
+                let last = self.groups.remove(&gid).expect("group");
+                for (go, gg) in self.graves.values_mut() {
+                    if go.kind != object_kind::STATIC && go.group == gid {
+                        *gg = last.clone();
+                    }
+                }
             }
         }
         Some(o)
@@ -3149,6 +3191,10 @@ impl FakeSim {
                 let Some(gid) = self.group_of(h.entity) else {
                     return self.result(&cmd, rc::NOT_BOUND, 0, "", Lv::Nil);
                 };
+                if self.refuse_orders > 0 {
+                    self.refuse_orders -= 1;
+                    return self.result(&cmd, rc::DCS_REFUSED, 0, "refused", Lv::Nil);
+                }
                 let g = self.groups.get_mut(&gid).expect("group");
                 g.route = route_points(task);
                 g.wp = 0;
@@ -3775,7 +3821,18 @@ impl FakeSim {
             .find(|(_, g)| g.name == name)
             .map(|(id, _)| *id)
         {
-            if !self.orphans.contains(&old) {
+            // A static revived after the spawn was written, or whose
+            // `OBJECT` the sidecar had not read by then: nothing told the
+            // sidecar that DCS holds it. Counted apart from
+            // `replacements`, as `ruins_replaced` keeps deaths read late.
+            let written = self.handling_written_at.unwrap_or(self.link_clock);
+            let unknown = self
+                .revived
+                .get(&old)
+                .is_some_and(|read| read.is_none_or(|r| r >= written));
+            if unknown {
+                self.ledger.ruins_over_unread_revivals += 1;
+            } else if !self.orphans.contains(&old) {
                 self.ledger.replacements += 1;
             }
             self.destroy_group(old);
@@ -3994,6 +4051,10 @@ impl SimAdapter for FakeSim {
             if let Some(key) = self.death_records.get(&record) {
                 self.deaths_unacked.push((record, *key, self.link_clock));
             }
+            if let Some(object) = self.revival_records.get(&record) {
+                self.revivals_unacked
+                    .push((record, *object, self.link_clock));
+            }
         }
         self.unacked.extend(v.iter().cloned());
         v
@@ -4006,6 +4067,12 @@ impl SimAdapter for FakeSim {
         for (record, key, clock) in std::mem::take(&mut self.deaths_unacked) {
             self.death_records.remove(&record);
             self.ledger.deaths_read.entry(key).or_insert(clock);
+        }
+        for (record, object, clock) in std::mem::take(&mut self.revivals_unacked) {
+            self.revival_records.remove(&record);
+            if let Some(read @ None) = self.revived.get_mut(&object) {
+                *read = Some(clock);
+            }
         }
     }
 }

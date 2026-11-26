@@ -539,9 +539,14 @@ late-activated group's units, are UNVERIFIED.
 |---|---|---|---|
 | + | lv | task | The task table for the group's controller |
 
-An order that resolves `refused` is not sent again at the same revision while DCS holds
-none of the group's members. It is sent again when DCS gets back a member it lacked: a
-revived member, a `MISSING` or `REMOVED` member found again, or a `lost` group found.
+An order that resolves `refused` is not sent again at the same revision. It is sent
+again when DCS gets back a member it lacked: a revived member, a `MISSING` or `REMOVED`
+member found again, or a `lost` group found. Reading a member DCS held all along, as an
+enumeration does, does not send it.
+After a `NOT_BOUND` answer, any `OBJECT` of a member counts as a member DCS got back:
+the answer says DCS held none of the group, even when no record said that member left.
+UNVERIFIED: whether DCS can hold a member again under its object ID with no record that
+it left; the fake sim models it as a script's removal and revival.
 
 `GROUP_DESTROY`, `GROUP_CAPTURE_DESTROY`, `STATIC_DESTROY`, `MARK_REMOVE`,
 `DRAWING_REMOVE` and `MENU_REMOVE` have no payload after the header. Destroying or

@@ -324,8 +324,9 @@ pub struct Reconciler {
     /// The order revision the agent holds per group, as far as the reconciler
     /// knows, in the loaded generation.
     order_held: HashMap<EntityId, u64>,
-    /// An order revision DCS refused; not sent again until it changes.
-    order_refused: HashMap<EntityId, u64>,
+    /// An order revision DCS refused; not sent again until it changes. The
+    /// flag says the answer was `NOT_BOUND`: DCS held none of the group.
+    order_refused: HashMap<EntityId, (u64, bool)>,
     /// A test diagnostic, off unless [`Reconciler::measure_binds`] turned it
     /// on: the time from a spawn's result to each unit's `OBJECT`.
     bind_lags: Option<BindLags>,
@@ -1273,7 +1274,8 @@ impl Reconciler {
                         *held = (*held).max(c.rev);
                     }
                     Outcome::Refused => {
-                        self.order_refused.insert(id, c.rev);
+                        self.order_refused
+                            .insert(id, (c.rev, code == Some(rc::NOT_BOUND)));
                     }
                     Outcome::Rejected if code == Some(rc::NOT_READY) => {
                         self.hold_not_ready(id, HOLD_ORDER, c.rev);
@@ -1543,6 +1545,12 @@ impl Reconciler {
             .unit(row.unit)
             .is_some_and(|u| !u.dead && (u.missing || u.removed))
         {
+            self.order_refused.remove(&row.group);
+        }
+        // A member seen in DCS after a `NOT_BOUND` refusal: DCS got back a
+        // member it lacked, though no record said it left (a script removed
+        // and revived it).
+        if self.order_refused.get(&row.group).is_some_and(|r| r.1) {
             self.order_refused.remove(&row.group);
         }
         store.set_missing(row.unit, false);
@@ -3137,7 +3145,7 @@ impl Reconciler {
         let rev = g.order_rev;
         let held = self.order_held.get(&id).copied().unwrap_or(0);
         if held >= rev
-            || self.order_refused.get(&id) == Some(&rev)
+            || self.order_refused.get(&id).map(|r| r.0) == Some(rev)
             || self.is_held(self.cmd_not_ready.get(&(id, HOLD_ORDER)), rev)
         {
             return;

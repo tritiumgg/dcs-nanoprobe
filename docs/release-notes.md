@@ -90,6 +90,11 @@
 - A FARP the platform spawns, by either call, is `LIVE` in the World, and
   `RemoveEntity` removes it with its airbase. On a paused server DCS removes it when the
   mission resumes ([2026-11-25-farp-fixes.md](results/2026-11-25-farp-fixes.md)).
+- A group's order that DCS refused because it held none of the group is sent again
+  once DCS reports one of its members, even a member no record said had left.
+  UNVERIFIED: whether DCS can hold such a member again; the fake sim models it as a
+  script's removal and revival
+  ([ADR 0051](adr/0051-an-order-refused-not-bound-waits-for-any-member.md)).
 
 ## 0.1.0, the first release
 

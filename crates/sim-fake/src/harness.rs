@@ -874,6 +874,10 @@ impl World {
 
     fn check_safety(&mut self) -> Result<(), Violation> {
         let l = self.sim.ledger();
+        // A ruin spawn over a revived static whose `OBJECT` the sidecar had
+        // not read when it wrote the spawn is counted in
+        // `ruins_over_unread_revivals`, not here: as with a death read late,
+        // nothing told the sidecar that DCS holds the object.
         if l.replacements != l.in_place {
             return Err(Violation(format!(
                 "{} spawns replaced a group DCS held",
