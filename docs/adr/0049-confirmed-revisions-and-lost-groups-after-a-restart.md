@@ -1,4 +1,4 @@
-# ADR NNNN: Confirmed revisions and lost groups after a restart
+# ADR 0049: Confirmed revisions and lost groups after a restart
 
 ## Status
 

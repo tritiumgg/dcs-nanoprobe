@@ -1,4 +1,4 @@
-# ADR NNNN: Stamps carry the agent boot
+# ADR 0050: Stamps carry the agent boot
 
 ## Status
 
