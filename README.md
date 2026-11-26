@@ -38,15 +38,42 @@ The sidecar and the agent talk through a mapped file: one file that both of them
 into memory. So the sidecar runs on the same machine as DCS.
 
 ```mermaid
-flowchart LR
-    C["Your controller<br/>(any language)"] -- "gRPC API" --> S
-    subgraph Server["DCS server machine"]
-        S["Sidecar"] --- D[("Campaign store")]
-        S -- "mapped file" --> A
-        subgraph DCS["DCS World"]
-            A["Agent and its Lua hook"]
+%%{init: {"theme": "base", "themeVariables": {"lineColor": "#64748b", "edgeLabelBackground": "#ffffff", "clusterBkg": "#f8fafc", "clusterBorder": "#94a3b8", "titleColor": "#0f172a", "textColor": "#0f172a"}}}%%
+flowchart TB
+    C(["<b>Your controller</b><br/>any language"])
+
+    subgraph host["<b>Server</b>#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;"]
+        S["<b>Sidecar</b><br/>reconciler and API"]
+        D[("#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;<b>Campaign store</b>#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;<br/>desired state, facts,<br/>event history")]
+        subgraph dcs["<b>DCS World</b>#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;#nbsp;"]
+            A["<b>Agent</b><br/>and its Lua hook"]
+            W["<b>DCS simulation</b><br/>units, weapons, players"]
         end
     end
+
+    S ~~~ D
+    S ~~~ A
+    A ~~~ W
+
+    C <-- "gRPC: commands down,<br/>world changes and events up" --> S
+    S -- "desired state,<br/>facts, events" --> D
+    D -- "restore after<br/>a restart" --> S
+    S -- "commands<br/>(mapped file)" --> A
+    A -- "state and events<br/>(mapped file)" --> S
+    A -- "spawn, order,<br/>effects" --> W
+    W -- "positions, life,<br/>DCS events" --> A
+
+    classDef controller fill:#1d4ed8,stroke:#1e3a8a,color:#ffffff
+    classDef sidecar fill:#6d28d9,stroke:#4c1d95,color:#ffffff
+    classDef store fill:#b45309,stroke:#78350f,color:#ffffff
+    classDef agent fill:#047857,stroke:#064e3b,color:#ffffff
+    classDef sim fill:#334155,stroke:#0f172a,color:#ffffff
+    class C controller
+    class S sidecar
+    class D store
+    class A agent
+    class W sim
+    style dcs fill:#e2e8f0,stroke:#64748b
 ```
 
 Your controller tells the sidecar what it wants: "this convoy exists and drives to that
