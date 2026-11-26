@@ -17,8 +17,23 @@ The agent writes a new `FRAME` before a record whose stamps differ in any field 
 those of the last `FRAME` it wrote, even within one frame. A `CAMPAIGN` command that
 changes the campaign in the middle of a frame therefore puts a `FRAME` with the new
 campaign before the next record, and the records made before the command keep the old
-one. The agent boot is not a stamp: the agent's queue lives in its memory and ends with
-the DCS process, so every record in one ring has the boot in the status block.
+one. A transport record carries no agent boot: the agent's queue lives in its memory and
+ends with the DCS process, so every record in one ring has the boot in the status block.
+
+The API's `Stamp` carries the agent boot beside these stamps. The pair of agent boot
+and mission generation names one mission run, because the generation and the frame
+number start over in each DCS process; `frame` and `model_time` order stamps only
+within one run. The server sets the boot. It is opaque and compared for equality only.
+While an agent is attached to this sidecar process, a stamp takes the boot of the
+record it was read with, so a new DCS process's first `FRAME` and queued records,
+which come before its `HELLO`, carry the new boot. The boot is 0 when none is known:
+no agent attached to this sidecar process since its start or its last restart, or an
+event body stored without it and with no agent-record source key. A 0 is never the same
+run as another stamp. An event made from an agent record carries the boot of its source
+key, `<agent boot>:<record number>` (spec/persistence.md, "Event history"), also when
+read back from history after a DCS restart. A checkpoint's stamp carries the boot of
+the generation it was taken in. No request takes a `Stamp` today; one that does checks
+the boot together with the generation.
 
 Every record the agent writes in a DCS process has a number, counted from 1 through
 `FRAME` and padding records too. `FRAME` carries the number of the record after it.

@@ -360,10 +360,6 @@ pub struct Reconciler {
     /// A spawn the agent rejected with a code that a resend cannot fix, by
     /// spec revision and generation; not sent again until either changes.
     spawn_rejected: HashMap<EntityId, (u64, u32)>,
-    /// The spec revision the latest applied spawn of each entity carried, in
-    /// the loaded generation. A live entity whose store `spec_rev` is ahead
-    /// of it is spawned again, in place (spec/world.md, "Revisions").
-    spawn_applied: HashMap<EntityId, u64>,
     /// A restored unit's life, as DCS reads it, held until the `DAMAGE` that
     /// sets it is applied: a sample or capture before then, at the life the
     /// spawn gave, does not replace it (spec/world.md, "Spawn state"). By
@@ -438,6 +434,12 @@ pub struct Reconciler {
     /// last `HELLO` and since the last `GAP` of events: until then the mirror
     /// may lack objects DCS holds.
     enumerated: bool,
+    /// Groups lost to failed destroys that no full enumeration begun since
+    /// has ended, with the enumeration in progress at the loss, if any. DCS
+    /// may still hold their objects, or a member may have left with no
+    /// record: the respawn policy waits for an enumeration, whose end marks
+    /// such a member missing (spec/world.md, "Respawn gate").
+    lost_unread: BTreeMap<EntityId, Option<u64>>,
     /// Lost groups the respawn policy is holding back now.
     held: BTreeSet<EntityId>,
     counters: Counters,
@@ -555,7 +557,6 @@ impl Reconciler {
             pins: players::PinState::starting(store),
             drift_destroy_failures: HashMap::new(),
             spawn_rejected: HashMap::new(),
-            spawn_applied: HashMap::new(),
             life_held: HashMap::new(),
             ruin_object: HashMap::new(),
             option_held: HashMap::new(),
@@ -583,6 +584,7 @@ impl Reconciler {
             campaign_sent: false,
             burst: false,
             enumerated: false,
+            lost_unread: BTreeMap::new(),
             held: BTreeSet::new(),
             counters: Counters::default(),
         }
@@ -918,11 +920,11 @@ impl Reconciler {
         self.forget_generation(store);
         self.pins_forget(store, false);
         self.spawn_rejected.clear();
-        self.spawn_applied.clear();
         self.life_held.clear();
         self.ruin_object.clear();
         self.drift_destroy_failures.clear();
         self.held.clear();
+        self.lost_unread.clear();
         self.run = None;
         // A load leaves PAUSED, which ends the burst in the agent.
         self.burst = false;
@@ -1190,8 +1192,6 @@ impl Reconciler {
                         // lost: a new group has no task, and an order refused
                         // for the old one may suit it. Sending the order again
                         // costs at most an AT_REVISION.
-                        let at = self.spawn_applied.entry(id).or_default();
-                        *at = (*at).max(c.rev);
                         self.order_held.remove(&id);
                         self.order_refused.remove(&id);
                         self.forget_options(id);
@@ -1201,7 +1201,7 @@ impl Reconciler {
                         // compiled again at a new revision. After a
                         // generation change every order is sent again anyway.
                         if store
-                            .spawned(id, c.agent_boot, c.mission_gen)
+                            .spawned(id, c.agent_boot, c.mission_gen, c.rev)
                             .expect("group")
                         {
                             let attackers: Vec<EntityId> = store
@@ -1367,6 +1367,8 @@ impl Reconciler {
                     store
                         .transition(id, Trigger::DestroyFailed)
                         .expect("dematerializing");
+                    let during = self.run.as_ref().map(|r| r.id);
+                    self.lost_unread.insert(id, during);
                 }
             } else {
                 *self.drift_destroy_failures.entry(id).or_default() += 1;
@@ -1786,11 +1788,16 @@ impl Reconciler {
         let found: BTreeSet<EntityId> = self.binding.values().map(|r| r.group).collect();
         let bound_units: BTreeSet<EntityId> = self.binding.values().map(|r| r.unit).collect();
         let ids: Vec<(EntityId, State)> = store.groups().map(|g| (g.id, g.state)).collect();
+        // Only an enumeration that began after the loss read the group.
+        self.lost_unread.retain(|_, during| *during == Some(run.id));
         for (id, state) in ids {
-            if state == State::Live {
+            if matches!(state, State::Live | State::Lost) {
                 // A member the agent's table does not hold is missing, even
                 // one the mirror never saw: its OBJECT may have been lost
-                // to a GAP.
+                // to a GAP. A lost group's too: one lost to failed destroys
+                // still had its objects, and a member that left since,
+                // with no record, may be dead (spec/world.md, "Respawn
+                // gate").
                 for m in store.group(id).expect("group").members.clone() {
                     if !bound_units.contains(&m) {
                         store.set_missing(m, true);
@@ -2179,16 +2186,20 @@ impl Reconciler {
                         // A live entity whose spec is ahead of its applied
                         // spawn is spawned again in place. Its order and
                         // options wait for that spawn: it replaces the group.
-                        let applied = *self.spawn_applied.entry(id).or_insert(g.spec_rev);
+                        // The revision DCS confirmed, kept in the store: a
+                        // revision sent and unanswered before a sidecar
+                        // restart is still owed after it.
+                        let spec_rev = g.spec_rev;
+                        let applied = store.spawned_rev(id, loaded.agent_boot, loaded.mission_gen);
                         let in_flight = self.inflight_for(
                             store,
                             id,
                             &[opcode::GROUP_SPAWN, opcode::STATIC_SPAWN],
                         );
-                        let behind = applied < g.spec_rev;
+                        let behind = applied < spec_rev;
                         let blocked = self.spawn_rejected.get(&id)
-                            == Some(&(g.spec_rev, loaded.mission_gen))
-                            || self.is_held(self.cmd_not_ready.get(&(id, HOLD_SPAWN)), g.spec_rev);
+                            == Some(&(spec_rev, loaded.mission_gen))
+                            || self.is_held(self.cmd_not_ready.get(&(id, HOLD_SPAWN)), spec_rev);
                         let mut sent = false;
                         if behind && !in_flight && !blocked && here && spawns > 0 {
                             sent = self.spawn(store, sim, id);
@@ -2236,8 +2247,13 @@ impl Reconciler {
                         self.held.remove(&id);
                         // Objects DCS may still hold (a destroy that failed to
                         // its limit) are settled by an enumeration first: one
-                        // used since the last HELLO, so the mirror is whole.
-                        if g.authority == Authority::Sim && here && self.enumerated && !has_objects
+                        // used since the last HELLO, so the mirror is whole,
+                        // and since the group was lost.
+                        if g.authority == Authority::Sim
+                            && here
+                            && self.enumerated
+                            && !self.lost_unread.contains_key(&id)
+                            && !has_objects
                         {
                             store.respawn(id).expect("lost");
                         }
@@ -2405,12 +2421,7 @@ impl Reconciler {
         let Some(u) = store.unit(unit) else {
             return false;
         };
-        u.captured.life_percent.is_some()
-            && store.group(u.group).is_some_and(|g| {
-                self.spawn_applied
-                    .get(&g.id)
-                    .is_some_and(|applied| *applied < g.spec_rev)
-            })
+        u.captured.life_percent.is_some() && store.spawn_behind(u.group)
     }
 
     /// A restored life DCS did not take: counted, and reported once.
@@ -2741,10 +2752,7 @@ impl Reconciler {
             store.group(u.group).is_some_and(|g| {
                 g.kind == Kind::Static
                     && (!matches!(lv::get(&u.extra, "category"), Some(Lv::String(c)) if c == b"Cargos")
-                        || self
-                            .spawn_applied
-                            .get(&g.id)
-                            .is_some_and(|applied| *applied < g.spec_rev))
+                        || store.spawn_behind(g.id))
             })
         })
     }

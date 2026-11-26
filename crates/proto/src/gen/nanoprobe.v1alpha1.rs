@@ -26,7 +26,10 @@ pub struct Attitude {
     #[prost(double, tag = "3")]
     pub roll: f64,
 }
-/// When something happened.
+/// When something happened. `agent_boot` and `mission_generation` together
+/// name one mission run; `frame` and `model_time` order stamps only within
+/// one run. No request takes a `Stamp` today; one that does checks
+/// `agent_boot` together with `mission_generation`.
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct Stamp {
     /// Wall-clock time: the agent's DCS real time plus the offset the server
@@ -43,6 +46,14 @@ pub struct Stamp {
     /// The agent's frame sequence number.
     #[prost(uint64, tag = "4")]
     pub frame: u64,
+    /// Set by the server. The agent boot: one value per DCS process, opaque,
+    /// compared for equality only, with no order. 0 when no agent boot is
+    /// known: no agent attached to the server since it started or restarted,
+    /// or an event stored without the field that was not made from an agent
+    /// record (one that was carries its record's boot). A 0 is never the same
+    /// run as another stamp.
+    #[prost(uint64, tag = "5")]
+    pub agent_boot: u64,
 }
 /// Who a message, mark or menu item is for.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]

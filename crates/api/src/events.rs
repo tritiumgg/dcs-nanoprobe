@@ -69,9 +69,17 @@ fn boot_of_source(source: Option<&str>) -> u64 {
         .unwrap_or(0)
 }
 
+/// An event as the file holds it. One made from an agent record takes the
+/// boot of its source key, so a body stored before stamps carried the boot
+/// reads it too; one without a key keeps what its body holds, 0 if nothing.
 fn decode(r: &EventRow) -> Result<Event, DiskError> {
-    Event::decode(r.body.as_slice())
-        .map_err(|e| DiskError::Corrupt(format!("event {} does not decode: {e}", r.seq)))
+    let mut e = Event::decode(r.body.as_slice())
+        .map_err(|e| DiskError::Corrupt(format!("event {} does not decode: {e}", r.seq)))?;
+    let boot = boot_of_source(r.source.as_deref());
+    if boot != 0 {
+        e.stamp.get_or_insert_with(pb::Stamp::default).agent_boot = boot;
+    }
+    Ok(e)
 }
 
 impl EventLog {
@@ -120,13 +128,20 @@ impl EventLog {
         source: Option<String>,
     ) -> u64 {
         let sequence = self.next;
+        let boot = boot_of_source(source.as_deref());
+        let mut stamp = stamp;
+        if boot != 0 {
+            // An event from an agent record carries the boot it was made
+            // in, whatever agent runs now (spec/records.md, "Stamps").
+            stamp.agent_boot = boot;
+        }
         let e = Event {
             sequence,
             stamp: Some(stamp),
             body: Some(body),
             campaign_id: campaign,
         };
-        self.boots.push_back(boot_of_source(source.as_deref()));
+        self.boots.push_back(boot);
         if let Some(f) = self.file.as_mut() {
             f.push(EventRow {
                 seq: sequence,
@@ -362,6 +377,9 @@ pub struct Link {
     pub attached: bool,
     /// The agent boot of the last `HELLO`.
     pub agent_boot: u64,
+    /// The agent boot that wrote the last record read. A new DCS process's
+    /// first `FRAME` and queued records come before its `HELLO`.
+    record_boot: u64,
     /// The DCS version the agent reported.
     pub dcs_version: String,
     /// The install's build the agent reported.
@@ -562,12 +580,19 @@ impl Link {
             Some(o) => o + self.real_time,
             None => now_s(),
         };
-        pb::Stamp {
-            wall: wall(at),
-            model_time: self.model_time,
-            mission_generation: self.mission_gen,
-            frame: self.frame,
-        }
+        crate::convert::stamp(
+            self.boot(),
+            self.mission_gen,
+            self.frame,
+            self.model_time,
+            wall(at),
+        )
+    }
+
+    /// The agent boot of what is read now: that of the last record while
+    /// attached, else 0 (none known).
+    fn boot(&self) -> u64 {
+        if self.attached { self.record_boot } else { 0 }
     }
 
     /// Fold one record in. Returns the event it carries, if any. An
@@ -607,6 +632,7 @@ impl Link {
     pub fn read_with(&mut self, r: &RawRecord, look: &Lookup<'_>) -> Option<Read> {
         let entity = look.unit;
         self.last_record = Some(SystemTime::now());
+        self.record_boot = r.agent_boot;
         let input = Input::decode(r.kind, &r.payload).ok()?;
         match input {
             Input::Frame(f) => {
@@ -657,11 +683,14 @@ impl Link {
             }
             Input::Gap(g) if u64::from(g.class) == gap_class::EVENTS => {
                 self.event_gaps += 1;
-                let end = |real: f64, model: f64, gen_: u32| pb::Stamp {
-                    wall: self.offset.and_then(|o| wall(o + real)),
-                    model_time: model,
-                    mission_generation: gen_,
-                    frame: 0,
+                let end = |real: f64, model: f64, gen_: u32| {
+                    crate::convert::stamp(
+                        self.boot(),
+                        gen_,
+                        0,
+                        model,
+                        self.offset.and_then(|o| wall(o + real)),
+                    )
                 };
                 Some(Read {
                     campaign: self.frame_campaign,
@@ -929,15 +958,17 @@ mod tests {
         const GOLDEN: &str = include_str!("../../../spec/persistence.golden");
         let e = Event {
             sequence: 3,
-            stamp: Some(pb::Stamp {
-                wall: Some(prost_types::Timestamp {
+            // Boot 0 is not encoded: the golden body predates the field.
+            stamp: Some(crate::convert::stamp(
+                0,
+                2,
+                77,
+                12.5,
+                Some(prost_types::Timestamp {
                     seconds: 1_700_000_000,
                     nanos: 5_000_000,
                 }),
-                model_time: 12.5,
-                mission_generation: 2,
-                frame: 77,
-            }),
+            )),
             body: Some(body(9)),
             campaign_id: 7,
         };
@@ -1010,13 +1041,16 @@ mod tests {
             for i in 0..10u32 {
                 // Event n comes from boot 100 + n; the fifth has no key.
                 let source = (i != 4).then(|| format!("{}:{}", 100 + i + 1, i));
-                let stamp = pb::Stamp {
-                    wall: Some(prost_types::Timestamp {
+                let stamp = crate::convert::stamp(
+                    0,
+                    0,
+                    0,
+                    0.0,
+                    Some(prost_types::Timestamp {
                         seconds: i64::from(i) + 1,
                         nanos: 0,
                     }),
-                    ..pb::Stamp::default()
-                };
+                );
                 l.push_from(1, stamp, body(i), source);
             }
             l.commit().expect("commit");
@@ -1128,6 +1162,157 @@ mod tests {
         let _ = link.stamp();
         assert_eq!(wall(f64::NAN), None);
         assert_eq!(wall(1e300), None);
+    }
+
+    /// D292: the stamp carries the agent boot. Two boots with the same
+    /// generation and frame give unequal stamps; a reattach in one boot
+    /// keeps the value; detached, the boot is 0; gap ends carry it.
+    #[test]
+    fn stamps_carry_the_agent_boot() {
+        use nanoprobe_transport::records::{Frame, Gap, Hello};
+        let rec = |boot: u64, i: Input| {
+            let (kind, payload) = i.encode();
+            RawRecord {
+                agent_boot: boot,
+                number: 0,
+                kind,
+                payload,
+                resync: false,
+            }
+        };
+        let hello = |boot: u64| {
+            Input::Hello(Hello {
+                agent_boot: boot,
+                ..Hello::default()
+            })
+        };
+        let frame = || {
+            Input::Frame(Frame {
+                frame: 9,
+                mission_gen: 1,
+                model_time: 5.0,
+                real_time: 100.0,
+                replay: 1,
+                ..Frame::default()
+            })
+        };
+        // The wall time of a replayed frame is now: left out.
+        let at = |l: &Link| {
+            let mut s = l.stamp();
+            s.wall = None;
+            s
+        };
+        let mut link = Link::default();
+        assert_eq!(link.stamp().agent_boot, 0, "before the first HELLO");
+        link.read(&rec(7, hello(7)));
+        link.read(&rec(7, frame()));
+        let a = at(&link);
+        assert_eq!(a.agent_boot, 7);
+        link.attached = false;
+        assert_eq!(link.stamp().agent_boot, 0, "no agent attached");
+        // A sidecar restart in the same boot: a new link reads the same HELLO.
+        let mut fresh = Link::default();
+        fresh.read(&rec(7, hello(7)));
+        fresh.read(&rec(7, frame()));
+        assert_eq!(at(&fresh), a, "the same boot keeps the value");
+        link.read(&rec(7, hello(7)));
+        link.read(&rec(7, frame()));
+        assert_eq!(at(&link), a);
+        // A DCS restart: the same generation and frame, another boot. Its
+        // first FRAME and a GAP come before its HELLO.
+        link.read(&rec(8, frame()));
+        assert_eq!(link.stamp().agent_boot, 8, "the record's boot");
+        let early = link
+            .read(&rec(
+                8,
+                Input::Gap(Gap {
+                    class: gap_class::EVENTS as u32,
+                    from_gen: 1,
+                    to_gen: 1,
+                    ..Gap::default()
+                }),
+            ))
+            .expect("a gap event");
+        let event::Body::Gap(g) = early.body else {
+            panic!("a gap");
+        };
+        assert_eq!(g.from.expect("from").agent_boot, 8);
+        link.read(&rec(8, hello(8)));
+        link.read(&rec(8, frame()));
+        let b = at(&link);
+        assert_eq!(
+            (b.mission_generation, b.frame, b.model_time),
+            (a.mission_generation, a.frame, a.model_time)
+        );
+        assert_ne!(b, a);
+        assert_eq!(b.agent_boot, 8);
+        let read = link
+            .read(&rec(
+                8,
+                Input::Gap(Gap {
+                    class: gap_class::EVENTS as u32,
+                    count: 2,
+                    from_gen: 1,
+                    to_gen: 1,
+                    ..Gap::default()
+                }),
+            ))
+            .expect("a gap event");
+        let event::Body::Gap(g) = read.body else {
+            panic!("a gap");
+        };
+        assert_eq!(g.from.expect("from").agent_boot, 8);
+        assert_eq!(g.to.expect("to").agent_boot, 8);
+    }
+
+    /// D292: a logged event keeps the boot of its source key after a
+    /// reopen and after a DCS restart, also when its stored body has no
+    /// boot; one with no key keeps its body's, 0 when absent.
+    #[test]
+    fn a_logged_event_keeps_its_agent_boot() {
+        let d = tempfile::tempdir().expect("dir");
+        let path = d.path().join("events.sqlite");
+        let at = |boot: u64| crate::convert::stamp(boot, 1, 9, 5.0, None);
+        {
+            // A body stored with no boot, as before the field, written
+            // straight to the file.
+            let mut file = EventFile::open(&path, 1).expect("file");
+            let old = Event {
+                sequence: 1,
+                stamp: Some(at(0)),
+                body: Some(body(1)),
+                campaign_id: 1,
+            };
+            file.push(EventRow {
+                seq: 1,
+                wall_ms: 1,
+                source: Some("41:1".into()),
+                body: old.encode_to_vec(),
+            });
+            file.commit().expect("commit");
+        }
+        {
+            let file = EventFile::open(&path, 1).expect("file");
+            let mut l = EventLog::open(file, 10).expect("log");
+            l.push_from(1, at(0), body(2), Some("41:2".into()));
+            l.push(1, at(0), body(3));
+            // A DCS restart: the same generation and frame, another boot.
+            l.push_from(1, at(42), body(4), Some("42:1".into()));
+            l.commit().expect("commit");
+            let boots: Vec<u64> = (1..=4)
+                .map(|n| l.get(n).expect("held").0.stamp.expect("stamp").agent_boot)
+                .collect();
+            assert_eq!(boots, vec![41, 41, 0, 42]);
+        }
+        let file = EventFile::open(&path, 1).expect("file");
+        // Memory holds one: the rest are read from the file.
+        let l = EventLog::open(file, 1).expect("log");
+        let boots: Vec<u64> = l
+            .after(0, 10)
+            .into_iter()
+            .map(|e| e.stamp.expect("stamp").agent_boot)
+            .collect();
+        assert_eq!(boots, vec![41, 41, 0, 42]);
     }
 
     #[test]

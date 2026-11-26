@@ -232,6 +232,8 @@ pub struct ReadStamp {
     pub mission_gen: u32,
     /// The agent's frame sequence number.
     pub frame: u64,
+    /// The agent boot, 0 when none was known.
+    pub agent_boot: u64,
 }
 
 /// A player-occupied unit's ammunition and the read it came from
@@ -357,6 +359,12 @@ pub struct Group {
     pub captured: bool,
     /// The agent boot and mission generation of its last applied spawn.
     pub spawned_in: Option<(u64, u32)>,
+    /// The highest spec revision DCS confirmed applied in `spawned_in`. A
+    /// body written without it, with a `spawned_in`, reads its stored
+    /// `spec_rev`. A live entity whose `spec_rev` is ahead is spawned again
+    /// in place, after a sidecar restart too (spec/world.md, "Revisions";
+    /// [`Store::spawned_rev`]).
+    pub spawned_rev: u64,
     /// Destroys refused or unknown while `dematerializing`.
     pub destroy_failures: u32,
     /// The agent boot and generation in which a spawn of it resolved
@@ -1809,6 +1817,7 @@ impl Store {
                 error: None,
                 captured: false,
                 spawned_in: None,
+                spawned_rev: 0,
                 destroy_failures: 0,
                 unknown_spawn_in: None,
                 order_sent_in: None,
@@ -2282,20 +2291,45 @@ impl Store {
         Ok(rev)
     }
 
-    /// Record an applied spawn. Returns whether the entity was already
-    /// spawned in the same agent boot and generation: a respawn that gives
-    /// it new DCS object IDs, as opposed to the spawn after a generation
-    /// change.
+    /// Record an applied spawn at a spec revision. Returns whether the
+    /// entity was already spawned in the same agent boot and generation: a
+    /// respawn that gives it new DCS object IDs, as opposed to the spawn
+    /// after a generation change.
     pub fn spawned(
         &mut self,
         id: EntityId,
         agent_boot: u64,
         mission_gen: u32,
+        rev: u64,
     ) -> Result<bool, StoreError> {
         let g = self.group_mut(id)?;
         let again = g.spawned_in == Some((agent_boot, mission_gen));
+        g.spawned_rev = if again { g.spawned_rev.max(rev) } else { rev };
         g.spawned_in = Some((agent_boot, mission_gen));
         Ok(again)
+    }
+
+    /// Whether the entity is live or was spawned in the loaded generation,
+    /// and its `spec_rev` is ahead of the revision DCS confirmed there: its
+    /// spawn in place is owed, as the plan reads it.
+    pub fn spawn_behind(&self, id: EntityId) -> bool {
+        let Some(l) = self.loaded() else {
+            return false;
+        };
+        self.group(id).is_some_and(|g| {
+            (g.state == State::Live || g.spawned_in == Some((l.agent_boot, l.mission_gen)))
+                && self.spawned_rev(id, l.agent_boot, l.mission_gen) < g.spec_rev
+        })
+    }
+
+    /// The spec revision DCS confirmed of the entity in the given agent boot
+    /// and generation, 0 when no spawn of it applied there: a live entity at 0
+    /// is spawned again in place, answered `AT_REVISION` if the agent holds
+    /// the revision.
+    pub fn spawned_rev(&self, id: EntityId, agent_boot: u64, mission_gen: u32) -> u64 {
+        self.group(id)
+            .filter(|g| g.spawned_in == Some((agent_boot, mission_gen)))
+            .map_or(0, |g| g.spawned_rev)
     }
 
     /// Record an order written for a group at a revision in a generation.

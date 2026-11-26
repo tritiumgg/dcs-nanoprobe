@@ -239,7 +239,13 @@ each option the group's current spawn has not applied, after the group's order
 
 The agent holds `applied_spec_rev` and `applied_order_rev` per entity it applied
 (spec/commands.md). The sidecar re-sends a spec or an order only when the agent's
-applied revision is behind.
+applied revision is behind. A revision counts as applied only when DCS confirms it: the
+store keeps, with the agent boot and generation of a live entity's last applied spawn,
+the highest spec revision a spawn of it resolved `applied` at there. A live entity whose
+`spec_rev` is ahead of it is spawned again in place, by a sidecar that restarted in
+between too, and an `AT_REVISION` answer confirms the revision. So is a live entity
+with no spawn applied in the loaded generation. A body written without that revision,
+with a last spawn, counts the `spec_rev` it was stored with as confirmed.
 
 ## Removal
 
@@ -341,7 +347,7 @@ a group of one.
 | `live` | `materializing` | The mission generation changes (a reload or a DCS restart), the theater is still the entity's and the authority is DCS |
 | `lost` | `live` | A later full enumeration finds the group |
 | `lost` | `materializing` or `virtual` | The mission generation changes: `materializing` if the new mission's theater is the entity's and the authority is DCS, else `virtual` |
-| `lost` | `materializing` | The author's policy is respawn, the authority is DCS, a full enumeration used since the sidecar started, since the last `HELLO` and since the last `GAP` of events finds no object of the entity, and the respawn gate is open (see "Respawn gate"). Until the enumeration the binding mirror may lack objects DCS holds, such as those of an entity that went `lost` after its destroys failed. The spawn carries a new spec revision: the agent still holds the old one for this generation and would answer `AT_REVISION`. |
+| `lost` | `materializing` | The author's policy is respawn, the authority is DCS, a full enumeration used since the sidecar started, since the last `HELLO`, since the last `GAP` of events finds no object of the entity (for an entity that went `lost` after its destroys failed, one that began after it went `lost`), and the respawn gate is open (see "Respawn gate"). Until the enumeration the binding mirror may lack objects DCS holds, such as those of an entity that went `lost` after its destroys failed. The spawn carries a new spec revision: the agent still holds the old one for this generation and would answer `AT_REVISION`. |
 | `lost` | `dead` | The author's policy is mark dead |
 | `unspawnable` | `virtual` | The author changes the spec; its last error is cleared. It materializes from `virtual` by the level condition above. |
 
@@ -441,7 +447,9 @@ CLEAR_DEBRIS").
 - **Budget.** A ruin's spawn counts against the materialization budget, and a ruin owed
   a spawn counts as waiting for the restore burst ("Authority";
   spec/persistence.md, "Restore burst").
-- **Outcomes.** `refused`: the error is kept as the static's last error until a spawn
+- **Outcomes.** Only an `APPLIED` result names the ruin's object, which the drift row of
+  the table above exempts: the agent answers `AT_REVISION` before a handler runs.
+  `refused`: the error is kept as the static's last error until a spawn
   of the ruin applies, and the spawn is not sent again at that revision in that
   generation. The sidecar keeps that in memory: a restarted sidecar tries once more.
   A rejection a resend cannot fix, such as `BAD_PAYLOAD` or a table over the size
@@ -496,6 +504,14 @@ The respawn policy (`on_lost`, spec/config.md) does not respawn a `lost` group w
 any member that is not found is marked `MISSING` or `REMOVED` and no death fact
 explains it: a mark from this mission generation, or one the agent reported in an
 `OBJECT_GONE` in an earlier generation (below).
+
+A full enumeration's end marks `MISSING` each member of a `live` or `lost` group that
+the agent's table does not hold. For a group that went `lost` after its destroys failed,
+this is how a member that left DCS with no record is found: a script removed it while
+the agent held no binding for the row, so no `OBJECT_GONE` names it. Its group may have
+lost it to a death, so the gate holds it in that generation. A destroy whose result was
+lost may have run, and its member is then held too: the cost is a respawn deferred to
+the next generation.
 
 `MISSING` means DCS no longer has the object and the cause is unknown, so a death
 event may still follow. `REMOVED` means DCS no longer has it and the read shows a
