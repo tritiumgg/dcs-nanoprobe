@@ -205,9 +205,9 @@ A commit writes:
 | Every group, unit or extension row whose spec, order, lifecycle, authority, policy, error, death, mark or object ID changed | Every commit |
 | Every `marker` row that changed or was purged, and every `layer` row that changed or was removed | Every commit |
 | Every `dcs_issue` row that changed or fell out of the newest 16 boots: few rows, all compared | Every commit |
-| `meta.world` and `meta.campaign` when they changed | Every commit |
+| `meta.world` (with the desired airbase owners and warehouse stocks) and `meta.campaign` when they changed | Every commit |
 | The idempotency rows of calls answered | Every commit |
-| Positions, life, warehouse stock: the sampled state | Only at a checkpoint |
+| Positions and life: the sampled state | Only at a checkpoint |
 
 A commit finds the changed rows from marks: a change to a group, or to one of its
 units, marks the group, and the commit compares only the marked groups and their
@@ -242,7 +242,8 @@ What each failure loses:
 |---|---|---|---|
 | Specs, orders, components, extensions | in the step or call that changes them, before any command that carries them reaches DCS and before the call answers | nothing | nothing |
 | Results, deaths, removals, revivals | at the end of the step that reads them, before the agent learns they were read | what DCS did in its last frames before the crash and had not yet written | nothing: unacknowledged records are read again |
-| Positions, life, warehouse stock | every `checkpoint_s` | up to `checkpoint_s` | up to `checkpoint_s`; read again from the agent |
+| The desired warehouse stocks | in the call that sets them, before it answers, or at the end of the step that reads a DCS change or an applied `WAREHOUSE_ADJUST` result | a change DCS made that no sample read yet; read again from the agent | nothing: unacknowledged records are read again |
+| Positions and life | every `checkpoint_s` | up to `checkpoint_s` | up to `checkpoint_s`; read again from the agent |
 | Events | at the end of the step that makes them, before they are published | nothing published | nothing published |
 | Effects | journalled as sent | may or may not have applied; never sent again | never sent again |
 | Owed mission load | in the activation's or the reload's commit (with a checkpoint for a reload); cleared in the commit that journals its outcome | nothing | sent again at start if it never reached DCS |
@@ -583,8 +584,9 @@ stocked FARP, docs/results/2026-11-16-person-tests-2.md). The editor writes an e
 aircraft list, or none, for an unlimited airport (ED-CODE, `MissionEditor/modules/me_mission.lua`), and an
 unlimited warehouse ignores a set (LIVE, E6). So an enabled airport's aircraft are
 limited, and the controller sets its aircraft stock (`SetWarehouseStock`) and its owner
-(`SetAirbaseOwner`). Whether the owner `SetAirbaseOwner` sets is the coalition
-`getAirdromesCoalition` gives is UNVERIFIED. Limited aircraft also limit what AI spawned
+(`SetAirbaseOwner`). The owner `SetAirbaseOwner` sets is the coalition
+`getAirdromesCoalition` gives (LIVE, docs/results/2026-11-17-person-fixes.md).
+Limited aircraft also limit what AI spawned
 at that airport by the mission can use. Munitions and fuel keep the template's flags.
 Units placed in a template stay unmanaged (spec/world.md, "Managed and unmanaged").
 
