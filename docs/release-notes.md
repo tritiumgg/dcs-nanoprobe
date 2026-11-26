@@ -1,6 +1,6 @@
 # Release notes
 
-## Next version, Draft
+## 0.2.0
 
 ### Added
 
@@ -104,6 +104,10 @@
 
 ### Fixed
 
+- **A drawing can no longer crash the server.** 0.1.0 passed any `markupToAll` shape
+  number and arguments a controller sent straight to DCS, and an unknown shape, such as
+  8, crashes and hangs the DCS server. Upgrade if a controller you do not control can
+  put drawings.
 - A group or static revised and not yet spawned before a sidecar restart is spawned in
   place after it. A group lost to failed destroys waits for a full enumeration that began
   after the loss before the respawn policy acts, and a member a script removed with no
