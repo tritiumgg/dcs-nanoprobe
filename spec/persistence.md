@@ -119,7 +119,16 @@ group or unit, or are held twice.
 A `marker` body holds `kind` (`mark`, `drawing` or `menu`), `spec_rev`, `scope`,
 `target`, `removed`, `removed_at_ms` and `removed_cause` (`expired` or `evicted`; absent
 for the controller's). A mark adds `theater`, `x`, `y`, `z`, `text` and `read_only`; a
-drawing `shape` and `args`; each of them `dcs_id` (absent for 0: an item DCS holds no
+drawing `typed`, its typed shape (spec/world.md, "Drawings"), as a nested table of `theater`,
+`color` and `fill` (four numbers each), `line_type` (the DCS value, 0 to 6), `text`,
+`read_only`, `kind` (`line`, `polygon`, `arrow`, `text_box`, `quad`, `freeform`, `circle`,
+`rectangle`, `oval` or `rounded_rectangle`), `points` (a list of north, east pairs: the
+kind's points, or its one point or center) and the kind's sizes by their field names
+(`font_size`, `radius`, `length`, `width`, `half_length`, `half_width`, `corner_radius`,
+`heading`). The sidecar makes the drawing's DCS arguments from it at load. A drawing body with
+`shape` and `args` in place of `typed` holds those arguments; it reads back typed where they
+are a layout `PutDrawingRequest.shape` and `args` take, and is sent as stored. Each of them
+holds `dcs_id` (absent for 0: an item DCS holds no
 ID for), `rank` (absent for 0; the draw rank: the value of a counter of adds when an add of the item was
 last sent, rising with every add the item is given; 0 for an item never sent), and `label`,
 `layer` and `expires_at` when set. A menu item adds `parent`, `submenu` and `text`. A `layer` body holds

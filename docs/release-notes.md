@@ -48,6 +48,13 @@
   `PutFromStaticTemplate` builds a static group whose every unit is a heliport the same
   way, and answers it as one static
   ([ADR 0046](adr/0046-heliport-groups-spawn-as-one-airbase.md)).
+- Typed drawings: `PutDrawingRequest.typed_shape`, `MarkupGroupDrawing.typed_shape` and
+  `Drawing.typed_shape` take a `DrawingShape`: a line, polygon, arrow, text box, quad,
+  freeform, circle, rectangle at any heading, oval or rounded rectangle, with colors, a
+  `LineType`, a fill and a font size. The sidecar draws an oval or a rounded rectangle as
+  a freeform with a point every 10 degrees. A circle's radius changes in place
+  ([ADR 0052](adr/0052-typed-drawing-shapes.md), spec/world.md, "Drawings").
+- A `WorldFilter` with a center and a radius keeps the drawings it meets.
 
 ### Changed
 
@@ -58,7 +65,8 @@
   ([ADR 0048](adr/0048-labels-and-markup-groups-for-marks-and-drawings.md),
   `spec/persistence.md`).
 - `PutDrawing` and the agent accept only the `markupToAll` shapes 1, 3, 4, 5, 6 and 7
-  with their known argument layouts, and refuse anything else before DCS is called.
+  and the `circleToAll` circle, with their known argument layouts, and refuse anything
+  else before DCS is called.
 - `PutStatic` and `PutFromStaticTemplate` refuse a `units` key in a static's `extra`
   with `INVALID_FIELD`. List a heliport group's further units in
   `StaticSpec.further_units`.
@@ -79,6 +87,20 @@
   aircraft.
 - The transport's `layout_version` is 2. A 0.1.0 agent and a sidecar of this version
   refuse each other; install both from the same release.
+- **`PutDrawingRequest.shape` and `args` are deprecated**; set `typed_shape`. A put sets
+  one form, not both and not neither. A drawing put through them reads back with its
+  `typed_shape` and an empty theater, and passes no area filter.
+- **The 0.1.0 drawing fields are checked more tightly.** A put through `shape` and `args`
+  is `INVALID_ARGUMENT` where 0.1.0 took it when a color or fill part is not from 0 to 1,
+  the line type is not a whole number from 0 to 6, a text box's font size is not a whole
+  number from 1 to 100, a point is more than 10,000 km from 0, or a polygon or freeform
+  has more than 7,990 points. The agent refuses the same colors, line types, font sizes
+  and point counts. DCS was never checked with those values, except line type 7, which
+  DCS draws solid.
+- A drawing put through `shape` and `args` keeps no `y`: it is sent and read back with
+  `y` 0, and DCS fills in the ground height.
+- `Drawing.shape` and `args` read as the `markupToAll` call a drawing is sent as: an oval
+  reads as shape 7 and its points, and a circle as 0 and an empty list.
 
 ### Fixed
 

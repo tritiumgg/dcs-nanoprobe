@@ -185,6 +185,11 @@ not tried here and is UNVERIFIED.
 | Build | `v0.1.0-48-g0ae2a48`, agent build `f2a023ad6e0c3511`, built before the fix for this finding |
 | Part | `drawing_layers`, `crates/xtask/src/shell_live/drawing_layers.rs`, run through `cargo xtask`; the bundle is `bundles/drawing-layers-run3/sidecar.json` |
 
+Part A and its rerun ran the part as it is at commit `ff8593d`, which put drawings through
+`PutDrawingRequest.shape` and `args`. The part now puts typed shapes (spec/world.md,
+"Drawings"), which the sidecar lowers to the same DCS calls: freeforms of the same points,
+two-point polygons, the same colors, line type 1, read only and an empty message.
+
 Passed:
 
 - **burst.** 53 commands over 2 agent windows of 20.0 s in all. Applied in 3.9 s. 1,911
@@ -211,7 +216,7 @@ the step waited for never came. The mission's pause was found and restored.
 | DCS | 2.9.31.29434 dedicated server under Wine 10.0 (`wine-10.0 (Debian 10.0~repack-6)`) |
 | Date | 2026-11-26, local time |
 | Build | `v0.1.0-57-ga188877`, agent build `53c83072dc69e430`; every add takes a never-used ID, and the draw rank orders full redraws |
-| Part | `drawing_layers`, run through `cargo xtask sidecar <server> --part drawing-layers`; the bundle is `bundles/sidecar-gameserver-20261126T023855Z/sidecar.json` |
+| Part | `drawing_layers`, run through `cargo xtask sidecar <server> --part drawing-layers`; the bundle is `bundles/sidecar-<server>-20261126T023855Z/sidecar.json` |
 
 Every step passed:
 

@@ -65,6 +65,7 @@ fn put(spec: MarkerSpec, label: &str, layer: &str) -> MarkerPut {
         scope: scope::ALL,
         target: 0,
         spec,
+        drawing: None,
         label: Some(label.into()),
         layer: Some(layer.into()),
         expire_after_s: None,
@@ -110,6 +111,51 @@ fn items_take_ids_in_creation_order_and_are_sent_again_in_it_after_a_load() {
     assert_eq!(sent(&w, opcode::DRAWING_SET)[2..], [t.id.0, n.id.0]);
     assert_eq!(dcs(&w, t.id), w.store.marker(t.id).unwrap().dcs_id);
     assert!(w.sim.ledger().ignored_adds.is_empty());
+}
+
+/// A typed circle of `radius` at `north`.
+fn circle(north: f64, radius: f64) -> MarkerPut {
+    use nanoprobe_sidecar::store::drawing::{DrawingShape, LineType, MapPoint, ShapeKind};
+    MarkerPut {
+        drawing: Some(DrawingShape {
+            theater: THEATER.into(),
+            color: [0.0, 0.0, 1.0, 1.0],
+            fill: [0.0, 0.0, 1.0, 0.6],
+            line_type: LineType::Solid,
+            text: String::new(),
+            read_only: true,
+            kind: ShapeKind::Circle {
+                center: MapPoint::new(north, 0.0),
+                radius,
+            },
+        }),
+        ..put(two_point(0.0, 1.0), "c", "")
+    }
+}
+
+#[test]
+fn a_circle_is_set_as_one_and_its_radius_changes_in_place() {
+    use nanoprobe_sidecar::store::drawing::shape;
+    let mut w = world();
+    let c = w.store.put_marker_with(circle(0.0, 1500.0)).unwrap();
+    ticks(&mut w, 10);
+    let held = w.sim.drawing(c.id.0).expect("drawn");
+    assert_eq!(held.shape, shape::CIRCLE);
+    let id0 = held.dcs_id;
+    // The radius: one DRAWING_UPDATE, the ID kept.
+    w.store.put_marker_with(circle(0.0, 2500.0)).unwrap();
+    ticks(&mut w, 10);
+    let held = w.sim.drawing(c.id.0).unwrap();
+    assert_eq!((held.updates, held.rev, held.dcs_id), (1, 2, id0));
+    assert_eq!(lv::items(&held.args)[1], &Lv::Number(2500.0));
+    assert_eq!(sent(&w, opcode::DRAWING_UPDATE), vec![c.id.0]);
+    // The center: a DRAWING_SET under a new ID.
+    w.store.put_marker_with(circle(100.0, 2500.0)).unwrap();
+    ticks(&mut w, 10);
+    let held = w.sim.drawing(c.id.0).unwrap();
+    assert!(held.dcs_id > id0, "a moved circle takes a new ID");
+    assert_eq!(sent(&w, opcode::DRAWING_SET).len(), 2);
+    assert_eq!(w.sim.ledger().drawing_layouts_refused, 0);
 }
 
 #[test]
@@ -674,7 +720,7 @@ fn the_crash_retry_is_given_again_at_a_later_revision() {
     assert!(w.rec.marker_refused(a.id, &w.store));
     assert!(w.sim.drawing(a.id.0).is_none());
     // A later revision is refused once more and then retried.
-    let mut again = put(two_point(0.0, 2.0), "a", "");
+    let mut again = put(two_point(0.0, 0.5), "a", "");
     again.id = a.id;
     w.store.put_marker_with(again).unwrap();
     ticks(&mut w, 100);

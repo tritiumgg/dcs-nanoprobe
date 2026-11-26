@@ -19,9 +19,10 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use nanoprobe_transport::records::Rates;
 
 use super::{
-    Authority, BootIssue, CapturedMore, DesiredOwner, DesiredStock, Entry, Extension, FurtherUnit,
-    Group, IdemRow, Journalled, Kind, Layer, LeftAs, Loaded, LostPolicy, Marker, MarkerSpec,
-    Outcome, OwedLoad, Point, RemoveCause, RouteEvent, Store, Unit, UnitState, check_lv,
+    Authority, BootIssue, CapturedMore, DesiredOwner, DesiredStock, DrawingShape, Entry, Extension,
+    FurtherUnit, Group, IdemRow, Journalled, Kind, Layer, LeftAs, Loaded, LostPolicy, Marker,
+    MarkerSpec, Outcome, OwedLoad, Point, RemoveCause, RouteEvent, Store, Unit, UnitState,
+    check_lv,
 };
 use crate::ids::{CampaignId, EntityId};
 use crate::intents::{Intent, Waypoint};
@@ -3810,11 +3811,16 @@ fn enc_marker(m: &Marker) -> Lv {
             ("text", s(text)),
             ("read_only", b(*read_only)),
         ]),
-        MarkerSpec::Drawing { shape, args } => pairs.extend([
-            ("kind", s("drawing")),
-            ("shape", u(u64::from(*shape))),
-            ("args", nested(args)),
-        ]),
+        // A typed drawing keeps its typed form, from which the lowering is
+        // made again at load; one without keeps its lowering.
+        MarkerSpec::Drawing { shape, args } => match &m.drawing {
+            Some(d) => pairs.extend([("kind", s("drawing")), ("typed", nested(&d.to_lv()))]),
+            None => pairs.extend([
+                ("kind", s("drawing")),
+                ("shape", u(u64::from(*shape))),
+                ("args", nested(args)),
+            ]),
+        },
         MarkerSpec::MenuItem {
             parent,
             submenu,
@@ -3855,7 +3861,15 @@ fn enc_marker(m: &Marker) -> Lv {
 fn dec_marker(id: EntityId, v: &Lv) -> Result<Marker, DiskError> {
     let r = Rd(v);
     let bad = |what: &str| DiskError::Corrupt(format!("marker {}: {what}", id.0));
+    let mut drawing = None;
     let spec = match r.s("kind")?.as_str() {
+        "drawing" if !matches!(r.nested("typed")?, Lv::Nil) => {
+            let d =
+                DrawingShape::from_lv(&r.nested("typed")?).ok_or_else(|| bad("typed drawing"))?;
+            let (shape, args) = d.lower();
+            drawing = Some(d);
+            MarkerSpec::Drawing { shape, args }
+        }
         "mark" => MarkerSpec::Mark {
             theater: r.s("theater")?,
             at: Point {
@@ -3866,10 +3880,12 @@ fn dec_marker(id: EntityId, v: &Lv) -> Result<Marker, DiskError> {
             text: r.s("text")?,
             read_only: r.b("read_only")?,
         },
-        "drawing" => MarkerSpec::Drawing {
-            shape: r.u32("shape")?,
-            args: r.nested("args")?,
-        },
+        // A lowering alone: the typed form is read from it where it parses.
+        "drawing" => {
+            let (shape, args) = (r.u32("shape")?, r.nested("args")?);
+            drawing = DrawingShape::from_legacy(shape, &args);
+            MarkerSpec::Drawing { shape, args }
+        }
         "menu" => MarkerSpec::MenuItem {
             parent: EntityId(r.u("parent")?),
             submenu: r.b("submenu")?,
@@ -3887,6 +3903,7 @@ fn dec_marker(id: EntityId, v: &Lv) -> Result<Marker, DiskError> {
         scope: r.u32("scope")?,
         target: r.u("target")?,
         spec,
+        drawing,
         dcs_id: r.u("dcs_id")?,
         rank: r.u("rank")?,
         label: r.s("label")?,
@@ -4019,6 +4036,7 @@ mod tests {
                 text: "Objective".into(),
                 read_only: true,
             },
+            drawing: None,
             dcs_id: 1 << 30,
             rank: 7,
             label: "obj-1".into(),
@@ -4028,13 +4046,45 @@ mod tests {
         }
     }
 
-    /// A drawing for everyone in no layer.
+    /// A typed drawing, a rotated oval, for everyone in no layer.
     fn golden_drawing() -> Marker {
+        use super::super::drawing::{LineType, MapPoint, ShapeKind};
+        let d = DrawingShape {
+            theater: "Caucasus".into(),
+            color: [1.0, 0.0, 0.0, 1.0],
+            fill: [1.0, 0.0, 0.0, 0.5],
+            line_type: LineType::Dashed,
+            text: "Zone".into(),
+            read_only: true,
+            kind: ShapeKind::Oval {
+                center: MapPoint::new(10.5, -20.25),
+                half_length: 1500.0,
+                half_width: 750.0,
+                heading: 0.5,
+            },
+        };
+        let (shape, args) = d.lower();
         Marker {
             id: EntityId(41),
             spec_rev: 1,
             scope: 1,
             target: 0,
+            spec: MarkerSpec::Drawing { shape, args },
+            drawing: Some(d),
+            dcs_id: (1 << 30) + (1 << 24) + 255 * (1 << 20),
+            rank: 8,
+            label: String::new(),
+            layer: String::new(),
+            expires_at: None,
+            ..golden_mark()
+        }
+    }
+
+    /// A drawing stored as its lowering alone, which reads back with no
+    /// typed form when it does not parse as a 0.1.0 layout.
+    fn golden_untyped() -> Marker {
+        Marker {
+            id: EntityId(44),
             spec: MarkerSpec::Drawing {
                 shape: 7,
                 args: list(vec![
@@ -4042,12 +4092,8 @@ mod tests {
                     Lv::Bool(true),
                 ]),
             },
-            dcs_id: (1 << 30) + (1 << 24) + 255 * (1 << 20),
-            rank: 8,
-            label: String::new(),
-            layer: String::new(),
-            expires_at: None,
-            ..golden_mark()
+            drawing: None,
+            ..golden_drawing()
         }
     }
 
@@ -4115,6 +4161,7 @@ mod tests {
             scope: 1,
             target: 0,
             spec: golden_drawing().spec,
+            drawing: golden_drawing().drawing,
             label: Some(label.into()),
             layer: Some(layer.into()),
             expire_after_s: Some(60.0),
@@ -4515,6 +4562,7 @@ mod tests {
         for m in [
             golden_mark(),
             golden_drawing(),
+            golden_untyped(),
             golden_submenu(),
             golden_removed(Some(RemoveCause::Evicted)),
             golden_removed(Some(RemoveCause::Expired)),
@@ -4683,6 +4731,10 @@ mod tests {
             (
                 "marker.drawing".to_owned(),
                 encode(&enc_marker(&golden_drawing())),
+            ),
+            (
+                "marker.drawing.untyped".to_owned(),
+                encode(&enc_marker(&golden_untyped())),
             ),
             (
                 "marker.submenu".to_owned(),

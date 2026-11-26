@@ -1330,6 +1330,173 @@ pub struct Mark {
     #[prost(uint64, tag = "12")]
     pub dcs_id: u64,
 }
+/// A color, each part from 0 to 1.
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct Color {
+    #[prost(double, tag = "1")]
+    pub red: f64,
+    #[prost(double, tag = "2")]
+    pub green: f64,
+    #[prost(double, tag = "3")]
+    pub blue: f64,
+    #[prost(double, tag = "4")]
+    pub alpha: f64,
+}
+/// A point on the map: meters north and east, map-local (DCS x and z).
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct MapPoint {
+    #[prost(double, tag = "1")]
+    pub north: f64,
+    #[prost(double, tag = "2")]
+    pub east: f64,
+}
+/// What a drawing draws, and its style (spec/world.md, "Drawings"). Every
+/// coordinate is within 10,000 km of 0 and every size from 1 m to 10,000 km.
+/// A heading is radians clockwise from north, of the length axis.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DrawingShape {
+    /// The map, as Position.theater: one of the campaign's theaters. Empty on a
+    /// drawing put through the deprecated fields, which passes no area filter.
+    #[prost(string, tag = "1")]
+    pub theater: ::prost::alloc::string::String,
+    /// The outline, and a text box's text. Absent: opaque black.
+    #[prost(message, optional, tag = "2")]
+    pub color: ::core::option::Option<Color>,
+    /// The inside, and a text box's background. Absent: no fill.
+    #[prost(message, optional, tag = "3")]
+    pub fill: ::core::option::Option<Color>,
+    /// A text box takes LINE_TYPE_UNSPECIFIED or LINE_TYPE_SOLID; any other value
+    /// is INVALID_ARGUMENT.
+    #[prost(enumeration = "LineType", tag = "4")]
+    pub line_type: i32,
+    /// A text box's text; for any other kind the message of its map panel.
+    #[prost(string, tag = "5")]
+    pub text: ::prost::alloc::string::String,
+    #[prost(bool, tag = "6")]
+    pub read_only: bool,
+    #[prost(
+        oneof = "drawing_shape::Kind",
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19"
+    )]
+    pub kind: ::core::option::Option<drawing_shape::Kind>,
+}
+/// Nested message and enum types in `DrawingShape`.
+pub mod drawing_shape {
+    /// A line through two points.
+    #[derive(Clone, Copy, PartialEq, ::prost::Message)]
+    pub struct Line {
+        #[prost(message, optional, tag = "1")]
+        pub from: ::core::option::Option<super::MapPoint>,
+        #[prost(message, optional, tag = "2")]
+        pub to: ::core::option::Option<super::MapPoint>,
+    }
+    /// An arrow from one point to another.
+    #[derive(Clone, Copy, PartialEq, ::prost::Message)]
+    pub struct Arrow {
+        #[prost(message, optional, tag = "1")]
+        pub from: ::core::option::Option<super::MapPoint>,
+        #[prost(message, optional, tag = "2")]
+        pub to: ::core::option::Option<super::MapPoint>,
+    }
+    /// A polygon through 2 to 7,990 points; 2 draw a line, 3 or more a filled
+    /// polygon.
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct Polygon {
+        #[prost(message, repeated, tag = "1")]
+        pub points: ::prost::alloc::vec::Vec<super::MapPoint>,
+    }
+    /// A text box at a point: the text is `text`, the background `fill`.
+    #[derive(Clone, Copy, PartialEq, ::prost::Message)]
+    pub struct TextBox {
+        #[prost(message, optional, tag = "1")]
+        pub at: ::core::option::Option<super::MapPoint>,
+        /// A whole number from 1 to 100.
+        #[prost(uint32, tag = "2")]
+        pub font_size: u32,
+    }
+    /// A quad through exactly four corners, in order round the outline.
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct Quad {
+        #[prost(message, repeated, tag = "1")]
+        pub corners: ::prost::alloc::vec::Vec<super::MapPoint>,
+    }
+    /// A freeform through 3 to 7,990 points, in order round the outline. An
+    /// outline that crosses itself draws no fill.
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct Freeform {
+        #[prost(message, repeated, tag = "1")]
+        pub points: ::prost::alloc::vec::Vec<super::MapPoint>,
+    }
+    #[derive(Clone, Copy, PartialEq, ::prost::Message)]
+    pub struct Circle {
+        #[prost(message, optional, tag = "1")]
+        pub center: ::core::option::Option<super::MapPoint>,
+        #[prost(double, tag = "2")]
+        pub radius: f64,
+    }
+    /// Drawn as a quad.
+    #[derive(Clone, Copy, PartialEq, ::prost::Message)]
+    pub struct Rectangle {
+        #[prost(message, optional, tag = "1")]
+        pub center: ::core::option::Option<super::MapPoint>,
+        #[prost(double, tag = "2")]
+        pub length: f64,
+        #[prost(double, tag = "3")]
+        pub width: f64,
+        #[prost(double, tag = "4")]
+        pub heading: f64,
+    }
+    /// Drawn as a freeform of 36 points.
+    #[derive(Clone, Copy, PartialEq, ::prost::Message)]
+    pub struct Oval {
+        #[prost(message, optional, tag = "1")]
+        pub center: ::core::option::Option<super::MapPoint>,
+        #[prost(double, tag = "2")]
+        pub half_length: f64,
+        #[prost(double, tag = "3")]
+        pub half_width: f64,
+        #[prost(double, tag = "4")]
+        pub heading: f64,
+    }
+    /// Drawn as a freeform of 36 to 40 points.
+    #[derive(Clone, Copy, PartialEq, ::prost::Message)]
+    pub struct RoundedRectangle {
+        #[prost(message, optional, tag = "1")]
+        pub center: ::core::option::Option<super::MapPoint>,
+        #[prost(double, tag = "2")]
+        pub length: f64,
+        #[prost(double, tag = "3")]
+        pub width: f64,
+        /// From 1 m to half the shorter of length and width.
+        #[prost(double, tag = "4")]
+        pub corner_radius: f64,
+        #[prost(double, tag = "5")]
+        pub heading: f64,
+    }
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Kind {
+        #[prost(message, tag = "10")]
+        Line(Line),
+        #[prost(message, tag = "11")]
+        Polygon(Polygon),
+        #[prost(message, tag = "12")]
+        Arrow(Arrow),
+        #[prost(message, tag = "13")]
+        TextBox(TextBox),
+        #[prost(message, tag = "14")]
+        Quad(Quad),
+        #[prost(message, tag = "15")]
+        Freeform(Freeform),
+        #[prost(message, tag = "16")]
+        Circle(Circle),
+        #[prost(message, tag = "17")]
+        Rectangle(Rectangle),
+        #[prost(message, tag = "18")]
+        Oval(Oval),
+        #[prost(message, tag = "19")]
+        RoundedRectangle(RoundedRectangle),
+    }
+}
 /// A map drawing the controller set.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Drawing {
@@ -1337,10 +1504,14 @@ pub struct Drawing {
     pub id: u64,
     #[prost(message, optional, tag = "2")]
     pub audience: ::core::option::Option<Audience>,
-    /// The DCS markupToAll shape number: 1 line, 3 polygon through its points (a line with
-    /// two), 4 arrow, 5 text box, 6 quad (four points), 7 freeform. 2 is unknown.
+    /// Deprecated: read typed_shape. The markupToAll shape number the drawing is
+    /// sent as; 0 for a circle.
+    #[deprecated]
     #[prost(uint32, tag = "3")]
     pub shape: u32,
+    /// Deprecated: read typed_shape. The arguments the drawing is sent as, after
+    /// the coalition and the ID; empty for a circle.
+    #[deprecated]
     #[prost(message, optional, tag = "4")]
     pub args: ::core::option::Option<::prost_types::ListValue>,
     #[prost(uint64, tag = "5")]
@@ -1366,6 +1537,10 @@ pub struct Drawing {
     /// platform's own mark events from a player's, read WorldEvent.platform_mark.
     #[prost(uint64, tag = "11")]
     pub dcs_id: u64,
+    /// What it draws. A drawing put through the deprecated fields reads back as
+    /// the kind its shape number names.
+    #[prost(message, optional, tag = "12")]
+    pub typed_shape: ::core::option::Option<DrawingShape>,
 }
 /// A named set of marks and drawings, shown or hidden together (spec/world.md,
 /// "Labels and markup groups").
@@ -1442,7 +1617,10 @@ pub struct WorldFilter {
     /// INVALID_FIELD.
     #[prost(enumeration = "EntityKind", repeated, tag = "3")]
     pub kinds: ::prost::alloc::vec::Vec<i32>,
-    /// Only entities within radius of center.
+    /// Only entities within radius of center. A drawing passes when any part of
+    /// it is within radius: its line, its point, its disc, or its outline and
+    /// inside. A drawing on another theater, or with an empty theater (put through
+    /// the deprecated fields), never passes.
     #[prost(message, optional, tag = "4")]
     pub center: ::core::option::Option<Position>,
     #[prost(double, tag = "5")]
@@ -1704,6 +1882,54 @@ impl UnitLeft {
             "UNIT_LEFT_UNSPECIFIED" => Some(Self::Unspecified),
             "UNIT_LEFT_MISSING" => Some(Self::Missing),
             "UNIT_LEFT_REMOVED" => Some(Self::Removed),
+            _ => None,
+        }
+    }
+}
+/// A drawing's outline (spec/world.md, "Drawings").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum LineType {
+    /// Solid.
+    Unspecified = 0,
+    Solid = 1,
+    Dashed = 2,
+    Dotted = 3,
+    DashDot = 4,
+    LongDash = 5,
+    /// A long dash and a short dash.
+    TwoDash = 6,
+    /// No outline.
+    None = 7,
+}
+impl LineType {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "LINE_TYPE_UNSPECIFIED",
+            Self::Solid => "LINE_TYPE_SOLID",
+            Self::Dashed => "LINE_TYPE_DASHED",
+            Self::Dotted => "LINE_TYPE_DOTTED",
+            Self::DashDot => "LINE_TYPE_DASH_DOT",
+            Self::LongDash => "LINE_TYPE_LONG_DASH",
+            Self::TwoDash => "LINE_TYPE_TWO_DASH",
+            Self::None => "LINE_TYPE_NONE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "LINE_TYPE_UNSPECIFIED" => Some(Self::Unspecified),
+            "LINE_TYPE_SOLID" => Some(Self::Solid),
+            "LINE_TYPE_DASHED" => Some(Self::Dashed),
+            "LINE_TYPE_DOTTED" => Some(Self::Dotted),
+            "LINE_TYPE_DASH_DOT" => Some(Self::DashDot),
+            "LINE_TYPE_LONG_DASH" => Some(Self::LongDash),
+            "LINE_TYPE_TWO_DASH" => Some(Self::TwoDash),
+            "LINE_TYPE_NONE" => Some(Self::None),
             _ => None,
         }
     }
@@ -9967,17 +10193,23 @@ pub struct PutDrawingRequest {
     /// Everyone or one coalition.
     #[prost(message, optional, tag = "3")]
     pub audience: ::core::option::Option<Audience>,
-    /// The DCS markupToAll shape number: 1 line (two points), 3 polygon through two or more
-    /// points (a line with two), 4 arrow (two points), 5 text box (one point), 6 quad (four
-    /// points), 7 freeform (three or more points). Any other shape is INVALID_ARGUMENT: DCS
-    /// can crash on one.
+    /// Deprecated: set typed_shape. A put sets typed_shape or this pair, not both
+    /// and not neither. The DCS markupToAll shape number: 1 line (two points), 3
+    /// polygon through 2 to 7,990 points (a line with two), 4 arrow (two points),
+    /// 5 text box (one point), 6 quad (four points), 7 freeform (3 to 7,990
+    /// points). Any other shape is INVALID_ARGUMENT: DCS can crash on one.
+    #[deprecated]
     #[prost(uint32, tag = "4")]
     pub shape: u32,
-    /// The shape's arguments, as DCS takes them: the points, each an object of finite x, y
-    /// and z, then color and fill (each a list of four finite numbers), the line type (the
-    /// font size for shape 5, a finite number), read only (a bool) and the message (a
-    /// string). Any other layout is
-    /// INVALID_ARGUMENT.
+    /// Deprecated: set typed_shape. The shape's arguments, as DCS takes them: the
+    /// points, each an object of finite x, y and z within 10,000 km of 0 (y is not
+    /// kept), then color and fill (each a list of four numbers from 0 to 1), the
+    /// line type (a whole
+    /// number from 0 to 6; for shape 5 the font size, a whole number from 1 to
+    /// 100), read only (a bool) and the message (a string). Any other layout is
+    /// INVALID_ARGUMENT. The drawing is stored as the DrawingShape it describes,
+    /// with an empty theater.
+    #[deprecated]
     #[prost(message, optional, tag = "5")]
     pub args: ::core::option::Option<::prost_types::ListValue>,
     /// As in PutMarkRequest.
@@ -9987,6 +10219,9 @@ pub struct PutDrawingRequest {
     pub markup_group: ::prost::alloc::string::String,
     #[prost(double, optional, tag = "8")]
     pub expire_after_s: ::core::option::Option<f64>,
+    /// What it draws (spec/world.md, "Drawings").
+    #[prost(message, optional, tag = "9")]
+    pub typed_shape: ::core::option::Option<DrawingShape>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct PutDrawingResponse {
@@ -10095,11 +10330,16 @@ pub struct MarkupGroupMark {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MarkupGroupDrawing {
-    /// As in PutDrawingRequest.
+    /// Unused: setting either is INVALID_ARGUMENT. Set typed_shape.
+    #[deprecated]
     #[prost(uint32, tag = "1")]
     pub shape: u32,
+    #[deprecated]
     #[prost(message, optional, tag = "2")]
     pub args: ::core::option::Option<::prost_types::ListValue>,
+    /// What it draws, as in PutDrawingRequest. Required.
+    #[prost(message, optional, tag = "3")]
+    pub typed_shape: ::core::option::Option<DrawingShape>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ReplaceMarkupGroupRequest {

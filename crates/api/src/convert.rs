@@ -9,6 +9,7 @@ use nanoprobe_proto::v1alpha1::{
 use nanoprobe_sidecar::ids::EntityId;
 use nanoprobe_sidecar::intents::{Intent, Waypoint};
 use nanoprobe_sidecar::lifecycle::State;
+use nanoprobe_sidecar::store::drawing::{self, DrawingShape};
 use nanoprobe_sidecar::store::{
     Group, Kind, Loadout, Marker, MarkerSpec, Point, ReadStamp, RemoveCause, Store, Unit, scope,
 };
@@ -381,14 +382,31 @@ pub fn marker_entity(m: &Marker, applied: u64, refused: bool) -> Option<pb::Enti
             expires_at: m.expires_at,
             dcs_id: m.dcs_id,
         }),
+        // The deprecated pair reads as the markupToAll call the drawing is
+        // sent as; a circle, sent through circleToAll, reads 0 and empty.
+        #[allow(deprecated)]
         MarkerSpec::Drawing { shape, args } => entity::Kind::Drawing(pb::Drawing {
             id: m.id.0,
             audience,
-            shape: *shape,
+            shape: if *shape == drawing::shape::CIRCLE {
+                0
+            } else {
+                *shape
+            },
             args: match from_lua(args).kind {
-                Some(prost_types::value::Kind::ListValue(l)) => Some(l),
+                Some(prost_types::value::Kind::ListValue(l))
+                    if *shape != drawing::shape::CIRCLE =>
+                {
+                    Some(l)
+                }
                 _ => Some(prost_types::ListValue::default()),
             },
+            typed_shape: m
+                .drawing
+                .clone()
+                .or_else(|| DrawingShape::from_legacy(*shape, args))
+                .as_ref()
+                .map(crate::drawing::to_pb),
             spec_revision: m.spec_rev,
             applied_spec_revision: applied,
             last_error,
@@ -548,8 +566,10 @@ impl Filter {
 
     /// Whether a live mark or drawing passes: its kind, its markup group, its
     /// coalition when it is for one (an item for everyone or a group passes
-    /// any coalition filter), and for a mark its place in the area. A drawing
-    /// has no place of its own and passes no area filter.
+    /// any coalition filter), and its place in the area: a mark's point, or
+    /// any part of a drawing on the filter's theater (spec/world.md,
+    /// "Drawings"). A drawing with no typed form or no theater passes no area
+    /// filter.
     pub fn marker_passes(&self, m: &Marker) -> bool {
         let kind_ok = match &m.spec {
             MarkerSpec::Mark { .. } => self.marks,
@@ -571,6 +591,13 @@ impl Filter {
                 (Some((theater, n, e, r)), MarkerSpec::Mark { theater: t, at, .. }) => {
                     let (dx, dz) = (at.x - n, at.z - e);
                     t == theater && dx * dx + dz * dz <= r * r
+                }
+                (Some((theater, n, e, r)), MarkerSpec::Drawing { .. }) => {
+                    m.drawing.as_ref().is_some_and(|d| {
+                        !d.theater.is_empty()
+                            && d.theater == *theater
+                            && d.distance_to(drawing::MapPoint::new(*n, *e)) <= *r
+                    })
                 }
                 (Some(_), _) => false,
             }

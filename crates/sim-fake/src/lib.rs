@@ -3440,6 +3440,12 @@ impl FakeSim {
                 else {
                     return self.result(&cmd, rc::NOT_BOUND, 0, "", Lv::Nil);
                 };
+                // As the shim: a radius only for a drawing held as a circle.
+                if d.shape != nanoprobe_sidecar::store::drawing::shape::CIRCLE
+                    && nanoprobe_sidecar::sim::wire::lv::get(changes, "radius").is_some()
+                {
+                    return self.result(&cmd, rc::DCS_REFUSED, 0, "radius", Lv::Nil);
+                }
                 d.args = update_args(d.shape, &d.args, changes);
                 d.rev = h.rev;
                 d.updates += 1;
@@ -4126,6 +4132,12 @@ fn update_args(shape: u32, args: &Lv, changes: &Lv) -> Lv {
         && matches!(items[n - 1], Lv::String(_));
     if !styled {
         return args.clone();
+    }
+    // A circle's radius follows its center, as setMarkupRadius changes it.
+    if shape == nanoprobe_sidecar::store::drawing::shape::CIRCLE
+        && let Some(r) = lv::get(changes, "radius")
+    {
+        items[1] = r.clone();
     }
     let third = if shape == 5 { "font_size" } else { "line_type" };
     for (key, at) in [

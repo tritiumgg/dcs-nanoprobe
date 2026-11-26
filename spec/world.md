@@ -1143,8 +1143,8 @@ holds no order of its own: a change to one item does not add the items above it 
 | `ListMarkupGroups` | The campaign's markup groups |
 
 `ListWorld` and `WatchWorld` list marks and drawings with their label, markup group and expiry,
-and `WorldFilter.markup_groups` keeps only the items of the markup groups named ("" for none). A
-drawing has no place of its own, so it passes no area filter. A coalition filter keeps
+and `WorldFilter.markup_groups` keeps only the items of the markup groups named ("" for none). An
+area filter keeps a drawing on its theater that it meets ("Drawings"). A coalition filter keeps
 an item for everyone or for a group, and an item for a coalition it names.
 
 **Visibility.** A hidden markup group's items stay in the store with their revisions; the
@@ -1277,6 +1277,106 @@ order, which is the order of their last adds, not of the requests. An item that 
 for its audience, such as a group mark before its group binds, is added when it can be
 and goes on top: the reconciler does not hold the items above it back. A change to a lower
 item moves only that item to the top; the platform does not add the items above it again.
+
+### Drawings
+
+A drawing is a `DrawingShape`: a theater, a style, a text and one kind with its geometry
+(ADR 0052). The sidecar sends each kind as one DCS call (spec/commands.md, "Layout:
+DRAWING_SET"); no caller-made argument reaches DCS. Points go to DCS as `x` north, `y` 0
+and `z` east; DCS fills `y` with the ground height (LIVE). What a client draws is LIVE on DCS
+2.9.31.29434 (docs/results/2026-11-25-drawing-layers.md, run 3 parts B and C;
+docs/results/2026-11-26-typed-shapes.md).
+
+| Kind | Geometry | DCS call | Drawn on a client |
+|---|---|---|---|
+| Line | two points | `markupToAll` 1 | a line |
+| Polygon | 2 to 7,990 points | `markupToAll` 3 | a line with two points; a filled polygon with three or more |
+| Arrow | two points | `markupToAll` 4 | an arrow |
+| TextBox | a point, a font size | `markupToAll` 5 | the text, the fill as its background |
+| Quad | four corners | `markupToAll` 6 | a filled quad, rotated or skewed |
+| Freeform | 3 to 7,990 points | `markupToAll` 7 | a filled shape; an outline that crosses itself draws no fill |
+| Circle | a center, a radius | `circleToAll` | a filled circle |
+| Rectangle | a center, length, width, heading | `markupToAll` 6, its four corners | a filled rectangle at any heading |
+| Oval | a center, two half-axes, a heading | `markupToAll` 7, 36 points | a smooth filled oval |
+| RoundedRectangle | a center, length, width, corner radius, heading | `markupToAll` 7, 36 to 40 points | a filled rectangle with smooth round corners |
+
+A heading is radians clockwise from north, of the length axis. Shape 2 draws nothing a
+client shows and shape 8 crashes DCS (LIVE); no kind sends either, or 9 to 12.
+
+**Expansion.** An oval has a point every 10 degrees from the end of its length axis, as
+the mission editor draws its own (ED-CODE, `MissionEditor/modules/me_draw_panel.lua`, 36
+points a turn). A rounded rectangle has four 90-degree corner arcs of 10 points each, 10
+degrees apart, in order round the outline; a point equal to the one before it, where the
+corner radius is half a side, or a last point equal to the first, is sent once: 40, 38
+or 36 points. A rectangle's corners go round in the same direction. Each expanded point is
+rounded to 1 mm. `spec/drawing.golden` holds one lowering of each kind.
+
+**Checks.** A put is `INVALID_ARGUMENT`, naming the field, when:
+
+- the theater is empty or not one of the campaign's;
+- a coordinate is not finite, or a point is more than 10,000 km from 0;
+- a radius, half-axis, length, width or corner radius is not from 1 m to 10,000 km, or a
+  heading is not finite;
+- a corner radius is above half the shorter of length and width (the arcs would cross);
+- a color or fill part is not from 0 to 1;
+- a font size is not from 1 to 100 (8 to 32 are LIVE), or a text box has a line type
+  other than solid;
+- a polygon or freeform has too few or more than 7,990 points, or a quad has other than
+  four corners;
+- the lowering does not fit a command.
+
+A freeform or quad whose outline crosses itself is not refused: DCS draws its outline with
+no fill (LIVE).
+
+**Defaults.** An absent `color` is opaque black, an absent `fill` is no fill, and
+`LINE_TYPE_UNSPECIFIED` is solid. `ListWorld` gives every field set.
+
+**Line types**, by their DCS value (LIVE): none 0, solid 1, dashed 2, dotted 3, dash and
+dot 4, long dash 5, long dash and short dash 6. DCS draws 7 solid; the platform sends
+none above 6.
+
+**Updates.** A put is applied in place when the DCS call it is sent as differs from the last
+one only in the color, the fill, the line type, a text box's font size or text, or a
+circle's radius, and the audience is the same: DCS keeps the drawing's ID and place, and
+emits no event (LIVE). Any other change to the call (a point, a size, a heading, read only,
+another kind's text, the call's shape) or to the audience adds the drawing again under a new
+ID, on top ("Redraw order"). So does a put whose call is unchanged but whose typed form
+changed, such as a new theater or a quad given again as a rectangle with the same corners.
+A theater or kind change that comes with a style change is applied in place: DCS draws
+neither. The platform does not move single points in place:
+`setMarkupPositionStart` re-fills through the moved first point only, and
+`setMarkupPositionEnd` adds an outline segment and leaves the fill (LIVE), so neither moves
+a whole shape.
+
+**Area filter.** A `WorldFilter` with a center and a radius keeps a drawing on the filter's
+theater when the distance from the center to the drawing is at most the radius: to its
+segment for a line, an arrow and a two-point polygon; to its point for a text box; to its
+disc for a circle; to its outline and inside (even-odd) for every other kind, expanded
+points for an oval and a rounded rectangle. A drawing changes place only on a put, so a
+watch sees it enter or leave the area only then.
+
+**The deprecated fields.** `PutDrawingRequest.shape` and `args` describe a drawing as its
+`markupToAll` call: shape 1, 3, 4, 5, 6 or 7 with its points (each finite `x`, `y` and `z`,
+within 10,000 km of 0; `y` is not kept; 2 to 7,990 for shape 3 and 3 to 7,990 for shape 7),
+then color, fill, the line type (a whole number from 0 to 6; for shape 5 the
+font size, a whole number from 1 to 100), read only and the message. The sidecar stores the
+`DrawingShape` they describe, with an empty theater; such a drawing passes no area filter.
+A put sets `typed_shape` or the pair, not both and not neither. `MarkupGroupDrawing` takes
+`typed_shape` only. `Drawing.shape` and `args` read as the `markupToAll` call the drawing is
+sent as; a circle reads 0 and an empty list.
+
+**Progress bars** have no kind; two ways draw one (LIVE, docs/results/2026-11-25-drawing-layers.md,
+"Progress bars"):
+
+- Segments: one quad a cell in a markup group, each step a fill change in place (about
+  21 us a cell in DCS).
+- One rectangle or rounded rectangle put again at each step, which adds it again under a
+  new ID. A freeform capsule or a `rectToAll` rectangle added again per step took about
+  1.7 ms in DCS, the slowest 15 ms, with no flicker seen; a typed rectangle, a quad, and a
+  rounded rectangle, a freeform of 36 to 40 points, took 1.8 to 3.2 ms an add, one 16.6
+  ms (LIVE, docs/results/2026-11-26-typed-shapes.md).
+
+A position setter cannot carry a bar end, which needs two points or an arc.
 
 ### Removing a player's mark
 

@@ -237,6 +237,15 @@ codes! {
 pub const SLOT_KEEP: u32 = 0xFFFF_FFFF;
 
 codes! {
+    /// `DRAWING_SET` shapes: the `markupToAll` shapes the platform sends, and
+    /// the circle, which `circleToAll` draws (spec/commands.md, "Codes:
+    /// drawing").
+    drawing "drawing" {
+        LINE = 1, POLYGON = 3, ARROW = 4, TEXT_BOX = 5, QUAD = 6, FREEFORM = 7, CIRCLE = 256,
+    }
+}
+
+codes! {
     /// `CLEAR_DEBRIS` volume shapes (spec/commands.md, "Codes: volume").
     volume "volume" { SPHERE = 1, BOX = 2, }
 }
@@ -473,6 +482,7 @@ mod tests {
         same_codes(opcode::SECTION, opcode::ALL);
         same_codes(moderation::SECTION, moderation::ALL);
         same_codes(volume::SECTION, volume::ALL);
+        same_codes(drawing::SECTION, drawing::ALL);
     }
 
     #[test]

@@ -26,7 +26,7 @@ use nanoprobe_proto::v1alpha1::{
 use nanoprobe_sidecar::ids::EntityId;
 use nanoprobe_sidecar::sim::wire::Body;
 use nanoprobe_sidecar::store::{
-    Kind, Layer, MarkerError, MarkerPut, MarkerSpec, drawing_layout_ok, scope,
+    DrawingShape, Kind, Layer, MarkerError, MarkerPut, MarkerSpec, scope,
 };
 use nanoprobe_transport::codec::Lv;
 use tonic::{Code, Request, Response, Status};
@@ -36,7 +36,6 @@ use crate::auth::{Access, require};
 use crate::convert::{coalition_of_dcs, dcs_coalition, invalid, not_built, not_found};
 use crate::hub::{Call, Hub, Inner, Need};
 use crate::idem::EffectKind;
-use crate::lua::to_lua;
 
 /// The service.
 pub struct Players(pub Arc<Hub>);
@@ -184,6 +183,7 @@ fn put_mark(g: &mut Inner, c: u64, r: &PutMarkRequest) -> Result<PutMarkResponse
                 text: r.text.clone(),
                 read_only: r.read_only,
             },
+            drawing: None,
             label: Some(r.label.clone()),
             layer: Some(r.markup_group.clone()),
             expire_after_s: r.expire_after_s,
@@ -195,29 +195,63 @@ fn put_mark(g: &mut Inner, c: u64, r: &PutMarkRequest) -> Result<PutMarkResponse
     })
 }
 
-/// Refuses a drawing whose shape and arguments are not a layout DCS is known
-/// to draw: DCS can crash inside `markupToAll` on any other (spec/commands.md,
-/// "Marks, drawings and menu items in DCS").
-fn check_layout(shape: u32, args: &Lv, field: &str) -> Result<(), Status> {
-    if drawing_layout_ok(shape, args) {
-        return Ok(());
-    }
-    Err(invalid(
-        field,
-        "shape 1 or 4 with two points, 3 with two or more, 5 with one, 6 with four, or 7 with three or more; each point an object of finite x, y and z; then color and fill (each a list of four finite numbers), the line type (the font size for shape 5, a finite number), read only and the message",
-    ))
+/// A put's drawing: its typed shape, checked against the campaign's theaters,
+/// or the drawing its deprecated `shape` and `args` describe (spec/world.md,
+/// "Drawings"). Exactly one form is set. Its lowering must fit a command.
+/// Every DCS markup call is made from the result's lowering, so no
+/// caller-made arguments reach DCS.
+fn put_shape(
+    g: &Inner,
+    c: u64,
+    typed: Option<&pb::DrawingShape>,
+    legacy: Option<(u32, Option<&prost_types::ListValue>)>,
+    field: &str,
+) -> Result<DrawingShape, Status> {
+    // A size refusal names the field of the form the put set.
+    let set = if legacy.is_some() {
+        "args"
+    } else {
+        "typed_shape"
+    };
+    let d = match (typed, legacy) {
+        (Some(_), Some(_)) => {
+            return Err(invalid(
+                &format!("{field}typed_shape"),
+                "set typed_shape or the deprecated shape and args, not both",
+            ));
+        }
+        (None, None) => {
+            return Err(invalid(
+                &format!("{field}typed_shape"),
+                "a drawing is required",
+            ));
+        }
+        (Some(t), None) => {
+            let theaters = &g.campaigns[&c].meta.theaters;
+            crate::drawing::from_pb(t, &format!("{field}typed_shape"), theaters)?
+        }
+        (None, Some((shape, args))) => {
+            crate::drawing::from_legacy(shape, args, &format!("{field}args"))?
+        }
+    };
+    let (_, args) = d.lower();
+    fits(
+        OVERHEAD + lv_len(&args),
+        g.backend.max_command(),
+        &format!("{field}{set}"),
+    )?;
+    Ok(d)
+}
+
+/// The deprecated pair of a put, when either is set.
+#[allow(deprecated)]
+fn legacy_of(r: &PutDrawingRequest) -> Option<(u32, Option<&prost_types::ListValue>)> {
+    (r.shape != 0 || r.args.is_some()).then_some((r.shape, r.args.as_ref()))
 }
 
 fn put_drawing(g: &mut Inner, c: u64, r: &PutDrawingRequest) -> Result<PutDrawingResponse, Status> {
-    let limit = g.backend.max_command();
     let (scope, target) = pin_scope(g, c, r.audience.as_ref(), "audience", false)?;
-    let args = to_lua(&prost_types::Value {
-        kind: Some(prost_types::value::Kind::ListValue(
-            r.args.clone().unwrap_or_default(),
-        )),
-    });
-    fits(OVERHEAD + lv_len(&args), limit, "args")?;
-    check_layout(r.shape, &args, "args")?;
+    let d = put_shape(g, c, r.typed_shape.as_ref(), legacy_of(r), "")?;
     let slot = g.campaigns.get_mut(&c).expect("resolved campaign");
     let put = slot
         .store
@@ -226,9 +260,10 @@ fn put_drawing(g: &mut Inner, c: u64, r: &PutDrawingRequest) -> Result<PutDrawin
             scope,
             target,
             spec: MarkerSpec::Drawing {
-                shape: r.shape,
-                args,
+                shape: 0,
+                args: Lv::Nil,
             },
+            drawing: Some(d),
             label: Some(r.label.clone()),
             layer: Some(r.markup_group.clone()),
             expire_after_s: r.expire_after_s,
@@ -359,6 +394,7 @@ fn replace_markup_group(
                         text: m.text.clone(),
                         read_only: m.read_only,
                     },
+                    None,
                 )
             }
             Some(pb::markup_group_item::Kind::Drawing(d)) => {
@@ -369,30 +405,44 @@ fn replace_markup_group(
                     &format!("{field}.audience"),
                     false,
                 )?;
-                let args = to_lua(&prost_types::Value {
-                    kind: Some(prost_types::value::Kind::ListValue(
-                        d.args.clone().unwrap_or_default(),
-                    )),
-                });
-                fits(OVERHEAD + lv_len(&args), limit, &format!("{field}.args"))?;
-                check_layout(d.shape, &args, &format!("{field}.args"))?;
+                #[allow(deprecated)]
+                if d.shape != 0 || d.args.is_some() {
+                    return Err(invalid(
+                        &format!("{field}.drawing.shape"),
+                        "unused: set typed_shape",
+                    ));
+                }
+                let shape = put_shape(
+                    g,
+                    c,
+                    Some(d.typed_shape.as_ref().ok_or_else(|| {
+                        invalid(
+                            &format!("{field}.drawing.typed_shape"),
+                            "a drawing is required",
+                        )
+                    })?),
+                    None,
+                    &format!("{field}.drawing."),
+                )?;
                 (
                     scope,
                     target,
                     MarkerSpec::Drawing {
-                        shape: d.shape,
-                        args,
+                        shape: 0,
+                        args: Lv::Nil,
                     },
+                    Some(shape),
                 )
             }
             None => return Err(invalid(&field, "a mark or a drawing is required")),
         };
-        let (scope, target, spec) = put;
+        let (scope, target, spec, drawing) = put;
         puts.push(MarkerPut {
             id: EntityId(0),
             scope,
             target,
             spec,
+            drawing,
             label: Some(item.label.clone()),
             layer: Some(r.name.clone()),
             expire_after_s: item.expire_after_s,

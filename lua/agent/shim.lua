@@ -1581,7 +1581,7 @@ end
 --     mission script's mark and kill the ID (LIVE);
 --   - `id` becomes the process mark before `add(id)` calls DCS, even when that
 --     raises.
-local function set_mark(entity, id, add)
+local function set_mark(entity, id, add, circle)
   local held = M.marks[entity]
   if held and held.id == id then
     return APPLIED
@@ -1600,7 +1600,7 @@ local function set_mark(entity, id, add)
   if not ok then
     return DCS_REFUSED, nil, tostring(err)
   end
-  M.marks[entity] = { id = id }
+  M.marks[entity] = { id = id, circle = circle or nil }
   M.by_id[id] = entity
   return APPLIED
 end
@@ -1608,6 +1608,7 @@ end
 -- The `setMarkup*` call for each key of a DRAWING_UPDATE's changes, in the
 -- order they are applied.
 local MARKUP_SETTERS = {
+  { 'radius', 'setMarkupRadius' },
   { 'color', 'setMarkupColor' },
   { 'fill', 'setMarkupColorFill' },
   { 'line_type', 'setMarkupTypeLine' },
@@ -1619,19 +1620,42 @@ local MARKUP_SETTERS = {
 -- { least, most } (LIVE, docs/results/2026-11-25-drawing-layers.md). DCS can
 -- crash inside `markupToAll` on another shape or layout, where pcall does not
 -- help (LOG), so DRAWING_SET calls it with nothing else.
+-- The most points Lua 5.1's unpack passes, with room for the style (LIVE).
+local MAX_POINTS = 7990
 local SHAPE_POINTS = {
   [1] = { 2, 2 },
-  [3] = { 2, math.huge },
+  [3] = { 2, MAX_POINTS },
   [4] = { 2, 2 },
   [5] = { 1, 1 },
   [6] = { 4, 4 },
-  [7] = { 3, math.huge },
+  [7] = { 3, MAX_POINTS },
 }
+-- A circle's code: DRAWING_SET calls circleToAll for it, never markupToAll.
+local CIRCLE = 256
 
 local function is_finite(v)
   return type(v) == 'number' and v == v and v ~= math.huge and v ~= -math.huge
 end
 
+-- A whole number from `lo` to `hi`.
+local function is_whole(v, lo, hi)
+  return is_finite(v) and v == math.floor(v) and v >= lo and v <= hi
+end
+
+local function is_line_type(v)
+  return is_whole(v, 0, 6)
+end
+
+local function is_font_size(v)
+  return is_whole(v, 1, 100)
+end
+
+-- A radius from 1 m to 10,000 km.
+local function is_radius(v)
+  return is_finite(v) and v >= 1 and v <= 1e7
+end
+
+-- Four parts, each from 0 to 1, keys 1 to 4 and nothing else.
 local function is_color(v)
   if type(v) ~= 'table' or table.maxn(v) ~= 4 then
     return false
@@ -1640,45 +1664,80 @@ local function is_color(v)
   for _ in pairs(v) do
     n = n + 1
   end
-  return n == 4 and is_finite(v[1]) and is_finite(v[2]) and is_finite(v[3]) and is_finite(v[4])
+  if n ~= 4 then
+    return false
+  end
+  for i = 1, 4 do
+    if not is_finite(v[i]) or v[i] < 0 or v[i] > 1 then
+      return false
+    end
+  end
+  return true
 end
 
--- Whether `args` is a known shape's layout: its points, each a table of
--- finite x, y and z, then color, fill, the line type or font size, read
--- only and the message, as a list with keys 1 to n and nothing else.
-local function layout_ok(shape, args)
-  local range = type(shape) == 'number' and SHAPE_POINTS[shape]
-  if not range or type(args) ~= 'table' then
-    return false
+local function is_point(p)
+  return type(p) == 'table' and is_finite(p.x) and is_finite(p.y) and is_finite(p.z)
+end
+
+-- The length of a list with keys 1 to n and nothing else, or nil.
+local function list_len(args)
+  if type(args) ~= 'table' then
+    return nil
   end
   local n = table.maxn(args)
   local keys = 0
   for _ in pairs(args) do
     keys = keys + 1
   end
-  local points = n - 5
-  if keys ~= n or points < range[1] or points > range[2] then
-    return false
+  if keys ~= n then
+    return nil
   end
-  for i = 1, points do
-    local p = args[i]
-    if type(p) ~= 'table' or not is_finite(p.x) or not is_finite(p.y) or not is_finite(p.z) then
-      return false
-    end
-  end
+  return n
+end
+
+-- Whether the last five of `n` arguments are the style: color, fill, the
+-- line type (a font size when `text`), read only and the message.
+local function style_ok(args, n, text)
   return is_color(args[n - 4])
     and is_color(args[n - 3])
-    and is_finite(args[n - 2])
+    and (text and is_font_size(args[n - 2]) or not text and is_line_type(args[n - 2]))
     and type(args[n - 1]) == 'boolean'
     and type(args[n]) == 'string'
 end
 
--- The value type each DRAWING_UPDATE change takes.
+-- Whether `args` is a known markupToAll shape's layout: its points, each a
+-- table of finite x, y and z, then the style.
+local function layout_ok(shape, args)
+  local range = type(shape) == 'number' and SHAPE_POINTS[shape]
+  local n = list_len(args)
+  if not range or not n then
+    return false
+  end
+  local points = n - 5
+  if points < range[1] or points > range[2] then
+    return false
+  end
+  for i = 1, points do
+    if not is_point(args[i]) then
+      return false
+    end
+  end
+  return style_ok(args, n, shape == 5)
+end
+
+-- Whether `args` is the circle's layout: center, radius, then the style.
+local function circle_ok(args)
+  return list_len(args) == 7 and is_point(args[1]) and is_radius(args[2]) and style_ok(args, 7, false)
+end
+
+-- The value each DRAWING_UPDATE change takes. `radius` is for a drawing held
+-- as a circle only.
 local CHANGE_OK = {
+  radius = is_radius,
   color = is_color,
   fill = is_color,
-  line_type = is_finite,
-  font_size = is_finite,
+  line_type = is_line_type,
+  font_size = is_font_size,
   text = function(v)
     return type(v) == 'string'
   end,
@@ -2056,15 +2115,23 @@ local HANDLERS = {
     return remove_mark(a.entity)
   end,
   -- DRAWING_SET: markupToAll with the coalition, -1 for all, and the array
-  -- unpacked after the ID.
+  -- unpacked after the ID; for the circle code, circleToAll the same way.
   [27] = function(a)
     if a.scope ~= 1 and a.scope ~= 2 then
       return DCS_REFUSED, nil, 'the scope is not 1 or 2'
     end
+    local coalition = a.scope == 1 and -1 or a.target
+    if a.shape == CIRCLE then
+      if not circle_ok(a.args) then
+        return DCS_REFUSED, nil, 'the shape and arguments are not a known layout'
+      end
+      return set_mark(a.entity, a.dcs_id, function(id)
+        trigger.action.circleToAll(coalition, id, unpack(a.args, 1, 7))
+      end, true)
+    end
     if not layout_ok(a.shape, a.args) then
       return DCS_REFUSED, nil, 'the shape and arguments are not a known layout'
     end
-    local coalition = a.scope == 1 and -1 or a.target
     return set_mark(a.entity, a.dcs_id, function(id)
       trigger.action.markupToAll(a.shape, coalition, id, unpack(a.args, 1, table.maxn(a.args)))
     end)
@@ -2081,7 +2148,7 @@ local HANDLERS = {
     end
     for key, value in pairs(a.changes) do
       local ok = CHANGE_OK[key]
-      if not ok or not ok(value) then
+      if not ok or not ok(value) or (key == 'radius' and not held.circle) then
         return DCS_REFUSED, nil, 'the change ' .. tostring(key) .. ' is not a known key and value'
       end
     end

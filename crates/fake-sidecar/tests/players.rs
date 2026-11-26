@@ -216,6 +216,8 @@ fn code_of<T>(r: Result<T, tonic::Status>) -> tonic::Code {
     r.err().expect("an error").code()
 }
 
+// The drawings here go through the deprecated `shape` and `args`.
+#[allow(deprecated)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn marks_drawings_and_menus_are_set_replaced_removed_and_set_again() {
     let (hub, ch) = in_process(cfg(), fake_config()).await.expect("server");
@@ -353,6 +355,7 @@ async fn marks_drawings_and_menus_are_set_replaced_removed_and_set_again() {
                     pb::MarkupGroupDrawing {
                         shape: 9,
                         args: Some(one_point),
+                        typed_shape: None,
                     },
                 )),
             }],

@@ -127,6 +127,8 @@ fn args(n: f64) -> Option<ListValue> {
     })
 }
 
+/// A drawing put through the deprecated `shape` and `args`.
+#[allow(deprecated)]
 fn drawing(
     l: &Lease,
     k: &str,
@@ -153,10 +155,36 @@ fn item(label: &str, n: f64) -> pb::MarkupGroupItem {
         expire_after_s: None,
         kind: Some(pb::markup_group_item::Kind::Drawing(
             pb::MarkupGroupDrawing {
-                shape: 7,
-                args: args(n),
+                typed_shape: Some(freeform(n)),
+                ..Default::default()
             },
         )),
+    }
+}
+
+/// The typed form of [`args`]: a freeform through three points at north `n`.
+fn freeform(n: f64) -> pb::DrawingShape {
+    let red = pb::Color {
+        red: 1.0,
+        green: 0.0,
+        blue: 0.0,
+        alpha: 1.0,
+    };
+    pb::DrawingShape {
+        theater: "Caucasus".into(),
+        color: Some(red),
+        fill: Some(red),
+        line_type: pb::LineType::Solid as i32,
+        read_only: true,
+        kind: Some(pb::drawing_shape::Kind::Freeform(
+            pb::drawing_shape::Freeform {
+                points: [n, n + 100.0, n + 200.0]
+                    .into_iter()
+                    .map(|north| pb::MapPoint { north, east: 0.0 })
+                    .collect(),
+            },
+        )),
+        ..Default::default()
     }
 }
 
@@ -700,6 +728,221 @@ async fn the_markup_group_and_coalition_filters_of_list_world_select_drawings() 
     );
 }
 
+/// The labels of the drawings `ListWorld` lists within `radius` of a point.
+async fn labels_near(
+    world: &mut WorldServiceClient<Channel>,
+    north: f64,
+    east: f64,
+    radius: f64,
+) -> Vec<String> {
+    labels_on(world, "Caucasus", north, east, radius).await
+}
+
+/// As [`labels_near`], with the filter's center on `theater`.
+async fn labels_on(
+    world: &mut WorldServiceClient<Channel>,
+    theater: &str,
+    north: f64,
+    east: f64,
+    radius: f64,
+) -> Vec<String> {
+    let page = world
+        .list_world(pb::ListWorldRequest {
+            filter: Some(pb::WorldFilter {
+                kinds: vec![EntityKind::Drawing as i32],
+                center: Some(pb::Position {
+                    theater: theater.into(),
+                    north,
+                    east,
+                    alt: 0.0,
+                }),
+                radius,
+                ..Default::default()
+            }),
+        })
+        .await
+        .expect("list")
+        .into_inner()
+        .next()
+        .await
+        .expect("page")
+        .expect("ok");
+    let mut v: Vec<String> = page
+        .entities
+        .iter()
+        .filter_map(|e| match &e.kind {
+            Some(entity::Kind::Drawing(d)) => Some(d.label.clone()),
+            _ => None,
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_drawings_are_checked_read_back_and_found_by_area() {
+    let (hub, ch, l, c) = setup().await;
+    let mut players = PlayersServiceClient::new(ch.clone());
+    let mut world = WorldServiceClient::new(ch.clone());
+    let put = |k: &str, label: &str, typed: Option<pb::DrawingShape>| pb::PutDrawingRequest {
+        write: write(&l, k, c),
+        audience: all(),
+        label: label.into(),
+        typed_shape: typed,
+        ..Default::default()
+    };
+    let circle = |north: f64, radius: f64| pb::DrawingShape {
+        theater: "Caucasus".into(),
+        kind: Some(pb::drawing_shape::Kind::Circle(pb::drawing_shape::Circle {
+            center: Some(pb::MapPoint { north, east: 0.0 }),
+            radius,
+        })),
+        ..Default::default()
+    };
+    let oval = pb::DrawingShape {
+        theater: "Caucasus".into(),
+        kind: Some(pb::drawing_shape::Kind::Oval(pb::drawing_shape::Oval {
+            center: Some(pb::MapPoint {
+                north: 10_000.0,
+                east: 0.0,
+            }),
+            half_length: 1_500.0,
+            half_width: 750.0,
+            heading: 0.5,
+        })),
+        ..Default::default()
+    };
+    let ci = players
+        .put_drawing(put("c", "circle", Some(circle(0.0, 1_000.0))))
+        .await
+        .expect("circle")
+        .into_inner();
+    players
+        .put_drawing(put("o", "oval", Some(oval)))
+        .await
+        .expect("oval");
+    // A drawing put through the deprecated pair reads back typed, with no
+    // theater; it passes no area filter.
+    players
+        .put_drawing(drawing(&l, "f", c, "legacy", "", 20_000.0))
+        .await
+        .expect("legacy");
+    until_fake(&hub, |s| s.drawings().len() == 3).await;
+    // The sidecar sends the circle through circleToAll and the oval as 36 points.
+    let held = fake(&hub, |s| s.drawing(ci.drawing_id).cloned()).unwrap();
+    assert_eq!(held.shape, 0x100);
+
+    assert_eq!(
+        labels_near(&mut world, 0.0, 1_500.0, 600.0).await,
+        ["circle"]
+    );
+    assert!(
+        labels_near(&mut world, 0.0, 1_500.0, 400.0)
+            .await
+            .is_empty()
+    );
+    // A filter on another theater, at the circle's center, finds nothing.
+    assert!(
+        labels_on(&mut world, "Syria", 0.0, 0.0, 2_000.0)
+            .await
+            .is_empty()
+    );
+    // Inside the oval, far from its outline.
+    assert_eq!(labels_near(&mut world, 10_000.0, 0.0, 1.0).await, ["oval"]);
+    assert!(
+        labels_near(&mut world, 20_000.0, 0.0, 500.0)
+            .await
+            .is_empty()
+    );
+
+    let listed = listed_drawings(&mut world).await;
+    let by = |label: &str| listed.iter().find(|d| d.label == label).cloned().unwrap();
+    #[allow(deprecated)]
+    {
+        assert_eq!((by("circle").shape, by("oval").shape), (0, 7));
+        assert_eq!(by("oval").args.unwrap().values.len(), 36 + 5);
+        assert!(by("circle").args.unwrap().values.is_empty());
+    }
+    let legacy = by("legacy").typed_shape.unwrap();
+    assert!(legacy.theater.is_empty());
+    assert!(matches!(
+        legacy.kind,
+        Some(pb::drawing_shape::Kind::Freeform(ref f)) if f.points.len() == 3
+    ));
+    assert_eq!(
+        by("circle").typed_shape.unwrap().kind,
+        circle(0.0, 1_000.0).kind
+    );
+
+    // Refusals: both forms, neither, a theater the campaign does not use, a
+    // size below 1 m, and the deprecated pair in a markup group.
+    let code = |e: tonic::Status| e.code();
+    let mut both = put("b", "b", Some(circle(0.0, 10.0)));
+    #[allow(deprecated)]
+    {
+        both.shape = 7;
+    }
+    let mut syria = circle(0.0, 10.0);
+    syria.theater = "Syria".into();
+    for req in [
+        both,
+        put("n", "n", None),
+        put("s", "s", Some(syria)),
+        put("r", "r", Some(circle(0.0, 0.5))),
+    ] {
+        assert_eq!(
+            code(players.put_drawing(req).await.expect_err("refused")),
+            tonic::Code::InvalidArgument
+        );
+    }
+    #[allow(deprecated)]
+    let legacy_item = pb::MarkupGroupItem {
+        label: "x".into(),
+        audience: all(),
+        expire_after_s: None,
+        kind: Some(pb::markup_group_item::Kind::Drawing(
+            pb::MarkupGroupDrawing {
+                shape: 7,
+                args: args(1.0),
+                typed_shape: None,
+            },
+        )),
+    };
+    let e = players
+        .replace_markup_group(pb::ReplaceMarkupGroupRequest {
+            write: write(&l, "g", c),
+            name: "g".into(),
+            items: vec![legacy_item],
+        })
+        .await
+        .expect_err("the deprecated pair in a markup group");
+    assert_eq!(e.code(), tonic::Code::InvalidArgument);
+}
+
+async fn listed_drawings(world: &mut WorldServiceClient<Channel>) -> Vec<pb::Drawing> {
+    let page = world
+        .list_world(pb::ListWorldRequest {
+            filter: Some(pb::WorldFilter {
+                kinds: vec![EntityKind::Drawing as i32],
+                ..Default::default()
+            }),
+        })
+        .await
+        .expect("list")
+        .into_inner()
+        .next()
+        .await
+        .expect("page")
+        .expect("ok");
+    page.entities
+        .into_iter()
+        .filter_map(|e| match e.kind {
+            Some(entity::Kind::Drawing(d)) => Some(d),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The `dcs_id` of every mark and drawing `ListWorld` lists, by ID.
 async fn listed_dcs_ids(ch: &Channel) -> Vec<(u64, u64)> {
     let mut world = WorldServiceClient::new(ch.clone());
@@ -884,6 +1127,7 @@ fn point(x: f64) -> Value {
 
 /// A rectangle with a style tail: two points, color, fill, line type, read
 /// only, message. A change of `color` alone is a style change in place.
+#[allow(deprecated)]
 fn styled(l: &Lease, k: &str, c: u64, label: &str, x: f64, color: f64) -> pb::PutDrawingRequest {
     let rgba = || Value {
         kind: Some(Kind::ListValue(ListValue {

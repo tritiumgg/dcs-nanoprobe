@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nanoprobe_transport::codec::Lv;
 
+use super::drawing::{self, DrawingShape};
 use super::{Entry, Point, RemoveCause, Store};
 use crate::ids::EntityId;
 
@@ -92,6 +93,9 @@ pub struct MarkerPut {
     pub target: u64,
     /// The fields.
     pub spec: MarkerSpec,
+    /// A drawing's typed form. When set, it replaces `spec` with its
+    /// lowering.
+    pub drawing: Option<DrawingShape>,
     /// The label; `None` keeps the item's own, empty clears it.
     pub label: Option<String>,
     /// The layer's name; `None` keeps the item's own, empty takes it out of
@@ -100,6 +104,17 @@ pub struct MarkerPut {
     /// Model seconds from now until the item expires; `None` keeps its
     /// expiry, or for a new item takes its layer's.
     pub expire_after_s: Option<f64>,
+}
+
+impl MarkerPut {
+    /// The put with `spec` set to its drawing's lowering, when it has one.
+    fn lowered(mut self) -> MarkerPut {
+        if let Some(d) = &self.drawing {
+            let (shape, args) = d.lower();
+            self.spec = MarkerSpec::Drawing { shape, args };
+        }
+        self
+    }
 }
 
 /// What a put did.
@@ -142,9 +157,11 @@ pub enum MarkerSpec {
         /// Whether players cannot change it.
         read_only: bool,
     },
-    /// A map drawing.
+    /// A map drawing, as the reconciler sends it: the lowering of the
+    /// marker's [`DrawingShape`] when it has one.
     Drawing {
-        /// The DCS shape ID.
+        /// The shape code: a `markupToAll` shape, or
+        /// [`drawing::shape::CIRCLE`].
         shape: u32,
         /// The shape's arguments after the coalition and the ID, as an array.
         args: Lv,
@@ -180,6 +197,9 @@ pub struct Marker {
     pub target: u64,
     /// The fields.
     pub spec: MarkerSpec,
+    /// A drawing's typed form; `spec` is its lowering. `None` for a mark, a
+    /// menu item, and a drawing stored without one (store tests).
+    pub drawing: Option<DrawingShape>,
     /// The DCS mark ID the reconciler last took for it, never one used before in
     /// the agent boot. 0 for a menu item, and for a mark or drawing DCS does
     /// not hold: new, hidden, or not yet added since the boot or mission load.
@@ -302,105 +322,49 @@ pub struct BootIssue {
     pub next: u64,
 }
 
-/// The points a shape's arguments hold before the style, or `None` for a
-/// shape whose layout is not known. Shapes 1 and 4 take two points (a line and
-/// an arrow), shape 3 a polygon through its points (two points draw a line,
-/// three or more a filled polygon), shape 5 a text box at one point, shape 6 a
-/// quad with four, and shape 7 a freeform with at least three. Shape 2 draws
-/// nothing a client shows with a point or two points and raises with radii;
-/// shape 8 crashed DCS (LIVE, docs/results/2026-11-25-drawing-layers.md).
-fn point_count(shape: u32, styled: usize) -> Option<usize> {
-    let points = styled.checked_sub(5)?;
-    match shape {
-        1 | 4 => (points == 2).then_some(points),
-        3 => (points >= 2).then_some(points),
-        5 => (points == 1).then_some(points),
-        6 => (points == 4).then_some(points),
-        7 => (points >= 3).then_some(points),
-        _ => None,
-    }
+/// Whether a drawing's shape code and arguments are a layout the platform
+/// sends (spec/commands.md, "Layout: DRAWING_SET"); see
+/// [`drawing::layout_ok`].
+pub fn drawing_layout_ok(shape: u32, args: &Lv) -> bool {
+    drawing::layout_ok(shape, args)
 }
 
-fn is_color(v: &Lv) -> bool {
-    let items = crate::sim::wire::lv::items(v);
-    items.len() == 4 && items.iter().all(|c| matches!(c, Lv::Number(_)))
-}
-
-/// Whether `args` end in the full style: color, fill, line type (the font
-/// size for a text), read only and the message, after the shape's points.
+/// Whether `args` hold the shape's lead (its points; a circle's center and
+/// radius) and then the full style: color and fill (four numbers each), the
+/// line type or font size, read only and the message.
 fn has_style_tail(shape: u32, args: &[&Lv]) -> bool {
     let n = args.len();
-    point_count(shape, n).is_some()
-        && is_color(args[n - 5])
-        && is_color(args[n - 4])
+    let lead = n.checked_sub(5);
+    let lead_ok = match (shape, lead) {
+        (drawing::shape::LINE | drawing::shape::ARROW, Some(2))
+        | (drawing::shape::TEXT_BOX, Some(1))
+        | (drawing::shape::QUAD, Some(4)) => true,
+        (drawing::shape::POLYGON, Some(p)) => p >= 2,
+        (drawing::shape::FREEFORM, Some(p)) => p >= 3,
+        (drawing::shape::CIRCLE, Some(2)) => matches!(args[1], Lv::Number(_)),
+        _ => false,
+    };
+    let color = |v: &Lv| {
+        let items = crate::sim::wire::lv::items(v);
+        items.len() == 4 && items.iter().all(|c| matches!(c, Lv::Number(_)))
+    };
+    lead_ok
+        && color(args[n - 5])
+        && color(args[n - 4])
         && matches!(args[n - 3], Lv::Number(_))
         && matches!(args[n - 2], Lv::Bool(_))
         && matches!(args[n - 1], Lv::String(_))
 }
 
-fn is_point(v: &Lv) -> bool {
-    ["x", "y", "z"]
-        .iter()
-        .all(|k| matches!(crate::sim::wire::lv::get(v, k), Some(Lv::Number(n)) if n.is_finite()))
-}
-
-/// Whether a drawing's shape and arguments are a layout DCS is known to draw
-/// (LIVE, docs/results/2026-11-25-drawing-layers.md): shape 1, 3, 4, 5, 6 or
-/// 7 with its points, each a table of finite `x`, `y` and `z`, then the full
-/// style. `args` must be a list with keys 1 to n and nothing else. DCS can
-/// crash inside `markupToAll` on any other shape or layout, so the API
-/// refuses them before anything is stored (spec/commands.md, "Marks,
-/// drawings and menu items in DCS").
-pub fn drawing_layout_ok(shape: u32, args: &Lv) -> bool {
-    let Some(n) = list_len(args) else {
-        return false;
-    };
-    let Some(points) = point_count(shape, n) else {
-        return false;
-    };
-    let items = crate::sim::wire::lv::items(args);
-    let finite = |v: &Lv| matches!(v, Lv::Number(x) if x.is_finite());
-    items[..points].iter().all(|p| is_point(p))
-        && is_finite_color(items[n - 5])
-        && is_finite_color(items[n - 4])
-        && finite(items[n - 3])
-        && matches!(items[n - 2], Lv::Bool(_))
-        && matches!(items[n - 1], Lv::String(_))
-}
-
-/// The length of a list whose keys are exactly 1 to n, or `None`.
-fn list_len(v: &Lv) -> Option<usize> {
-    let Lv::Table(pairs) = v else {
-        return None;
-    };
-    let mut keys = Vec::with_capacity(pairs.len());
-    for (k, _) in pairs {
-        match k {
-            Lv::Number(i) => keys.push(*i),
-            _ => return None,
-        }
-    }
-    keys.sort_by(f64::total_cmp);
-    keys.iter()
-        .enumerate()
-        .all(|(i, k)| *k == (i + 1) as f64)
-        .then_some(keys.len())
-}
-
-/// A color as the shim takes it: a list of four finite numbers, keys 1 to 4.
-fn is_finite_color(v: &Lv) -> bool {
-    list_len(v) == Some(4)
-        && crate::sim::wire::lv::items(v)
-            .iter()
-            .all(|c| matches!(c, Lv::Number(x) if x.is_finite()))
-}
-
 /// The `DRAWING_UPDATE` changes that take a drawing from `old` to `new`, if
-/// only its colors, line type, font size or a text shape's text differ
-/// (spec/commands.md, "Marks, drawings and menu items in DCS"). The
-/// arguments end with the style: color, fill, then the line type (the font
-/// size for a text, shape 5), read only and the message (the text). Any
-/// other layout is a full set.
+/// only its colors, line type, a text box's font size and text, or a
+/// circle's radius differ (spec/commands.md, "Marks, drawings and menu items
+/// in DCS"). The arguments end with the style: color, fill, then the line
+/// type (the font size for a text box), read only and the message (the
+/// text). A circle's radius follows its center. Any other change, or
+/// arguments that are not the shape's lead and full style tail, is a full
+/// set. The values are checked at put time ([`DrawingShape::check`]) and by
+/// the shim (spec/commands.md, "Layout: DRAWING_SET").
 pub fn drawing_style_change(shape: u32, old: &Lv, new: &Lv) -> Option<Lv> {
     let (a, b) = (
         crate::sim::wire::lv::items(old),
@@ -410,9 +374,12 @@ pub fn drawing_style_change(shape: u32, old: &Lv, new: &Lv) -> Option<Lv> {
     if b.len() != n || !has_style_tail(shape, &a) || !has_style_tail(shape, &b) {
         return None;
     }
-    let text = shape == 5;
-    // Points and read only stay, and a message that is not a text shape's.
-    if a[..n - 5] != b[..n - 5] || a[n - 2] != b[n - 2] || (!text && a[n - 1] != b[n - 1]) {
+    let text = shape == drawing::shape::TEXT_BOX;
+    let circle = shape == drawing::shape::CIRCLE;
+    // The points stay (a circle's center), read only, and a message that is
+    // not a text box's.
+    let lead = if circle { 1 } else { n - 5 };
+    if a[..lead] != b[..lead] || a[n - 2] != b[n - 2] || (!text && a[n - 1] != b[n - 1]) {
         return None;
     }
     let mut changes = Vec::new();
@@ -421,6 +388,9 @@ pub fn drawing_style_change(shape: u32, old: &Lv, new: &Lv) -> Option<Lv> {
             changes.push((Lv::String(key.as_bytes().to_vec()), b[i].clone()));
         }
     };
+    if circle {
+        put("radius", 1);
+    }
     put("color", n - 5);
     put("fill", n - 4);
     put(if text { "font_size" } else { "line_type" }, n - 3);
@@ -433,12 +403,21 @@ pub fn drawing_style_change(shape: u32, old: &Lv, new: &Lv) -> Option<Lv> {
 /// Whether the marker `old`, with a change to `scope`, `target` and `spec`,
 /// needs an add to DCS: it holds no ID, a mark changed, or a drawing changed
 /// by more than the style [`drawing_style_change`] sends in place.
-fn add_needed(old: &Marker, scope: u32, target: u64, spec: &MarkerSpec) -> bool {
+fn add_needed(
+    old: &Marker,
+    scope: u32,
+    target: u64,
+    spec: &MarkerSpec,
+    drawing: &Option<DrawingShape>,
+) -> bool {
     if old.dcs_id == 0 {
         return true;
     }
     if old.scope == scope && old.target == target && old.spec == *spec {
-        return false;
+        // The same lowering under a new typed form (a theater, or a quad
+        // given as a rectangle) is a new revision with no style change: the
+        // reconciler adds it again.
+        return old.drawing != *drawing;
     }
     match (&old.spec, spec) {
         (
@@ -533,6 +512,7 @@ impl Store {
             scope,
             target,
             spec,
+            drawing: None,
             label: None,
             layer: None,
             expire_after_s: None,
@@ -545,6 +525,7 @@ impl Store {
     /// the current revision. A put that adds an item to a layer over its cap
     /// removes the layer's oldest items in the same write.
     pub fn put_marker_with(&mut self, p: MarkerPut) -> Result<Put, MarkerError> {
+        let p = p.lowered();
         let kind = match p.spec {
             MarkerSpec::Mark { .. } => MarkerKind::Mark,
             MarkerSpec::Drawing { .. } => MarkerKind::Drawing,
@@ -581,7 +562,7 @@ impl Store {
                 return Err(MarkerError::LabelTaken(l.to_owned()));
             }
         }
-        let (spec, scope, target) = (p.spec, p.scope, p.target);
+        let (spec, scope, target, typed) = (p.spec, p.scope, p.target, p.drawing);
         let old = if id.0 == 0 {
             None
         } else {
@@ -650,9 +631,9 @@ impl Store {
                 .and_then(|l| l.expire_after_s)
                 .map(|s| self.markers.played_s + s),
         };
-        let same_spec = old
-            .as_ref()
-            .is_some_and(|m| m.scope == scope && m.target == target && m.spec == spec);
+        let same_spec = old.as_ref().is_some_and(|m| {
+            m.scope == scope && m.target == target && m.spec == spec && m.drawing == typed
+        });
         let hidden = !self.markers.layers.get(&layer).is_none_or(|l| l.visible);
         if let Some(m) = &old
             && same_spec
@@ -681,7 +662,7 @@ impl Store {
             && !hidden
             && old
                 .as_ref()
-                .is_none_or(|m| add_needed(m, scope, target, &spec))
+                .is_none_or(|m| add_needed(m, scope, target, &spec, &typed))
             && self.pool_free(|m| m.id == id) == 0
         {
             return Err(MarkerError::DcsIdsFull(0));
@@ -719,6 +700,7 @@ impl Store {
                 scope,
                 target,
                 spec,
+                drawing: typed,
                 dcs_id,
                 rank: old.as_ref().map_or(0, |m| m.rank),
                 label,
@@ -1216,6 +1198,7 @@ impl Store {
         if !name_ok(name, LAYER_NAME_MAX) {
             return Err(MarkerError::BadLayer);
         }
+        let items: Vec<MarkerPut> = items.into_iter().map(MarkerPut::lowered).collect();
         if let Some(cap) = self.markers.layers.get(name).and_then(|l| l.cap)
             && items.len() > cap as usize
         {
@@ -1278,7 +1261,7 @@ impl Store {
                     .labels
                     .get(p.label.as_deref().unwrap_or(""))
                     .map(|h| &self.markers.items[h]);
-                if held.is_none_or(|m| add_needed(m, p.scope, p.target, &p.spec)) {
+                if held.is_none_or(|m| add_needed(m, p.scope, p.target, &p.spec, &p.drawing)) {
                     adds += 1;
                 }
             }
@@ -1688,6 +1671,65 @@ mod tests {
         assert!(!drawing_layout_ok(1, &Lv::Number(1.0)));
     }
 
+    fn circle(radius: f64, theater: &str) -> MarkerPut {
+        use super::super::drawing::{LineType, MapPoint, ShapeKind};
+        MarkerPut {
+            drawing: Some(DrawingShape {
+                theater: theater.into(),
+                color: [1.0, 0.0, 0.0, 1.0],
+                fill: [1.0, 0.0, 0.0, 0.5],
+                line_type: LineType::Solid,
+                text: String::new(),
+                read_only: true,
+                kind: ShapeKind::Circle {
+                    center: MapPoint::new(1.0, 2.0),
+                    radius,
+                },
+            }),
+            ..put(drawing(0.0), "c", "")
+        }
+    }
+
+    #[test]
+    fn a_typed_drawing_is_stored_with_its_lowering() {
+        let mut s = Store::new(CampaignId(1), 10);
+        let a = s.put_marker_with(circle(100.0, "Caucasus")).unwrap();
+        let m = s.marker(a.id).unwrap();
+        let (code, args) = m.drawing.as_ref().unwrap().lower();
+        assert_eq!(m.spec, MarkerSpec::Drawing { shape: code, args });
+        // The same put changes nothing; a new theater alone is a new revision.
+        assert_eq!(
+            s.put_marker_with(circle(100.0, "Caucasus")).unwrap().rev,
+            a.rev
+        );
+        assert_eq!(
+            s.put_marker_with(circle(100.0, "Syria")).unwrap().rev,
+            a.rev + 1
+        );
+    }
+
+    #[test]
+    fn a_circle_radius_alone_is_in_place() {
+        let lowered = |r: f64| circle(r, "Caucasus").drawing.unwrap().lower();
+        let ((code, a), (_, b)) = (lowered(100.0), lowered(250.0));
+        let changes = drawing_style_change(code, &a, &b).expect("in place");
+        assert_eq!(
+            crate::sim::wire::lv::get(&changes, "radius"),
+            Some(&Lv::Number(250.0))
+        );
+        // A radius is a circle's only: a polygon's second point is not one.
+        let tri = |x: f64| {
+            let mut v = layout(3);
+            v[1] = crate::sim::wire::lv::obj(vec![
+                ("x", Lv::Number(x)),
+                ("y", Lv::Number(0.0)),
+                ("z", Lv::Number(0.0)),
+            ]);
+            crate::sim::wire::lv::list(v)
+        };
+        assert!(drawing_style_change(3, &tri(1.0), &tri(2.0)).is_none());
+    }
+
     fn mark(text: &str) -> MarkerSpec {
         MarkerSpec::Mark {
             theater: "Caucasus".into(),
@@ -1707,6 +1749,7 @@ mod tests {
             scope: scope::ALL,
             target: 0,
             spec,
+            drawing: None,
             label: Some(label.into()),
             layer: Some(layer.into()),
             expire_after_s: None,
@@ -1867,6 +1910,24 @@ mod tests {
             boot(&mut s, b);
         }
         assert!(!s.dcs_issued_in_boot(7, id1) && !s.dcs_issued_in_boot(8, id1));
+    }
+
+    #[test]
+    fn a_typed_change_with_the_same_lowering_needs_a_slot() {
+        let mut s = Store::new(CampaignId(1), 10);
+        boot(&mut s, 7);
+        s.set_slot_limit_for_test(1);
+        let a = s.put_marker_with(circle(100.0, "Caucasus")).unwrap();
+        s.issue_dcs_id(a.id, false).unwrap();
+        // A new theater keeps the lowering but is added again: no slot is left.
+        assert_eq!(
+            s.put_marker_with(circle(100.0, "Syria")),
+            Err(MarkerError::DcsIdsFull(0))
+        );
+        // A radius change is in place and needs none, and so does one that
+        // comes with a new theater: the call differs only in its style.
+        assert!(s.put_marker_with(circle(200.0, "Caucasus")).is_ok());
+        assert!(s.put_marker_with(circle(300.0, "Syria")).is_ok());
     }
 
     #[test]

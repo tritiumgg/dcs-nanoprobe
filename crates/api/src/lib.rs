@@ -9,6 +9,7 @@
 pub mod auth;
 pub mod config;
 pub mod convert;
+pub mod drawing;
 pub mod events;
 pub mod group_template;
 pub mod hub;

@@ -58,6 +58,7 @@ pub mod static_replace;
 pub mod static_template;
 pub mod template;
 pub mod template_heliport;
+pub mod typed_shapes;
 
 /// The two committed templates.
 const CAUCASUS: &[u8] = include_bytes!("../../../tests/fixtures/templates/caucasus.miz");

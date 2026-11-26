@@ -93,7 +93,9 @@ pub fn check_lv(v: &Lv) -> Result<(), String> {
     at(v, 0)
 }
 
+pub mod drawing;
 mod markers;
+pub use drawing::DrawingShape;
 pub use markers::{
     BootIssue, ISSUE_BOOTS_KEEP, LABEL_MAX, LAYER_NAME_MAX, Layer, Marker, MarkerError, MarkerKind,
     MarkerPut, MarkerSpec, Markers, Put, dcs_ids, drawing_layout_ok, drawing_style_change, scope,

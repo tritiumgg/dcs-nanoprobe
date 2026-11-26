@@ -202,14 +202,134 @@ message Mark {
   uint64 dcs_id = 12;
 }
 
+// A color, each part from 0 to 1.
+message Color {
+  double red = 1;
+  double green = 2;
+  double blue = 3;
+  double alpha = 4;
+}
+
+// A drawing's outline (spec/world.md, "Drawings").
+enum LineType {
+  // Solid.
+  LINE_TYPE_UNSPECIFIED = 0;
+  LINE_TYPE_SOLID = 1;
+  LINE_TYPE_DASHED = 2;
+  LINE_TYPE_DOTTED = 3;
+  LINE_TYPE_DASH_DOT = 4;
+  LINE_TYPE_LONG_DASH = 5;
+  // A long dash and a short dash.
+  LINE_TYPE_TWO_DASH = 6;
+  // No outline.
+  LINE_TYPE_NONE = 7;
+}
+
+// A point on the map: meters north and east, map-local (DCS x and z).
+message MapPoint {
+  double north = 1;
+  double east = 2;
+}
+
+// What a drawing draws, and its style (spec/world.md, "Drawings"). Every
+// coordinate is within 10,000 km of 0 and every size from 1 m to 10,000 km.
+// A heading is radians clockwise from north, of the length axis.
+message DrawingShape {
+  // A line through two points.
+  message Line {
+    MapPoint from = 1;
+    MapPoint to = 2;
+  }
+  // An arrow from one point to another.
+  message Arrow {
+    MapPoint from = 1;
+    MapPoint to = 2;
+  }
+  // A polygon through 2 to 7,990 points; 2 draw a line, 3 or more a filled
+  // polygon.
+  message Polygon {
+    repeated MapPoint points = 1;
+  }
+  // A text box at a point: the text is `text`, the background `fill`.
+  message TextBox {
+    MapPoint at = 1;
+    // A whole number from 1 to 100.
+    uint32 font_size = 2;
+  }
+  // A quad through exactly four corners, in order round the outline.
+  message Quad {
+    repeated MapPoint corners = 1;
+  }
+  // A freeform through 3 to 7,990 points, in order round the outline. An
+  // outline that crosses itself draws no fill.
+  message Freeform {
+    repeated MapPoint points = 1;
+  }
+  message Circle {
+    MapPoint center = 1;
+    double radius = 2;
+  }
+  // Drawn as a quad.
+  message Rectangle {
+    MapPoint center = 1;
+    double length = 2;
+    double width = 3;
+    double heading = 4;
+  }
+  // Drawn as a freeform of 36 points.
+  message Oval {
+    MapPoint center = 1;
+    double half_length = 2;
+    double half_width = 3;
+    double heading = 4;
+  }
+  // Drawn as a freeform of 36 to 40 points.
+  message RoundedRectangle {
+    MapPoint center = 1;
+    double length = 2;
+    double width = 3;
+    // From 1 m to half the shorter of length and width.
+    double corner_radius = 4;
+    double heading = 5;
+  }
+
+  // The map, as Position.theater: one of the campaign's theaters. Empty on a
+  // drawing put through the deprecated fields, which passes no area filter.
+  string theater = 1;
+  // The outline, and a text box's text. Absent: opaque black.
+  Color color = 2;
+  // The inside, and a text box's background. Absent: no fill.
+  Color fill = 3;
+  // A text box takes LINE_TYPE_UNSPECIFIED or LINE_TYPE_SOLID; any other value
+  // is INVALID_ARGUMENT.
+  LineType line_type = 4;
+  // A text box's text; for any other kind the message of its map panel.
+  string text = 5;
+  bool read_only = 6;
+  oneof kind {
+    Line line = 10;
+    Polygon polygon = 11;
+    Arrow arrow = 12;
+    TextBox text_box = 13;
+    Quad quad = 14;
+    Freeform freeform = 15;
+    Circle circle = 16;
+    Rectangle rectangle = 17;
+    Oval oval = 18;
+    RoundedRectangle rounded_rectangle = 19;
+  }
+}
+
 // A map drawing the controller set.
 message Drawing {
   uint64 id = 1;
   Audience audience = 2;
-  // The DCS markupToAll shape number: 1 line, 3 polygon through its points (a line with
-  // two), 4 arrow, 5 text box, 6 quad (four points), 7 freeform. 2 is unknown.
-  uint32 shape = 3;
-  google.protobuf.ListValue args = 4;
+  // Deprecated: read typed_shape. The markupToAll shape number the drawing is
+  // sent as; 0 for a circle.
+  uint32 shape = 3 [deprecated = true];
+  // Deprecated: read typed_shape. The arguments the drawing is sent as, after
+  // the coalition and the ID; empty for a circle.
+  google.protobuf.ListValue args = 4 [deprecated = true];
   uint64 spec_revision = 5;
   // 0 while its markup group is hidden.
   uint64 applied_spec_revision = 6;
@@ -226,6 +346,9 @@ message Drawing {
   // load, a restart. Set by the sidecar and ignored on input. To tell the
   // platform's own mark events from a player's, read WorldEvent.platform_mark.
   uint64 dcs_id = 11;
+  // What it draws. A drawing put through the deprecated fields reads back as
+  // the kind its shape number names.
+  DrawingShape typed_shape = 12;
 }
 
 // A named set of marks and drawings, shown or hidden together (spec/world.md,
@@ -277,7 +400,10 @@ message WorldFilter {
   // Units are listed inside their groups: ENTITY_KIND_UNIT here fails with
   // INVALID_FIELD.
   repeated EntityKind kinds = 3;
-  // Only entities within radius of center.
+  // Only entities within radius of center. A drawing passes when any part of
+  // it is within radius: its line, its point, its disc, or its outline and
+  // inside. A drawing on another theater, or with an empty theater (put through
+  // the deprecated fields), never passes.
   Position center = 4;
   double radius = 5;
   // Leave unmanaged entities out.

@@ -447,6 +447,14 @@ layout DRAWING_SET fixed=24
 layout DRAWING_UPDATE fixed=8
   0x0000 u64 dcs_id
   + lv changes
+codes drawing
+  1 LINE
+  3 POLYGON
+  4 ARROW
+  5 TEXT_BOX
+  6 QUAD
+  7 FREEFORM
+  256 CIRCLE
 layout MARK_CLEAR fixed=8
   0x0000 u64 dcs_id
 layout MENU_SET fixed=24
@@ -551,4 +559,4 @@ codes moderation
   2 BAN call=net.banlist_add(player,_seconds,_reason);_with_player_0,_net.banlist_add_by_ucid(ucid,_seconds,_reason)
   3 UNBAN call=net.banlist_remove(ucid)
   4 SLOT call=net.force_player_slot(player,_side,_slot)
-hash 38fc24c11e1688e7
+hash 2e5e0dd96be329da

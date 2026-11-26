@@ -5,7 +5,7 @@
 //!
 //! 1. `burst`: `PutMarkupGroup` `np-front` and `np-low`,
 //!    `ReplaceMarkupGroup` `np-front` with 50 freeform drawings of 100 points,
-//!    `PutDrawing` of 3 two-point shape-3 drawings (lines) in `np-low`. The run waits until every
+//!    `PutDrawing` of 3 two-point polygons (lines) in `np-low`. The run waits until every
 //!    item's applied spec revision equals its spec revision, then reads
 //!    `world.getMarkPanels`: 53 panels with an ID from 2^30, ascending in
 //!    the order the items were added: the 50 front panels, then the 3 low
@@ -38,7 +38,6 @@
 
 use std::time::{Duration, Instant};
 
-use super::payload_preset::sv;
 use super::static_replace::{PAUSED_LUA, restore_pause};
 use super::*;
 
@@ -49,13 +48,10 @@ const FRONT_ITEMS: usize = 50;
 const LOW_ITEMS: usize = 3;
 const POINTS: usize = 100;
 /// The lowest DCS ID the sidecar gives a mark or drawing (2^30).
-const SCRIPT_ID_BASE: u64 = 1 << 30;
+pub(super) const SCRIPT_ID_BASE: u64 = 1 << 30;
 /// DCS's mark events: added, changed, removed (spec/world.md).
 const MARK_EVENTS: [u32; 3] = [25, 26, 27];
 const MARK_ADDED: u32 = 25;
-/// The freeform shape and shape 3, a polygon through its points (a line with two).
-const FREEFORM: u32 = 7;
-const TWO_POINT: u32 = 3;
 /// North and east of the front items' grid, meters; the grid is 5 rows of 10
 /// columns, 1.5 km apart.
 const BASE: (f64, f64) = (-289_000.0, 681_000.0);
@@ -69,41 +65,40 @@ const SPLIT_EAST_M: f64 = 20_000.0;
 const RED: [f64; 4] = [1.0, 0.0, 0.0, 1.0];
 const GREEN: [f64; 4] = [0.0, 1.0, 0.0, 1.0];
 /// Not design limits; only when this test gives up.
-const APPLY_LIMIT: Duration = Duration::from_secs(300);
+pub(super) const APPLY_LIMIT: Duration = Duration::from_secs(300);
 /// The agent reports every 10 s; this is the wait for the last window.
 const REPORT_WAIT: Duration = Duration::from_secs(12);
 
 // ---- specs -----------------------------------------------------------------
 
-fn all() -> Option<pb::Audience> {
+pub(super) fn all() -> Option<pb::Audience> {
     Some(pb::Audience {
         to: Some(pb::audience::To::All(true)),
     })
 }
 
-fn list(v: Value) -> Option<prost_types::ListValue> {
-    match sv(v).kind {
-        Some(prost_types::value::Kind::ListValue(l)) => Some(l),
-        _ => None,
+pub(super) fn map_point(north: f64, east: f64) -> pb::MapPoint {
+    pb::MapPoint { north, east }
+}
+
+/// A drawing on the theater: the color, the fill at alpha 0.2, a solid
+/// line, read only, an empty message.
+fn shape(kind: pb::drawing_shape::Kind, color: [f64; 4]) -> pb::DrawingShape {
+    let c = |a: f64| pb::Color {
+        red: color[0],
+        green: color[1],
+        blue: color[2],
+        alpha: a,
+    };
+    pb::DrawingShape {
+        theater: THEATER.into(),
+        color: Some(c(color[3])),
+        fill: Some(c(0.2)),
+        line_type: pb::LineType::Solid as i32,
+        read_only: true,
+        kind: Some(kind),
+        ..Default::default()
     }
-}
-
-fn point(north: f64, east: f64) -> Value {
-    json!({ "x": north, "y": 0.0, "z": east })
-}
-
-/// A drawing's arguments: the points, the color, the fill color, line type
-/// 1, read only, an empty message. DCS requires the fill color.
-fn args(points: Vec<Value>, color: [f64; 4]) -> Option<prost_types::ListValue> {
-    let mut v = points;
-    v.extend([
-        json!(color),
-        json!([color[0], color[1], color[2], 0.2]),
-        json!(1),
-        json!(true),
-        json!(""),
-    ]);
-    list(Value::Array(v))
 }
 
 /// Where front item `k`'s circle is centered, north and east in meters.
@@ -114,20 +109,29 @@ fn center(k: usize) -> (f64, f64) {
     )
 }
 
-fn freeform(k: usize, color: [f64; 4]) -> Option<prost_types::ListValue> {
+fn freeform(k: usize, color: [f64; 4]) -> pb::DrawingShape {
     let (n, e) = center(k);
-    let pts = (0..POINTS)
+    let points = (0..POINTS)
         .map(|i| {
             let a = std::f64::consts::TAU * i as f64 / POINTS as f64;
-            point(n + RADIUS_M * a.cos(), e + RADIUS_M * a.sin())
+            map_point(n + RADIUS_M * a.cos(), e + RADIUS_M * a.sin())
         })
         .collect();
-    args(pts, color)
+    shape(
+        pb::drawing_shape::Kind::Freeform(pb::drawing_shape::Freeform { points }),
+        color,
+    )
 }
 
-fn two_point(k: usize) -> Option<prost_types::ListValue> {
+/// A polygon through two points: a line.
+fn two_point(k: usize) -> pb::DrawingShape {
     let (n, e) = (BASE.0 + k as f64 * GRID_M, BASE.1 + LOW_EAST_M);
-    args(vec![point(n, e), point(n + 400.0, e + 400.0)], GREEN)
+    shape(
+        pb::drawing_shape::Kind::Polygon(pb::drawing_shape::Polygon {
+            points: vec![map_point(n, e), map_point(n + 400.0, e + 400.0)],
+        }),
+        GREEN,
+    )
 }
 
 fn front_label(k: usize) -> String {
@@ -138,7 +142,7 @@ fn low_label(k: usize) -> String {
     format!("low-{k}")
 }
 
-fn markup_group(name: &str, visible: bool) -> pb::MarkupGroup {
+pub(super) fn markup_group(name: &str, visible: bool) -> pb::MarkupGroup {
     pb::MarkupGroup {
         name: name.into(),
         visible,
@@ -155,8 +159,8 @@ fn front_items() -> Vec<pb::MarkupGroupItem> {
             expire_after_s: None,
             kind: Some(pb::markup_group_item::Kind::Drawing(
                 pb::MarkupGroupDrawing {
-                    shape: FREEFORM,
-                    args: freeform(k, RED),
+                    typed_shape: Some(freeform(k, RED)),
+                    ..Default::default()
                 },
             )),
         })
@@ -167,15 +171,15 @@ fn front_items() -> Vec<pb::MarkupGroupItem> {
 
 /// A drawing in the World.
 #[derive(Debug, Clone, PartialEq)]
-struct Item {
-    id: u64,
+pub(super) struct Item {
+    pub(super) id: u64,
     /// The ID DCS shows it under, 0 when it is not shown.
-    dcs_id: u64,
-    label: String,
-    markup_group: String,
-    spec: u64,
-    applied: u64,
-    error: String,
+    pub(super) dcs_id: u64,
+    pub(super) label: String,
+    pub(super) markup_group: String,
+    pub(super) spec: u64,
+    pub(super) applied: u64,
+    pub(super) error: String,
 }
 
 fn in_markup_group<'a>(items: &'a [Item], name: &str) -> Vec<&'a Item> {
@@ -195,13 +199,13 @@ fn hidden_all(items: &[&Item], n: usize) -> bool {
 
 /// One panel of `world.getMarkPanels` with an ID from [`SCRIPT_ID`].
 #[derive(Debug, Clone, PartialEq)]
-struct Panel {
-    idx: u64,
-    east: Option<f64>,
+pub(super) struct Panel {
+    pub(super) idx: u64,
+    pub(super) east: Option<f64>,
 }
 
 /// The panels of a read ([`PANELS`]). An empty Lua table is JSON `{}`.
-fn panels(seen: &Value) -> Vec<Panel> {
+pub(super) fn panels(seen: &Value) -> Vec<Panel> {
     seen["panels"]
         .as_array()
         .map(|a| {
@@ -217,7 +221,7 @@ fn panels(seen: &Value) -> Vec<Panel> {
         .unwrap_or_default()
 }
 
-fn idxs(p: &[Panel]) -> Vec<u64> {
+pub(super) fn idxs(p: &[Panel]) -> Vec<u64> {
     p.iter().map(|p| p.idx).collect()
 }
 
@@ -257,7 +261,7 @@ fn order_verdict(p: &[Panel], count: usize, low: usize, low_last: bool) -> Value
 
 /// A mark event of the API: the DCS event ID and the mark's ID.
 #[derive(Debug, Clone, PartialEq)]
-struct MarkEvent {
+pub(super) struct MarkEvent {
     dcs_id: u32,
     mark_id: Option<u64>,
     /// `WorldEvent.platform_mark`: the ID was issued by the platform in the
@@ -331,7 +335,7 @@ fn id_verdict(
 /// arrive and a quiet change proves nothing. `during` is the mark events
 /// from the change on: a fallback to `DRAWING_SET` removes and adds the ID,
 /// so it must hold none for an ID from 2^30.
-fn in_place_events(earlier: &[MarkEvent], during: &[MarkEvent], wanted: usize) -> Value {
+pub(super) fn in_place_events(earlier: &[MarkEvent], during: &[MarkEvent], wanted: usize) -> Value {
     let seen = earlier
         .iter()
         .filter(|e| e.dcs_id == MARK_ADDED && scripted(e))
@@ -377,7 +381,7 @@ fn sum_windows(lines: &[Value]) -> Value {
 /// The panels with an ID from 2^30 and the count of all panels. DCS lists
 /// panels in ascending ID order (LIVE, docs/results/2026-11-25-drawing-layers.md).
 /// A panel's ID is `idx`; the mock names it `id`.
-const PANELS: &str = r#"local base = 1073741824
+pub(super) const PANELS: &str = r#"local base = 1073741824
 local ok, list = pcall(world.getMarkPanels)
 if not ok or type(list) ~= 'table' then
   return { error = tostring(list), panels = {}, total = 0 }
@@ -408,7 +412,7 @@ fn markup_groups(api: &mut Api, c: u64) -> Result<Vec<pb::MarkupGroup>, String> 
         .markup_groups)
 }
 
-fn put_markup_group(api: &mut Api, c: u64, l: pb::MarkupGroup) -> Result<(), String> {
+pub(super) fn put_markup_group(api: &mut Api, c: u64, l: pb::MarkupGroup) -> Result<(), String> {
     let req = pb::PutMarkupGroupRequest {
         write: api.write("markup-group", c),
         markup_group: Some(l),
@@ -419,7 +423,7 @@ fn put_markup_group(api: &mut Api, c: u64, l: pb::MarkupGroup) -> Result<(), Str
         .map_err(status_text("PutMarkupGroup"))
 }
 
-fn remove_markup_group(api: &mut Api, c: u64, name: &str) -> Result<(), String> {
+pub(super) fn remove_markup_group(api: &mut Api, c: u64, name: &str) -> Result<(), String> {
     let req = pb::RemoveMarkupGroupRequest {
         write: api.write("remove-markup-group", c),
         name: name.into(),
@@ -430,7 +434,7 @@ fn remove_markup_group(api: &mut Api, c: u64, name: &str) -> Result<(), String> 
         .map_err(status_text("RemoveMarkupGroup"))
 }
 
-fn replace_markup_group(
+pub(super) fn replace_markup_group(
     api: &mut Api,
     c: u64,
     name: &str,
@@ -449,24 +453,22 @@ fn replace_markup_group(
         .ids)
 }
 
-fn put_drawing(
+pub(super) fn put_drawing(
     api: &mut Api,
     c: u64,
     what: &str,
     label: &str,
     markup_group: &str,
-    args: Option<prost_types::ListValue>,
-    shape: u32,
+    typed_shape: pb::DrawingShape,
 ) -> Result<u64, String> {
     let req = pb::PutDrawingRequest {
         write: api.write(what, c),
         drawing_id: 0,
         audience: all(),
-        shape,
-        args,
         label: label.into(),
         markup_group: markup_group.into(),
-        expire_after_s: None,
+        typed_shape: Some(typed_shape),
+        ..Default::default()
     };
     Ok(api
         .rt
@@ -477,7 +479,7 @@ fn put_drawing(
 }
 
 /// The campaign's drawings in the World.
-fn drawings(api: &mut Api, c: u64) -> Result<Vec<Item>, String> {
+pub(super) fn drawings(api: &mut Api, c: u64) -> Result<Vec<Item>, String> {
     let mut s = api
         .rt
         .block_on(api.world.list_world(pb::ListWorldRequest {
@@ -514,7 +516,11 @@ fn drawings(api: &mut Api, c: u64) -> Result<Vec<Item>, String> {
 
 /// The campaign's mark events after sequence `after`, with the last
 /// sequence read.
-fn mark_events(api: &mut Api, c: u64, after: u64) -> Result<(u64, Vec<MarkEvent>), String> {
+pub(super) fn mark_events(
+    api: &mut Api,
+    c: u64,
+    after: u64,
+) -> Result<(u64, Vec<MarkEvent>), String> {
     let (mut last, mut out) = (after, Vec::new());
     loop {
         let r = api
@@ -546,7 +552,7 @@ fn mark_events(api: &mut Api, c: u64, after: u64) -> Result<(u64, Vec<MarkEvent>
     }
 }
 
-fn read_panels(run: &dyn Live, stem: &str) -> Result<Value, String> {
+pub(super) fn read_panels(run: &dyn Live, stem: &str) -> Result<Value, String> {
     run.eval("server", stem, PANELS, 60)
 }
 
@@ -566,14 +572,14 @@ fn sampling_lines(run: &dyn Live) -> Result<Vec<Value>, String> {
 }
 
 /// The number of sampling reports now: where a burst's windows start.
-fn mark(run: &dyn Live) -> usize {
+pub(super) fn mark(run: &dyn Live) -> usize {
     sampling_lines(run).map_or(0, |l| l.len())
 }
 
 /// The windows since `start`, summed, after the last window had time to be
 /// written. `applied_s` is the real time from the first call to the last item
 /// applied, and `commands` the items sent.
-fn burst(
+pub(super) fn burst(
     run: &dyn Live,
     api: &mut Api,
     start: usize,
@@ -636,11 +642,11 @@ pub fn drive(
     Ok(())
 }
 
-fn recorded(r: Result<Value, String>) -> Value {
+pub(super) fn recorded(r: Result<Value, String>) -> Value {
     r.unwrap_or_else(|e| json!({ "pass": false, "error": e }))
 }
 
-fn step(rec: &mut Value, key: &str, r: Result<Value, String>) -> Result<(), String> {
+pub(super) fn step(rec: &mut Value, key: &str, r: Result<Value, String>) -> Result<(), String> {
     match r {
         Ok(v) => {
             rec["steps"][key] = v;
@@ -685,7 +691,12 @@ const WAIT_IDS_SHOWN: usize = 10;
 /// The text of a panel wait that timed out: the phase, the wanted count, the
 /// count of the last read and its first IDs. `last` is `None` when no read
 /// came back.
-fn panel_wait_error(phase: &str, wanted: usize, last: Option<&[Panel]>, cause: &str) -> String {
+pub(super) fn panel_wait_error(
+    phase: &str,
+    wanted: usize,
+    last: Option<&[Panel]>,
+    cause: &str,
+) -> String {
     let read = match last {
         None => "no read".to_string(),
         Some(p) => {
@@ -708,7 +719,7 @@ fn panel_wait_error(phase: &str, wanted: usize, last: Option<&[Panel]>, cause: &
 
 /// Wait until the read has `count` panels from 2^30; the last read. A timeout
 /// names the `phase`, the wanted count and the last read.
-fn wait_panels(
+pub(super) fn wait_panels(
     run: &dyn Live,
     api: &mut Api,
     stem: &str,
@@ -733,7 +744,7 @@ fn first_burst(run: &dyn Live, api: &mut Api, c: u64) -> Result<Value, String> {
     put_markup_group(api, c, markup_group(LOW, true))?;
     let ids = replace_markup_group(api, c, FRONT, front_items())?;
     for k in 0..LOW_ITEMS {
-        put_drawing(api, c, "low", &low_label(k), LOW, two_point(k), TWO_POINT)?;
+        put_drawing(api, c, "low", &low_label(k), LOW, two_point(k))?;
     }
     let applied_s = wait_applied(run, api, c, FRONT_ITEMS)
         .map(|_| t.elapsed().as_secs_f64())
@@ -772,15 +783,7 @@ fn in_place(run: &dyn Live, api: &mut Api, c: u64) -> Result<Value, String> {
         .ok_or("the item to change is not listed")?;
     let panels_before = panels(&read_panels(run, "drawing-layers-before")?);
     let (last, earlier) = mark_events(api, c, 0)?;
-    put_drawing(
-        api,
-        c,
-        "color",
-        &front_label(k),
-        FRONT,
-        freeform(k, GREEN),
-        FREEFORM,
-    )?;
+    put_drawing(api, c, "color", &front_label(k), FRONT, freeform(k, GREEN))?;
     let now = wait(run, api, APPLY_LIMIT, "the revision applied", |api| {
         let d = drawings(api, c)?;
         Ok(d.into_iter()
@@ -1011,10 +1014,12 @@ mod tests {
 
     #[test]
     fn a_freeform_holds_its_points_then_color_fill_line_read_only_and_message() {
-        let a = freeform(0, RED).unwrap().values;
-        assert_eq!(a.len(), POINTS + 5);
-        let r = two_point(0).unwrap().values;
-        assert_eq!(r.len(), 2 + 5);
+        let a = freeform(0, RED);
+        assert!(
+            matches!(a.kind, Some(pb::drawing_shape::Kind::Freeform(f)) if f.points.len() == POINTS)
+        );
+        let r = two_point(0);
+        assert!(matches!(r.kind, Some(pb::drawing_shape::Kind::Polygon(p)) if p.points.len() == 2));
         assert_eq!(front_items().len(), FRONT_ITEMS);
         // Every front item stands west of the split, every low item east.
         let last = center(FRONT_ITEMS - 1);

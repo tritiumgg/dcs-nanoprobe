@@ -2881,6 +2881,16 @@ scenario('marks', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
     { 1, style(P1, { x = 1, y = 0 / 0, z = 2 }) }, -- a point that is not finite
     { 1, style(P1, 5) }, -- a point that is a number
     { 1, {} },
+    { 1, { P1, P2, { 1.5, 0, 0, 1 }, CLEAR, 1, true, 'm' } }, -- a color part above 1
+    { 1, { P1, P2, RED, { 0, 0, 0, -0.1 }, 1, true, 'm' } }, -- a fill part below 0
+    { 1, { P1, P2, RED, CLEAR, 7, true, 'm' } }, -- line type 7
+    { 1, { P1, P2, RED, CLEAR, 2.5, true, 'm' } }, -- a line type not whole
+    { 5, { P1, RED, CLEAR, 0, true, 'm' } }, -- font size 0
+    { 5, { P1, RED, CLEAR, 101, true, 'm' } }, -- font size 101
+    { 256, style(P1, P2) }, -- the circle code with points
+    { 256, { P1, 0, RED, CLEAR, 1, true, 'c' } }, -- a circle of radius 0
+    { 256, { P1, 1500, RED, CLEAR, 7, true, 'c' } }, -- a circle with line type 7
+    { 256, { P1, 1500, RED, CLEAR, 1, true } }, -- a circle with no message
   }
   for i, case in ipairs(bad) do
     r = run({ drawing(40 + i, 1, 1, 0, case[2], nil, case[1]) }, 'bad layout ' .. i)
@@ -2929,12 +2939,58 @@ scenario('marks', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
     drawing_update(21, 4, d21, { color = { 0, 1, 0 } }),
     drawing_update(21, 5, d21, { line_type = 'dash' }),
     drawing_update(21, 6, d21, { radius = 5 }),
+    drawing_update(21, 7, d21, { bogus = 1 }),
   }, 'bad drawing updates')
   expect(r[1], DCS_REFUSED, 'DRAWING_UPDATE with a color of three')
   expect(r[2], DCS_REFUSED, 'DRAWING_UPDATE with a line type not a number')
-  expect(r[3], DCS_REFUSED, 'DRAWING_UPDATE with an unknown key')
+  expect(r[3], DCS_REFUSED, 'DRAWING_UPDATE with a radius on a drawing not held as a circle')
+  expect(r[4], DCS_REFUSED, 'DRAWING_UPDATE with an unknown key')
+  assert(sim.marks[d21].set.bogus == nil, 'an unknown key reached DCS')
   assert(#sim.marks[d21].set.color == 4 and sim.marks[d21].set.line_type == 2, 'a refused DRAWING_UPDATE reached DCS')
   assert(sim.marks[d21].set.color[2] == 1 and sim.marks[d21].set.line_type == 2, 'the update did not reach DCS')
+  assert(sim.marks[d21].set.radius == nil, 'a refused radius reached DCS')
+
+  -- A circle goes through circleToAll, never markupToAll; its radius changes
+  -- in place.
+  local d25 = 2 ^ 30 + 2 ^ 24 + 25
+  r = run({ drawing(25, 1, 1, 0, { P1, 1500, RED, CLEAR, 1, true, 'c' }, nil, 256) }, 'a circle')
+  expect(r[1], APPLIED, 'DRAWING_SET of a circle')
+  assert(sim.marks[d25] and sim.marks[d25].circle and sim.marks[d25].args[2] == 1500
+    and sim.marks[d25].shape == nil, 'the circle did not go through circleToAll')
+  r = run({
+    drawing_update(25, 2, d25, { radius = 2500 }),
+    drawing_update(25, 3, d25, { radius = 0 }),
+    drawing_update(25, 4, d25, { radius = 'big' }),
+  }, 'circle updates')
+  expect(r[1], APPLIED, 'DRAWING_UPDATE of a circle radius')
+  expect(r[2], DCS_REFUSED, 'DRAWING_UPDATE of a radius 0')
+  expect(r[3], DCS_REFUSED, 'DRAWING_UPDATE of a radius not a number')
+  assert(sim.marks[d25].set.radius == 2500, 'the radius did not reach DCS')
+  r = run({ drawing_update(21, 8, d21, { line_type = 7 }) }, 'a line type 7 update')
+  expect(r[1], DCS_REFUSED, 'DRAWING_UPDATE with line type 7')
+  r = run({ { op = 'DRAWING_REMOVE', entity = 25 } }, 'circle removal')
+  expect(r[1], APPLIED, 'DRAWING_REMOVE of the circle')
+  assert(sim.marks[d25] == nil, 'the circle is still in DCS')
+
+  -- Freeforms the size of the sidecar's expansions: an oval's 36 points and a
+  -- rounded rectangle's 40, at millimeter coordinates, with y 0.
+  for i, count in ipairs({ 36, 40 }) do
+    local pts = {}
+    for k = 0, count - 1 do
+      local t = 2 * math.pi * k / count
+      pts[#pts + 1] = { x = 1500.123 * math.cos(t), y = 0, z = 750.456 * math.sin(t) }
+    end
+    for _, v in ipairs({ RED, { 1, 0, 0, 0.6 }, 2, true, 'oval' }) do
+      pts[#pts + 1] = v
+    end
+    local entity = 25 + i
+    r = run({ drawing(entity, 1, 1, 0, pts, nil, 7) }, 'a freeform of ' .. count)
+    expect(r[1], APPLIED, 'DRAWING_SET of a freeform of ' .. count .. ' points')
+    local id = 2 ^ 30 + 2 ^ 24 + entity
+    assert(sim.marks[id] and #sim.marks[id].args == count + 5, 'the freeform of ' .. count .. ' differs')
+    r = run({ { op = 'DRAWING_REMOVE', entity = entity } }, 'freeform removal')
+    expect(r[1], APPLIED, 'DRAWING_REMOVE of the freeform of ' .. count)
+  end
 
   -- A mark the platform does not hold is removed by its ID; a held one is
   -- refused.

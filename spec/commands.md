@@ -785,17 +785,29 @@ stops the handler there: the items before it stay changed and the answer is
 | Offset | Type | Field | Meaning |
 |---|---|---|---|
 | 0x0000 | u32 | scope | `ALL` or `COALITION` |
-| 0x0004 | u32 | shape | The DCS shape ID |
+| 0x0004 | u32 | shape | A drawing code ("Codes: drawing") |
 | 0x0008 | u64 | target | The coalition number, by scope |
 | 0x0010 | u64 | dcs_id | The DCS mark ID the sidecar chose, from 1 to 2^53 - 1 |
-| + | lv | args | The shape's arguments after the coalition and the ID, as an array |
+| + | lv | args | The call's arguments after the coalition and the ID, as an array |
 
 ### Layout: DRAWING_UPDATE
 
 | Offset | Type | Field | Meaning |
 |---|---|---|---|
 | 0x0000 | u64 | dcs_id | The DCS mark ID the shim holds the drawing under |
-| + | lv | changes | A table with any of `color`, `fill` (each an array of four numbers), `line_type` (a number), `font_size` (a number) and `text` (a string) |
+| + | lv | changes | A table with any of `radius` (a number; a circle only), `color`, `fill` (each an array of four numbers), `line_type` (a number), `font_size` (a number) and `text` (a string) |
+
+### Codes: drawing
+
+| Code | Name | Meaning |
+|---|---|---|
+| 1 | LINE | `markupToAll` shape 1 |
+| 3 | POLYGON | `markupToAll` shape 3 |
+| 4 | ARROW | `markupToAll` shape 4 |
+| 5 | TEXT_BOX | `markupToAll` shape 5 |
+| 6 | QUAD | `markupToAll` shape 6 |
+| 7 | FREEFORM | `markupToAll` shape 7 |
+| 256 | CIRCLE | `circleToAll`; never a `markupToAll` shape |
 
 ### Layout: MARK_CLEAR
 
@@ -832,35 +844,32 @@ sends it as `dcs_id`. The shim holds each entity under the ID it was last set wi
   `markToCoalition(id, text, point, coalition, read_only)` or
   `markToGroup(id, text, point, group, read_only)`.
 - `DRAWING_SET` calls `trigger.action.markupToAll(shape, coalition, id, ...)` with the
-  coalition number, -1 for `ALL`, and the array `args` unpacked after the ID. Points in
-  `args` are tables with `x`, `y` and `z`, as DCS takes them. DCS checks the arguments
-  for the shape: shape 1 with two points, colors, a line type, read only and a message
-  is drawn, and shape 2 with a number after its first point is refused with
-  `DCS_REFUSED` (LIVE, docs/results/2026-11-15-s16-players-moderation.md). A line
-  without a fill color after its color is refused (LIVE,
-  docs/results/2026-11-25-drawing-layers.md).
-- The shim calls `markupToAll` only with a known shape and its layout, and refuses any
-  other with `DCS_REFUSED` and the message `the shape and arguments are not a known
-  layout`, before DCS is called. DCS crashed inside `markupToAll` on shape 8 with four points,
-  called alone, where `pcall` did not help, and the process hung (LIVE,
-  docs/results/2026-11-25-drawing-layers.md, "Run 3, part C"). Shapes 9 to 12 were not
-  called alone, and no drawing is known for them or for shape 2. The known layouts are the shape's points, each a table of finite `x`,
-  `y` and `z`, then color and fill (each a list of four finite numbers), the line type
-  (the font size for shape 5, a finite number), read only (a boolean) and the message (a
-  string), as a list with keys 1 to n
-  and nothing else. Shapes 1 and 4 take two points, 3 two or more, 5 one, 6 four and 7
-  three or more. The API refuses any other layout with `INVALID_ARGUMENT` before it
-  stores the drawing. A `DRAWING_UPDATE` with a key other than `color`, `fill`,
-  `line_type`, `font_size` and `text`, or a value of another type than the layout's, is
-  `DCS_REFUSED` with no setter called. What a client draws for each number
-  (LIVE, client, docs/results/2026-11-25-drawing-layers.md, "Run 3, part B"): 1 a line
-  through two points; 3 a polygon through its points, a line with two and a filled
-  polygon with three or more; 4 an arrow with two points; 5 a text box at one point;
-  6 a filled quad with four points; 7 a freeform. Shape 2 with a center and a point, or with
-  two points, makes a server panel but a client draws nothing; with a center and one or
-  two radii it raises. Shape 3 is not a rectangle: a rectangle is shape 6 with four
-  points, and `trigger.action.rectToAll` and `circleToAll` draw a rectangle and a circle
-  but the platform sends neither.
+  coalition number, -1 for `ALL`, and the array `args` unpacked after the ID; for shape
+  `0x100` CIRCLE it calls `trigger.action.circleToAll(coalition, id, ...)` the same way.
+  Points in `args` are tables with `x`, `y` and `z`, as DCS takes them. The sidecar makes
+  `args` from the drawing's typed shape (spec/world.md, "Drawings"). A line without a fill
+  color after its color is refused by DCS (LIVE, docs/results/2026-11-25-drawing-layers.md),
+  so every layout carries one.
+- The shim checks each layout exactly and refuses any other with `DCS_REFUSED` and the
+  message `the shape and arguments are not a known layout`, before DCS is called. DCS
+  crashed inside `markupToAll` on shape 8 with four points, called alone, where `pcall` did
+  not help, and the process hung (LIVE, docs/results/2026-11-25-drawing-layers.md, "Run 3,
+  part C"). Shapes 9 to 12 were not called alone, and no drawing is known for them or for
+  shape 2. The layouts are a list with keys 1 to n and nothing else:
+  - `markupToAll` shapes 1 and 4 with two points, 3 with 2 to 7,990, 5 with one, 6 with
+    four and 7 with 3 to 7,990, each point a table of finite `x`, `y` and `z`;
+  - CIRCLE with its center (a point) and a radius from 1 m to 10,000 km;
+  - then, for each, color and fill (each a list of four numbers from 0 to 1), the line type
+    (a whole number from 0 to 6; for shape 5 the font size, a whole number from 1 to 100),
+    read only (a boolean) and the message (a string).
+
+  CIRCLE is never a `markupToAll` shape. DCS draws line type 7 solid (LIVE); the shim
+  refuses it. A `DRAWING_UPDATE` with a key other than `radius`, `color`, `fill`,
+  `line_type`, `font_size` and `text`, a value outside the layout's range, or `radius` for a
+  drawing the shim does not hold as a CIRCLE, is `DCS_REFUSED` with no setter called.
+  `radius` calls `trigger.action.setMarkupRadius`, which resizes the circle and its fill in
+  place (LIVE, docs/results/2026-11-26-typed-shapes.md). What a client draws for each kind
+  is in spec/world.md, "Drawings".
 - DCS ignores an add of a mark or drawing, with no panel and no event, in two cases:
   an add over an ID DCS holds (LIVE for a drawing, UNVERIFIED for a mark), and an add
   under an ID `removeMark` removed earlier, until the next mission load (LIVE). Both are in docs/results/2026-11-25-drawing-layers.md. A remove of an
@@ -885,8 +894,9 @@ sends it as `dcs_id`. The shim holds each entity under the ID it was last set wi
     controller tells the platform's mark events from a player's by
     `WorldEvent.platform_mark` (spec/world.md, "DCS IDs").
 - `DRAWING_UPDATE` changes the drawing the shim holds for the entity, in place, with
-  `trigger.action.setMarkupColor`, `setMarkupColorFill`, `setMarkupTypeLine`,
-  `setMarkupFontSize` and `setMarkupText`, one call for each key of `changes`. DCS
+  `trigger.action.setMarkupRadius`, `setMarkupColor`, `setMarkupColorFill`,
+  `setMarkupTypeLine`, `setMarkupFontSize` and `setMarkupText`, one call for each key of
+  `changes`, in that order. DCS
   keeps the drawing's ID and order and emits no event (LIVE). An entity the shim does
   not hold, or holds under another ID, is `NOT_BOUND`, and the sidecar sends the
   drawing's `DRAWING_SET` instead. A call that raises is `DCS_REFUSED`; the calls

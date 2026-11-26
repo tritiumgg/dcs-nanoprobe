@@ -1405,11 +1405,20 @@ local function scripting(host, name)
         end
         mark_event('S_EVENT_MARK_ADDED', id, '', from, side == -1 and 255 or side, false, nil, { drawing = true })
       end,
-      circleToAll = function(side, id, center)
+      -- A circle: center, radius, color, fill, line type, read only and the
+      -- text (LIVE, docs/results/2026-11-26-typed-shapes.md). The mock records
+      -- the arguments after the ID as `args`.
+      circleToAll = function(side, id, center, ...)
+        if type(side) ~= 'number' or type(id) ~= 'number' or type(center) ~= 'table' then
+          error('mock: circleToAll takes a coalition, an ID and a center', 2)
+        end
         if sim.marks[id] or sim.dead_marks[id] then
           return
         end
-        mark_event('S_EVENT_MARK_ADDED', id, '', center, side == -1 and 255 or side, false, nil, { drawing = true })
+        local n = select('#', ...)
+        local last = n > 0 and select(n, ...) or nil
+        mark_event('S_EVENT_MARK_ADDED', id, type(last) == 'string' and last or '', center,
+          side == -1 and 255 or side, false, nil, { circle = true, args = { center, ... }, drawing = true })
       end,
       -- A filled rectangle between two corners (LIVE, rectToAll draws one).
       rectToAll = function(side, id, from, to, color, fill, line_type, read_only, text)
