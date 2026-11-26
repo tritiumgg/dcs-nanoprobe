@@ -1603,15 +1603,18 @@ scenario('farps', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
     return real_done(...)
   end
   -- One sidecar session: the commands, then frames until `done` holds for
-  -- its events while attached (a detached agent samples nothing).
-  local function session(commands, done, what)
+  -- its events while attached (a detached agent samples nothing). The
+  -- wait ends on that state; `seconds` (30) only bounds it. The sampling
+  -- budget is wall time, so a loaded host writes the OBJECTs of the 150
+  -- FARPs below at a fraction of the idle rate (about 7 a second idle).
+  local function session(commands, done, what, seconds)
     ctx.stop()
     for _, c in ipairs(commands) do
       c.gen, c.wait_result = gen, true
     end
     ctx.script(json({ campaign = 7, commands = commands }), 60000)
     local events
-    assert(ctx.run(30, function()
+    assert(ctx.run(seconds or 30, function()
       events = ctx.events()
       return agent.status().attached and done(events)
     end), what .. ':\n' .. dump(ctx))
@@ -1671,14 +1674,14 @@ scenario('farps', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   -- already run when ENUMERATE arrives and end first, having passed the
   -- object before this sidecar attached. Records reach the sidecar over the
   -- next frames: half a second after.
-  local function enumerate(what, object)
+  local function enumerate(what, object, seconds)
     local before, ended = enums, nil
     return session({ { op = 'ENUMERATE' } }, function(events)
       if enums > before and not ended and (not object or enumerated(events, object) > 0) then
         ended = now()
       end
       return ended ~= nil and now() - ended > 0.5
-    end, what)
+    end, what, seconds)
   end
   -- The warehouse tier's name for the FARP's airbase entry.
   local function sampled(at)
@@ -1879,7 +1882,7 @@ scenario('farps', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   local coalition_ = host.states.server.coalition
   local real_add = coalition_.addGroup
   local at_spawn
-  local function mid(rev, ready, what)
+  local function mid(rev, ready, what, seconds)
     os.remove(marker)
     local before = enums
     at_spawn = nil
@@ -1900,7 +1903,7 @@ scenario('farps', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
       -- ENUMERATE is a control command with no sequence: the spawn is 1.
       local r = result(events, 1)
       return r ~= nil and enums > before and #find(events, 'object', r.object) > 0
-    end, what)
+    end, what, seconds)
     slow(false)
     coalition_.addGroup = real_add
     assert(S.read(marker), what .. ': the spawn was not held for the enumeration')
@@ -1940,18 +1943,18 @@ scenario('farps', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
       end
     end
     return true
-  end, 'more FARPs')
+  end, 'more FARPs', 180)
   assert(#shim.T.airbases >= at5 + 150, 'the further FARPs have no entries after the first')
   ev = mid(6, function()
     return shim.T.enum ~= nil and shim.T.enum.fi ~= nil and shim.T.enum.fi > at5
-  end, 'a FARP spawned after the step passed its entry')
+  end, 'a FARP spawned after the step passed its entry', 180)
   local id6 = result(ev, 1).object
   assert(at_spawn.fi and at_spawn.fi > at5, 'the second spawn reached DCS before the cursor passed its entry: fi ' .. tostring(at_spawn.fi) .. ' step ' .. tostring(at_spawn.step) .. ' at ' .. at5 .. ' of ' .. #shim.T.airbases)
   assert(find(ev, 'gone', id5)[1] and find(ev, 'gone', id5)[1].reason == DESTROYED,
     'the replaced FARP was not written DESTROYED:\n' .. dump(ctx))
   assert(#find(all, 'gone', id6) == 0 and shim.T.slot_of[id6] and shim.T.airbases[at5].id == id6,
     'the FARP spawned behind the cursor lost its row or its entry')
-  ev = enumerate('an enumeration after the mid-enumeration spawns', id6)
+  ev = enumerate('an enumeration after the mid-enumeration spawns', id6, 180)
   assert(#find(all, 'gone', id6) == 0,
     'the next enumeration did not find the FARP spawned behind the cursor:\n' .. dump(ctx))
 
