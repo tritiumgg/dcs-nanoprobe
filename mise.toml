@@ -172,6 +172,10 @@ description = "Stage the Windows and Linux release archives in dist/ and check t
 depends = ["dll"]
 run = ["sh tools/stage-release.sh", "sh tools/stage-release-test.sh"]
 
+[tasks.release-notes-draft]
+description = "Draft a version's release notes from the commits since the last tag: mise run release-notes-draft -- 0.2.0"
+run = "sh tools/draft-release-notes.sh"
+
 [tasks.secrets]
 description = "Check that the pre-commit hook blocks a planted secret"
 run = "sh tools/secretscan-test.sh"
@@ -207,6 +211,8 @@ run = [
   "sh tools/secretscan-test.sh",
   # The tag and notes checks .github/workflows/release.yml runs before it builds a tag.
   "sh tools/release-check-test.sh",
+  # The release-notes drafter, on a written history.
+  "sh tools/draft-release-notes-test.sh",
   # The log parser of tools/ci-failures.sh, on written samples.
   "sh tools/ci-failures-test.sh",
   "actionlint",

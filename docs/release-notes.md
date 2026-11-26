@@ -4,9 +4,40 @@
 
 ### Added
 
+- `PutFromStaticTemplate` reads a Mission Editor static template (`.stm`) from a folder
+  `[missions] template_dirs` lists and makes every vehicle group and static in it in one
+  store commit or none. An anchor and a heading place and turn the layout. Files with
+  plane, helicopter, ship or complex groups, linked statics or grass airfields are
+  refused
+  ([ADR 0003](adr/0003-static-template-spawn-in-one-commit.md),
+  [2026-11-23-static-templates.md](results/2026-11-23-static-templates.md)).
+- A `PutGroup` unit names a Mission Editor payload preset in `payload_preset`. The
+  sidecar reads the preset file from `template_dirs` as data and stores its pylons. A
+  file with code other than the data table and its `return` is refused, and so is a
+  preset together with `pylons`
+  ([ADR 0004](adr/0004-payload-presets-read-at-request-time.md),
+  [2026-11-24-payload-presets.md](results/2026-11-24-payload-presets.md)).
+- `PutStatic` with a `static_id` revises the static's spec in place, and the sidecar
+  spawns it again under its name. A heliport group grows and shrinks as one airbase, and
+  the old airbase's owner and stock carry over. A heliport type change is refused with
+  `FAILED_PRECONDITION`
+  ([ADR 0047](adr/0047-a-statics-spec-is-revised-in-place.md)).
+- Marks and drawings carry a label, unique among the live ones, and belong to a markup
+  group with visibility, expiry and a cap: `PutMarkupGroup`, `ReplaceMarkupGroup`,
+  `RemoveMarkupGroup` and `ListMarkupGroups`. A put with ID 0 and a held label changes
+  that item. `ListWorld` and `WatchWorld` filter by markup group. The sidecar chooses
+  every DCS mark ID from one pool; a full pool refuses an add with `RESOURCE_EXHAUSTED`
+  and reason `DCS_IDS_FULL`. `Mark` and `Drawing` carry `dcs_id`, and
+  `WorldEvent.platform_mark` tells a controller which mark events the platform caused.
+  A persisted draw order survives a mission load or a restart
+  ([ADR 0048](adr/0048-labels-and-markup-groups-for-marks-and-drawings.md)).
+- `RemovePlayerMark` removes a mark the platform did not issue, named by the sequence
+  number of the mark event that carries its ID. Mark events carry `WorldEvent.mark_id`.
+- `Stamp` has an `agent_boot` field: opaque, compared for equality only, and 0 when no
+  boot is known. The boot and the mission generation together name one mission run
+  ([ADR 0050](adr/0050-stamps-carry-the-agent-boot.md)).
 - `PutFromStaticTemplate` builds a heliport static, such as a FARP or a helipad, as
-  `PutStatic` does: DCS makes its airbase, and the platform samples its warehouse. A
-  grass airfield is still refused
+  `PutStatic` does: DCS makes its airbase, and the platform samples its warehouse
   ([ADR 0044](adr/0044-static-template-spawn-with-heliports.md)).
 - A FARP's radio: `heliport_frequency`, `heliport_modulation` and `heliport_callsign_id`
   in `StaticSpec.extra` set its frequency, modulation and callsign, and
@@ -20,6 +51,14 @@
 
 ### Changed
 
+- **The store file is schema 2.** The sidecar takes a `pre_migration` backup and migrates
+  a 0.1.0 store on its first open. A 0.1.0 sidecar refuses the migrated file, and there
+  is no downgrade: to go back, restore the `pre_migration` backup, which loses what the
+  campaign did since. Back the store up before upgrading if you may roll back
+  ([ADR 0048](adr/0048-labels-and-markup-groups-for-marks-and-drawings.md),
+  `spec/persistence.md`).
+- `PutDrawing` and the agent accept only the `markupToAll` shapes 1, 3, 4, 5, 6 and 7
+  with their known argument layouts, and refuse anything else before DCS is called.
 - `PutStatic` and `PutFromStaticTemplate` refuse a `units` key in a static's `extra`
   with `INVALID_FIELD`. List a heliport group's further units in
   `StaticSpec.further_units`.
@@ -43,6 +82,11 @@
 
 ### Fixed
 
+- A group or static revised and not yet spawned before a sidecar restart is spawned in
+  place after it. A group lost to failed destroys waits for a full enumeration that began
+  after the loss before the respawn policy acts, and a member a script removed with no
+  record is not respawned in that mission generation
+  ([ADR 0049](adr/0049-confirmed-revisions-and-lost-groups-after-a-restart.md)).
 - A FARP the platform spawns, by either call, is `LIVE` in the World, and
   `RemoveEntity` removes it with its airbase. On a paused server DCS removes it when the
   mission resumes ([2026-11-25-farp-fixes.md](results/2026-11-25-farp-fixes.md)).

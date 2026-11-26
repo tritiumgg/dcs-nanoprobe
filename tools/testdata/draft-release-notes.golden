@@ -1,0 +1,23 @@
+## 0.2.0, Draft
+
+### Added
+
+- The `Call` RPC does a thing, as
+  [ADR 0044](adr/0044-heliports.md) says.
+- A second entry from the same commit.
+- add a call without a trailer ([ADR 0044](adr/0044-heliports.md), [2026-11-25-farp.md](results/2026-11-25-farp.md)) TODO: reword for users
+- A branch feature.
+
+### Changed
+
+- **rename a field** TODO: reword for users
+- **faster write** TODO: reword for users
+- The notes now say how to draft them.
+- **raise the minimum Rust** TODO: reword for users
+- **drop a platform** TODO: reword for users
+- Fix a crash on load TODO: reword for users
+- Revert "feat: something" TODO: reword for users
+
+### Fixed
+
+- plain fix TODO: reword for users

@@ -141,7 +141,27 @@ gh run download "$run" -n "agent-symbols-$commit" -D "dist/runner-$commit/privat
 folder. Keep the full commit with any test of the files. A dry run is optional for a
 later release. Before 0.1 it is required: the 0.1 acceptance run, which runs once,
 tests a dry run's files (docs/acceptance.md). Before the tag, finish the version's
-section of `docs/release-notes.md`. The section is final
+section of `docs/release-notes.md`. Draft it from the commits since the last tag:
+
+```bash
+mise run release-notes-draft -- 0.2.0
+```
+
+The draft goes to standard output under `## 0.2.0, Draft`. It reads the first-parent
+history after the newest `v*` tag (pass another ref as a second argument) and skips
+merges, `docs(adr): number ...` and the types docs, test, ci, chore, build, style and
+wip. A merge commit stands for the commits of its second parent.
+
+A commit's `Release-note:` trailers, written in its body for a user, become the entries
+as written; indented lines continue a trailer. `Release-note: none` drops a commit with
+nothing a user sees. A commit of a skipped type with a trailer still gives its entries,
+and so does a breaking commit of a skipped type, a commit whose subject is not a
+Conventional Commit, and a revert; the last three carry the `TODO`.
+A `feat` is Added, a `fix` is Fixed, and the rest, with every breaking commit, is
+Changed. A commit with no trailer gives its subject, the ADRs and results it names as
+links, and `TODO: reword for users`. Merge the draft into the section by hand, reword
+the `TODO` entries, and make the heading the version, such as `## 0.2.0`, without
+`Draft`. The section is final
 when its heading is the version with optional words after it, such as
 `## 0.1.0, the first release`, without "Draft", and no line in it says "To be
 completed", "not yet run", "TBD" or "TODO".
