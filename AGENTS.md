@@ -101,6 +101,10 @@ On Linux, install `libreadline-dev` and `libncurses-dev` before `mise install`.
 - Tag every DCS statement in `spec/`, `docs/` and code comments with an evidence tag.
   Link a LIVE claim to its results document in `docs/results/`.
 - Record a decision other parts depend on as an ADR in `docs/adr/`.
+- Update every document a change affects, in the same commit: `README.md`, the guides
+  in `docs/`, `AGENTS.md` and `skills/nanoprobe/`. Keep each one's audience: the README
+  is for people, the guides for people and AI agents, `AGENTS.md` and the skill for AI
+  agents.
 - Test new behavior against `crates/fake-sidecar`, `crates/fake-agent` and
   `crates/sim-fake` before a DCS server.
 - `cargo xtask` (`crates/xtask`) deploys, probes and collects redacted bundles on a
