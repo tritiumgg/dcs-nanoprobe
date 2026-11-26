@@ -28,7 +28,7 @@ license = "MIT"
 repository = "https://github.com/tritiumgg/dcs-nanoprobe"
 authors = ["tritiumgg"]
 
-# The agent catches every panic at its entry points (CLAUDE.md, "Code inside
+# The agent catches every panic at its entry points (AGENTS.md, "Code inside
 # DCS"), which needs unwinding. Do not switch this profile to abort.
 [profile.release]
 panic = "unwind"

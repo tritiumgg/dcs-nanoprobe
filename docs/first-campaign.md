@@ -102,7 +102,8 @@ one; `ListCampaigns` shows them all.
 - **Simulating without DCS.** A group can be `virtual`: the campaign holds it and DCS
   does not. `Materialize` and `Dematerialize` move a group between the two, and only the
   controller decides when.
-- **Freshness.** The README's table says how old each value can be. `GetServerStatus`
+- **Freshness.** [controller-guide.md](controller-guide.md), "Freshness", says how old
+  each value can be. `GetServerStatus`
   reports the period each sampling tier achieved.
 - **Restarts.** Stop the sidecar while a convoy drives and start it again: the campaign
   carries on. After a DCS restart the sidecar must be started again too; the groups on

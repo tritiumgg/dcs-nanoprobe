@@ -1,196 +1,278 @@
 # nanoprobe
 
-nanoprobe lets a program outside DCS World run a persistent campaign on a DCS server.
-DCS simulates. Your program, the controller, decides what exists and what it does, over
-a gRPC API, in any language. The world survives mission reloads and server restarts.
+nanoprobe turns a DCS World server into a world your own program runs. You write a
+program, in any language, that decides what exists on the map and what it does. DCS
+does the flying, driving and fighting. The world is stored outside DCS, so it survives
+mission reloads, server restarts and crashes. nanoprobe costs the server almost
+nothing: its part inside DCS may use at most 0.3 % of the server's time, and it used
+about 0.2 % with 2,000 objects on the map. Your program can also take units far from
+any player out of DCS and keep them virtual: nanoprobe holds them, and DCS spends no
+time on them. Your program brings them back, where they were, when a player comes near.
+So a campaign can grow larger than DCS could hold at once.
 
-It has three parts:
+The name comes from the Borg's nanoprobes, which take over their host from inside.
 
-- The **agent** is a DLL with a small Lua hook, loaded by DCS from the Saved Games
-  profile. It reads state out of DCS and applies commands, inside a fixed time budget.
-- The **sidecar** is a separate program on the same machine. It owns the campaign's
-  world, stores it, and serves the API.
-- **`nanoprobe`** is the command-line tool: installer, uninstaller, `doctor`, and
-  inspectors.
+## When to use it
 
-Nothing is written into the DCS install, and no DCS binary is hooked or patched. The
-integrity check is not affected by files in Saved Games.
+Use nanoprobe when you want a persistent campaign on a DCS server, run by code you
+write. A program that does this is called a **controller**. It can be a dynamic
+campaign, a mission generator, a training range, or a bot that answers players.
 
-The API is `nanoprobe.v1alpha1`. It can change in a way that breaks clients until it
-leaves alpha.
+nanoprobe is not a mission framework, a mission editor or a server manager. It ships no
+missions. It never starts, stops or restarts DCS.
+
+## How it works
+
+nanoprobe has three parts on the DCS server:
+
+- The **agent** is a small library that DCS loads at start. It runs inside DCS, reads
+  what happens there, and carries out commands. It works to a small time budget, 0.3 %
+  of the server's time by default.
+- The **sidecar** is a program that runs beside DCS. It stores the world and makes DCS
+  match it. Your controller calls it over the network. The calls use gRPC, a common
+  way for programs to call each other, available in most languages.
+- **`nanoprobe`** is the command-line tool. It installs and removes the agent, checks
+  a setup (`nanoprobe doctor`), and restores backups.
+
+The sidecar and the agent talk through a mapped file: one file that both of them map
+into memory. So the sidecar runs on the same machine as DCS.
+
+```mermaid
+flowchart LR
+    C["Your controller<br/>(any language)"] -- "gRPC API" --> S
+    subgraph Server["DCS server machine"]
+        S["Sidecar"] --- D[("Campaign store")]
+        S -- "mapped file" --> A
+        subgraph DCS["DCS World"]
+            A["Agent and its Lua hook"]
+        end
+    end
+```
+
+Your controller tells the sidecar what it wants: "this convoy exists and drives to that
+town". The sidecar stores that, then has the agent make it true in DCS. When DCS
+restarts, the sidecar puts the convoy back where it was, and it drives on.
+
+### What the messages look like
+
+The repository has a small example controller, the hello example. It also has a fake
+sidecar, which answers like the real one with no DCS behind it. The messages below come
+from the hello example's steps, run against the fake sidecar. They are the API's
+messages written as JSON, trimmed to the fields that matter, with times rounded.
+
+**A command and its answer.** The controller puts a convoy of two M-113s on the
+Caucasus map and orders it to drive one kilometer north. It sends `PutGroup`. The
+`write` part proves the controller holds control of the server (the lease), and its
+key lets a resent call take effect only once.
+
+```json
+{
+  "write": {
+    "lease": { "epoch": "1795722999660", "leaseId": "…" },
+    "idempotency": { "key": "hello/hello-1795722999661/convoy" },
+    "campaignId": "1795722999663"
+  },
+  "spec": {
+    "label": "convoy",
+    "country": 2,
+    "category": "GROUP_CATEGORY_GROUND",
+    "units": [
+      { "type": "M-113", "label": "lead",
+        "position": { "theater": "Caucasus", "north": -290000.0, "east": 680000.0 } },
+      { "type": "M-113", "label": "second",
+        "position": { "theater": "Caucasus", "north": -290000.0, "east": 680020.0 } }
+    ]
+  },
+  "order": { "route": { "waypoints": [
+    { "position": { "theater": "Caucasus", "north": -289000.0, "east": 680000.0 },
+      "speed": 10.0 } ] } }
+}
+```
+
+The sidecar stores the group and answers with its IDs. DCS spawns it a moment later.
+
+```json
+{ "groupId": "1", "unitIds": ["2", "3"], "specRevision": "1", "revision": "2" }
+```
+
+**An event.** The convoy reaches the end of its route. A program that follows the
+campaign's events receives:
+
+```json
+{
+  "event": {
+    "sequence": "2",
+    "stamp": { "modelTime": 25.7, "missionGeneration": 2 },
+    "route": {
+      "kind": "ROUTE_EVENT_KIND_ROUTE_COMPLETE",
+      "groupId": "1",
+      "orderRevision": "1",
+      "observed": true
+    }
+  }
+}
+```
+
+## What it installs, and DCS updates
+
+DCS keeps each user's settings, missions and logs in a profile folder under Saved
+Games. nanoprobe installs only there. It adds its own folder, a small loader script,
+and one marked block in the profile's `Config/autoexec.cfg` that lets the agent reach
+the server's scripting. Nothing is written into the DCS install, and no DCS binary is
+hooked or patched.
+
+A DCS update leaves the profile alone, so you do not reinstall nanoprobe after one. It
+keeps working as long as the DCS functions it calls are still there. After an update,
+`nanoprobe doctor` names any that DCS removed or renamed.
+
+## What nanoprobe adds to DCS
+
+- **A world that lasts.** Groups, orders, ruins and stock come back after a mission
+  reload, a server restart or a crash.
+- **Virtual groups.** Your controller can take a group out of DCS and bring it back.
+  It returns where it was, with the damage it had.
+- **Kills credited to players.** DCS reports some kills late, after the killer may
+  have left. nanoprobe remembers who was in each unit, names the
+  players, and dates the kill from when it happened.
+- **Weapon hits credited to the shooter.** A hit or kill names the players who
+  launched the weapon, even when the shooter has gone.
+- **Player keys.** Every event names the players involved by a stable, private key.
+  It stays the same across sessions, name changes and campaigns.
+- **Route progress.** An event says when a group reaches each waypoint and the end of
+  its route. nanoprobe works this out from positions.
+- **Loadouts.** An event gives a player's ammunition when they take a slot and at each
+  takeoff.
+- **Numbered event history.** Every event has a sequence number, so a controller that
+  reconnects continues where it stopped. When events are lost, a gap event says so.
+- **Map drawings that stay put.** Marks and drawings have names and layers, keep their
+  drawing order, and come back after a reload. Shapes known to crash DCS cannot be
+  sent.
+- **Warehouses and airbase owners.** They are read on a schedule. What your controller
+  sets is applied again after each reload.
 
 ## What a controller can do
 
-| Service | Calls |
+- Create campaigns, switch between them, and back them up.
+- Place ground units, aircraft, ships and static objects, from scratch or from Mission
+  Editor templates. Give aircraft a Mission Editor loadout.
+- Give groups orders: follow a route, attack, hold, or orbit.
+- Make far groups virtual, and bring them back, so they cost DCS no time.
+- Set who owns an airbase and what its warehouse holds.
+- Make explosions, smoke, flares and illumination, and clear away wrecks.
+- See every unit's position and life (its health), and follow every event as it
+  happens.
+- Set the next mission's date, time and weather.
+- Reach players with messages, sounds, chat, F10 map marks and drawings, and radio menu
+  items.
+- Kick, ban and move players.
+
+## Getting started
+
+You need a DCS server, on Windows or under Wine on Linux, that you can stop and
+start.
+
+1. Download the latest release from the
+   [releases page](https://github.com/tritiumgg/dcs-nanoprobe/releases).
+2. Install the agent into the server's DCS profile, and write the sidecar's settings.
+   [docs/install.md](docs/install.md) has each step for Windows and Linux.
+3. In the Mission Editor, save one mission for each map you will use. The sidecar
+   builds each campaign's mission from it.
+   [docs/mission-templates.md](docs/mission-templates.md) says how.
+4. Start DCS. Then start the sidecar, and check the setup:
+
+   ```sh
+   nanoprobe-sidecar run --config sidecar.toml
+   nanoprobe doctor --sidecar-config sidecar.toml --theater Caucasus
+   ```
+
+5. Run the hello example in [Rust](examples/hello-rust),
+   [Python](examples/hello-python) or [Kotlin](examples/hello-kotlin). It starts a
+   campaign and drives two vehicles one kilometer.
+   [docs/first-campaign.md](docs/first-campaign.md) walks through it. You can also run
+   it with no DCS at all, against the fake sidecar.
+
+## Configuration
+
+- **`sidecar.toml`** is the sidecar's settings file; its `--config` argument names it.
+  It names the mapped file, the agent's token, the folder of mission templates, and
+  where campaigns are stored. It also sets the API's address and access tokens.
+- **`agent.toml`**, in the profile's `nanoprobe` folder, sets up the agent. Windows
+  needs none when the sidecar runs as the same user as DCS. Under Wine it names the
+  mapped file. It also sets the agent's time budget and how often it reads each value.
+  Lua from a controller stays off unless this file turns it on.
+- **A tokens file** gives each program that calls the API a role: observer,
+  controller or admin. Without one, only programs on the server itself can connect,
+  and each of them has the admin role.
+- **An empty `disable` file** in the profile's `nanoprobe` folder stops the agent
+  within 2 seconds of DCS's next frame, while DCS runs on. During a mission load it
+  takes effect once the load ends.
+
+[docs/configuration.md](docs/configuration.md) lists every setting, what it does, and
+when to change it.
+
+## Documentation
+
+| For | Read |
 |---|---|
-| Campaign | create, activate, suspend, finish, back up, export and delete campaigns; give a campaign its own mission template |
-| Commands | put groups and statics, make groups and statics from Mission Editor group and static templates, give aircraft a Mission Editor payload preset, set orders and options, move a group between DCS and the campaign's own simulation (`Materialize`, `Dematerialize`), remove entities, set airbase owners and warehouse stock, clear wrecks |
-| World | list the world at a revision, watch its changes, query an area |
-| Events | subscribe to events from a sequence number, read history |
-| Mission | server status and health, weather and time of the next mission, reload |
-| Players | list players and the units they occupy, messages, sounds, chat, F10 marks, drawings and menu items |
-| Moderation | kick, ban, unban, move a player |
-| Extension | your own data and events; your own Lua, when the server's administrator allows it |
+| Writing a controller | [docs/controller-guide.md](docs/controller-guide.md), [docs/api-clients.md](docs/api-clients.md) |
+| Running a server | [docs/operator-guide.md](docs/operator-guide.md), [docs/configuration.md](docs/configuration.md) |
+| Contributing | [AGENTS.md](AGENTS.md), [docs/releasing.md](docs/releasing.md) |
+| Exact behavior | [spec/](spec/) and the API schema in [proto/](proto/) |
+| Test results | [docs/results/](docs/results/), [docs/acceptance.md](docs/acceptance.md) |
 
-One controller at a time holds the lease and may change things. Any number of observers
-read. [docs/api-clients.md](docs/api-clients.md) shows how to generate a client;
-[spec/world.md](spec/world.md) defines the world model.
+For AI coding tools, [skills/nanoprobe/](skills/nanoprobe/) holds a skill that points
+them at these documents.
 
-## What is tracked, and how fresh it is
+## Performance
 
-The agent takes at most 0.3 % of real time on the simulation thread by default, and
-gives itself at most 250 µs in one frame. It reads what that budget allows. Each value below
-has a target period; the periods are settings (`[sampling]` in `agent.toml`).
+DCS runs its simulation on one thread, and every frame nanoprobe takes there is a frame
+DCS does not get. So the agent works to a budget:
 
-| Value | For | When it is read | How old it can be |
-|---|---|---|---|
-| Position | every unit, and cargo statics | every second | 1 s. A unit that has not moved 0.5 m in three reads is read every 5 s, so it is seen up to 5 s late, once, when it starts to move. |
-| Position | statics that cannot move | when first seen, and at each full enumeration (60 s) | does not change |
-| Life | every unit and static | when first seen; after a hit event names it; in a slow sweep every 60 s; at a capture | about 1 s after a weapon hit. Damage that sends no event shows at the next slow sweep. |
-| Life | units players occupy | every 5 s | 5 s |
-| Ammunition | units players occupy | once when the player takes the slot, and once at takeoff | not updated in between |
-| Ammunition | AI units | never | unknown, not full |
-| Fuel | any unit | never | not tracked |
-| Coalition and warehouse stock | every airbase | every 60 s | 60 s |
-| Which objects exist | every group and static | births and deaths as they happen; a full enumeration every 60 s | a kill is seen at once for ground units and statics (below) |
+- At most 0.3 % of real time on the simulation thread, by default.
+- At most 250 µs of any one frame for its reads. A single DCS call cannot be split, so
+  a few frames run past it.
+- A separate 2 ms a frame for your controller's commands. One large command, such as a
+  big spawn, can run past it in its frame.
 
-These are targets, not promises. When the budget cannot meet every target, the server
-is not slowed: rates fall in a fixed order. Warehouses fall first, then life, then
-positions. Positions a controller subscribed to fall last. The server status reports the
-period each tier achieved, so a controller can see how old its data is. The slow sweep
-of life took 98 s, not 60, on a loaded server.
+When the budget is tight, the agent reads less often, so DCS keeps its frame rate. It
+drops warehouse reads first, then life, then positions. Positions your controller
+asked for go last. The server status reports how often each value was read.
 
-Measured on a dedicated server under Wine with 2,000 objects, one ground group in five
-moving, across the runs of three results documents: the mean share was 0.19 to 0.23 % of
-real time, and 0.19 to 0.27 % of frames went over 250 µs. The median interval between an
-object's positions was 0.993 to 1.008 s
-([s11](docs/results/2026-11-14-s11-budget-and-baseline.md),
-[s14](docs/results/2026-11-14-s14-command-path.md),
-[s19](docs/results/2026-11-17-s19-spawn-state.md)).
+Measured on a dedicated server under Wine, with 2,000 objects and one ground group in
+five moving:
 
-A controller's commands have their own budget, 2 ms a frame by default. A command is not
-cut short: one large spawn can take longer than the budget in its frame, and the server
-status counts it.
-
-## Behavior to know
-
-**Deaths.** A killed ground unit or static is reported dead at once, from a read. DCS
-sends a ground unit's own death events only when its wreck explodes, which came 0 to
-103 s later in tests. An aircraft or a ship is reported dead by its death event, which
-came at once in every test. A cargo crate killed by gunfire sends no event and is reported
-as missing.
-
-**Removal by script.** DCS sends no event for a unit a script removes. The platform
-reports a removed ground unit or static as removed, and anything else as missing.
-
-**Damage without an event.** DCS sends a hit event for weapon hits, splash damage and a
-wreck's explosion. A scripted explosion, or a script that sets a unit's life, sends
-none; the slow sweep finds the change.
-
-**Rearming.** The platform does not see a rearm. No event came when a truck rearmed an
-AI unit; whether DCS sends one when ground crew rearm a player's aircraft is unverified.
-A player's ammunition is read again at the next takeoff. Flares and chaff cannot be
-read.
-
-**Units that left without a death.** A member that DCS reported missing or removed is
-not created again by a reload, a restart or a restore, because its death report may
-have been lost. Its group comes back without it. The API marks such a unit `left`; the
-controller releases it with `ResolveMember` or removes the group.
-
-**Restarts.** The sidecar checkpoints positions, life and warehouse stock every 5 s. When
-DCS comes back after a restart, or a campaign is activated, each group on the loaded map
-is spawned from its last stored state and its order continues, so a convoy goes on to
-its destination. After a restart DCS runs the mission its own settings name, not the
-campaign's; the campaign's next `Reload` loads its own. After a DCS crash the restored
-values are up to one checkpoint old. The sidecar exits when DCS restarts, so that
-whatever runs it starts it again; the restore happens once it is back
-([docs/install.md](docs/install.md)). Ammunition is not
-stored. The platform never starts, stops or restarts DCS: it reports DCS as healthy,
-hung or gone, and restarting is the host's job.
-
-**Missions.** The sidecar writes each campaign's mission from a template that the
-server's administrator saves in the Mission Editor, one per map. The project ships no
-mission. The copy changes the date, the start time, the weather, and the dynamic-spawn
-and hot-start settings of the airports the controller names. An airport with dynamic
-spawn turned on gets a limited aircraft stock, which the controller sets with
-`SetWarehouseStock`. Slots, zones, triggers and placed units stay as saved, and placed
-units are not managed. See [docs/mission-templates.md](docs/mission-templates.md).
-
-**Ruins.** A campaign static that is destroyed stays destroyed and stays in the world.
-After a reload or restart DCS shows a dead static in its place. How a restored ruin
-looks depends on its type, and the wreck of the one ground vehicle tested, a BRDM-2,
-could not be kept this way ([spec/world.md](spec/world.md), "Ruins").
-
-**Wrecks.** `ClearDebris` removes wrecks, craters and debris in a volume. A `Column` is
-a square on the map that clears at every height, so the caller needs no terrain height;
-a `Sphere` and a `Box` take altitudes above sea level. The edge is not exact: wrecks
-within about 30 m of a small volume go too, and a wreck that is still burning stays.
-
-**Lua.** Extensions and raw Lua are off unless the administrator sets `[lua] raw = true`
-in the agent's settings file on the server. No API call can turn them on.
-
-## Limits
-
-- DCS simulates on one core, and the capacity is DCS's. The platform is measured at
-  500, 1,200 and 2,000 objects.
-- Fuel is not tracked. Ammunition is known only for units players occupy.
-- The position of cargo that an aircraft carries is unverified.
-- The API has no TLS. Off loopback it needs tokens, and the network must be trusted.
-- No client packages are published. Clients generate code from the release's schema.
-- Mission templates come from the administrator; the project ships none.
-- Groups and statics can be made from Mission Editor group templates
-  (`PutGroupFromTemplate`) and static templates (`PutFromStaticTemplate`), for ground
-  groups and statics only. An aircraft's pylons can come from a Mission Editor payload
-  preset file in the data form; a preset file with Lua code is refused
-  ([docs/mission-templates.md](docs/mission-templates.md), "Group templates", "Static
-  templates" and "Payload presets").
-
-## Where it is verified
-
-Every claim about DCS in [spec/](spec/) is tagged with how it is known, and every
-measurement in [docs/results/](docs/results/) names its script, DCS build, platform and
-date.
-
-| Platform | Status |
+| Measure | Result |
 |---|---|
-| DCS dedicated server under Wine on Linux, in a container | The development target. The measurements and live tests ran here: DCS 2.9.31.29434, `wine-10.0`. |
-| DCS on Windows, hosting a session from the client | The agent's overhead, mission reloads and the kill switch ran here. |
-| DCS dedicated server on Windows | Unverified. No test has run on one. |
+| Mean share of real time, settled at 2,000 objects | 0.19 to 0.23 % |
+| Frames over 250 µs | 0.19 to 0.27 % |
+| Median time between two positions of one object | 0.993 to 1.008 s |
 
-[docs/acceptance.md](docs/acceptance.md) maps the project's acceptance criteria to
-their evidence and lists what is not yet shown.
+A frame over 250 µs is one where fixed work, a command, or one DCS call ran past the
+read slice. The figures span the runs in three test reports:
+[s11](docs/results/2026-11-14-s11-budget-and-baseline.md),
+[s14](docs/results/2026-11-14-s14-command-path.md) and
+[s19](docs/results/2026-11-17-s19-spawn-state.md).
 
-## Get started
+## Limitations
 
-1. [Install](docs/install.md) the agent into the DCS profile and run the sidecar.
-2. Save a [mission template](docs/mission-templates.md) for each map you use.
-3. Run your [first campaign](docs/first-campaign.md) with one of the examples in
-   [examples/](examples/): Rust, Python and Kotlin.
-4. Generate a client for [your language](docs/api-clients.md).
-
-`nanoprobe doctor` checks an install from outside DCS. After a DCS update it names each
-DCS function the platform calls and no longer finds.
-
-## Build from source
-
-Every tool comes from `mise.toml`; the Rust toolchain is pinned in
-`rust-toolchain.toml`. On Linux, mise builds Lua 5.1 from source and needs the
-readline and ncurses development headers first (`libreadline-dev libncurses-dev` on
-Debian and Ubuntu); the Linux CI jobs install them with apt.
-
-```sh
-mise install
-mise run setup      # once: the secret-scanner hook
-mise run check      # what CI checks, on the host
-mise run package    # the release archives, in dist/
-```
-
-The host tests run on macOS, Linux and Windows. The agent DLL is built for Windows, and
-cross-built on macOS and Linux. The development and test tooling
-(`cargo xtask`) reads its targets from a file outside the repository and is not part of
-a release. [docs/releasing.md](docs/releasing.md) says how a release is built and
-published.
+- **Fuel is not tracked.**
+- **Ammunition is known only for units players fly,** and only when the player takes
+  the slot and at each takeoff. AI units' ammunition is never read. Flares and chaff
+  cannot be read. Rearming is not seen.
+- **How old values can be.** Positions are about a second old. Life is about a
+  second old after a weapon hit. Damage that DCS reports no event for shows within
+  about a minute. Airbase owners and stock are up to a minute old. On a busy server
+  the agent reads less often, so that DCS does not slow down.
+- **The API is an early version,** `v1alpha1`. A release can change it in ways that
+  need client changes; its release notes say how.
+- **The API has no encryption.** Off the server it needs tokens and a network you
+  trust.
+- **No client libraries are published.** You generate one from the release's API
+  schema with your language's gRPC tools ([docs/api-clients.md](docs/api-clients.md)).
+- **No missions are included.** You save the mission templates yourself.
+- **Mission Editor group and static templates make ground groups and statics
+  only.** Aircraft and ships are placed directly.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+nanoprobe is released under the [MIT License](LICENSE).

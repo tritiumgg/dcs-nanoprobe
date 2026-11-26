@@ -482,7 +482,7 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec")
     }
 
-    /// CLAUDE.md: the spec and the golden file change together.
+    /// AGENTS.md: the spec and the golden file change together.
     #[test]
     fn the_golden_file_matches_the_spec() {
         let text = generate(&spec()).expect("the spec tables are valid");

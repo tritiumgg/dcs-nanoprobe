@@ -833,7 +833,7 @@ fn exit_status(ok: bool, conclusive: bool) -> u8 {
     }
 }
 
-/// What the result was measured on, which CLAUDE.md requires of every LIVE
+/// What the result was measured on, which AGENTS.md requires of every LIVE
 /// result: the platform, the DCS build and branch, the Wine version, and the
 /// deployed agent build. A figure that cannot be read is an `error`.
 pub(crate) fn provenance(name: &str) -> Value {

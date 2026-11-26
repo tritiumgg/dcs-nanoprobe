@@ -1,5 +1,5 @@
 #!/bin/sh
-# Checks the public API schema for breaking changes (CLAUDE.md, "Conventions").
+# Checks the public API schema for breaking changes (AGENTS.md, "Conventions").
 #
 # The base is a git ref: the first argument, else PROTOBREAK_BASE, else the
 # first of origin/main, main and HEAD whose merge base with HEAD holds a
