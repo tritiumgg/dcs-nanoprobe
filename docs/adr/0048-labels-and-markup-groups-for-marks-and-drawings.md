@@ -1,4 +1,4 @@
-# ADR NNNN: Labels and markup groups for marks and drawings
+# ADR 0048: Labels and markup groups for marks and drawings
 
 ## Status
 
