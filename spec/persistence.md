@@ -273,7 +273,7 @@ every record it was not told was read.
 - A crash between the commits leaves the events of the step in the events file and its
   facts out of the store. The records are read again: their facts are folded in, and an
   event whose record identity is already in the events file is not appended again.
-- A crash after the store commit, before the acknowledgement: the records are read
+- A crash after the store commit, before the acknowledgment: the records are read
   again, and a record at or below the store's last folded record is dropped.
 
 So each fact is folded in once and each event is recorded once, whatever the crash

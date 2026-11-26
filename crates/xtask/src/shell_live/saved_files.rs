@@ -99,7 +99,7 @@ struct Object {
 }
 
 /// The objects the call makes from `src`, by the sidecar's own reader and
-/// conversion, and a record of the file: its theatre, countries, counts and
+/// conversion, and a record of the file: its theater, countries, counts and
 /// dropped keys.
 fn layout(src: &[u8]) -> Result<(Vec<Object>, Vec<usize>, Value), String> {
     let l = static_template::read(src).map_err(|r| format!("the reader refused it: {}", r.text))?;

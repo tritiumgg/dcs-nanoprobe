@@ -47,7 +47,7 @@ esac
 (cd "$ROOT" && cargo build -p nanoprobe-fake-agent --bin link-probe --bin command-probe --bin command-script --bin conformance-probe -p nanoprobe-cli --bin nanoprobe -p nanoprobe-api --bin nanoprobe-sidecar -p nanoprobe-hello --bin hello-campaign)
 PROBE="$ROOT/target/debug/link-probe"
 INSPECT="$ROOT/target/debug/nanoprobe"
-# The catalogue builder, which lua/tests/probes.lua runs on the scenarios'
+# The catalog builder, which lua/tests/probes.lua runs on the scenarios'
 # reports from the mock.
 (cd "$ROOT" && cargo build -p xtask)
 XTASK="$ROOT/target/debug/xtask"

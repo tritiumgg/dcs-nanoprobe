@@ -1,10 +1,10 @@
 -- How the agent's object table classifies a row that DCS no longer has
 -- (the S10 confirming run, DECISIONS 2026-11-14 00:38 item 7 and 01:27). Units
 -- and statics cease to exist in ten ways, each on objects of its own,
--- kilometres from the others:
+-- kilometers from the others:
 --   gun         eight tanks, four a side, 600 m apart, open fire
 --   air         two attack aircraft, each against four trucks
---   shootdown   three aircraft flown over air defence vehicles
+--   shootdown   three aircraft flown over air defense vehicles
 --   static_weapon  an attack aircraft bombs four statics (a heavier weapon)
 --   explosion   trigger.action.explosion on each of four vehicles, on three
 --               statics (static_explosion) and on the vehicles of `wreck`
@@ -98,7 +98,7 @@ end
 add('np-deaths-ud', function()
   return S.ground('np-deaths-ud', 'M-113', row('np-deaths-u', 6, ex + 900, ez, 40))
 end)
--- air: two groups of trucks 20 km east, out of the air defence's reach, each
+-- air: two groups of trucks 20 km east, out of the air defense's reach, each
 -- with an attack aircraft 9 km south of it. The bomb's CLSID is UNVERIFIED;
 -- with none loaded the aircraft has its gun.
 local MK82 = '{BCE4E030-38E9-423E-98ED-24BE3DA87C32}'
@@ -142,11 +142,11 @@ for i = 1, 3 do
   add_static('np-deaths-se' .. i, ex - origin.x + 1300, ez - origin.z + (i - 1) * 60)
   add_static('np-deaths-sr' .. i, ex - origin.x + 1600, ez - origin.z + (i - 1) * 60)
 end
--- shootdown: the air defence scenario of the event catalogue
--- (lua/catalogue/30-air-defense.lua), where it is known to end in a kill,
+-- shootdown: the air defense scenario of the event catalog
+-- (lua/catalog/30-air-defense.lua), where it is known to end in a kill,
 -- with three aircraft one behind the other.
 local dx, dz = origin.x - 6000, origin.z + 6000
-local defence = {
+local defense = {
   add('np-deaths-sam', function()
     return S.ground('np-deaths-sam', 'Osa 9A33 ln', { { name = 'np-deaths-sam-1', x = dx, z = dz } }, nil, RUSSIA)
   end),
@@ -180,8 +180,8 @@ local function order(name, group, option, value)
 end
 order('blue', blue, 0, 2)
 order('red', red, 0, 2)
-order('sam', defence[1], 0, 2)
-order('aaa', defence[2], 0, 2)
+order('sam', defense[1], 0, 2)
+order('aaa', defense[2], 0, 2)
 
 -- The watched objects, by object ID and by name: name, stage, whether a
 -- static.

@@ -15,14 +15,14 @@ local function now()
   return L.clock() or 0
 end
 
--- The centre every scenario is laid out around: the first airbase's point.
+-- The center every scenario is laid out around: the first airbase's point.
 function S.origin()
-  if not S.centre then
+  if not S.center then
     local base = world.getAirbases()[1]
     local point = base:getPoint()
-    S.centre = { x = point.x, y = point.y, z = point.z }
+    S.center = { x = point.x, y = point.y, z = point.z }
   end
-  return S.centre
+  return S.center
 end
 
 local function country_id(name)
@@ -77,7 +77,7 @@ function S.ground(name, kind, units, route, country, category)
 end
 
 -- Add `n` units of `kind` in groups of `per`, on a square grid `spacing`
--- metres apart, `offset` metres north of the origin. `label` keeps the names
+-- meters apart, `offset` meters north of the origin. `label` keeps the names
 -- of two grids apart. Returns the group names and each group's cost in
 -- seconds.
 function S.spawn_grid(n, options)
@@ -107,7 +107,7 @@ function S.spawn_grid(n, options)
 end
 
 -- A convoy of `count` vehicles with a route of four points, 500 m apart,
--- heading north from `offset` metres east of the origin. Returns the group
+-- heading north from `offset` meters east of the origin. Returns the group
 -- name and the route.
 function S.spawn_convoy(options)
   options = options or {}
@@ -223,7 +223,7 @@ function S.open_fire(group)
   end))
 end
 
--- A static object `east` metres east and `north` metres north of the
+-- A static object `east` meters east and `north` meters north of the
 -- origin. Returns the object and the seconds the call took.
 function S.spawn_static(name, north, east, kind, category)
   local origin = S.origin()
@@ -298,7 +298,7 @@ L.track.defer('scenario', S.clear)
 
 -- The moving, mixed scenario of step S10. Of `n` objects: 92 % ground units
 -- in moving groups of 10, 4 % ships in moving pairs on water, 2 % aircraft
--- (half helicopters, half aeroplanes, one to a group), 2 % statics. The
+-- (half helicopters, half airplanes, one to a group), 2 % statics. The
 -- shares keep aircraft few, since each costs the server a frame of its own
 -- to spawn and more to fly. With no water within 60 km of the origin the
 -- ships' share goes to ground units, and the result says so. `o.label` keeps

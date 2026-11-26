@@ -1,4 +1,4 @@
--- Catalogue: a blue aircraft flies low over a red SA-8 and a Shilka, which
+-- Catalog: a blue aircraft flies low over a red SA-8 and a Shilka, which
 -- shoot it down. Waits for the crash and what follows: ejection, landing.
 -- states: server
 -- timeout: 260
@@ -41,7 +41,7 @@ return E.wait(function()
   end
   -- After the aircraft is gone, wait for the ejection and the landing.
   if (down and timer.getTime() - down >= 60) or timer.getTime() - started >= 240 then
-    E.observe('catalogue', R.report(), { info = true })
+    E.observe('catalog', R.report(), { info = true })
     -- What is left would fight on into the next scenario. A scripted
     -- removal emits no event (LIVE, lua/probes/32-events.lua).
     S.clear()

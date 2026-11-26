@@ -6,7 +6,7 @@
 //! raw-pointer copies (spec/transport.md, "Conventions").
 //!
 //! The rings and the status block take `&impl Memory`, so the Loom tests can
-//! run them on modelled atomics and the Miri tests on a heap buffer.
+//! run them on modeled atomics and the Miri tests on a heap buffer.
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 

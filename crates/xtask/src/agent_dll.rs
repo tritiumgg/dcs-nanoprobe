@@ -19,7 +19,7 @@ const DEPLOYING: &[&str] = &[
     "deploy",
     "roundtrip",
     "run",
-    "catalogue",
+    "catalog",
     "commands",
     "persistence",
     "sampling",

@@ -98,7 +98,7 @@ return E.wait(function()
   E.observe('frames_during_load', now.frames_loading - counts.frames_loading, { windows = 0 })
   E.observe('load_progress_calls', (now.onMissionLoadProgress or 0) - (counts.onMissionLoadProgress or 0),
     { windows = 0 })
-  -- The theatre is readable at onMissionLoadBegin and nil at
+  -- The theater is readable at onMissionLoadBegin and nil at
   -- onSimulationStop (PRIOR).
   E.observe('theatre_at_load_begin', theatre.onMissionLoadBegin, { windows = 'string' })
   E.observe('theatre_at_stop', theatre.onSimulationStop, { windows = 'nil' })

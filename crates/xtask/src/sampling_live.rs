@@ -1924,7 +1924,7 @@ mod tests {
             json!({ "scale": scale, "frames": 1_000, "frames_over_250": over,
                     "syscall_over_250": 0, "frame_max_us": 400.0 })
         };
-        // 1.5 % over at k = 0.1 does not fail the k = 1 judgement.
+        // 1.5 % over at k = 0.1 does not fail the k = 1 judgment.
         let (k1, k01) = tail_by_scale(&[report(1.0, 5), report(1.0, 5), report(0.1, 30)]);
         assert_eq!(k1["p99_within_250"], json!(true));
         assert_eq!(k1["frames"], json!(2_000));

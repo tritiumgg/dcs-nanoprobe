@@ -548,7 +548,7 @@ async fn a_static_template_makes_every_entity_in_one_call_or_none() {
         assert_eq!((st.country, st.label.as_str()), (0, "mine/Depot"));
     }
 
-    // With an anchor the file's theatre is not used: a Syria file goes to
+    // With an anchor the file's `theatre` is not used: a Syria file goes to
     // a Caucasus anchor.
     let moved = commands
         .put_from_static_template(pb::PutFromStaticTemplateRequest {

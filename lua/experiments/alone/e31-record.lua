@@ -18,7 +18,7 @@ return E.wait(function()
     left = timer.getTime()
   end
   if (left and timer.getTime() - left >= 20) or timer.getTime() - start >= 290 then
-    E.observe('catalogue', R.report(), { info = true })
+    E.observe('catalog', R.report(), { info = true })
     return 'done'
   end
   return nil

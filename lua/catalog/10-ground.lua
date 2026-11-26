@@ -1,4 +1,4 @@
--- Catalogue: ground units and a static. Spawn, a weak explosion that
+-- Catalog: ground units and a static. Spawn, a weak explosion that
 -- damages, a strong one that kills, a static killed, and a scripted removal.
 -- states: server
 -- timeout: 90
@@ -59,7 +59,7 @@ return E.wait(function()
     end
   elseif step == 5 then
     if after(3) then
-      E.observe('catalogue', R.report(), { info = true })
+      E.observe('catalog', R.report(), { info = true })
       -- The static, if the explosion left it, goes before the next
       -- scenario. A scripted removal emits no event (LIVE,
       -- lua/probes/32-events.lua).

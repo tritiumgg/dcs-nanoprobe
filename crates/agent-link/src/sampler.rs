@@ -1025,7 +1025,7 @@ const MAINTENANCE_FLOOR_US: f64 = -1000.0;
 const MAINTENANCE_SHARE: f64 = 0.5;
 const MAINTENANCE_SHARE_OVERDUE: f64 = 0.75;
 
-/// Movement under this many metres since the last sample is no movement.
+/// Movement under this many meters since the last sample is no movement.
 const STOP_M: f64 = 0.5;
 /// A unit or cargo static unmoved for this many position reads in a row is
 /// read less often: once in `IDLE_EVERY` sweeps. The first read that finds

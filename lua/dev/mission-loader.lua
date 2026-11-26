@@ -9,7 +9,7 @@
 -- before the load is attempted, so a mission that crashes DCS is not loaded
 -- again at the next start. The result goes to dcs.log under NANOPROBE-DEV.
 --
--- It honours the kill switch, and no callback returns a value.
+-- It honors the kill switch, and no callback returns a value.
 
 local ok, err = pcall(function()
   local root = lfs.writedir() .. 'nanoprobe/'

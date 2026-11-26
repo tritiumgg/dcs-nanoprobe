@@ -53,16 +53,16 @@ E.track.handler({
   end,
 })
 
--- kind of truck, metres from the tank, and whether it is the other side's.
+-- kind of truck, meters from the tank, and whether it is the other side's.
 local NEIGHBORS = {
   { label = 'none' },
-  { label = 'M 818 at 25 m', kind = 'M 818', metres = 25 },
-  { label = 'M978 HEMTT Tanker at 25 m', kind = 'M978 HEMTT Tanker', metres = 25 },
-  { label = 'Ural-375 at 25 m', kind = 'Ural-375', metres = 25 },
-  { label = 'M 818 at 100 m', kind = 'M 818', metres = 100 },
-  { label = 'M 818 at 200 m', kind = 'M 818', metres = 200 },
-  { label = 'M 818 at 400 m', kind = 'M 818', metres = 400 },
-  { label = 'M 818 of the other coalition at 25 m, added later', kind = 'M 818', metres = 25, other = true },
+  { label = 'M 818 at 25 m', kind = 'M 818', meters = 25 },
+  { label = 'M978 HEMTT Tanker at 25 m', kind = 'M978 HEMTT Tanker', meters = 25 },
+  { label = 'Ural-375 at 25 m', kind = 'Ural-375', meters = 25 },
+  { label = 'M 818 at 100 m', kind = 'M 818', meters = 100 },
+  { label = 'M 818 at 200 m', kind = 'M 818', meters = 200 },
+  { label = 'M 818 at 400 m', kind = 'M 818', meters = 400 },
+  { label = 'M 818 of the other coalition at 25 m, added later', kind = 'M 818', meters = 25, other = true },
 }
 
 -- Eight sites on land, 1.5 km apart, each with 700 m of land to the north.
@@ -106,7 +106,7 @@ for i, neighbor in ipairs(NEIGHBORS) do
   local group = S.ground(name, 'M-1 Abrams', { { name = name .. '-1', x = site.x, z = site.z, heading = 0 } })
   local tank = { label = neighbor.label, name = name .. '-1', group = group, site = site, neighbor = neighbor, changes = {} }
   if neighbor.kind and not neighbor.other then
-    S.ground('np-e38-n' .. i, neighbor.kind, { { name = 'np-e38-n' .. i .. '-1', x = site.x - neighbor.metres, z = site.z, heading = 0 } })
+    S.ground('np-e38-n' .. i, neighbor.kind, { { name = 'np-e38-n' .. i .. '-1', x = site.x - neighbor.meters, z = site.z, heading = 0 } })
     tank.truck_name = 'np-e38-n' .. i .. '-1'
   end
   tanks[i] = tank
@@ -213,7 +213,7 @@ return E.wait(function()
         -- ROE option 0, value 4: weapon hold (ED-CODE, as S.open_fire).
         tank.group:getController():setOption(0, 4)
         S.ground('np-e38-n' .. i, tank.neighbor.kind, {
-          { name = 'np-e38-n' .. i .. '-1', x = tank.site.x - tank.neighbor.metres, z = tank.site.z, heading = 0 },
+          { name = 'np-e38-n' .. i .. '-1', x = tank.site.x - tank.neighbor.meters, z = tank.site.z, heading = 0 },
         }, nil, country.id.RUSSIA)
         tank.truck_name = 'np-e38-n' .. i .. '-1'
       end

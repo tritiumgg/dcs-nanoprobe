@@ -207,7 +207,7 @@ fn print(rows: &[Row]) {
         .iter()
         .partition(|r| kind(&r.path) == Some(Kind::Template));
     if !t.is_empty() {
-        println!("| Static template | Bytes | Result | Groups | Units | Statics | Theatre |");
+        println!("| Static template | Bytes | Result | Groups | Units | Statics | Theater |");
         println!("|---|---:|---|---:|---:|---:|---|");
         for r in t {
             match &r.outcome {

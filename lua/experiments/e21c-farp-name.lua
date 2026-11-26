@@ -157,14 +157,14 @@ end
 -- 4. The idea naming scheme (base 62, campaign tag 'k3F') and today's spec form,
 -- each read back by name and checked byte for byte.
 local function ll(north, east)
-  local metres = string.format('x %.0f z %.0f', o.x + north, o.z + east)
+  local meters = string.format('x %.0f z %.0f', o.x + north, o.z + east)
   local ok, lat, lon = pcall(function()
     return coordinate.LOtoLL({ x = o.x + north, y = 0, z = o.z + east })
   end)
   if ok and type(lat) == 'number' then
-    return string.format('lat %.5f lon %.5f ; %s', lat, lon, metres)
+    return string.format('lat %.5f lon %.5f ; %s', lat, lon, meters)
   end
-  return metres
+  return meters
 end
 
 local function ground(group, unit_names, north, east)

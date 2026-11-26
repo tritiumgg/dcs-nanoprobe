@@ -1,6 +1,6 @@
 -- E20: getters on the object of a unit that was removed, one that was
 -- killed, and their old object IDs; and whether a later spawn reuses an ID.
--- The rule: behaviour recorded, and the validity rule (every sampled row is
+-- The rule: behavior recorded, and the validity rule (every sampled row is
 -- checked against the agent's table generation) confirmed or tightened.
 -- states: hook
 -- timeout: 180

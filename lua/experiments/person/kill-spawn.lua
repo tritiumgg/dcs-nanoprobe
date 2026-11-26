@@ -1,4 +1,4 @@
--- Person tests: add one M-113 (group `np-person-kill`) DISTANCE metres in front of
+-- Person tests: add one M-113 (group `np-person-kill`) DISTANCE meters in front of
 -- the player's aircraft, facing it, for the damage kill in kill-damage.lua.
 -- 150 m put it under a FARP pad, out of sight (LIVE, owner); 400 m clears it.
 -- states: server

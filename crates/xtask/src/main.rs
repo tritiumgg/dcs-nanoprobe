@@ -5,7 +5,7 @@
 
 mod agent_dll;
 mod bundle;
-mod catalogue;
+mod catalog;
 mod chaos;
 mod check;
 mod client;
@@ -218,14 +218,14 @@ commands:
   real-files <name> profile <path>...
                             The same for files under the target's Saved Games
                             profile
-  catalogue <name>          Experiment E9 on a docker-wine target: deploy with --dev,
+  catalog <name>            Experiment E9 on a docker-wine target: deploy with --dev,
                             restart DCS, load a fresh shell, record the agent's stream
-                            with link-probe, run the scenarios in lua/catalogue, load
-                            the shell again, and build the event catalogue under
-                            bundles/catalogue-<name>-<time>/. Refuses a server with
+                            with link-probe, run the scenarios in lua/catalog, load
+                            the shell again, and build the event catalog under
+                            bundles/catalog-<name>-<time>/. Refuses a server with
                             players.
-  catalogue --build <probes.json> [--recording F]... --out STEM
-                            Build the field-presence report STEM.md and the catalogue
+  catalog --build <probes.json> [--recording F]... --out STEM
+                            Build the field-presence report STEM.md and the catalog
                             STEM.json from a probes report and stream recordings
   client join <client> <server>
                             Experiment E30: join the docker-wine server <server> from
@@ -334,7 +334,7 @@ fn main() -> ExitCode {
         ["chaos", name, rest @ ..] => chaos::command(name, rest),
         ["faults", name, rest @ ..] => faults::command(name, rest),
         ["real-files", name, rest @ ..] => real_files::command(name, rest),
-        ["catalogue", rest @ ..] => catalogue::command(&repository(), rest),
+        ["catalog", rest @ ..] => catalog::command(&repository(), rest),
         ["sampling", rest @ ..] => sampling::command(&repository(), rest),
         ["commands", rest @ ..] => commands::command(&repository(), rest),
         ["sidecar", rest @ ..] => sidecar::command(&repository(), rest),

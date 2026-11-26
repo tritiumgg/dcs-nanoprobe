@@ -1686,13 +1686,13 @@ of description",
         let src = vehicle_unit(UNIT).replace("[\"theatre\"] = \"Caucasus\",", "");
         let l = read(src.as_bytes()).expect("read");
         assert_eq!(l.theatre, None);
-        let r = specs(&l, None, 0.0, None, "").expect_err("no theatre");
+        let r = specs(&l, None, 0.0, None, "").expect_err("no `theatre`");
         assert_eq!(r.field, "path");
         assert!(r.text.contains("has no `theatre`"), "{}", r.text);
         for bad in ["5", "\"\""] {
             let src = vehicle_unit(UNIT).replace("\"Caucasus\"", bad);
             let l = read(src.as_bytes()).expect("read");
-            let r = specs(&l, None, 0.0, None, "").expect_err("a theatre that is not a name");
+            let r = specs(&l, None, 0.0, None, "").expect_err("a `theatre` that is not a name");
             assert_eq!(r.field, "path");
             assert!(r.text.contains("has no `theatre`"), "{bad}: {}", r.text);
         }

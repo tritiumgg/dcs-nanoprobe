@@ -1,4 +1,4 @@
--- Catalogue: two blue tanks and two red tanks 600 m apart, ordered to open
+-- Catalog: two blue tanks and two red tanks 600 m apart, ordered to open
 -- fire, fight until one
 -- side is dead or the time is up.
 -- states: server
@@ -34,7 +34,7 @@ return E.wait(function()
   end
   -- After a side is gone, wait for the last events of the fight.
   if (ended and timer.getTime() - ended >= 10) or timer.getTime() - started >= 120 then
-    E.observe('catalogue', R.report(), { info = true })
+    E.observe('catalog', R.report(), { info = true })
     -- What is left would fight on into the next scenario. A scripted
     -- removal emits no event (LIVE, lua/probes/32-events.lua).
     S.clear()

@@ -64,7 +64,7 @@ use std::process::ExitCode;
 
 use serde_json::{Value, json};
 
-/// The slack on a position, metres.
+/// The slack on a position, meters.
 const POSITION_SLACK_M: f64 = 1.0;
 /// The sampler's schedule (spec/sampling.md, "Tiers"): a unit or cargo
 /// static that has not moved is read once in this many position sweeps, and
@@ -77,7 +77,7 @@ const ENUMERATION_S: f64 = 60.0;
 /// An object moves when the oracle reads its speed above this, m/s.
 const MOVING_M_S: f64 = 1.0;
 /// An object was halted at the early read when its speed was at most this,
-/// m/s, and its sample lies within this many metres of where it stood, plus
+/// m/s, and its sample lies within this many meters of where it stood, plus
 /// the position slack: the sampler's own stop distance.
 const HALTED_M_S: f64 = 0.5;
 const STOP_M: f64 = 0.5;
@@ -186,13 +186,13 @@ pub struct Verdict {
     pub extra: Vec<u64>,
     /// In both, with no position in the mirror yet.
     pub unpositioned: Vec<u64>,
-    /// Positions past the distance allowed: object and metres off.
+    /// Positions past the distance allowed: object and meters off.
     pub far: Vec<(u64, f64)>,
     /// Life that differs: object.
     pub vitals: Vec<u64>,
     /// Objects with no vitals yet.
     pub unvital: Vec<u64>,
-    /// The largest position error, metres, and its allowance.
+    /// The largest position error, meters, and its allowance.
     pub worst: (f64, f64),
     /// Getters that raised in the oracle.
     pub oracle_failed: u64,

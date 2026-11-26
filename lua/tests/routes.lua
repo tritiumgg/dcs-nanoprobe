@@ -198,7 +198,7 @@ local chunk = assert(loadfile(root .. 'lua/scenarios/routes.lua'))
 setfenv(chunk, env)
 local R = chunk({ lib = function(name) return lib_stub[name] end, clock = function() return 0 end })
 
--- The dense path has a waypoint every `step` metres, the ends included.
+-- The dense path has a waypoint every `step` meters, the ends included.
 assert(R.dense_points(4000, 50) == 81, 'dense points ' .. R.dense_points(4000, 50))
 local path = R.path(100, 7, 4000, 8, true, 50, nil)
 assert(#path == 81 and path[1].x == 100 and path[81].x == 4100 and path[2].x - path[1].x == 50, 'the dense path')

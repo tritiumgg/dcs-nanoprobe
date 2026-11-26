@@ -1,16 +1,16 @@
-//! `catalogue`: the event catalogue of experiment E9 (step S9).
+//! `catalog`: the event catalog of experiment E9 (step S9).
 //!
-//! `catalogue <name>` runs on a docker-wine target. It deploys the build with
+//! `catalog <name>` runs on a docker-wine target. It deploys the build with
 //! the eval channel, restarts DCS, loads a fresh shell mission, and attaches
 //! `link-probe` in the game container as the sidecar, recording the agent's
 //! stream (`link-probe --record`). It then runs the scenarios in
-//! `lua/catalogue` as probes, each of which reports what the Lua event
+//! `lua/catalog` as probes, each of which reports what the Lua event
 //! recorder (`lua/dev/lib/recorder.lua`) saw, loads the shell again so the
 //! mission's end and start are recorded, and stops the probe.
 //!
-//! `catalogue --build <probes.json> [--recording FILE]... --out STEM` builds
+//! `catalog --build <probes.json> [--recording FILE]... --out STEM` builds
 //! the report from those two sources and writes `STEM.md`, the field-presence
-//! report, and `STEM.json`, the catalogue. For each event type reached it
+//! report, and `STEM.json`, the catalog. For each event type reached it
 //! gives how often each field was present and in what shape, which field the
 //! allow-list reads it as (spec/records.md), the fields the allow-list names
 //! that never came, the fields that came and no list reads, and, from the
@@ -18,14 +18,14 @@
 //! records. Every `EVENT` in a recording must decode; one that does not is
 //! named in the report and fails the build.
 //!
-//! The live part writes everything under `bundles/catalogue-<name>-<time>/`:
+//! The live part writes everything under `bundles/catalog-<name>-<time>/`:
 //! the probes report, the recording, the probe's output, and the built
-//! report as `<date>-event-catalogue.{md,json}`. A recording holds server
+//! report as `<date>-event-catalog.{md,json}`. A recording holds server
 //! data, so nothing from it is committed but the built report, which has
 //! field names, shapes and counts only. The report is committed to
 //! `docs/results/` under that name, with the header results documents need;
-//! the test `every_catalogued_shape_decodes` reads every
-//! `docs/results/*event-catalogue.json`. Before each disruptive step the
+//! the test `every_cataloged_shape_decodes` reads every
+//! `docs/results/*event-catalog*.json`. Before each disruptive step the
 //! live run waits for the server to have no player.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -43,7 +43,7 @@ use crate::profile::Target;
 use crate::{bundle, link, live, miz, probes};
 
 /// Where the probe goes in the container.
-const DIR: &str = "/tmp/nanoprobe-catalogue";
+const DIR: &str = "/tmp/nanoprobe-catalog";
 /// How long the probe may take to attach after it starts.
 const ATTACH_S: u64 = 60;
 /// How long to keep recording after the last load, for its events.
@@ -70,7 +70,7 @@ fn empty(remote: &crate::remote::Remote, step: &str) -> Result<(), String> {
     }
 }
 
-/// `catalogue <name>` and `catalogue --build ...`.
+/// `catalog <name>` and `catalog --build ...`.
 pub fn command(repository: &Path, rest: &[&str]) -> Result<ExitCode, String> {
     match rest {
         ["--build", rest @ ..] => {
@@ -231,7 +231,7 @@ pub fn event_names(dump: &str) -> BTreeMap<u32, String> {
     out
 }
 
-/// One event type in the catalogue.
+/// One event type in the catalog.
 #[derive(Debug, Default)]
 struct Entry {
     id: Option<u32>,
@@ -269,9 +269,9 @@ struct Recorded {
     cut_off: u64,
 }
 
-/// Merge every `catalogue` observation of a probes report into `by_name`.
+/// Merge every `catalog` observation of a probes report into `by_name`.
 /// Returns the scenarios that reported, and those that failed or reported
-/// no catalogue, each with why. A scenario's numeric observations named
+/// no catalog, each with why. A scenario's numeric observations named
 /// `fact.<name>` go into `facts`.
 fn merge_probes(
     report: &Value,
@@ -290,7 +290,7 @@ fn merge_probes(
         let reported = observations
             .into_iter()
             .flatten()
-            .any(|o| o["name"] == "catalogue");
+            .any(|o| o["name"] == "catalog");
         for o in observations.into_iter().flatten() {
             if let Some(fact) = o["name"].as_str().and_then(|n| n.strip_prefix("fact."))
                 && let Some(v) = o["value"].as_f64()
@@ -299,10 +299,10 @@ fn merge_probes(
             }
         }
         if !reported && result["ok"] != json!(false) {
-            failed.push(format!("{probe}: no catalogue observation"));
+            failed.push(format!("{probe}: no catalog observation"));
         }
         for o in observations.into_iter().flatten() {
-            if o["name"] != "catalogue" {
+            if o["name"] != "catalog" {
                 continue;
             }
             probes.push(probe.to_owned());
@@ -473,7 +473,7 @@ fn leaves(fields: &BTreeMap<String, BTreeMap<String, u64>>) -> BTreeSet<&str> {
         .collect()
 }
 
-/// Build the catalogue as JSON, and whether it is whole: a scenario reported,
+/// Build the catalog as JSON, and whether it is whole: a scenario reported,
 /// none failed, and every `EVENT` decoded.
 fn build(
     report: &Value,
@@ -636,7 +636,7 @@ fn build(
         && forwarding_ok
         && unforwarded.is_empty();
     // The target's profile name stays out: it names one person's setup.
-    let catalogue = json!({
+    let catalog = json!({
         "source": {
             "kind": report["kind"],
             "dcs": report["dcs"],
@@ -659,7 +659,7 @@ fn build(
         "events": events,
         "unreached": unreached,
     });
-    (catalogue, ok)
+    (catalog, ok)
 }
 
 /// The field-presence report as Markdown.
@@ -668,7 +668,7 @@ fn markdown(c: &Value) -> String {
     let s = &c["source"];
     let mut out = String::new();
     let text = |v: &Value| v.as_str().map_or_else(|| v.to_string(), str::to_owned);
-    let _ = writeln!(out, "# Event catalogue (E9)\n");
+    let _ = writeln!(out, "# Event catalog (E9)\n");
     let _ = writeln!(out, "| | |\n|---|---|");
     let _ = writeln!(out, "| Target kind | {} |", text(&s["kind"]));
     let _ = writeln!(out, "| DCS | {} |", text(&s["dcs"]));
@@ -682,7 +682,7 @@ fn markdown(c: &Value) -> String {
         .collect();
     let _ = writeln!(
         out,
-        "| Script | `cargo xtask catalogue`, scenarios {} in `lua/catalogue` |",
+        "| Script | `cargo xtask catalog`, scenarios {} in `lua/catalog` |",
         probes.join(", ")
     );
     let r = &c["recorded"];
@@ -722,7 +722,7 @@ fn markdown(c: &Value) -> String {
     }
     for (key, label) in [
         ("unforwarded", "Not forwarded"),
-        ("failed", "Scenario that failed or reported no catalogue"),
+        ("failed", "Scenario that failed or reported no catalog"),
         (
             "name_conflicts",
             "Event ID named differently in the run and the API dump",
@@ -900,7 +900,7 @@ fn markdown(c: &Value) -> String {
     out
 }
 
-/// `catalogue --build`.
+/// `catalog --build`.
 fn build_files(
     repository: &Path,
     probes: &Path,
@@ -916,19 +916,19 @@ fn build_files(
         .iter()
         .map(|p| read(p))
         .collect::<Result<Vec<_>, _>>()?;
-    let (catalogue, ok) = build(&report, &texts, &spec, &names);
+    let (catalog, ok) = build(&report, &texts, &spec, &names);
     let stem = out.display().to_string();
     let json_path = PathBuf::from(format!("{stem}.json"));
     let md_path = PathBuf::from(format!("{stem}.md"));
-    let pretty = serde_json::to_string_pretty(&catalogue).map_err(|e| e.to_string())?;
+    let pretty = serde_json::to_string_pretty(&catalog).map_err(|e| e.to_string())?;
     std::fs::write(&json_path, pretty + "\n")
         .map_err(|e| format!("{}: {e}", json_path.display()))?;
-    std::fs::write(&md_path, markdown(&catalogue))
+    std::fs::write(&md_path, markdown(&catalog))
         .map_err(|e| format!("{}: {e}", md_path.display()))?;
     println!("wrote {} and {}", md_path.display(), json_path.display());
     if !ok {
         println!(
-            "the catalogue is not whole: a scenario failed, none reported, or an EVENT did not decode; see the report"
+            "the catalog is not whole: a scenario failed, none reported, or an EVENT did not decode; see the report"
         );
     }
     Ok(if ok {
@@ -938,11 +938,11 @@ fn build_files(
     })
 }
 
-/// `catalogue <name>`: the live run.
+/// `catalog <name>`: the live run.
 fn live_run(repository: &Path, name: &str) -> Result<ExitCode, String> {
     let target = crate::target(name)?;
     if !matches!(target, Target::DockerWine { .. }) {
-        return Err("catalogue runs on a docker-wine target".into());
+        return Err("catalog runs on a docker-wine target".into());
     }
     let template = std::fs::read(repository.join("tests/fixtures/templates/caucasus.miz"))
         .map_err(|e| format!("tests/fixtures/templates/caucasus.miz: {e}"))?;
@@ -963,7 +963,7 @@ fn live_run(repository: &Path, name: &str) -> Result<ExitCode, String> {
     println!("== load a fresh shell mission");
     live::load(&remote, "np-shell.miz", &shell)?;
 
-    let folder = bundle::folder().join(format!("catalogue-{name}-{}", bundle::stamp()));
+    let folder = bundle::folder().join(format!("catalog-{name}-{}", bundle::stamp()));
     std::fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
     let toml = remote
         .read(crate::install::AGENT_TOML)?
@@ -1013,7 +1013,7 @@ fn live_run(repository: &Path, name: &str) -> Result<ExitCode, String> {
         }
         println!("== scenarios");
         let options = probes::ProbeOptions {
-            dir: Some("lua/catalogue".into()),
+            dir: Some("lua/catalog".into()),
             ..Default::default()
         };
         let facts = crate::facts(&target)?;
@@ -1082,7 +1082,7 @@ fn live_run(repository: &Path, name: &str) -> Result<ExitCode, String> {
         repository,
         &copied,
         &[folder.join("recording.jsonl")],
-        &folder.join(format!("{date}-event-catalogue")),
+        &folder.join(format!("{date}-event-catalog")),
     )?;
     if probes_code != ExitCode::SUCCESS {
         println!(
@@ -1104,6 +1104,15 @@ mod tests {
             .and_then(Path::parent)
             .expect("repository")
             .to_path_buf()
+    }
+
+    /// Whether `path` is a committed event catalog report with extension
+    /// `ext`. The reports committed on 2026-11-13 keep their file names,
+    /// `*event-catalogue.*`; later ones are `*event-catalog.*`.
+    fn is_catalog(path: &Path, ext: &str) -> bool {
+        let name = path.to_string_lossy();
+        name.ends_with(&format!("event-catalog.{ext}"))
+            || name.ends_with(&format!("event-catalogue.{ext}"))
     }
 
     fn spec() -> Spec {
@@ -1142,7 +1151,7 @@ mod tests {
         }
     }
 
-    /// A probes report as `probes` writes it, with one `catalogue`
+    /// A probes report as `probes` writes it, with one `catalog`
     /// observation, and a recording with an EVENT, a FRAME and a bad line.
     fn sample() -> (Value, String) {
         let report = json!({
@@ -1151,7 +1160,7 @@ mod tests {
                 "probe": "10-ground",
                 "result": { "reply": { "observations": [
                     { "name": "other", "value": 1 },
-                    { "name": "catalogue", "value": { "total": 3, "by": {
+                    { "name": "catalog", "value": { "total": 3, "by": {
                         "spawn": { "S_EVENT_BIRTH": { "id": 15, "count": 2, "fields": {
                             "id": { "number": 2 },
                             "time": { "number": 2 },
@@ -1184,7 +1193,7 @@ mod tests {
     }
 
     #[test]
-    fn a_catalogue_names_presence_reads_and_gaps() {
+    fn a_catalog_names_presence_reads_and_gaps() {
         let (report, recording) = sample();
         let (c, ok) = build(&report, &[recording], &spec(), &names());
         assert!(!ok, "code 77 is forwarded and allow-listed nowhere");
@@ -1238,7 +1247,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_scenario_or_none_reporting_makes_the_catalogue_not_whole() {
+    fn a_failed_scenario_or_none_reporting_makes_the_catalog_not_whole() {
         let (mut report, recording) = sample();
         report["results"]
             .as_array_mut()
@@ -1301,16 +1310,16 @@ mod tests {
         assert_eq!(c["recorded"]["undecodable"].as_array().unwrap().len(), 2);
     }
 
-    /// Every shape a catalogue in docs/results recorded, and every shape the
+    /// Every shape a catalog in docs/results recorded, and every shape the
     /// allow-lists allow, written as the agent writes it and as no agent
     /// would, decodes and reads back.
     #[test]
-    fn every_catalogued_shape_decodes() {
+    fn every_cataloged_shape_decodes() {
         let s = spec();
         let names = names();
         let ids: BTreeMap<&str, u32> = names.iter().map(|(i, n)| (n.as_str(), *i)).collect();
         // Shape lists per event: from the allow-lists, then from every
-        // catalogue committed under docs/results.
+        // catalog committed under docs/results.
         let mut shapes: Vec<(u32, Vec<(u16, String)>)> = Vec::new();
         for (event, fields) in &s.allow {
             let id = ids[event.as_str()];
@@ -1321,13 +1330,13 @@ mod tests {
             shapes.push((id, list));
         }
         let results = repo().join("docs/results");
-        let mut catalogues = 0;
+        let mut catalogs = 0;
         for entry in std::fs::read_dir(&results).expect("docs/results").flatten() {
             let path = entry.path();
-            if !path.to_string_lossy().ends_with("event-catalogue.json") {
+            if !is_catalog(&path, "json") {
                 continue;
             }
-            catalogues += 1;
+            catalogs += 1;
             let c: Value =
                 serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
             for e in c["events"].as_array().into_iter().flatten() {
@@ -1350,17 +1359,17 @@ mod tests {
                 shapes.push((id, list));
             }
         }
-        // A committed report without its catalogue would be skipped silently.
+        // A committed report without its catalog would be skipped silently.
         let reports = std::fs::read_dir(&results)
             .expect("docs/results")
             .flatten()
-            .filter(|e| e.path().to_string_lossy().ends_with("event-catalogue.md"))
+            .filter(|e| is_catalog(&e.path(), "md"))
             .count();
         assert_eq!(
-            catalogues, reports,
-            "each committed catalogue report has its JSON"
+            catalogs, reports,
+            "each committed catalog report has its JSON"
         );
-        println!("{catalogues} committed catalogue(s) read");
+        println!("{catalogs} committed catalog(s) read");
         let values = |shape: &str| -> Vec<Lv> {
             let mut v = vec![
                 Lv::Nil,
@@ -1401,30 +1410,30 @@ mod tests {
         }
     }
 
-    /// Each committed catalogue backs the spec's Evidence column: a LIVE row
+    /// Each committed catalog backs the spec's Evidence column: a LIVE row
     /// names a type the recorder saw, a "stream only" row a type with agent
     /// records, and every field path but `ROUNDS`'s was present somewhere.
     #[test]
-    fn the_evidence_column_matches_the_committed_catalogues() {
+    fn the_evidence_column_matches_the_committed_catalogs() {
         let s = spec();
         let results = repo().join("docs/results");
-        let mut catalogues: Vec<(PathBuf, Value)> = Vec::new();
+        let mut catalogs: Vec<(PathBuf, Value)> = Vec::new();
         for entry in std::fs::read_dir(&results).expect("docs/results").flatten() {
             let path = entry.path();
-            if path.to_string_lossy().ends_with("event-catalogue.json") {
+            if is_catalog(&path, "json") {
                 let c = serde_json::from_str(&std::fs::read_to_string(&path).expect("read"))
                     .expect("json");
-                catalogues.push((path, c));
+                catalogs.push((path, c));
             }
         }
-        // spec/records.md cites two committed catalogues.
+        // spec/records.md cites two committed catalogs.
         assert!(
-            !catalogues.is_empty(),
-            "no committed event catalogue in docs/results"
+            !catalogs.is_empty(),
+            "no committed event catalog in docs/results"
         );
-        // Each event type's entries, across every committed catalogue.
+        // Each event type's entries, across every committed catalog.
         let mut by_type: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
-        for (_, c) in &catalogues {
+        for (_, c) in &catalogs {
             for e in c["events"].as_array().into_iter().flatten() {
                 if let Some(n) = e["name"].as_str() {
                     by_type.entry(n.to_owned()).or_default().push(e);
@@ -1441,11 +1450,11 @@ mod tests {
             if evidence.contains("stream only") {
                 assert!(
                     entries.iter().any(|e| e["records"].as_u64() > Some(0)),
-                    "{event}: no agent record in any committed catalogue"
+                    "{event}: no agent record in any committed catalog"
                 );
             } else if evidence.starts_with("LIVE") {
-                assert!(!seen.is_empty(), "{event}: no committed catalogue saw it");
-                // A listed field no catalogue saw for the type must be named
+                assert!(!seen.is_empty(), "{event}: no committed catalog saw it");
+                // A listed field no catalog saw for the type must be named
                 // in the cell, after "not seen:".
                 let excused: Vec<&str> = evidence
                     .split_once("not seen:")
@@ -1460,13 +1469,13 @@ mod tests {
                     });
                     assert!(
                         !unseen_everywhere || excused.contains(&f),
-                        "{event}: {f} is listed as LIVE but no catalogue saw it"
+                        "{event}: {f} is listed as LIVE but no catalog saw it"
                     );
                 }
             } else if evidence.starts_with("UNVERIFIED") || evidence.starts_with("PRIOR") {
                 assert!(
                     seen.is_empty(),
-                    "{event}: tagged {evidence} but a committed catalogue saw it"
+                    "{event}: tagged {evidence} but a committed catalog saw it"
                 );
             } else {
                 panic!("{event}: the Evidence cell {evidence:?} is not LIVE, PRIOR or UNVERIFIED");
@@ -1483,7 +1492,7 @@ mod tests {
                 assert!(paths.contains(p.as_str()), "{name} ({p}) present nowhere");
             }
         }
-        for (_, c) in &catalogues {
+        for (_, c) in &catalogs {
             let events: BTreeMap<&str, &Value> = c["events"]
                 .as_array()
                 .into_iter()
@@ -1528,7 +1537,7 @@ mod tests {
     #[test]
     fn presence_is_kept_per_cause() {
         let report = json!({ "results": [{ "probe": "p", "result": { "reply": { "observations": [
-            { "name": "catalogue", "value": { "by": {
+            { "name": "catalog", "value": { "by": {
                 "unit": { "S_EVENT_DEAD": { "id": 8, "count": 2, "fields": {
                     "initiator_data.unit_name": { "string": 2 }, "time": { "number": 2 } },
                     "values": { "initiator_data.object_category": { "1": 2 } } } },
@@ -1614,7 +1623,7 @@ mod tests {
     #[test]
     fn a_read_field_present_more_often_than_forwarded_fails_the_build() {
         let report = json!({ "results": [{ "probe": "p", "result": { "reply": { "observations": [
-            { "name": "catalogue", "value": { "by": { "c": { "S_EVENT_DEAD": {
+            { "name": "catalog", "value": { "by": { "c": { "S_EVENT_DEAD": {
                 "id": 8, "count": 1, "fields": {
                     "time": { "number": 1 },
                     "initiator": { "object:Unit": 1 },

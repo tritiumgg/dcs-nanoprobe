@@ -259,18 +259,18 @@ local function main()
   assert((kinds[1] or 0) > 0 and (kinds[20] or 0) >= 3, 'the recording has no FRAME or too few EVENT records')
   S.ok('the stream recorder keeps every record, FRAME and EVENT among them')
 
-  -- The catalogue builder reads this recording as it is: every EVENT
+  -- The catalog builder reads this recording as it is: every EVENT
   -- decodes, none is counted twice, the birth is named, and the fields
   -- of the direct test events, which no allow-list names, fail the build.
   local xtask = XTASK
   if xtask then
     local report = profile .. 'probes.json'
     S.write(report, '{"results":[{"probe":"link","result":{"reply":{"observations":'
-      .. '[{"name":"catalogue","value":{"by":{}}}]}}}]}')
-    local stem = profile .. 'catalogue'
-    local status = os.execute(S.quote(xtask) .. ' catalogue --build ' .. S.quote(report) .. ' --recording '
+      .. '[{"name":"catalog","value":{"by":{}}}]}}}]}')
+    local stem = profile .. 'catalog'
+    local status = os.execute(S.quote(xtask) .. ' catalog --build ' .. S.quote(report) .. ' --recording '
       .. S.quote(recording) .. ' --out ' .. S.quote(stem) .. ' > ' .. S.quote(profile .. 'build.txt') .. ' 2>&1')
-    local built = S.json(assert(S.read(stem .. '.json'), 'no catalogue built:\n' .. (S.read(profile .. 'build.txt') or '')))
+    local built = S.json(assert(S.read(stem .. '.json'), 'no catalog built:\n' .. (S.read(profile .. 'build.txt') or '')))
     assert(#built.recorded.undecodable == 0 and built.recorded.duplicates == 0,
       'the recording did not decode cleanly: ' .. (S.read(profile .. 'build.txt') or ''))
     local birth
@@ -279,10 +279,10 @@ local function main()
         birth = e
       end
     end
-    assert(birth and birth.records >= 1, 'the built catalogue has no birth record')
+    assert(birth and birth.records >= 1, 'the built catalog has no birth record')
     -- The build is not whole, and says so: the direct test events above
     -- carry fields no allow-list names.
-    assert(status ~= 0, 'catalogue --build passed a recording with fields no allow-list names')
+    assert(status ~= 0, 'catalog --build passed a recording with fields no allow-list names')
     -- And it fails for that reason only.
     assert(#built.source.failed == 0 and #built.source.unforwarded == 0,
       'the build failed for another reason: ' .. (S.read(profile .. 'build.txt') or ''))
@@ -293,7 +293,7 @@ local function main()
       end
     end
     assert(unexpected, 'the direct test event is not reported as forwarding unexpected fields')
-    S.ok('catalogue --build reads the real recording: every EVENT decodes, none twice')
+    S.ok('catalog --build reads the real recording: every EVENT decodes, none twice')
   end
 
   -- The inspector shows the handshake while attached.

@@ -6,7 +6,7 @@
 -- parked object costs DCS far less than one that moves. `count` reads the
 -- lead unit of every ground group and ship whose name starts with a prefix
 -- and sets it against where it stood at the previous call: a group moved
--- when its lead unit is more than `M.THRESHOLD` metres from there.
+-- when its lead unit is more than `M.THRESHOLD` meters from there.
 --
 -- The first call only records positions. A group that is new since the
 -- last call has no earlier position and is counted as `new`, not as moved

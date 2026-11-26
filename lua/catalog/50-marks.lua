@@ -1,4 +1,4 @@
--- Catalogue: marks and drawings added and removed by script.
+-- Catalog: marks and drawings added and removed by script.
 -- states: server
 -- timeout: 60
 
@@ -41,7 +41,7 @@ return E.wait(function()
     local sample = entry and entry.samples[1]
     E.observe('fact.mark_added_time', sample and sample.time, { info = true })
     E.observe('fact.model_time', timer.getTime(), { info = true })
-    E.observe('catalogue', R.report(), { info = true })
+    E.observe('catalog', R.report(), { info = true })
     -- Nothing of this scenario is left: its marks are removed above.
     S.clear()
     return 'done'

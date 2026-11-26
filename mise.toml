@@ -44,7 +44,7 @@ java = "temurin-21.0.13+9.0.LTS"
 gradle = "9.9.1"
 
 # Cross-build of the agent DLL for x86_64-pc-windows-msvc on macOS and Linux.
-# cargo-xwin fetches the MSVC CRT and SDK; accept Microsoft's licence on its
+# cargo-xwin fetches the MSVC CRT and SDK; accept Microsoft's license on its
 # first run. LLVM supplies clang, lld and llvm-dlltool, which turns
 # vendor/lua/lua.def into the import library for lua.dll. A rustup llvm-tools
 # component is not enough. A Windows host uses the Visual Studio Build Tools.

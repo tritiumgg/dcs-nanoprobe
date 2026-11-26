@@ -593,7 +593,7 @@ pub struct FakeSim {
     /// link clock of the read.
     deaths_unacked: Vec<((u64, u64), DeathKey, u64)>,
     /// Revived objects DCS holds now, each with the link clock at the first
-    /// read and acknowledgement of its `OBJECT` after the revival: None
+    /// read and acknowledgment of its `OBJECT` after the revival: None
     /// until a sidecar has read it.
     revived: HashMap<u64, Option<u64>>,
     /// The `OBJECT` records of those revivals, by agent boot and record
@@ -2196,7 +2196,7 @@ impl FakeSim {
 
     /// A unit or static dies: a death event, and the row leaves the table.
     /// Scenery dies with it, [`SCENERY_PER_DEATH`] objects, each its own
-    /// death event and never in the table (S9's catalogue: 300 of 306
+    /// death event and never in the table (S9's catalog: 300 of 306
     /// deaths were scenery, LIVE). With `Config::death_delay_max` above 0 the
     /// event is late, as [`FakeSim::kill_late`] with a drawn delay.
     pub fn kill(&mut self, object: u64) {

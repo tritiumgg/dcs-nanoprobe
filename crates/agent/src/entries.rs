@@ -30,7 +30,7 @@ use crate::{driver, platform, state};
 /// stack.
 const RAISE: c_int = -1;
 
-/// Run `work` for an entry: count the call, catch a panic, and honour the
+/// Run `work` for an entry: count the call, catch a panic, and honor the
 /// disabled state unless `always`. An entry that is not `hot` runs outside
 /// the frame's pump, so the agent's held log records are written after it;
 /// a hot one leaves them for the pump's system-call frame (spec/log.md).

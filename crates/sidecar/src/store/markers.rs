@@ -1983,7 +1983,7 @@ mod tests {
             s.marker(a.id).unwrap().removed_cause,
             Some(RemoveCause::Evicted)
         );
-        // A replacement: b changes, c goes, d comes; an unlabelled item goes.
+        // A replacement: b changes, c goes, d comes; an unlabeled item goes.
         s.put_layer(Layer {
             cap: Some(3),
             ..Layer::new("p")

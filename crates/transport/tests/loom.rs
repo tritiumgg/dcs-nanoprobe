@@ -1,6 +1,6 @@
 //! Loom models of the ring and the metrics sequence lock.
 //!
-//! Run with `mise run loom`. The data bytes are modelled as relaxed atomic
+//! Run with `mise run loom`. The data bytes are modeled as relaxed atomic
 //! words, so a read that the tail's release and acquire do not order after
 //! its write may see an old value, and the checks below catch it. Loom does
 //! not model a load that reads a later store, so it cannot find a head
@@ -76,7 +76,7 @@ fn ring() -> Ring {
 }
 
 /// Payloads of 0, 4 and 4 bytes take 8, 16 and 16 bytes: the third does not
-/// fit before the end, so the padding record and the wrap are modelled too.
+/// fit before the end, so the padding record and the wrap are modeled too.
 const PAYLOADS: [&[u8]; 3] = [b"", b"\x01\x02\x03\x04", b"\x05\x06\x07\x08"];
 
 #[test]

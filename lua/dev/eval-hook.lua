@@ -7,7 +7,7 @@
 -- keeps a log of the hook callbacks DCS makes, which a snippet in the hook
 -- state reads as E.hook.
 --
--- It honours the kill switch. No callback returns a value, and it registers no
+-- It honors the kill switch. No callback returns a value, and it registers no
 -- onPlayerTry* callback: a value returned from one ends the hook chain for
 -- later scripts (ED-CODE, API/Sim_ControlAPI.md).
 

@@ -1,6 +1,6 @@
 -- Drawing layers, part C: point the client's F10 map camera straight down at a place,
 -- from the client's hook state. run.sh-style placeholders: <x> north, <z> east (DCS
--- map metres) and <h> height (sets the zoom). Uses Export.LoGetCameraPosition and
+-- map meters) and <h> height (sets the zoom). Uses Export.LoGetCameraPosition and
 -- Export.LoSetCameraPosition; returns the position read back.
 -- states: hook
 -- timeout: 20

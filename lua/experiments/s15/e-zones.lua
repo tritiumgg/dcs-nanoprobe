@@ -10,7 +10,7 @@
 --
 -- Run 2 changes the drive and the pause check: two zones of 150 m, np-za
 -- alone and np-zb with an addTrigger on c_part_of_group_in_zone; an M-113 for
--- each starts 210 m (60 m outside) before the centre and drives straight
+-- each starts 210 m (60 m outside) before the center and drives straight
 -- through to 210 m past it, long enough to enter and leave; every field of
 -- each S_EVENT_TRIGGER_ZONE event is recorded (read with pcall); the pause
 -- is set from the hook state, polled with DCS.getPause until true, then
@@ -111,7 +111,7 @@ return 'za=' .. ser(za) .. ' zb=' .. ser(zb) .. ' | getZone za ' .. try(trigger.
 
 local SPAWN = PRE .. [[
 local Z = E.store.zones
--- each unit starts 210 m west of its zone centre: 60 m outside the 150 m zone
+-- each unit starts 210 m west of its zone center: 60 m outside the 150 m zone
 S.ground('np-ga', 'M-113', { { name = 'np-ua', x = CX, z = CZ - 210 } },
   { { x = CX, z = CZ - 210, speed = 0 }, { x = CX, z = CZ + 210, speed = 10 } })
 S.ground('np-gb', 'M-113', { { name = 'np-ub', x = CX + 1500, z = CZ - 210 } },

@@ -1712,7 +1712,7 @@ impl Reconciler {
                 }
                 // A death fact while the spawn is unanswered shows the spawn
                 // ran: resolve it applied. A spawn not yet written is
-                // cancelled by the move to `dead`.
+                // canceled by the move to `dead`.
                 let pending: Vec<Journalled> = if state == State::Materializing {
                     let loaded = store.loaded().cloned();
                     self.inflight

@@ -8,8 +8,8 @@
 --
 -- Shapes (`R.SHAPES`):
 --   halted         groups of 10 that stay where they are (the floor)
---   offroad-few    groups of 10, two waypoints `length` metres apart, off road
---   offroad-dense  the same path with a waypoint every `step` metres
+--   offroad-few    groups of 10, two waypoints `length` meters apart, off road
+--   offroad-dense  the same path with a waypoint every `step` meters
 --   onroad         groups of 10 with two road points (land.getClosestPointOnRoads)
 --   formation-off, formation-line, formation-column, formation-diamond
 --                  groups of 4 on the offroad-few path with the formation
@@ -56,14 +56,14 @@ local CONFIG = {
   ['held-zero'] = { per = 10, route = 'zero' },
 }
 
--- The number of waypoints of the dense shape for a path of `length` metres
--- with one every `step` metres, the two ends included.
+-- The number of waypoints of the dense shape for a path of `length` meters
+-- with one every `step` meters, the two ends included.
 function R.dense_points(length, step)
   return math.floor(length / step + 0.5) + 1
 end
 
 -- The route points `{ x, z, speed, action }` of a straight path from
--- (x, z) east for `length` metres: two points, or a point every `step`.
+-- (x, z) east for `length` meters: two points, or a point every `step`.
 function R.path(x, z, length, speed, dense, step, action)
   local points = {}
   local n = dense and R.dense_points(length, step) or 2
@@ -112,7 +112,7 @@ function R.road_points(count, origin, grid_m, reach_m)
 end
 
 -- The end of a road route from `start`: the road point nearest to a point
--- `length` metres off in the first of four directions that lands at least
+-- `length` meters off in the first of four directions that lands at least
 -- half that far away. Nil when none does.
 local function road_end(start, length)
   for _, angle in ipairs({ 0, math.pi / 2, math.pi, 3 * math.pi / 2 }) do

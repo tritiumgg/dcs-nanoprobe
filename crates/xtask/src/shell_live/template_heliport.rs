@@ -525,7 +525,7 @@ pub fn layout(file: &[u8]) -> Result<(Layout, usize, String), String> {
     let theater = layout.theatre.clone().ok_or("the file has no `theatre`")?;
     if theater != THEATER {
         return Err(format!(
-            "the file's theatre is `{theater}`; the part runs on {THEATER} only"
+            "the file's `theatre` is `{theater}`; the part runs on {THEATER} only"
         ));
     }
     Ok((layout, pad, theater))

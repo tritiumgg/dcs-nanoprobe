@@ -698,7 +698,7 @@ impl<'r> Api<'r> {
                         n.events.fetch_add(1, Relaxed);
                         if let Some(pb::event::Body::World(w)) = &ev.body {
                             // DCS's event IDs: 8 is S_EVENT_DEAD and 15 is
-                            // S_EVENT_BIRTH (LIVE: the event catalogue,
+                            // S_EVENT_BIRTH (LIVE: the event catalog,
                             // docs/results/2026-11-13-event-catalogue.md).
                             match w.dcs_id {
                                 8 => n.deaths.fetch_add(1, Relaxed),

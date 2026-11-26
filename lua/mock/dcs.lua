@@ -40,7 +40,7 @@
 --     were added, so a test is repeatable.
 --   - a_do_script exists only while a mission is loaded (PRIOR), and hands
 --     back what the chunk returned shifted by one (LIVE).
--- Unmeasured behaviour is marked UNVERIFIED where the mock picks one.
+-- Unmeasured behavior is marked UNVERIFIED where the mock picks one.
 --
 -- Usage:
 --   local mock = dofile('lua/mock/dcs.lua')
@@ -336,7 +336,7 @@ function M.new(o)
   -- A file handle in the hook state has no `seek`, and its `write` returns
   -- nil on success (LIVE, DCS 2.9.31.29434 dedicated server under Wine
   -- 10.0). Its other methods, and what `write` returns on an error, are
-  -- UNVERIFIED; the mock keeps stock behaviour for them.
+  -- UNVERIFIED; the mock keeps stock behavior for them.
   hook.io = setmetatable({
     open = function(path, mode)
       local file, err = io.open(path, mode)

@@ -103,7 +103,7 @@ local TYPES = {
     ammo = { { 'weapons.shells.M2_12_7_T', 104 }, { 'weapons.shells.M2_12_7_T', 404 } },
   },
   ['F-15C'] = { life = 1, air = true, fuel_max = 6103, gun = { 'weapons.shells.M61_20_HE', 940 } },
-  -- The event catalogue's scenarios (lua/catalogue). Their figures are
+  -- The event catalog's scenarios (lua/catalog). Their figures are
   -- UNVERIFIED: the mock only needs the types to exist.
   ['M-1 Abrams'] = { life = 1 },
   ['T-72B'] = { life = 1 },
@@ -387,7 +387,7 @@ function Sim:add_group(country, category, data)
   for _, u in ipairs(data.units) do
     local kind = TYPES[u.type]
     if not kind then
-      error('mock: the unit type ' .. tostring(u.type) .. ' is not modelled', 3)
+      error('mock: the unit type ' .. tostring(u.type) .. ' is not modeled', 3)
     end
     if not self.mission_ids[u.name] then
       self.mission_ids[u.name] = self.next_mission
@@ -1342,7 +1342,7 @@ local function scripting(host, name)
       -- A scripted mark or drawing emits S_EVENT_MARK_ADDED, and its
       -- removal S_EVENT_MARK_REMOVED, with no initiator, coalition 255 and
       -- group -1 for one shown to all, and a time that is not model time
-      -- (LIVE, the S9 event catalogue). The mock's time is the time of day.
+      -- (LIVE, the S9 event catalog). The mock's time is the time of day.
       markToAll = function(id, text, point, read_only)
         mark_check('markToAll', id, text, point)
         -- An add over a held ID, or under an ID removed earlier in this

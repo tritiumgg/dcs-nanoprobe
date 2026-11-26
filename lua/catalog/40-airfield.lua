@@ -1,4 +1,4 @@
--- Catalogue: aircraft at the first airdrome. One takes off from the runway,
+-- Catalog: aircraft at the first airdrome. One takes off from the runway,
 -- one starts cold from parking, and a helicopter lands.
 -- states: server
 -- timeout: 300
@@ -80,7 +80,7 @@ return E.wait(function()
   local landed = R.count('land', 'S_EVENT_LAND') > 0
   local cold_off = not spot or R.count('cold', 'S_EVENT_TAKEOFF') > 0
   if (landed and cold_off and timer.getTime() - started >= 60) or timer.getTime() - started >= 270 then
-    E.observe('catalogue', R.report(), { info = true })
+    E.observe('catalog', R.report(), { info = true })
     -- What is left would fight on into the next scenario. A scripted
     -- removal emits no event (LIVE, lua/probes/32-events.lua).
     S.clear()

@@ -542,7 +542,7 @@ event of one type does not always carry the same fields.
 The shim reads every field with `rawget`, which calls no metamethod. A field read
 from an object, such as `event.initiator.id_`, is taken as the object's own `id_` key.
 Every path in "Read from" but `ROUNDS`'s was present on some event type in the event
-catalogue, and every object carried its ID as its own `id_` number. On a kill whose
+catalog, and every object carried its ID as its own `id_` number. On a kill whose
 killer was already dead, `event.initiator` was a plain table, not an object, with
 `id_`, `coalition`, `dead`, `misID` and `unit_type`, and the shim still reads `id_`
 from it (LIVE, `docs/results/2026-11-13-event-catalogue.md`). A value
@@ -580,7 +580,7 @@ event, so a cut `EVENT` always fits (see "Oversized records").
 | 21 | INITIATOR_MISSION_ID | string | `event.initiator_data.mission_id` |
 
 `INITIATOR_TYPE` and `TARGET_TYPE` are the DCS type names, present on every `DEAD`,
-`HIT` and `KILL` in the catalogue, scenery included (LIVE). The API reports them as
+`HIT` and `KILL` in the catalog, scenery included (LIVE). The API reports them as
 `initiator_type` and `target_type`, from the mission's mirror when the event has none.
 `INITIATOR_MISSION_ID` joins a player's slot to the unit born in it (spec/world.md,
 "Players"). It equals the slot ID DCS gives the player for a client slot of the mission
@@ -592,14 +592,14 @@ The agent reads `INITIATOR_TYPE` on every event type whose row below lists
 `INITIATOR_MISSION_ID` on `S_EVENT_BIRTH` only.
 
 `INITIATOR_CATEGORY` and `TARGET_CATEGORY` are DCS's `Object.Category` numbers. In the
-event catalogue (LIVE, `docs/results/2026-11-13-event-catalogue.md`) a spawned unit's
+event catalog (LIVE, `docs/results/2026-11-13-event-catalogue.md`) a spawned unit's
 events carried 1, the spawned static's 3, and the objects that died around an
 explosion 5, which is DCS's number for a scenery object (PRIOR). They say what kind of
 object the ID in `INITIATOR` or `TARGET` names: an explosion that kills a unit also
 kills scenery near it, and each scenery object is a death event of its own; in that
 run 304 of 309 `S_EVENT_DEAD` events were of category 5 (LIVE, same report).
 
-`TIME` is model time on every type the catalogue's recorder saw but the mark events:
+`TIME` is model time on every type the catalog's recorder saw but the mark events:
 it was within 0.004 s of model time when the event arrived (LIVE,
 `docs/results/2026-11-13-event-catalogue.md`). On `S_EVENT_MARK_ADDED` it was 28,799.1 s
 ahead of model time, which matches the time of day for a mission that starts at
@@ -618,10 +618,10 @@ never renumbered.
 
 The fields the shim reads, by event type. The type is the `world.event` name, whose ID
 the shim reads from `world.event` in the `server` state when it registers its handler; a
-name the running DCS lacks has no allow-list. The lists come from the event catalogue
+name the running DCS lacks has no allow-list. The lists come from the event catalog
 (experiment E9, `docs/results/2026-11-13-event-catalogue.md`, and the scripted
 client of experiments E30 and E31, `docs/results/2026-11-13-e31-event-catalogue.md`). "Evidence" says
-whether the catalogue saw the type with its fields on the Wine server (LIVE), saw it
+whether the catalog saw the type with its fields on the Wine server (LIVE), saw it
 only as an agent record with no field data (stream only), saw it only in an earlier
 run of the same scenarios whose report is not committed (PRIOR), or did not reach it
 (UNVERIFIED: a lead, to be checked when a step reaches the type). A type with no row,
