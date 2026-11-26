@@ -306,6 +306,9 @@ pub struct Checkpoint {
     pub model_time: f64,
     /// The mission generation it was taken in, 0 before the first.
     pub mission_gen: u32,
+    /// The agent boot of that generation, 0 before the first and in a body
+    /// written without it.
+    pub agent_boot: u64,
     /// The periods the tiers achieved when it was taken.
     pub achieved: Vec<TierPeriod>,
 }
@@ -903,6 +906,7 @@ impl Store {
         let revision = self.rev;
         let model_time = self.sample_time;
         let mission_gen = self.loaded.as_ref().map_or(0, |l| l.mission_gen);
+        let agent_boot = self.loaded.as_ref().map_or(0, |l| l.agent_boot);
         let Some(mut d) = self.disk.0.take() else {
             self.since_checkpoint.clear();
             self.checkpoint_all = false;
@@ -913,6 +917,7 @@ impl Store {
                 revision,
                 model_time,
                 mission_gen,
+                agent_boot,
                 achieved,
             });
         };
@@ -934,6 +939,7 @@ impl Store {
                 revision,
                 model_time,
                 mission_gen,
+                agent_boot,
                 achieved,
             };
             d.write_with(self, Some(&c), false)?;
@@ -962,6 +968,7 @@ impl Store {
         let revision = self.rev;
         let model_time = self.sample_time;
         let mission_gen = self.loaded.as_ref().map_or(0, |l| l.mission_gen);
+        let agent_boot = self.loaded.as_ref().map_or(0, |l| l.agent_boot);
         let Some(mut d) = self.disk.0.take() else {
             return Ok(Checkpoint {
                 seq: 0,
@@ -969,6 +976,7 @@ impl Store {
                 revision,
                 model_time,
                 mission_gen,
+                agent_boot,
                 achieved,
             });
         };
@@ -982,6 +990,7 @@ impl Store {
             revision,
             model_time,
             mission_gen,
+            agent_boot,
             achieved,
         };
         let r = d.write_with(self, Some(&c), false);
@@ -2772,6 +2781,7 @@ fn enc_group(v: &Group) -> Lv {
         error,
         captured,
         spawned_in,
+        spawned_rev,
         destroy_failures,
         unknown_spawn_in,
         order_sent_in,
@@ -2826,6 +2836,7 @@ fn enc_group(v: &Group) -> Lv {
         ),
         ("captured", b(*captured)),
         ("spawned_in", opt_pair(*spawned_in)),
+        ("spawned_rev", u(*spawned_rev)),
         ("destroy_failures", u(u64::from(*destroy_failures))),
         ("unknown_spawn_in", opt_pair(*unknown_spawn_in)),
         ("ruin_sent_in", opt_pair(*ruin_sent_in)),
@@ -2966,6 +2977,14 @@ fn dec_group(v: &Lv) -> Result<Group, DiskError> {
         )),
         _ => return Err(DiskError::Corrupt("order_sent_in".into())),
     };
+    // A body without the applied revision counts the spec revision it was
+    // stored with as confirmed in its last spawn's generation (spec/world.md,
+    // "Revisions").
+    let spawned_in = r.pair("spawned_in")?;
+    let spawned_rev = match r.u("spawned_rev")? {
+        0 if spawned_in.is_some() => r.u("spec_rev")?,
+        v => v,
+    };
     Ok(Group {
         id: EntityId(r.u("id")?),
         kind,
@@ -2987,7 +3006,8 @@ fn dec_group(v: &Lv) -> Result<Group, DiskError> {
         on_lost: dec_policy(&r.s("on_lost")?)?,
         error,
         captured: r.b("captured")?,
-        spawned_in: r.pair("spawned_in")?,
+        spawned_in,
+        spawned_rev,
         destroy_failures: r.u32("destroy_failures")?,
         unknown_spawn_in: r.pair("unknown_spawn_in")?,
         ruin_sent_in: r.pair("ruin_sent_in")?,
@@ -3515,6 +3535,7 @@ fn enc_checkpoint(v: &Checkpoint) -> Lv {
         revision,
         model_time,
         mission_gen,
+        agent_boot,
         achieved,
     } = v;
     t(vec![
@@ -3523,6 +3544,7 @@ fn enc_checkpoint(v: &Checkpoint) -> Lv {
         ("revision", u(*revision)),
         ("model_time", f(*model_time)),
         ("mission_gen", u(u64::from(*mission_gen))),
+        ("agent_boot", u(*agent_boot)),
         (
             "achieved",
             list(
@@ -3554,6 +3576,7 @@ fn dec_checkpoint(v: &Lv) -> Result<Checkpoint, DiskError> {
         revision: r.u("revision")?,
         model_time: r.f("model_time")?,
         mission_gen: r.u32("mission_gen")?,
+        agent_boot: r.u("agent_boot")?,
         achieved: r
             .list("achieved")?
             .into_iter()
@@ -4561,6 +4584,7 @@ mod tests {
             revision: 9,
             model_time: 12.5,
             mission_gen: 2,
+            agent_boot: 0,
             achieved: vec![TierPeriod {
                 tier: "position".into(),
                 target_s: 1.0,
@@ -4804,6 +4828,104 @@ mod tests {
         // The removal ends it: no ruin is kept for a removed static.
         s.remove_entity(id).expect("remove");
         assert!(!s.is_ruin(id));
+    }
+
+    /// A checkpoint keeps the loaded mission's agent boot beside its
+    /// generation, 0 before one is loaded.
+    #[test]
+    fn a_checkpoint_keeps_the_loaded_agent_boot() {
+        let mut s = Store::new(CampaignId(7), 10);
+        assert_eq!(
+            s.checkpoint(1, Vec::new()).expect("checkpoint").agent_boot,
+            0
+        );
+        s.set_loaded(super::super::Loaded {
+            agent_boot: 88,
+            mission_gen: 3,
+            theater: "Caucasus".into(),
+        });
+        let c = s.checkpoint(2, Vec::new()).expect("checkpoint");
+        assert_eq!((c.agent_boot, c.mission_gen), (88, 3));
+    }
+
+    /// A checkpoint's agent boot reads back; a body without it reads 0.
+    #[test]
+    fn a_checkpoints_agent_boot_round_trips_and_is_0_by_default() {
+        let c = Checkpoint {
+            seq: 1,
+            at_ms: 5,
+            revision: 2,
+            model_time: 3.0,
+            mission_gen: 1,
+            agent_boot: 77,
+            achieved: Vec::new(),
+        };
+        let back = dec_checkpoint(&decode(&encode(&enc_checkpoint(&c))).expect("decode"))
+            .expect("checkpoint");
+        assert_eq!(back, c);
+        let old = Checkpoint { agent_boot: 0, ..c };
+        let body = enc_checkpoint(&old);
+        assert!(!matches!(&body, Lv::Table(p) if p.iter().any(|(k, _)| *k == s("agent_boot"))));
+        let back = dec_checkpoint(&decode(&encode(&body)).expect("decode")).expect("checkpoint");
+        assert_eq!(back.agent_boot, 0);
+    }
+
+    /// The revision of the last applied spawn reads back, and grows only
+    /// within one agent boot and generation. A body without it reads 0, which
+    /// counts the spec revision as confirmed in its last spawn's generation;
+    /// another generation has none, and a read writes nothing.
+    #[test]
+    fn the_applied_spawn_revision_round_trips() {
+        let mut s = Store::new(CampaignId(7), 10);
+        let id = s
+            .create_static(super::super::NewGroup {
+                theater: "Caucasus".into(),
+                country: 2,
+                category: 0,
+                coalition: 2,
+                units: vec![super::super::NewUnit::new("Tent", UnitState::default())],
+                authority: Authority::Sim,
+                label: "s".into(),
+                extra: Lv::Nil,
+            })
+            .expect("static");
+        let plain = s.group(id).expect("g").clone();
+        let back = dec_group(&decode(&encode(&enc_group(&plain))).expect("decode")).expect("group");
+        assert_eq!(back.spawned_rev, 0);
+        let spec_rev = plain.spec_rev;
+        assert_eq!(s.spawned_rev(id, 4, 1), 0, "no spawn applied there");
+        assert_eq!(s.spawned(id, 4, 1, 3), Ok(false));
+        assert_eq!(s.spawned(id, 4, 1, 2), Ok(true));
+        let g = s.group(id).expect("g").clone();
+        assert_eq!((g.spawned_in, g.spawned_rev), (Some((4, 1)), 3));
+        let back = dec_group(&decode(&encode(&enc_group(&g))).expect("decode")).expect("group");
+        assert_eq!(back, g);
+        assert_eq!(s.spawned(id, 4, 2, 1), Ok(false));
+        assert_eq!(s.group(id).expect("g").spawned_rev, 1);
+        assert_eq!(s.spawned_rev(id, 4, 2), 1);
+        assert_eq!(s.spawned_rev(id, 5, 1), 0);
+        assert_eq!(s.group(id).expect("g").spawned_in, Some((4, 2)));
+        // A body written without the revision, at its last spawn's
+        // generation, reads the spec revision it was stored with; a later
+        // revision is then owed.
+        let mut legacy = s.group(id).expect("g").clone();
+        legacy.spawned_rev = 0;
+        let body = enc_group(&legacy);
+        assert!(
+            !matches!(&body, Lv::Table(p) if p.iter().any(|(k, _)| *k == super::s("spawned_rev")))
+        );
+        let back = dec_group(&decode(&encode(&body)).expect("decode")).expect("group");
+        assert_eq!(back.spawned_rev, spec_rev);
+        *s.group_mut(id).expect("g") = back;
+        s.set_loaded(super::super::Loaded {
+            agent_boot: 4,
+            mission_gen: 2,
+            theater: "Caucasus".into(),
+        });
+        assert!(!s.spawn_behind(id));
+        s.bump_spec(id).expect("bump");
+        assert!(s.spawn_behind(id), "a revision after the upgrade is owed");
+        assert_eq!(s.spawned_rev(id, 4, 2), spec_rev);
     }
 
     /// A heliport group's further units read back; a body without the key

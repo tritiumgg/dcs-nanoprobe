@@ -131,6 +131,10 @@ pub struct Config {
     pub raw_lua: bool,
     /// The junk objects each `CLEAR_DEBRIS` reports removed.
     pub debris_per_clear: f64,
+    /// Fault injection: an `AT_REVISION` answer names the object DCS holds
+    /// of the entity. The agent names none; the sidecar must not take the
+    /// object of a result that is not `APPLIED` as the spawn's.
+    pub at_revision_names_object: bool,
 }
 
 impl Default for Config {
@@ -152,6 +156,7 @@ impl Default for Config {
             enum_end_hold: 0,
             raw_lua: true,
             debris_per_clear: 3.0,
+            at_revision_names_object: false,
         }
     }
 }
@@ -3050,7 +3055,12 @@ impl FakeSim {
             if h.rev <= map.get(&h.entity).copied().unwrap_or(0) {
                 // The agent's admission check answers before any handler
                 // runs, so the result names no object.
-                return self.result(&cmd, rc::AT_REVISION, 0, "", Lv::Nil);
+                let object = if self.cfg.at_revision_names_object {
+                    self.group_of(h.entity).unwrap_or(0)
+                } else {
+                    0
+                };
+                return self.result(&cmd, rc::AT_REVISION, object, "", Lv::Nil);
             }
         }
         match &cmd.body {

@@ -2696,12 +2696,13 @@ pub fn checkpoint_info(c: &Checkpoint) -> pb::CheckpointInfo {
     }
     pb::CheckpointInfo {
         taken: Some(timestamp_ms(c.at_ms)),
-        sim: Some(pb::Stamp {
-            wall: None,
-            model_time: c.model_time,
-            mission_generation: c.mission_gen,
-            frame: 0,
-        }),
+        sim: Some(crate::convert::stamp(
+            c.agent_boot,
+            c.mission_gen,
+            0,
+            c.model_time,
+            None,
+        )),
         achieved: (!c.achieved.is_empty()).then_some(rates),
     }
 }
@@ -3492,6 +3493,22 @@ mod tests {
     use super::*;
 
     mod group_template;
+
+    /// D292: a checkpoint's stamp carries the agent boot it keeps.
+    #[test]
+    fn a_checkpoints_stamp_carries_its_agent_boot() {
+        let c = Checkpoint {
+            seq: 1,
+            at_ms: 1_000,
+            revision: 2,
+            model_time: 3.0,
+            mission_gen: 4,
+            agent_boot: 55,
+            achieved: Vec::new(),
+        };
+        let sim = checkpoint_info(&c).sim.expect("sim");
+        assert_eq!((sim.agent_boot, sim.mission_generation), (55, 4));
+    }
     mod payload_preset;
     mod static_template;
 
@@ -4078,13 +4095,16 @@ mod tests {
 
     /// A stamp whose wall time is `ms`.
     fn stamp_at(ms: u64) -> pb::Stamp {
-        pb::Stamp {
-            wall: Some(prost_types::Timestamp {
+        crate::convert::stamp(
+            0,
+            0,
+            0,
+            0.0,
+            Some(prost_types::Timestamp {
                 seconds: i64::try_from(ms / 1000).expect("seconds"),
                 nanos: i32::try_from((ms % 1000) * 1_000_000).expect("nanos"),
             }),
-            ..pb::Stamp::default()
-        }
+        )
     }
 
     fn lifecycle() -> event::Body {

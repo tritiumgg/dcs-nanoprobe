@@ -99,20 +99,22 @@ An entity body carries every field of its row in spec/world.md: for a group or s
 its spec, order and revisions, lifecycle state, authority, lost policy, error, whether
 it is removed, when (`removed_at_ms`) and whether by the expiry (`expired`), when it
 became `dead` (`dead_at_ms`; a body without these reads them as absent), and the
-reconciler's per-generation bookkeeping (spawned, spawn unknown, order sent, destroy
-failures, and for a dead static the generation its ruin's spawn was written in and the
-generation DCS holds its dead object in; a body without those two reads them as
-absent); for a unit its spec, last observed state, death fact, missing or removed
-mark, whether the agent reported that mark in an `OBJECT_GONE` (only a reported mark
-outlives a mission generation, spec/world.md "Respawn gate"), and DCS object ID. A
-group's body records whether it is a `group` or a `static`. A heliport group's static
-body also carries its further units (`further`), each with its `EntityId`, type, place,
-heading and further keys (spec/world.md, "Heliport groups"); a body without the key has
-none. It carries the `EntityId`s of the further units a revision dropped (`retired`),
-which still stand for the static until the next mission load; a body without the key
-has none. A further unit has no `unit` row. A load refuses a store whose further or
-retired IDs are at or past the next `EntityId`, are also a group or unit, or are held
-twice.
+reconciler's per-generation bookkeeping (spawned, with `spawned_rev`, the highest spec
+revision a spawn of it resolved `applied` at in that generation, which a body without it
+reads as its stored `spec_rev` when it has a last spawn, spec/world.md "Revisions";
+spawn unknown; order sent; destroy failures; and for a dead static the generation its
+ruin's spawn was written in and the generation DCS holds its dead object in, which a
+body without them reads as absent); for a unit its spec, last observed state, death
+fact, missing or removed mark, whether the agent reported that mark in an `OBJECT_GONE`
+(only a reported mark outlives a mission generation, spec/world.md "Respawn gate"), and
+DCS object ID. A group's body records whether it is a `group` or a `static`. A heliport
+group's static body also carries its further units (`further`), each with its
+`EntityId`, type, place, heading and further keys (spec/world.md, "Heliport groups"); a
+body without the key has none. It carries the `EntityId`s of the further units a
+revision dropped (`retired`), which still stand for the static until the next mission
+load; a body without the key has none. A further unit has no `unit` row. A load refuses
+a store whose further or retired IDs are at or past the next `EntityId`, are also a
+group or unit, or are held twice.
 
 A `marker` body holds `kind` (`mark`, `drawing` or `menu`), `spec_rev`, `scope`,
 `target`, `removed`, `removed_at_ms` and `removed_cause` (`expired` or `evicted`; absent
@@ -136,7 +138,8 @@ sends it and deleted with the entry that gives its outcome, in the same transact
 is what a restarted reconciler reads to learn which commands it is owed a result for.
 
 The checkpoint row holds `seq`, `at_ms` (wall time), `revision`, `model_time` and
-`mission_gen` (the samples' model time and generation), and `achieved` (below). A new
+`mission_gen` (the samples' model time and generation), `agent_boot` (the loaded
+mission's agent boot; a body without it reads 0), and `achieved` (below). A new
 checkpoint replaces it, with `seq` one more.
 
 ### Journal retention
@@ -405,7 +408,9 @@ not logged twice. It is unique where it is not null:
 - An event made from an agent record: `<agent boot>:<record number>` for the record's
   first event, and `<agent boot>:<record number>:<i>` for its event at index `i`
   (from 1) when one record makes several. A record's events are logged in one
-  transaction, so the first one's key stands for all of them.
+  transaction, so the first one's key stands for all of them. The event's
+  `Stamp.agent_boot` is the key's boot, set when it is logged and when it is read
+  back, so a body stored without the field reads it too (spec/records.md, "Stamps").
 - A route event (spec/world.md), which the sidecar makes again from samples read
   again: `route:<group EntityId>:<order revision>:<waypoint index or end>`.
 - Any other event the sidecar makes: null.

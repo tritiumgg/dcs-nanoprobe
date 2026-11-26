@@ -168,13 +168,17 @@ impl Reconciler {
                     .expect("group");
                 // An error kept from a refused spawn no longer holds.
                 store.clear_error(id).expect("group");
-                if let Some(r) = res {
+                // Only an `APPLIED` result names the ruin's object: the
+                // agent answers `AT_REVISION` before a handler runs, and an
+                // object it named there could be a revived live one, which
+                // the drift destroy must not exempt.
+                if let Some(r) = res
+                    && u64::from(r.code) == rc::APPLIED
+                {
                     if r.object != 0 {
                         self.ruin_object.insert(id, r.object);
                     }
-                    if u64::from(r.code) == rc::APPLIED {
-                        self.counters.ruins_spawned += 1;
-                    }
+                    self.counters.ruins_spawned += 1;
                 }
             }
             Outcome::Refused => {

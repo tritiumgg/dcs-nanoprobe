@@ -28,7 +28,10 @@ message Attitude {
   double roll = 3;
 }
 
-// When something happened.
+// When something happened. `agent_boot` and `mission_generation` together
+// name one mission run; `frame` and `model_time` order stamps only within
+// one run. No request takes a `Stamp` today; one that does checks
+// `agent_boot` together with `mission_generation`.
 message Stamp {
   // Wall-clock time: the agent's DCS real time plus the offset the server
   // measures (spec/records.md, "Stamps"). An estimate for what happened
@@ -40,6 +43,13 @@ message Stamp {
   uint32 mission_generation = 3;
   // The agent's frame sequence number.
   uint64 frame = 4;
+  // Set by the server. The agent boot: one value per DCS process, opaque,
+  // compared for equality only, with no order. 0 when no agent boot is
+  // known: no agent attached to the server since it started or restarted,
+  // or an event stored without the field that was not made from an agent
+  // record (one that was carries its record's boot). A 0 is never the same
+  // run as another stamp.
+  uint64 agent_boot = 5;
 }
 
 enum Coalition {

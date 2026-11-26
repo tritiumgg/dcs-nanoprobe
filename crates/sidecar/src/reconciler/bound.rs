@@ -241,7 +241,7 @@ impl Reconciler {
         };
         self.work.remove(&id);
         self.held.remove(&id);
-        self.spawn_applied.remove(&id);
+        self.lost_unread.remove(&id);
         self.spawn_rejected.remove(&id);
         self.order_held.remove(&id);
         self.order_refused.remove(&id);

@@ -2432,7 +2432,9 @@ fn unanswered_spawns_hold_the_plan_to_the_budget() {
 /// script revived while the ruin spawn was in flight: the agent answers the
 /// spawn `AT_REVISION` and holds no ruin, the live object stays bound, and
 /// the plan destroys it and spawns the ruin (spec/world.md, "Ruins"). Found
-/// by the property search; the minimal input of the failing case.
+/// by the property search; the minimal input of the failing case. It holds
+/// too when the `AT_REVISION` answer names the live object: only an
+/// `APPLIED` result names the ruin's.
 #[test]
 fn a_static_revived_under_a_ruin_spawn_gets_its_ruin() {
     let ops = [
@@ -2446,10 +2448,140 @@ fn a_static_revived_under_a_ruin_spawn_gets_its_ruin() {
         Op::RefuseDestroys(5),
         Op::Revive(54106),
     ];
-    let mut w = World::new_late(1, 2, LostPolicy::Dead, 0);
-    for (i, op) in ops.iter().enumerate() {
-        w.apply(op)
-            .unwrap_or_else(|e| panic!("op {i} {op:?}: {}", e.0));
+    for names in [false, true] {
+        let mut w = World::with_config(
+            1,
+            2,
+            LostPolicy::Dead,
+            nanoprobe_sim_fake::Config {
+                event_queue: 6,
+                death_delay_max: 83.0,
+                at_revision_names_object: names,
+                ..nanoprobe_sim_fake::Config::default()
+            },
+        );
+        for (i, op) in ops.iter().enumerate() {
+            w.apply(op)
+                .unwrap_or_else(|e| panic!("names {names}, op {i} {op:?}: {}", e.0));
+        }
+        w.settle()
+            .unwrap_or_else(|e| panic!("names {names}: {}", e.0));
     }
+}
+
+/// A static under campaign authority whose object a script removed with no
+/// record, while a foreign campaign held the agent, so no enumeration names
+/// it `MISSING`. The sidecar restart resolves its destroys in flight
+/// `unknown`, and they reach the limit: the static is lost. Authority goes
+/// back to the simulation and the respawn policy applies. The static's
+/// member left DCS unexplained, so the enumeration after the loss marks it
+/// missing and the gate holds the respawn (spec/world.md, "Respawn gate").
+/// Found by the property search; the minimal input of the failing case.
+#[test]
+fn a_static_lost_to_failed_destroys_is_not_respawned_over_a_silent_removal() {
+    let ops = [
+        Op::FixSpec(0),
+        Op::RestartDcs,
+        Op::Frames(2),
+        Op::Kill(0),
+        Op::KillRemoved(21406),
+        Op::Kill(38841),
+        Op::RestartDcs,
+        Op::Frames(1),
+        Op::Kill(0),
+        Op::Kill(0),
+        Op::Authority(5591, false),
+        Op::RemoveSilently(10959),
+        Op::LoseResult,
+        Op::RefuseDestroys(4),
+        Op::ForeignCampaign,
+        Op::Kill(15082),
+        Op::KillRemoved(24581),
+        Op::RemoveWithEvent(59064),
+        Op::SidecarRestart,
+        Op::RemoveSilently(14199),
+        Op::Authority(49224, true),
+        Op::Authority(62333, true),
+    ];
+    run(1, 1, LostPolicy::Respawn, &ops).unwrap();
+}
+
+/// Whether the fake sim applied a spawn of the entity at the revision.
+fn spawned_at(w: &World, id: nanoprobe_sidecar::ids::EntityId, rev: u64) -> bool {
+    w.sim
+        .ledger()
+        .spawns
+        .iter()
+        .any(|s| s.2 == id.0 && s.3 == rev)
+}
+
+/// A live group and a live static revised and not yet spawned when the
+/// sidecar restarts: the revision counts as applied only once DCS confirms
+/// it, so the new reconciler spawns both in place (spec/world.md,
+/// "Revisions").
+#[test]
+fn a_revision_unsent_before_a_sidecar_restart_is_spawned_after_it() {
+    let mut w = World::new(1, 1, LostPolicy::Report);
     w.settle().unwrap();
+    let ids: Vec<_> = w.store.groups().map(|g| g.id).collect();
+    assert_eq!(ids.len(), 2);
+    let mut revs = Vec::new();
+    for id in &ids {
+        assert_eq!(w.store.group(*id).unwrap().state, State::Live);
+        revs.push(w.store.bump_spec(*id).unwrap());
+        assert!(!spawned_at(&w, *id, revs[revs.len() - 1]));
+    }
+    w.apply(&Op::SidecarRestart).unwrap();
+    w.settle().unwrap();
+    for (id, rev) in ids.iter().zip(&revs) {
+        assert!(spawned_at(&w, *id, *rev), "{id} spawned at revision {rev}");
+        assert_eq!(w.store.group(*id).unwrap().state, State::Live);
+    }
+}
+
+/// A revision whose spawn was sent and applied, but whose result was lost,
+/// before the sidecar restarts: the new reconciler sends it again, the agent
+/// answers `AT_REVISION`, and that confirms the revision. Nothing is sent
+/// after it, so the in-place spawn does not loop.
+#[test]
+fn a_revision_answered_after_a_lost_result_and_a_restart_is_confirmed() {
+    use nanoprobe_sidecar::sim::wire::opcode;
+    use nanoprobe_sidecar::store::Entry;
+    let sent = |w: &World, id: nanoprobe_sidecar::ids::EntityId, rev: u64| {
+        w.store
+            .entries()
+            .iter()
+            .filter(|e| {
+                matches!(e, Entry::Command(c)
+                    if c.opcode == opcode::GROUP_SPAWN && c.entity == id && c.rev == rev)
+            })
+            .count()
+    };
+    let mut w = World::new(1, 0, LostPolicy::Report);
+    w.settle().unwrap();
+    let id = w.store.groups().next().unwrap().id;
+    let rev = w.store.bump_spec(id).unwrap();
+    w.sim.lose_next_result_of(opcode::GROUP_SPAWN);
+    for _ in 0..10 {
+        if spawned_at(&w, id, rev) {
+            break;
+        }
+        w.tick().unwrap();
+    }
+    assert!(spawned_at(&w, id, rev), "the fake applied the revision");
+    let l = w.store.loaded().unwrap().clone();
+    assert!(
+        w.store.spawned_rev(id, l.agent_boot, l.mission_gen) < rev,
+        "not confirmed"
+    );
+    w.apply(&Op::SidecarRestart).unwrap();
+    w.settle().unwrap();
+    assert_eq!(w.store.spawned_rev(id, l.agent_boot, l.mission_gen), rev);
+    let n = sent(&w, id, rev);
+    assert!(n >= 2, "sent again after the restart: {n}");
+    for _ in 0..20 {
+        w.tick().unwrap();
+    }
+    assert_eq!(sent(&w, id, rev), n, "nothing more once confirmed");
+    assert_eq!(w.store.group(id).unwrap().state, State::Live);
 }

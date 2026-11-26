@@ -180,7 +180,27 @@ pub fn loadout(a: &Ammo, at: &pb::Stamp) -> Loadout {
             model_time: at.model_time,
             mission_gen: at.mission_generation,
             frame: at.frame,
+            agent_boot: at.agent_boot,
         },
+    }
+}
+
+/// A stamp. Every `pb::Stamp` in this crate is built here, so none goes
+/// out without its agent boot (spec/records.md, "Stamps"): 0 when no agent
+/// boot is known.
+pub fn stamp(
+    agent_boot: u64,
+    mission_generation: u32,
+    frame: u64,
+    model_time: f64,
+    wall: Option<prost_types::Timestamp>,
+) -> pb::Stamp {
+    pb::Stamp {
+        wall,
+        model_time,
+        mission_generation,
+        frame,
+        agent_boot,
     }
 }
 
@@ -200,12 +220,13 @@ pub fn ammo_read(l: &Loadout) -> pb::AmmoRead {
             2 => pb::AmmoReadCause::Takeoff,
             _ => pb::AmmoReadCause::Unspecified,
         } as i32,
-        read: Some(pb::Stamp {
+        read: Some(stamp(
+            l.read.agent_boot,
+            l.read.mission_gen,
+            l.read.frame,
+            l.read.model_time,
             wall,
-            model_time: l.read.model_time,
-            mission_generation: l.read.mission_gen,
-            frame: l.read.frame,
-        }),
+        )),
     }
 }
 
@@ -681,6 +702,24 @@ mod tests {
     use nanoprobe_sidecar::ids::CampaignId;
     use nanoprobe_sidecar::store::{Authority, NewGroup, NewUnit, UnitState};
     use nanoprobe_transport::codec::Lv;
+
+    /// D292: an ammunition read keeps the agent boot of the stamp it was
+    /// read under.
+    #[test]
+    fn an_ammo_read_carries_its_agent_boot() {
+        let a = Ammo {
+            object: 1,
+            cause: Ammo::BIRTH,
+            ammo: Lv::Nil,
+        };
+        let read = ammo_read(&loadout(&a, &stamp(31, 2, 9, 5.0, None)))
+            .read
+            .expect("read");
+        assert_eq!(
+            (read.agent_boot, read.mission_generation, read.frame),
+            (31, 2, 9)
+        );
+    }
 
     fn store() -> (Store, EntityId, EntityId, EntityId) {
         let mut s = Store::new(CampaignId(1), 100);
