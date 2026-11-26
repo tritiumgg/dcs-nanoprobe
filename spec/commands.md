@@ -262,8 +262,10 @@ form) and `static_name`, because its entity is a group or a static.
 | `EXTENSION_SET` | `name`, `source` |
 | `EXTENSION_REMOVE` | `name` |
 | `EXTENSION_INVOKE` | `name`, `args` |
-| `MARK_SET` | `entity`, `scope`, `target`, `name`, `read_only`, `x`, `y`, `z`, `text` |
-| `DRAWING_SET` | `entity`, `scope`, `target`, `shape`, `args` |
+| `MARK_SET` | `entity`, `dcs_id`, `scope`, `target`, `name`, `read_only`, `x`, `y`, `z`, `text` |
+| `DRAWING_SET` | `entity`, `dcs_id`, `scope`, `target`, `shape`, `args` |
+| `DRAWING_UPDATE` | `entity`, `dcs_id`, `changes` |
+| `MARK_CLEAR` | `dcs_id` |
 | `MENU_SET` | `entity`, `parent`, `scope`, `target`, `name`, `submenu`, `text` |
 | `MARK_REMOVE`, `DRAWING_REMOVE`, `MENU_REMOVE` | `entity` |
 | `MESSAGE` | `scope`, `target`, `name`, `clear`, `seconds`, `text` |
@@ -274,7 +276,7 @@ form) and `static_name`, because its entity is a group or a static.
 
 For the mark, drawing and menu opcodes, `entity` and `parent` are the header's entity
 and the layout's parent as decimal text, so no `EntityId` loses digits in a Lua number;
-`parent` is `'0'` for the root. `read_only`, `submenu` and `clear` are booleans. `name`
+`parent` is `'0'` for the root. `dcs_id` is a number: every DCS mark ID is below 2^53. `read_only`, `submenu` and `clear` are booleans. `name`
 is the group's platform name for the scope `GROUP` (and the unit's for `MESSAGE`'s
 `UNIT`), built from the header's `campaign` and the `target`; it is empty otherwise.
 `target` is passed as a number for the scopes `COALITION`, `COUNTRY` and `GROUP` and
@@ -356,6 +358,7 @@ other, is answered `UNKNOWN_OPCODE`, and sets `last_applied_seq`.
 | 30 | MENU_REMOVE | set-state | menu item |  | active | bound | server | none | Remove an F10 menu item |
 | 31 | EXTENSION_SET | set-state |  | spec | active |  | server | layout | Register or replace a Lua extension |
 | 32 | EXTENSION_REMOVE | set-state |  |  | active |  | server | layout | Remove a Lua extension |
+| 33 | DRAWING_UPDATE | set-state | drawing | spec | active | bound | server | layout | Change a held map drawing's style or text in place |
 | 48 | EXPLOSION | effect |  |  | active | bound | server | layout | An explosion at a point |
 | 49 | MESSAGE | effect |  |  | any |  | server | layout | Text on screen |
 | 50 | SOUND | effect |  |  | any |  | server | layout | Play a sound file from the mission |
@@ -376,6 +379,7 @@ other, is answered `UNKNOWN_OPCODE`, and sets `last_applied_seq`.
 | 65 | COUNTRIES | query |  |  | any | bound | server | none | Read each country's coalition in the loaded mission |
 | 66 | PLAYERS | query |  |  | any |  | hook | none | Read the connected players and their slots |
 | 67 | BANS | query |  |  | any |  | hook | none | Read DCS's ban list |
+| 68 | MARK_CLEAR | effect |  |  | any | bound | server | layout | Remove a mark or drawing the platform does not hold, by its DCS ID |
 
 The State column names the Lua state the handler runs in: `server`, the mission
 scripting state, through the shim; `hook`, the hook's own state. A control command has
@@ -768,6 +772,7 @@ stops the handler there: the items before it stay changed and the answer is
 | 0x0010 | f64 | x | DCS `x`, meters |
 | 0x0018 | f64 | y | DCS `y`, meters |
 | 0x0020 | f64 | z | DCS `z`, meters |
+| 0x0028 | u64 | dcs_id | The DCS mark ID the sidecar chose, from 1 to 2^53 - 1 |
 | + | str | text | The mark's text |
 
 ### Layout: DRAWING_SET
@@ -777,7 +782,21 @@ stops the handler there: the items before it stay changed and the answer is
 | 0x0000 | u32 | scope | `ALL` or `COALITION` |
 | 0x0004 | u32 | shape | The DCS shape ID |
 | 0x0008 | u64 | target | The coalition number, by scope |
+| 0x0010 | u64 | dcs_id | The DCS mark ID the sidecar chose, from 1 to 2^53 - 1 |
 | + | lv | args | The shape's arguments after the coalition and the ID, as an array |
+
+### Layout: DRAWING_UPDATE
+
+| Offset | Type | Field | Meaning |
+|---|---|---|---|
+| 0x0000 | u64 | dcs_id | The DCS mark ID the shim holds the drawing under |
+| + | lv | changes | A table with any of `color`, `fill` (each an array of four numbers), `line_type` (a number), `font_size` (a number) and `text` (a string) |
+
+### Layout: MARK_CLEAR
+
+| Offset | Type | Field | Meaning |
+|---|---|---|---|
+| 0x0000 | u64 | dcs_id | The DCS mark ID, from 1 to 2^53 - 1 |
 
 ### Layout: MENU_SET
 
@@ -801,10 +820,8 @@ have is `NOT_BOUND`. DCS returns nothing from these calls, so `APPLIED` says onl
 the call did not raise.
 
 **Marks and drawings** share DCS's mark ID space (ED-CODE, `trigger.action.removeMark`
-removes both). The shim gives each a DCS ID from its own counter, which starts at
-2^30 so it stays clear of the IDs DCS gives the marks players make (UNVERIFIED: that
-those start low). A replacement removes the held DCS mark first and adds the new one
-under a new ID.
+removes both). The sidecar chooses each one's DCS ID (spec/world.md, "DCS IDs") and
+sends it as `dcs_id`. The shim holds each entity under the ID it was last set with.
 
 - `MARK_SET` calls `trigger.action.markToAll(id, text, point, read_only)`,
   `markToCoalition(id, text, point, coalition, read_only)` or
@@ -814,9 +831,71 @@ under a new ID.
   `args` are tables with `x`, `y` and `z`, as DCS takes them. DCS checks the arguments
   for the shape: shape 1 with two points, colors, a line type, read only and a message
   is drawn, and shape 2 with a number after its first point is refused with
-  `DCS_REFUSED` (LIVE, docs/results/2026-11-15-s16-players-moderation.md).
+  `DCS_REFUSED` (LIVE, docs/results/2026-11-15-s16-players-moderation.md). A line
+  without a fill color after its color is refused (LIVE,
+  docs/results/2026-11-25-drawing-layers.md).
+- The shim calls `markupToAll` only with a known shape and its layout, and refuses any
+  other with `DCS_REFUSED` and the message `the shape and arguments are not a known
+  layout`, before DCS is called. DCS crashed inside `markupToAll` on shape 8 with four points,
+  called alone, where `pcall` did not help, and the process hung (LIVE,
+  docs/results/2026-11-25-drawing-layers.md, "Run 3, part C"). Shapes 9 to 12 were not
+  called alone, and no drawing is known for them or for shape 2. The known layouts are the shape's points, each a table of finite `x`,
+  `y` and `z`, then color and fill (each a list of four finite numbers), the line type
+  (the font size for shape 5, a finite number), read only (a boolean) and the message (a
+  string), as a list with keys 1 to n
+  and nothing else. Shapes 1 and 4 take two points, 3 two or more, 5 one, 6 four and 7
+  three or more. The API refuses any other layout with `INVALID_ARGUMENT` before it
+  stores the drawing. A `DRAWING_UPDATE` with a key other than `color`, `fill`,
+  `line_type`, `font_size` and `text`, or a value of another type than the layout's, is
+  `DCS_REFUSED` with no setter called. What a client draws for each number
+  (LIVE, client, docs/results/2026-11-25-drawing-layers.md, "Run 3, part B"): 1 a line
+  through two points; 3 a polygon through its points, a line with two and a filled
+  polygon with three or more; 4 an arrow with two points; 5 a text box at one point;
+  6 a filled quad with four points; 7 a freeform. Shape 2 with a center and a point, or with
+  two points, makes a server panel but a client draws nothing; with a center and one or
+  two radii it raises. Shape 3 is not a rectangle: a rectangle is shape 6 with four
+  points, and `trigger.action.rectToAll` and `circleToAll` draw a rectangle and a circle
+  but the platform sends neither.
+- DCS ignores an add of a mark or drawing, with no panel and no event, in two cases:
+  an add over an ID DCS holds (LIVE for a drawing, UNVERIFIED for a mark), and an add
+  under an ID `removeMark` removed earlier, until the next mission load (LIVE). Both are in docs/results/2026-11-25-drawing-layers.md. A remove of an
+  ID DCS never held blocks nothing (LIVE, same file, run 3 part A). A mission load frees
+  every ID (LIVE, one kind of load: a reload of the same mission), but the platform
+  reuses none within a DCS process, so the shim's mark does not reset at a load. The shim
+  guards both:
+  - A `MARK_SET` or `DRAWING_SET` for an entity the shim holds under the same `dcs_id` is
+    `APPLIED` without a call to DCS (a retry, a resend). It changes nothing in DCS.
+  - The shim keeps one process mark for the shared pool of marks and drawings (2^30 to
+    2^31 - 1; spec/world.md, "DCS IDs"): the highest ID it added. An add whose `dcs_id`
+    is at or below the mark, or that another entity holds, and is not the held-same-ID
+    case above, is `DCS_REFUSED` with the message `id <ID> at or below the process mark <N>`,
+    where N is the current mark, and the shim does not call DCS. Any other add sets the
+    mark to its ID before it calls DCS, and keeps it when the call raises. The mark outlives
+    a shim reload, a mission load and a campaign switch; it starts empty with a new Lua state
+    (a new DCS process).
+  - Before the call, the shim removes the entity's held DCS ID when it differs from
+    `dcs_id`. It does not call `removeMark(dcs_id)` for an ID it does not hold: that could
+    only remove a mission script's mark and kill the ID, since a removed ID draws nothing
+    until the next mission load (LIVE, docs/results/2026-11-25-drawing-layers.md, run 3). A
+    controller tells the platform's mark events from a player's by
+    `WorldEvent.platform_mark` (spec/world.md, "DCS IDs").
+- `DRAWING_UPDATE` changes the drawing the shim holds for the entity, in place, with
+  `trigger.action.setMarkupColor`, `setMarkupColorFill`, `setMarkupTypeLine`,
+  `setMarkupFontSize` and `setMarkupText`, one call for each key of `changes`. DCS
+  keeps the drawing's ID and order and emits no event (LIVE). An entity the shim does
+  not hold, or holds under another ID, is `NOT_BOUND`, and the sidecar sends the
+  drawing's `DRAWING_SET` instead. A call that raises is `DCS_REFUSED`; the calls
+  before it stay applied. Any answer other than `APPLIED` or a transient rejection
+  (`NOT_READY`, a stale epoch, a wrong campaign or generation) makes the sidecar drop
+  the shim's held state for the drawing and send its `DRAWING_SET` at the same
+  revision.
 - `MARK_REMOVE` and `DRAWING_REMOVE` call `trigger.action.removeMark` on the held ID.
   An entity the shim does not hold is `APPLIED`: it is gone already.
+- `MARK_CLEAR` calls `trigger.action.removeMark(dcs_id)` for a mark the platform does not
+  own, such as a player's. An ID the shim holds for an entity is `BAD_PAYLOAD`. DCS
+  returns nothing, so `APPLIED` says only that the call did not raise. A second
+  `removeMark` of an ID DCS removed earlier in the same mission emits a second
+  `S_EVENT_MARK_REMOVED` (LIVE).
 
 **Menu items** use `missionCommands.addSubMenu` or `addCommand`, or their
 `ForCoalition` or `ForGroup` form by scope. A submenu's path is what DCS returned for

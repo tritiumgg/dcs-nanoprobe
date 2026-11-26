@@ -323,6 +323,10 @@ function M.new(o)
       end
       local attributes = { mode = 'file', size = f:seek('end') }
       f:close()
+      -- UNVERIFIED: DCS's `modification` field in this state.
+      local stamp = io.popen('stat -f %m ' .. quote(path) .. ' 2>/dev/null || stat -c %Y ' .. quote(path))
+      attributes.modification = tonumber(stamp:read('*a'))
+      stamp:close()
       if field then
         return attributes[field]
       end
@@ -367,6 +371,21 @@ function M.new(o)
     -- or resume callback follows; the mock sends it.
     setPause = function(paused)
       host.pending_pause = paused and true or false
+    end,
+    -- UNVERIFIED: the mock keeps the extension and writes one file per
+    -- screenshot under <writedir>Screenshots/, named by the call or by count.
+    setScreenShotExt = function(ext)
+      host.shot_ext = ext
+    end,
+    makeScreenShot = function(...)
+      host.screenshots = host.screenshots or {}
+      host.screenshots[#host.screenshots + 1] = { ... }
+      local dir = host.writedir .. 'Screenshots'
+      os.execute('mkdir -p ' .. quote(dir))
+      local name = (...) or ('Screen_' .. #host.screenshots)
+      local f = assert(io.open(dir .. '/' .. name .. '.' .. (host.shot_ext or 'jpg'), 'wb'))
+      f:write('shot')
+      f:close()
     end,
     getMissionName = function()
       return host.mission

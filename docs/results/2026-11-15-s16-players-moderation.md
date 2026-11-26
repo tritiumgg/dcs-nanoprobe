@@ -168,6 +168,10 @@ filter.
   reset (`e-handler-survives-load.lua`). This settles the question S15 left open. The first
   attempt was invalid: the load was given a file name from the remote machine and no load
   happened.
+  The count came from the script as of commit `efbfca8`, which marks under the fixed ID
+  536,870,912. The current script takes a fresh ID per run, because DCS ignores an add
+  under an ID removed earlier in the process (LIVE, `2026-11-25-drawing-layers.md`), so a
+  second run under the fixed ID would draw nothing.
 - `id_` differs from `getID()` on the objects read: 6 of 6 (5 units and 1 static). An example
   pair: `id_` 16777473 against `getID` 1000001 for a unit, and 8000001 against 1000006 for a
   static (`e-emit-objects.lua`, server state). An emit of objects spawned in the same chunk

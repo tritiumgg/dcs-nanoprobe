@@ -67,6 +67,10 @@ Every failed call returns a gRPC status whose details hold one `ErrorDetail`: a
 | `NOT_FOUND` | `ENTITY_NOT_FOUND`, `CAMPAIGN_NOT_FOUND`, `EXTENSION_NOT_FOUND`, `PLAYER_NOT_FOUND` | The named thing does not exist, or was removed and purged (spec/world.md, "Removal") |
 | `NOT_FOUND` | `OUTCOME_NOT_FOUND` | `GetOutcome` names an idempotency key that is unknown or no longer remembered |
 | `ALREADY_EXISTS` | `CAMPAIGN_EXISTS` | A campaign with that name exists |
+| `ALREADY_EXISTS` | `INVALID_FIELD`, `field` `label` | A put of a mark or drawing whose label another item holds, or one in another markup group holds (spec/world.md, "Labels and markup groups") |
+| `NOT_FOUND` | `INVALID_FIELD`, `field` `name` | A `RemoveMarkupGroup` that names a markup group the campaign lacks |
+| `INTERNAL` | `INTERNAL` | A put of a mark or drawing, or a `ReplaceMarkupGroup`, when the campaign has used every entity ID. Nothing is written |
+| `FAILED_PRECONDITION` | `INVALID_FIELD`, `field` `event_sequence` | A `RemovePlayerMark` whose event the log no longer holds, or is from another mission generation or DCS process than the running one |
 | `FAILED_PRECONDITION` | `NO_ACTIVE_CAMPAIGN` | The call needs a campaign, names campaign 0, and no campaign is active |
 | `FAILED_PRECONDITION` | `CAMPAIGN_NOT_ACTIVE` | The call acts on DCS (an effect, a capture, materialize) and names a campaign that is not the active one |
 | `FAILED_PRECONDITION` | `CAMPAIGN_READ_ONLY` | The campaign is finished |
@@ -110,6 +114,7 @@ Every failed call returns a gRPC status whose details hold one `ErrorDetail`: a
 | `UNIMPLEMENTED` | `UNVERIFIED` | A call path not yet verified on DCS; permanent until a release verifies it. The detail's `field` names the field |
 | `UNIMPLEMENTED` | none (`UNSPECIFIED`) | The call is in the schema and this server does not build it yet. The detail's `field` names the method |
 | `RESOURCE_EXHAUSTED` | `SPACE_LOW` | The store's file system has less free space than the campaign holds there (its store, the store's WAL and its events file), plus a template being set: a backup, a read copy and `SetCampaignTemplate` are refused. A store write that fails still stops the sidecar |
+| `RESOURCE_EXHAUSTED` | `DCS_IDS_FULL` | A put of a mark, a drawing or a markup group, or a set of its items, needs more DCS IDs than the pool has left in the DCS process now running (spec/world.md, "DCS IDs"). Nothing is written; items already shown stay. The server status reports the DCS IDs left. A new DCS process starts with every ID free |
 | `INTERNAL` | `INTERNAL` | A fault in the sidecar |
 
 A set-state call succeeds when the desired state is journalled. It does not wait for

@@ -61,6 +61,10 @@ pub mod opcode {
     pub const EXTENSION_SET: u16 = 31;
     /// `EXTENSION_REMOVE`
     pub const EXTENSION_REMOVE: u16 = 32;
+    /// `DRAWING_UPDATE`
+    pub const DRAWING_UPDATE: u16 = 33;
+    /// `MARK_CLEAR`
+    pub const MARK_CLEAR: u16 = 68;
     /// `MESSAGE`
     pub const MESSAGE: u16 = 49;
     /// `SOUND`
@@ -133,6 +137,8 @@ pub mod opcode {
         ("CAPTURE", CAPTURE),
         ("COUNTRIES", COUNTRIES),
         ("CLEAR_DEBRIS", CLEAR_DEBRIS),
+        ("DRAWING_UPDATE", DRAWING_UPDATE),
+        ("MARK_CLEAR", MARK_CLEAR),
     ];
 }
 
@@ -501,6 +507,8 @@ pub enum Body {
         y: f64,
         /// DCS `z`, meters.
         z: f64,
+        /// The DCS mark ID the sidecar chose.
+        dcs_id: u64,
         /// The mark's text.
         text: String,
     },
@@ -514,8 +522,22 @@ pub enum Body {
         shape: u32,
         /// The coalition number, by scope.
         target: u64,
+        /// The DCS mark ID the sidecar chose.
+        dcs_id: u64,
         /// The shape's arguments after the coalition and the ID, as an array.
         args: Lv,
+    },
+    /// `DRAWING_UPDATE`
+    DrawingUpdate {
+        /// The DCS mark ID the shim holds the drawing under.
+        dcs_id: u64,
+        /// The changes: `color`, `fill`, `line_type`, `font_size`, `text`.
+        changes: Lv,
+    },
+    /// `MARK_CLEAR`
+    MarkClear {
+        /// The DCS mark ID.
+        dcs_id: u64,
     },
     /// `DRAWING_REMOVE`
     DrawingRemove,
@@ -685,6 +707,8 @@ impl Body {
             Body::MarkRemove => opcode::MARK_REMOVE,
             Body::DrawingSet { .. } => opcode::DRAWING_SET,
             Body::DrawingRemove => opcode::DRAWING_REMOVE,
+            Body::DrawingUpdate { .. } => opcode::DRAWING_UPDATE,
+            Body::MarkClear { .. } => opcode::MARK_CLEAR,
             Body::MenuSet { .. } => opcode::MENU_SET,
             Body::MenuRemove => opcode::MENU_REMOVE,
             Body::Message { .. } => opcode::MESSAGE,
@@ -860,6 +884,7 @@ impl Command {
                 x,
                 y,
                 z,
+                dcs_id,
                 text,
             } => {
                 w.u32(*scope)
@@ -868,15 +893,23 @@ impl Command {
                     .f64(*x)
                     .f64(*y)
                     .f64(*z)
+                    .u64(*dcs_id)
                     .str(text);
             }
             Body::DrawingSet {
                 scope,
                 shape,
                 target,
+                dcs_id,
                 args,
             } => {
-                w.u32(*scope).u32(*shape).u64(*target).lv(args);
+                w.u32(*scope).u32(*shape).u64(*target).u64(*dcs_id).lv(args);
+            }
+            Body::DrawingUpdate { dcs_id, changes } => {
+                w.u64(*dcs_id).lv(changes);
+            }
+            Body::MarkClear { dcs_id } => {
+                w.u64(*dcs_id);
             }
             Body::MenuSet {
                 parent,
@@ -1099,6 +1132,7 @@ impl Command {
                     x: r.f64()?,
                     y: r.f64()?,
                     z: r.f64()?,
+                    dcs_id: r.u64()?,
                     text: r.str()?.to_owned(),
                 }
             }
@@ -1110,10 +1144,16 @@ impl Command {
                     scope,
                     shape,
                     target: r.u64()?,
+                    dcs_id: r.u64()?,
                     args: r.lv()?,
                 }
             }
             opcode::DRAWING_REMOVE => Body::DrawingRemove,
+            opcode::DRAWING_UPDATE => Body::DrawingUpdate {
+                dcs_id: r.u64()?,
+                changes: r.lv()?,
+            },
+            opcode::MARK_CLEAR => Body::MarkClear { dcs_id: r.u64()? },
             opcode::MENU_SET => {
                 let parent = r.u64()?;
                 let target = r.u64()?;
@@ -1475,6 +1515,7 @@ mod tests {
             x: 1.0,
             y: 2.0,
             z: 3.0,
+            dcs_id: 1 << 30,
             text: "t".into(),
         });
         assert_eq!(&mark[..4], &3u32.to_le_bytes());
@@ -1483,20 +1524,35 @@ mod tests {
         assert_eq!(&mark[16..24], &1.0f64.to_le_bytes());
         assert_eq!(&mark[24..32], &2.0f64.to_le_bytes());
         assert_eq!(&mark[32..40], &3.0f64.to_le_bytes());
+        assert_eq!(&mark[40..48], &(1u64 << 30).to_le_bytes());
         assert_eq!(mark.len(), golden::layout("MARK_SET").unwrap().fixed + 3);
         let drawing = body(Body::DrawingSet {
             scope: 2,
             shape: 7,
             target: 1,
+            dcs_id: 77,
             args: Lv::Nil,
         });
         assert_eq!(&drawing[..4], &2u32.to_le_bytes());
         assert_eq!(&drawing[4..8], &7u32.to_le_bytes());
         assert_eq!(&drawing[8..16], &1u64.to_le_bytes());
+        assert_eq!(&drawing[16..24], &77u64.to_le_bytes());
         assert_eq!(
             drawing.len(),
             golden::layout("DRAWING_SET").unwrap().fixed + 1
         );
+        let update = body(Body::DrawingUpdate {
+            dcs_id: 78,
+            changes: Lv::Nil,
+        });
+        assert_eq!(&update[..8], &78u64.to_le_bytes());
+        assert_eq!(
+            update.len(),
+            golden::layout("DRAWING_UPDATE").unwrap().fixed + 1
+        );
+        let clear = body(Body::MarkClear { dcs_id: 79 });
+        assert_eq!(clear, 79u64.to_le_bytes());
+        assert_eq!(clear.len(), golden::layout("MARK_CLEAR").unwrap().fixed);
         let menu = body(Body::MenuSet {
             parent: 5,
             target: 6,
@@ -1674,6 +1730,7 @@ mod tests {
                 x: 1.5,
                 y: 2.5,
                 z: -3.5,
+                dcs_id: 1 << 30,
                 text: "rally".into(),
             },
             Body::MarkRemove,
@@ -1681,8 +1738,14 @@ mod tests {
                 scope: 2,
                 shape: 7,
                 target: 1,
+                dcs_id: (1 << 30) + (1 << 24),
                 args: lv::list(vec![lv::obj(vec![("x", lv::n(1.0)), ("z", lv::n(2.0))])]),
             },
+            Body::DrawingUpdate {
+                dcs_id: (1 << 30) + (1 << 24),
+                changes: lv::obj(vec![("line_type", lv::n(2.0))]),
+            },
+            Body::MarkClear { dcs_id: 42 },
             Body::DrawingRemove,
             Body::MenuSet {
                 parent: 12,

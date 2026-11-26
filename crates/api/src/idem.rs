@@ -70,6 +70,8 @@ pub enum EffectKind {
     Move,
     /// `DoEffect` with `ClearDebris`, whose response carries a count.
     Debris,
+    /// `RemovePlayerMark`.
+    PlayerMark,
 }
 
 /// A command whose result the call did not wait for.
@@ -105,13 +107,17 @@ const METHODS: &[&str] = &[
     "PutFromStaticTemplate",
     "PutGroup",
     "PutGroupFromTemplate",
+    "PutMarkupGroup",
     "PutMark",
     "PutMenuItem",
     "PutStatic",
     "RegisterLua",
     "Reload",
     "RemoveEntity",
+    "RemoveMarkupGroup",
     "RemoveLua",
+    "RemovePlayerMark",
+    "ReplaceMarkupGroup",
     "ResolveMember",
     "SendChat",
     "SendMessage",
@@ -153,6 +159,7 @@ pub fn encode_done(done: &Done) -> Vec<u8> {
             EffectKind::Bans => ("bans", 0),
             EffectKind::Move => ("move", 0),
             EffectKind::Debris => ("debris", 0),
+            EffectKind::PlayerMark => ("player_mark", 0),
         };
         pairs.push((s("epoch"), s(&p.cmd.0.to_string())));
         pairs.push((s("seq"), s(&p.cmd.1.to_string())));
@@ -198,6 +205,7 @@ pub fn decode_done(bytes: &[u8]) -> Option<Done> {
                 "kick" => EffectKind::Kick,
                 "ban" => EffectKind::Ban,
                 "unban" => EffectKind::Unban,
+                "player_mark" => EffectKind::PlayerMark,
                 "bans" => EffectKind::Bans,
                 "move" => EffectKind::Move,
                 "debris" => EffectKind::Debris,
@@ -425,6 +433,7 @@ mod tests {
             EffectKind::Bans,
             EffectKind::Move,
             EffectKind::Debris,
+            EffectKind::PlayerMark,
         ];
         for kind in kinds {
             let done = Done {

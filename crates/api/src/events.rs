@@ -38,6 +38,9 @@ pub struct EventLog {
     keep: usize,
     next: u64,
     events: VecDeque<Event>,
+    /// The agent boot each event in `events` was made in, 0 when unknown.
+    /// Kept beside the events: the public stamp does not carry it.
+    boots: VecDeque<u64>,
     file: Option<EventFile>,
     /// The encoded bytes of the events in `events`, kept for a log without
     /// a file: the count the size limit reads. 0 for a log on disk, whose
@@ -57,6 +60,15 @@ fn wall_ms_of(e: &Event) -> u64 {
         })
 }
 
+/// The agent boot of an event's source key, `<boot>:<record>[:<i>]`; 0 for
+/// no key.
+fn boot_of_source(source: Option<&str>) -> u64 {
+    source
+        .and_then(|s| s.split(':').next())
+        .and_then(|b| b.parse().ok())
+        .unwrap_or(0)
+}
+
 fn decode(r: &EventRow) -> Result<Event, DiskError> {
     Event::decode(r.body.as_slice())
         .map_err(|e| DiskError::Corrupt(format!("event {} does not decode: {e}", r.seq)))
@@ -69,6 +81,7 @@ impl EventLog {
             keep: keep.max(1),
             next: 1,
             events: VecDeque::new(),
+            boots: VecDeque::new(),
             file: None,
             bytes: 0,
         }
@@ -81,13 +94,16 @@ impl EventLog {
         let next = file.next_seq();
         let from = next.saturating_sub(keep as u64).max(1);
         let mut events = VecDeque::new();
+        let mut boots = VecDeque::new();
         for r in file.read_from(from, keep)? {
             events.push_back(decode(&r)?);
+            boots.push_back(boot_of_source(r.source.as_deref()));
         }
         Ok(EventLog {
             keep,
             next,
             events,
+            boots,
             file: Some(file),
             bytes: 0,
         })
@@ -110,6 +126,7 @@ impl EventLog {
             body: Some(body),
             campaign_id: campaign,
         };
+        self.boots.push_back(boot_of_source(source.as_deref()));
         if let Some(f) = self.file.as_mut() {
             f.push(EventRow {
                 seq: sequence,
@@ -152,6 +169,7 @@ impl EventLog {
 
     /// Drop the oldest event from memory.
     fn pop_oldest(&mut self) {
+        self.boots.pop_front();
         if let Some(e) = self.events.pop_front()
             && self.file.is_none()
         {
@@ -277,6 +295,29 @@ impl EventLog {
         after <= self.last() && after + 1 >= self.first()
     }
 
+    /// The event numbered `sequence` and the agent boot it was made in (0
+    /// when unknown), if the log still holds it. The boot is the one in the
+    /// event's source key (spec/persistence.md, "Event history").
+    pub fn get(&self, sequence: u64) -> Option<(Event, u64)> {
+        if sequence == 0 {
+            return None;
+        }
+        if let Some(i) = self
+            .events
+            .front()
+            .and_then(|f| sequence.checked_sub(f.sequence))
+            && let Some(e) = self.events.get(i as usize)
+        {
+            return Some((e.clone(), self.boots.get(i as usize).copied().unwrap_or(0)));
+        }
+        let f = self.file.as_ref()?;
+        let row = f.read_from(sequence, 1).ok()?.into_iter().next()?;
+        if row.seq != sequence {
+            return None;
+        }
+        Some((decode(&row).ok()?, boot_of_source(row.source.as_deref())))
+    }
+
     /// Up to `limit` events after `after`, in order: from memory, or from
     /// the file for those older than memory holds. A read of the file that
     /// fails returns what memory holds from there.
@@ -361,6 +402,9 @@ pub struct Lookup<'a> {
     pub unit: &'a dyn Fn(u64) -> Option<u64>,
     /// Who is in which object, and who is connected.
     pub roster: Option<&'a Roster>,
+    /// Whether the platform issued a DCS mark ID in an agent boot:
+    /// `(boot, mark_id)`.
+    pub issued: &'a dyn Fn(u64, u64) -> bool,
 }
 
 /// The API's player event for what the roster saw.
@@ -534,6 +578,7 @@ impl Link {
             &Lookup {
                 unit: &|_| None,
                 roster: None,
+                issued: &|_, _| false,
             },
         )
     }
@@ -550,6 +595,7 @@ impl Link {
             &Lookup {
                 unit: entity,
                 roster: None,
+                issued: &|_, _| false,
             },
         )
     }
@@ -695,6 +741,7 @@ mod field {
     pub const WEAPON_NAME: u64 = 5;
     pub const SUBPLACE: u64 = 7;
     pub const TEXT: u64 = 8;
+    pub const MARK_ID: u64 = 9;
     pub const POS_X: u64 = 10;
     pub const POS_Y: u64 = 11;
     pub const POS_Z: u64 = 12;
@@ -745,7 +792,7 @@ impl Link {
             .iter()
             .filter_map(|(code, name)| e.get(*code).map(|v| ((*name).to_owned(), from_lua(v))))
             .collect();
-        WorldEvent {
+        let mut w = WorldEvent {
             dcs_id: e.id,
             initiator_id: initiator
                 .and_then(|o| (look.unit)(o))
@@ -770,8 +817,22 @@ impl Link {
                 .filter(|n| n.is_finite() && *n >= 0.0 && *n <= f64::from(u32::MAX))
                 .map(|n| n as u32),
             extra: (!fields.is_empty()).then_some(prost_types::Struct { fields }),
+            // The mark events: added, changed and removed (25 to 27).
+            mark_id: e
+                .number(field::MARK_ID)
+                .filter(|n| {
+                    (25..=27).contains(&e.id)
+                        && n.is_finite()
+                        && *n >= 0.0
+                        && *n < 9.007_199_254_740_992e15
+                })
+                .map(|n| n as u64),
             ..WorldEvent::default()
-        }
+        };
+        w.platform_mark = w
+            .mark_id
+            .is_some_and(|id| (look.issued)(self.agent_boot, id));
+        w
     }
 }
 
@@ -936,6 +997,60 @@ mod tests {
         assert!(seqs(10, 100).is_empty());
     }
 
+    /// The lookup behind `RemovePlayerMark` reads an event and its agent boot
+    /// from the file once memory no longer holds it, including after a
+    /// reopen.
+    #[test]
+    fn get_reads_an_event_and_its_boot_from_the_file() {
+        let d = tempfile::tempdir().expect("dir");
+        let path = d.path().join("events.sqlite");
+        {
+            let file = EventFile::open(&path, 1).expect("file");
+            let mut l = EventLog::open(file, 3).expect("log");
+            for i in 0..10u32 {
+                // Event n comes from boot 100 + n; the fifth has no key.
+                let source = (i != 4).then(|| format!("{}:{}", 100 + i + 1, i));
+                let stamp = pb::Stamp {
+                    wall: Some(prost_types::Timestamp {
+                        seconds: i64::from(i) + 1,
+                        nanos: 0,
+                    }),
+                    ..pb::Stamp::default()
+                };
+                l.push_from(1, stamp, body(i), source);
+            }
+            l.commit().expect("commit");
+            check_get(&l);
+        }
+        // A reopen keeps only the newest 3 in memory; the rest come from the
+        // file with the same boots.
+        let file = EventFile::open(&path, 1).expect("reopen");
+        let mut l = EventLog::open(file, 3).expect("log");
+        check_get(&l);
+        // A sequence the retention purged is gone, and so is one past the
+        // newest.
+        l.retain(Duration::from_millis(1), 1_000_000, 5, 0)
+            .expect("retain");
+        assert!(l.get(1).is_none());
+        assert!(l.get(5).is_none());
+        assert_eq!(l.get(6).map(|g| g.1), Some(106));
+        assert!(l.get(11).is_none());
+        assert!(l.get(0).is_none());
+    }
+
+    fn check_get(l: &EventLog) {
+        // In memory: the newest.
+        let (e, boot) = l.get(10).expect("memory");
+        assert_eq!((e.sequence, boot), (10, 110));
+        // Only in the file.
+        let (e, boot) = l.get(2).expect("file");
+        assert_eq!((e.sequence, boot), (2, 102));
+        assert!(matches!(e.body, Some(event::Body::World(ref w)) if w.dcs_id == 1));
+        // No source key: boot 0.
+        assert_eq!(l.get(5).map(|g| g.1), Some(0));
+        assert!(l.get(11).is_none());
+    }
+
     #[test]
     fn a_log_numbers_and_keeps_the_newest() {
         let mut l = EventLog::new(3);
@@ -1060,6 +1175,43 @@ mod tests {
         // The initiator's DCS object ID is not shown.
         assert_eq!(extra.fields.len(), 1);
         assert_eq!(w.initiator_id, None);
+    }
+
+    /// The WorldEvent a record of this event ID and fields gives.
+    fn world_event(id: u32, fields: Vec<(u16, nanoprobe_transport::codec::Lv)>) -> pb::WorldEvent {
+        let mut link = Link {
+            theater: "Caucasus".into(),
+            ..Link::default()
+        };
+        let (kind, payload) = Input::Event(records::Event { id, fields }).encode();
+        let r = link
+            .read(&RawRecord {
+                agent_boot: 1,
+                number: 0,
+                kind,
+                payload,
+                resync: false,
+            })
+            .expect("an event");
+        let event::Body::World(w) = r.body else {
+            panic!("world event")
+        };
+        w
+    }
+
+    #[test]
+    fn a_mark_event_shows_its_mark_id_and_others_do_not() {
+        use nanoprobe_transport::codec::Lv;
+        let mark = |id: u32, v: f64| world_event(id, vec![(field::MARK_ID as u16, Lv::Number(v))]);
+        for id in 25..=27 {
+            assert_eq!(mark(id, 17.0).mark_id, Some(17), "event {id}");
+        }
+        assert_eq!(mark(24, 17.0).mark_id, None, "not a mark event");
+        assert_eq!(mark(28, 17.0).mark_id, None, "not a mark event");
+        assert_eq!(mark(25, -1.0).mark_id, None, "negative");
+        assert_eq!(mark(25, f64::NAN).mark_id, None, "NaN");
+        assert_eq!(mark(25, f64::INFINITY).mark_id, None, "infinite");
+        assert_eq!(mark(25, 1e300).mark_id, None, "too large");
     }
 
     #[test]

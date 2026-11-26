@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::eventfile::EventFile;
 use crate::ids::CampaignId;
+use crate::server::ServerStore;
 use crate::store::{
     CampaignRecord, CampaignState, DiskError, MIGRATIONS, Migration, SCHEMA, Store, TierPeriod,
     backup_file, ident_of, next_entity_of, rebase_world, record_of, revision_of, state_of,
@@ -230,6 +231,22 @@ impl Campaigns {
         at_ms: u64,
         achieved: Vec<TierPeriod>,
     ) -> Result<(), DiskError> {
+        self.activate_with(None, None, active, id, at_ms, achieved)
+    }
+
+    /// [`Campaigns::activate`] with the server store: the old campaign's
+    /// closing writes its mark there, and the new campaign raises its mark
+    /// to the row's (spec/persistence.md, "The server store"). `running` is
+    /// the agent boot now running, if one is attached.
+    pub fn activate_with(
+        &self,
+        server: Option<&ServerStore>,
+        running: Option<u64>,
+        active: &mut Option<Store>,
+        id: CampaignId,
+        at_ms: u64,
+        achieved: Vec<TierPeriod>,
+    ) -> Result<(), DiskError> {
         if active.as_ref().is_some_and(|cur| cur.campaign() == id) {
             return Ok(());
         }
@@ -245,13 +262,16 @@ impl Campaigns {
             return Err(DiskError::Finished(id));
         }
         if let Some(cur) = active.as_mut() {
-            let suspended = self.suspend(cur, at_ms, achieved);
+            let suspended = self.suspend_with(server, running, cur, at_ms, achieved);
             // From here the old store is closed or half-closed: it leaves
             // `active` either way.
             *active = None;
             suspended?;
         }
         let mut s = self.open(id, at_ms)?;
+        if let Some((boot, next)) = server.map(ServerStore::dcs_mark).transpose()?.flatten() {
+            s.raise_dcs_mark(boot, next);
+        }
         let mut r = s
             .record()
             .cloned()
@@ -270,7 +290,27 @@ impl Campaigns {
         at_ms: u64,
         achieved: Vec<TierPeriod>,
     ) -> Result<(), DiskError> {
-        self.close(store, at_ms, achieved, CampaignState::Suspended, None)
+        self.suspend_with(None, None, store, at_ms, achieved)
+    }
+
+    /// [`Campaigns::suspend`] that first writes the campaign's DCS ID mark
+    /// to the server store, unless it is of another boot than `running`.
+    pub fn suspend_with(
+        &self,
+        server: Option<&ServerStore>,
+        running: Option<u64>,
+        store: &mut Store,
+        at_ms: u64,
+        achieved: Vec<TierPeriod>,
+    ) -> Result<(), DiskError> {
+        self.close(
+            server.map(|s| (s, running)),
+            store,
+            at_ms,
+            achieved,
+            CampaignState::Suspended,
+            None,
+        )
     }
 
     /// Finish a campaign: as suspend, with the outcome record, and the state
@@ -282,7 +322,22 @@ impl Campaigns {
         achieved: Vec<TierPeriod>,
         outcome: Vec<u8>,
     ) -> Result<(), DiskError> {
+        self.finish_with(None, None, store, at_ms, achieved, outcome)
+    }
+
+    /// [`Campaigns::finish`] that first writes the campaign's DCS ID mark to
+    /// the server store, unless it is of another boot than `running`.
+    pub fn finish_with(
+        &self,
+        server: Option<&ServerStore>,
+        running: Option<u64>,
+        store: &mut Store,
+        at_ms: u64,
+        achieved: Vec<TierPeriod>,
+        outcome: Vec<u8>,
+    ) -> Result<(), DiskError> {
         self.close(
+            server.map(|s| (s, running)),
             store,
             at_ms,
             achieved,
@@ -291,8 +346,10 @@ impl Campaigns {
         )
     }
 
+    /// `row` is the server store and the agent boot now running, if known.
     fn close(
         &self,
+        row: Option<(&ServerStore, Option<u64>)>,
         store: &mut Store,
         at_ms: u64,
         achieved: Vec<TierPeriod>,
@@ -306,6 +363,16 @@ impl Campaigns {
         r.state = state;
         if outcome.is_some() {
             r.outcome = outcome;
+        }
+        // The server store's row goes first, as an idempotency index row
+        // does: a close that then fails leaves a mark that is too high,
+        // which wastes slots and never repeats an ID.
+        // A store that has not yet seen the running boot holds an older
+        // boot's mark; it never replaces the row of the running boot.
+        if let (Some((server, running)), Some((boot, next))) = (row, store.dcs_mark())
+            && running.is_none_or(|r| r == boot)
+        {
+            server.put_dcs_mark(boot, next)?;
         }
         store.close_with(at_ms, achieved, r).map(|_| ())
     }
@@ -724,6 +791,31 @@ mod tests {
         drop(s);
         fs::write(path, db).expect("store back");
         fs::write(&wal, log).expect("its WAL back");
+    }
+
+    #[test]
+    fn a_close_in_another_boot_keeps_the_row_of_the_running_boot() {
+        use crate::store::dcs_ids;
+        let (d, c) = campaigns();
+        let server = ServerStore::open(d.path(), 0).expect("server");
+        server.put_dcs_mark(22, 50).expect("row");
+        // A store in boot 0, closed while boot 22 runs.
+        let mut s = c
+            .create(CampaignId(1), record(CampaignState::Active))
+            .expect("create");
+        s.raise_dcs_mark_past(dcs_ids::BASE + 9);
+        assert_eq!(s.dcs_boot(), Some(0));
+        c.suspend_with(Some(&server), Some(22), &mut s, 5, Vec::new())
+            .expect("suspend");
+        assert_eq!(server.dcs_mark().unwrap(), Some((22, 50)));
+        // With no running boot known, the close writes its own.
+        let mut s = c
+            .create(CampaignId(2), record(CampaignState::Active))
+            .expect("create");
+        s.raise_dcs_mark_past(dcs_ids::BASE + 9);
+        c.suspend_with(Some(&server), None, &mut s, 5, Vec::new())
+            .expect("suspend");
+        assert_eq!(server.dcs_mark().unwrap(), Some((0, 10)));
     }
 
     #[test]

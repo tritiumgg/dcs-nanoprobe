@@ -217,11 +217,13 @@ codes! {
         GROUP_CAPTURE_DESTROY = 19, GROUP_OPTION = 20, STATIC_SPAWN = 21,
         STATIC_DESTROY = 22, AIRBASE_OWNER = 23, WAREHOUSE_SET = 24, MARK_SET = 25,
         MARK_REMOVE = 26, DRAWING_SET = 27, DRAWING_REMOVE = 28, MENU_SET = 29,
-        MENU_REMOVE = 30, EXTENSION_SET = 31, EXTENSION_REMOVE = 32, EXPLOSION = 48,
+        MENU_REMOVE = 30, EXTENSION_SET = 31, EXTENSION_REMOVE = 32, DRAWING_UPDATE = 33,
+        EXPLOSION = 48,
         MESSAGE = 49, SOUND = 50, SMOKE = 51, FLARE = 52, ILLUMINATION = 53, DAMAGE = 54,
         CHAT = 55, MISSION_LOAD = 56, EXTENSION_INVOKE = 57, EVAL = 58,
         WAREHOUSE_ADJUST = 59, PICTURE = 60, PICTURE_STOP = 61, MODERATE = 62,
         CLEAR_DEBRIS = 63, CAPTURE = 64, COUNTRIES = 65, PLAYERS = 66, BANS = 67,
+        MARK_CLEAR = 68,
     }
 }
 
@@ -310,7 +312,7 @@ pub const fn opcode_row(code: u64) -> Option<Opcode> {
     }
     match code {
         1..=6 => row(Control, None, false, false),
-        16 | 21 | 25 | 27 | 29 => row(SetState, Some(Rev::Spec), true, true),
+        16 | 21 | 25 | 27 | 29 | 33 => row(SetState, Some(Rev::Spec), true, true),
         17 => row(SetState, Some(Rev::Order), true, true),
         18..=20 | 22..=24 | 26 | 28 | 30 => row(SetState, None, true, true),
         31 => row(SetState, Some(Rev::Spec), true, false),
@@ -335,7 +337,7 @@ pub const fn opcode_row(code: u64) -> Option<Opcode> {
             }
         }),
         57 | 58 => row(Effect, None, true, false),
-        63 => row(Effect, None, false, true),
+        63 | 68 => row(Effect, None, false, true),
         64 => row(Query, None, true, true),
         65 => row(Query, None, false, true),
         66 | 67 => Some(Opcode {

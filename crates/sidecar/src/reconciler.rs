@@ -552,7 +552,7 @@ impl Reconciler {
             lifecycle_changes: 0,
             frames_read: 0,
             ext_sent: HashMap::new(),
-            pins: players::PinState::default(),
+            pins: players::PinState::starting(store),
             drift_destroy_failures: HashMap::new(),
             spawn_rejected: HashMap::new(),
             spawn_applied: HashMap::new(),
@@ -1060,6 +1060,7 @@ impl Reconciler {
                     | opcode::MODERATE
                     | opcode::PLAYERS
                     | opcode::BANS
+                    | opcode::MARK_CLEAR
                     | opcode::CLEAR_DEBRIS
             )
         {
@@ -1103,6 +1104,7 @@ impl Reconciler {
             | opcode::MODERATE
             | opcode::PLAYERS
             | opcode::BANS
+            | opcode::MARK_CLEAR
             | opcode::CLEAR_DEBRIS => return,
             opcode::EXTENSION_REMOVE => {
                 self.extension_removed(store, c, outcome, res);
@@ -1111,6 +1113,7 @@ impl Reconciler {
             opcode::MARK_SET
             | opcode::MARK_REMOVE
             | opcode::DRAWING_SET
+            | opcode::DRAWING_UPDATE
             | opcode::DRAWING_REMOVE
             | opcode::MENU_SET
             | opcode::MENU_REMOVE => {

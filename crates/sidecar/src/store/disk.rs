@@ -19,9 +19,9 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use nanoprobe_transport::records::Rates;
 
 use super::{
-    Authority, CapturedMore, DesiredOwner, DesiredStock, Entry, Extension, FurtherUnit, Group,
-    IdemRow, Journalled, Kind, LeftAs, Loaded, LostPolicy, Outcome, OwedLoad, Point, RemoveCause,
-    RouteEvent, Store, Unit, UnitState, check_lv,
+    Authority, BootIssue, CapturedMore, DesiredOwner, DesiredStock, Entry, Extension, FurtherUnit,
+    Group, IdemRow, Journalled, Kind, Layer, LeftAs, Loaded, LostPolicy, Marker, MarkerSpec,
+    Outcome, OwedLoad, Point, RemoveCause, RouteEvent, Store, Unit, UnitState, check_lv,
 };
 use crate::ids::{CampaignId, EntityId};
 use crate::intents::{Intent, Waypoint};
@@ -29,7 +29,7 @@ use crate::lifecycle::State;
 use crate::stock::Stock;
 
 /// The schema version this sidecar writes (spec/persistence.md).
-pub const SCHEMA: u32 = 1;
+pub const SCHEMA: u32 = 2;
 
 /// What [`Store::prune_journal`] did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -234,8 +234,21 @@ pub struct Migration {
     pub run: fn(&Transaction<'_>) -> rusqlite::Result<()>,
 }
 
-/// The steps of this sidecar, oldest first. Empty while [`SCHEMA`] is 1.
-pub const MIGRATIONS: &[Migration] = &[];
+/// The steps of this sidecar, oldest first.
+pub const MIGRATIONS: &[Migration] = &[Migration { to: 2, run: step_2 }];
+
+/// Schema 2: the marker and layer tables, empty (spec/persistence.md,
+/// "Schema version and migration"). `meta.world` without `played_s` reads 0.
+fn step_2(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    tx.execute_batch(MARKER_TABLES)?;
+    tx.execute_batch(ISSUE_TABLE)
+}
+
+/// The tables of marks, drawings, menu items and layers, from schema 2.
+const MARKER_TABLES: &str = "
+CREATE TABLE marker (id INTEGER PRIMARY KEY, body BLOB NOT NULL);
+CREATE TABLE layer (name TEXT PRIMARY KEY, body BLOB NOT NULL);
+";
 
 /// A campaign's state (spec/persistence.md, "Campaign operations").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -318,6 +331,15 @@ pub struct Disk {
     world: Vec<u8>,
     /// The model time of the samples last written, by a checkpoint.
     sample_time: f64,
+    /// The marks, drawings and menu items as the file holds them.
+    markers: BTreeMap<EntityId, Marker>,
+    /// The layers as the file holds them.
+    layers: BTreeMap<String, Layer>,
+    /// The issued DCS ID slots per agent boot as the file holds them.
+    issue: BTreeMap<u64, BootIssue>,
+    /// The campaign model time and its last sample, as last written, by a
+    /// checkpoint.
+    played: (f64, Option<(u64, u32, f64)>),
     record: CampaignRecord,
     record_written: bool,
     last_checkpoint: Option<Checkpoint>,
@@ -399,7 +421,15 @@ CREATE TABLE inflight (epoch INTEGER NOT NULL, seq INTEGER NOT NULL, body BLOB N
 CREATE TABLE idempotency (key TEXT PRIMARY KEY, at_ms INTEGER NOT NULL, request_hash BLOB NOT NULL, response BLOB NOT NULL);
 CREATE TABLE checkpoint (seq INTEGER PRIMARY KEY, body BLOB NOT NULL);
 CREATE TABLE template (theater TEXT PRIMARY KEY, body BLOB NOT NULL);
+CREATE TABLE marker (id INTEGER PRIMARY KEY, body BLOB NOT NULL);
+CREATE TABLE layer (name TEXT PRIMARY KEY, body BLOB NOT NULL);
+CREATE TABLE dcs_issue (boot INTEGER PRIMARY KEY, body BLOB NOT NULL);
 ";
+
+/// The table of issued DCS IDs, made at open in a schema 2 file written before
+/// it (schema 2 has not shipped; spec/persistence.md).
+const ISSUE_TABLE: &str =
+    "CREATE TABLE IF NOT EXISTS dcs_issue (boot INTEGER PRIMARY KEY, body BLOB NOT NULL);";
 
 /// The template table, made at open in a schema 1 file written before it
 /// (schema 1 has not shipped; spec/persistence.md).
@@ -752,6 +782,10 @@ impl Store {
             journal_bytes_unwritten: true,
             world: Vec::new(),
             sample_time: 0.0,
+            markers: BTreeMap::new(),
+            layers: BTreeMap::new(),
+            issue: BTreeMap::new(),
+            played: (0.0, None),
             record,
             record_written: false,
             last_checkpoint: None,
@@ -1356,6 +1390,96 @@ impl Disk {
                 changed_floors.push((name.clone(), *rev));
             }
         }
+        // Marks, drawings and menu items: the rows the marks name, as groups;
+        // every row for a new file or a bulk change. Layers are few: every
+        // commit compares them all.
+        let marker_rows = store.marker_rows();
+        let marker_ids: BTreeSet<EntityId> = if scan_all {
+            marker_rows
+                .keys()
+                .chain(self.markers.keys())
+                .copied()
+                .collect()
+        } else {
+            let marks = if full {
+                &store.since_checkpoint
+            } else {
+                &store.dirty
+            };
+            let marked: BTreeSet<EntityId> = marks
+                .iter()
+                .filter(|id| marker_rows.contains_key(id) || self.markers.contains_key(id))
+                .copied()
+                .collect();
+            if cfg!(debug_assertions) {
+                let differs = |id: &EntityId| marker_rows.get(id) != self.markers.get(id);
+                let every: BTreeSet<EntityId> = marker_rows
+                    .keys()
+                    .chain(self.markers.keys())
+                    .filter(|id| differs(id))
+                    .copied()
+                    .collect();
+                let missed: Vec<&EntityId> = every.difference(&marked).collect();
+                assert!(
+                    missed.is_empty(),
+                    "a marker change was made without marking its row: {missed:?}"
+                );
+            }
+            marked
+        };
+        let mut changed_markers = Vec::new();
+        for id in marker_ids {
+            match marker_rows.get(&id) {
+                Some(m) if self.markers.get(&id) != Some(m) => {
+                    tx.execute(
+                        "INSERT OR REPLACE INTO marker (id, body) VALUES (?1, ?2)",
+                        params![id.0 as i64, encode(&enc_marker(m))],
+                    )?;
+                    changed_markers.push(id);
+                }
+                Some(_) => {}
+                None if self.markers.contains_key(&id) => {
+                    tx.execute("DELETE FROM marker WHERE id = ?1", params![id.0 as i64])?;
+                    changed_markers.push(id);
+                }
+                None => {}
+            }
+        }
+        let layer_rows = store.layer_rows();
+        let mut changed_layers = Vec::new();
+        for (name, l) in layer_rows {
+            if self.layers.get(name) != Some(l) {
+                tx.execute(
+                    "INSERT OR REPLACE INTO layer (name, body) VALUES (?1, ?2)",
+                    params![name, encode(&enc_layer(l))],
+                )?;
+                changed_layers.push(name.clone());
+            }
+        }
+        for name in self.layers.keys().filter(|n| !layer_rows.contains_key(*n)) {
+            tx.execute("DELETE FROM layer WHERE name = ?1", params![name])?;
+            changed_layers.push(name.clone());
+        }
+        // The slots issued per agent boot: few rows, all compared. Written in
+        // the transaction of the commands that carry the IDs.
+        let issue_rows = store.issue_rows();
+        let mut changed_issue = Vec::new();
+        for (boot, i) in issue_rows {
+            if self.issue.get(boot) != Some(i) {
+                tx.execute(
+                    "INSERT OR REPLACE INTO dcs_issue (boot, body) VALUES (?1, ?2)",
+                    params![*boot as i64, encode(&enc_issue(i))],
+                )?;
+                changed_issue.push(*boot);
+            }
+        }
+        for boot in self.issue.keys().filter(|b| !issue_rows.contains_key(*b)) {
+            tx.execute(
+                "DELETE FROM dcs_issue WHERE boot = ?1",
+                params![*boot as i64],
+            )?;
+            changed_issue.push(*boot);
+        }
         let mut seq = self.journal_seq;
         let mut added_bytes = 0u64;
         for e in journal.iter().skip(self.journal_written) {
@@ -1395,8 +1519,14 @@ impl Disk {
                 params![r.key, r.at_ms as i64, r.request_hash, r.response],
             )?;
         }
-        // Sampled state moves only at a checkpoint.
+        // Sampled state moves only at a checkpoint, and so does the campaign
+        // model time.
         let sample_time = if full { *sample_time } else { self.sample_time };
+        let played = if full || init {
+            store.played()
+        } else {
+            self.played
+        };
         let mut world_pairs = vec![
             ("next_entity", u(*next_entity)),
             ("open", b(self.open)),
@@ -1433,6 +1563,8 @@ impl Disk {
                 countries.as_ref().map_or(Lv::Nil, enc_countries),
             ),
             ("sample_time", f(sample_time)),
+            ("played_s", f(played.0)),
+            ("played_at", enc_played_at(played.1)),
             (
                 "route_events",
                 list(route_events.iter().map(enc_route_event).collect()),
@@ -1490,6 +1622,37 @@ impl Disk {
         }
         self.extensions.retain(|n, _| extensions.contains_key(n));
         self.floors.extend(changed_floors);
+        for id in changed_markers {
+            match marker_rows.get(&id) {
+                Some(m) => {
+                    self.markers.insert(id, m.clone());
+                }
+                None => {
+                    self.markers.remove(&id);
+                }
+            }
+        }
+        for name in changed_layers {
+            match layer_rows.get(&name) {
+                Some(l) => {
+                    self.layers.insert(name, l.clone());
+                }
+                None => {
+                    self.layers.remove(&name);
+                }
+            }
+        }
+        for boot in changed_issue {
+            match issue_rows.get(&boot) {
+                Some(i) => {
+                    self.issue.insert(boot, i.clone());
+                }
+                None => {
+                    self.issue.remove(&boot);
+                }
+            }
+        }
+        self.played = played;
         self.journal_seq = seq;
         self.journal_bytes = journal_bytes;
         self.journal_bytes_unwritten = false;
@@ -1664,6 +1827,7 @@ fn opt_record(v: Option<(u64, u64)>) -> Lv {
 
 fn load(path: &Path, conn: Connection, changes_keep: usize) -> Result<Store, DiskError> {
     conn.execute_batch(TEMPLATE_TABLE)?;
+    conn.execute_batch(ISSUE_TABLE)?;
     let campaign = CampaignId(dec_u(&get_meta(&conn, "campaign_id")?, "campaign_id")?);
     let record = dec_record(&get_meta(&conn, "campaign")?)?;
     let world_bytes: Vec<u8> = conn
@@ -1673,6 +1837,7 @@ fn load(path: &Path, conn: Connection, changes_keep: usize) -> Result<Store, Dis
         .optional()?
         .ok_or_else(|| DiskError::Corrupt("no meta world".into()))?;
     let mut store = Store::new(campaign, changes_keep);
+    let (played_s, played_at);
     {
         let mut q = conn.prepare("SELECT theater, body FROM template")?;
         let rows = q.query_map([], |r| {
@@ -1746,6 +1911,8 @@ fn load(path: &Path, conn: Connection, changes_keep: usize) -> Result<Store, Dis
             v => Some(dec_countries(v)?),
         };
         store.sample_time = w.f("sample_time")?;
+        played_s = w.f("played_s")?;
+        played_at = dec_played_at(w.get("played_at"))?;
         store.route_events = w
             .list("route_events")?
             .into_iter()
@@ -1921,6 +2088,47 @@ fn load(path: &Path, conn: Connection, changes_keep: usize) -> Result<Store, Dis
     store.reindex();
     store.extensions = extensions.clone();
     store.set_extension_floors(floors.clone());
+    let mut markers = BTreeMap::new();
+    {
+        let mut q = conn.prepare("SELECT id, body FROM marker")?;
+        let rows = q.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?;
+        for row in rows {
+            let (id, body) = row?;
+            let m = dec_marker(EntityId(id as u64), &decode(&body)?)?;
+            markers.insert(m.id, m);
+        }
+    }
+    let mut layers = BTreeMap::new();
+    {
+        let mut q = conn.prepare("SELECT name, body FROM layer")?;
+        let rows = q.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })?;
+        for row in rows {
+            let (name, body) = row?;
+            layers.insert(name.clone(), dec_layer(&name, &decode(&body)?)?);
+        }
+    }
+    let mut issue = BTreeMap::new();
+    {
+        let mut q = conn.prepare("SELECT boot, body FROM dcs_issue")?;
+        let rows = q.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?;
+        for row in rows {
+            let (boot, body) = row?;
+            issue.insert(boot as u64, dec_issue(&decode(&body)?)?);
+        }
+    }
+    store
+        .restore_markers(
+            markers.clone(),
+            layers.clone(),
+            issue.clone(),
+            played_s,
+            played_at,
+        )
+        .map_err(DiskError::Corrupt)?;
+    // The open may raise a mark above the stored one; it is written with the
+    // first commit.
     store.inflight = inflight;
     store.keep_journal = false;
     let sample_time = store.sample_time;
@@ -1937,6 +2145,10 @@ fn load(path: &Path, conn: Connection, changes_keep: usize) -> Result<Store, Dis
         journal_bytes_unwritten,
         world,
         sample_time,
+        markers,
+        layers,
+        issue,
+        played: (played_s, played_at),
         record,
         record_written: true,
         last_checkpoint,
@@ -2992,6 +3204,10 @@ fn enc_entry(e: &Entry) -> Lv {
             k("extension_spec", vec![("name", s(name)), ("rev", u(*rev))])
         }
         Entry::ExtensionRemoved { name } => k("extension_removed", vec![("name", s(name))]),
+        Entry::Layer { name, removed } => k(
+            "layer",
+            vec![("name", s(name)), ("removed", Lv::Bool(*removed))],
+        ),
         Entry::Order { entity, rev } => k("order", vec![("entity", u(entity.0)), ("rev", u(*rev))]),
         Entry::Authority { entity, authority } => k(
             "authority",
@@ -3050,6 +3266,7 @@ fn enc_entry(e: &Entry) -> Lv {
                     s(match cause {
                         RemoveCause::Controller => "controller",
                         RemoveCause::Expired => "expired",
+                        RemoveCause::Evicted => "evicted",
                     }),
                 ),
             ],
@@ -3118,6 +3335,10 @@ fn dec_entry(v: &Lv) -> Result<Entry, DiskError> {
             rev: r.u("rev")?,
         },
         "extension_removed" => Entry::ExtensionRemoved { name: r.s("name")? },
+        "layer" => Entry::Layer {
+            name: r.s("name")?,
+            removed: matches!(r.get("removed"), Lv::Bool(true)),
+        },
         "order" => Entry::Order {
             entity: entity()?,
             rev: r.u("rev")?,
@@ -3167,6 +3388,7 @@ fn dec_entry(v: &Lv) -> Result<Entry, DiskError> {
                 _ => match r.s("cause")?.as_str() {
                     "controller" => RemoveCause::Controller,
                     "expired" => RemoveCause::Expired,
+                    "evicted" => RemoveCause::Evicted,
                     c => return Err(DiskError::Corrupt(format!("removal cause {c}"))),
                 },
             },
@@ -3497,6 +3719,206 @@ fn dec_route_event(v: &Lv) -> Result<RouteEvent, DiskError> {
     })
 }
 
+// ---- marks, drawings, menu items and layers ----
+
+fn enc_played_at(v: Option<(u64, u32, f64)>) -> Lv {
+    v.map_or(Lv::Nil, |(boot, gen_, t)| {
+        list(vec![
+            s(&boot.to_string()),
+            s(&gen_.to_string()),
+            Lv::Number(t),
+        ])
+    })
+}
+
+fn dec_played_at(v: &Lv) -> Result<Option<(u64, u32, f64)>, DiskError> {
+    let bad = || DiskError::Corrupt("played_at".into());
+    match v {
+        Lv::Nil => Ok(None),
+        Lv::Table(pairs) => match pairs.as_slice() {
+            [(_, boot), (_, gen_), (_, Lv::Number(t))] => Ok(Some((
+                dec_u(boot, "played_at")?,
+                u32::try_from(dec_u(gen_, "played_at")?).map_err(|_| bad())?,
+                *t,
+            ))),
+            _ => Err(bad()),
+        },
+        _ => Err(bad()),
+    }
+}
+
+fn cause_name(c: RemoveCause) -> &'static str {
+    match c {
+        RemoveCause::Controller => "controller",
+        RemoveCause::Expired => "expired",
+        RemoveCause::Evicted => "evicted",
+    }
+}
+
+/// A marker row's body (spec/persistence.md, "The store file").
+fn enc_marker(m: &Marker) -> Lv {
+    let num = |v: Option<f64>| v.map_or(Lv::Nil, Lv::Number);
+    let mut pairs = vec![
+        ("spec_rev", u(m.spec_rev)),
+        ("scope", u(u64::from(m.scope))),
+        ("target", u(m.target)),
+        ("removed", b(m.removed)),
+        ("removed_at_ms", u(m.removed_at_ms.unwrap_or(0))),
+        (
+            "removed_cause",
+            match m.removed_cause {
+                Some(c) if c != RemoveCause::Controller => s(cause_name(c)),
+                _ => Lv::Nil,
+            },
+        ),
+    ];
+    match &m.spec {
+        MarkerSpec::Mark {
+            theater,
+            at,
+            text,
+            read_only,
+        } => pairs.extend([
+            ("kind", s("mark")),
+            ("theater", s(theater)),
+            ("x", Lv::Number(at.x)),
+            ("y", Lv::Number(at.y)),
+            ("z", Lv::Number(at.z)),
+            ("text", s(text)),
+            ("read_only", b(*read_only)),
+        ]),
+        MarkerSpec::Drawing { shape, args } => pairs.extend([
+            ("kind", s("drawing")),
+            ("shape", u(u64::from(*shape))),
+            ("args", nested(args)),
+        ]),
+        MarkerSpec::MenuItem {
+            parent,
+            submenu,
+            text,
+        } => pairs.extend([
+            ("kind", s("menu")),
+            ("parent", u(parent.0)),
+            ("submenu", b(*submenu)),
+            ("text", s(text)),
+        ]),
+    }
+    if !matches!(m.spec, MarkerSpec::MenuItem { .. }) {
+        pairs.extend([
+            ("dcs_id", u(m.dcs_id)),
+            ("rank", u(m.rank)),
+            (
+                "label",
+                if m.label.is_empty() {
+                    Lv::Nil
+                } else {
+                    s(&m.label)
+                },
+            ),
+            (
+                "layer",
+                if m.layer.is_empty() {
+                    Lv::Nil
+                } else {
+                    s(&m.layer)
+                },
+            ),
+            ("expires_at", num(m.expires_at)),
+        ]);
+    }
+    t(pairs)
+}
+
+fn dec_marker(id: EntityId, v: &Lv) -> Result<Marker, DiskError> {
+    let r = Rd(v);
+    let bad = |what: &str| DiskError::Corrupt(format!("marker {}: {what}", id.0));
+    let spec = match r.s("kind")?.as_str() {
+        "mark" => MarkerSpec::Mark {
+            theater: r.s("theater")?,
+            at: Point {
+                x: r.f("x")?,
+                y: r.f("y")?,
+                z: r.f("z")?,
+            },
+            text: r.s("text")?,
+            read_only: r.b("read_only")?,
+        },
+        "drawing" => MarkerSpec::Drawing {
+            shape: r.u32("shape")?,
+            args: r.nested("args")?,
+        },
+        "menu" => MarkerSpec::MenuItem {
+            parent: EntityId(r.u("parent")?),
+            submenu: r.b("submenu")?,
+            text: r.s("text")?,
+        },
+        k => return Err(bad(&format!("kind {k}"))),
+    };
+    let removed = r.b("removed")?;
+    let removed_at = r.u("removed_at_ms")?;
+    Ok(Marker {
+        id,
+        spec_rev: r.u("spec_rev")?,
+        removed,
+        removed_at_ms: (removed_at != 0).then_some(removed_at),
+        scope: r.u32("scope")?,
+        target: r.u("target")?,
+        spec,
+        dcs_id: r.u("dcs_id")?,
+        rank: r.u("rank")?,
+        label: r.s("label")?,
+        layer: r.s("layer")?,
+        expires_at: r.opt_f("expires_at")?,
+        // A row without a cause is the controller's.
+        removed_cause: if removed {
+            Some(match r.s("removed_cause")?.as_str() {
+                "" | "controller" => RemoveCause::Controller,
+                "expired" => RemoveCause::Expired,
+                "evicted" => RemoveCause::Evicted,
+                c => return Err(bad(&format!("removal cause {c}"))),
+            })
+        } else {
+            None
+        },
+    })
+}
+
+/// A layer row's body.
+fn enc_layer(l: &Layer) -> Lv {
+    t(vec![
+        ("visible", b(l.visible)),
+        (
+            "expire_after_s",
+            l.expire_after_s.map_or(Lv::Nil, Lv::Number),
+        ),
+        ("cap", u(u64::from(l.cap.unwrap_or(0)))),
+    ])
+}
+
+/// A boot's issued DCS ID slots: its order and the next slot of the pool.
+fn enc_issue(i: &BootIssue) -> Lv {
+    t(vec![("ordinal", u(i.ordinal)), ("next", u(i.next))])
+}
+
+fn dec_issue(v: &Lv) -> Result<BootIssue, DiskError> {
+    let r = Rd(v);
+    Ok(BootIssue {
+        ordinal: r.u("ordinal")?,
+        next: r.u("next")?,
+    })
+}
+
+fn dec_layer(name: &str, v: &Lv) -> Result<Layer, DiskError> {
+    let r = Rd(v);
+    let cap = r.u32("cap")?;
+    Ok(Layer {
+        name: name.to_owned(),
+        visible: r.b("visible")?,
+        expire_after_s: r.opt_f("expire_after_s")?,
+        cap: (cap != 0).then_some(cap),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3553,6 +3975,547 @@ mod tests {
             )
             .expect("group");
         s.group(id).expect("g").clone()
+    }
+
+    /// A read-only mark with a label, a layer and an expiry.
+    fn golden_mark() -> Marker {
+        Marker {
+            id: EntityId(40),
+            spec_rev: 2,
+            removed: false,
+            removed_at_ms: None,
+            scope: 2,
+            target: 2,
+            spec: MarkerSpec::Mark {
+                theater: "Caucasus".into(),
+                at: Point {
+                    x: 10.5,
+                    y: 0.0,
+                    z: -20.25,
+                },
+                text: "Objective".into(),
+                read_only: true,
+            },
+            dcs_id: 1 << 30,
+            rank: 7,
+            label: "obj-1".into(),
+            layer: "objectives".into(),
+            expires_at: Some(3600.0),
+            removed_cause: None,
+        }
+    }
+
+    /// A drawing for everyone in no layer.
+    fn golden_drawing() -> Marker {
+        Marker {
+            id: EntityId(41),
+            spec_rev: 1,
+            scope: 1,
+            target: 0,
+            spec: MarkerSpec::Drawing {
+                shape: 7,
+                args: list(vec![
+                    t(vec![("x", Lv::Number(1.0)), ("z", Lv::Number(2.0))]),
+                    Lv::Bool(true),
+                ]),
+            },
+            dcs_id: (1 << 30) + (1 << 24) + 255 * (1 << 20),
+            rank: 8,
+            label: String::new(),
+            layer: String::new(),
+            expires_at: None,
+            ..golden_mark()
+        }
+    }
+
+    /// A submenu for one group.
+    fn golden_submenu() -> Marker {
+        Marker {
+            id: EntityId(42),
+            spec_rev: 1,
+            scope: 3,
+            target: 5,
+            spec: MarkerSpec::MenuItem {
+                parent: EntityId(0),
+                submenu: true,
+                text: "Support".into(),
+            },
+            dcs_id: 0,
+            rank: 0,
+            label: String::new(),
+            layer: String::new(),
+            expires_at: None,
+            ..golden_mark()
+        }
+    }
+
+    /// A removed drawing whose layer has no row any more; `None` is a row
+    /// written without a cause, which reads as the controller's.
+    fn golden_removed(cause: Option<RemoveCause>) -> Marker {
+        Marker {
+            id: EntityId(43),
+            removed: true,
+            removed_at_ms: Some(1_700_000_000_000),
+            layer: "gone".into(),
+            removed_cause: cause,
+            ..golden_drawing()
+        }
+    }
+
+    fn golden_layer(cap: Option<u32>) -> Layer {
+        Layer {
+            name: "objectives".into(),
+            visible: cap.is_none(),
+            expire_after_s: cap.map(|_| 90.0),
+            cap,
+        }
+    }
+
+    /// The slots issued in one boot.
+    fn golden_issue() -> BootIssue {
+        BootIssue {
+            ordinal: 3,
+            next: 1 << 20,
+        }
+    }
+
+    /// A put that DCS has also been given an ID for.
+    fn put_item(s: &mut Store, label: &str, layer: &str) -> EntityId {
+        let id = put_item_unissued(s, label, layer);
+        s.issue_dcs_id(id, false).expect("issue");
+        id
+    }
+
+    fn put_item_unissued(s: &mut Store, label: &str, layer: &str) -> EntityId {
+        s.put_marker_with(super::super::MarkerPut {
+            id: EntityId(0),
+            scope: 1,
+            target: 0,
+            spec: golden_drawing().spec,
+            label: Some(label.into()),
+            layer: Some(layer.into()),
+            expire_after_s: Some(60.0),
+        })
+        .expect("put")
+        .id
+    }
+
+    #[test]
+    fn the_draw_counter_is_rebuilt_at_open_past_every_row() {
+        let d = tempfile::tempdir().expect("dir");
+        let path = d.path().join("store.sqlite");
+        let mut s = Store::new(CampaignId(7), 10);
+        s.save_as(&path, record()).expect("save");
+        let a = put_item(&mut s, "a", "");
+        let b = put_item(&mut s, "b", "");
+        let c = put_item(&mut s, "c", "");
+        // Six more adds of c: its rank climbs to 9; then it is removed.
+        for _ in 0..6 {
+            s.issue_dcs_id(c, false).expect("issue");
+        }
+        let rank = |s: &Store, e| s.marker(e).unwrap().rank;
+        assert_eq!((rank(&s, a), rank(&s, b), rank(&s, c)), (1, 2, 9));
+        s.remove_marker(c).expect("remove");
+        s.commit().expect("commit");
+        s.close().expect("close");
+
+        let mut s = Store::open(&path, 10).expect("open");
+        let n = put_item(&mut s, "n", "");
+        assert_eq!(
+            rank(&s, n),
+            10,
+            "the counter is past the removed row's rank"
+        );
+        s.commit().expect("commit");
+        s.close().expect("close");
+        let s = Store::open(&path, 10).expect("open again");
+        assert_eq!(rank(&s, n), 10);
+    }
+
+    #[test]
+    fn markers_and_layers_survive_a_reopen_and_removed_rows_go_with_the_purge() {
+        let d = tempfile::tempdir().expect("dir");
+        let path = d.path().join("store.sqlite");
+        let mut s = Store::new(CampaignId(7), 10);
+        s.save_as(&path, record()).expect("save");
+        s.put_layer(Layer {
+            cap: Some(5),
+            ..golden_layer(None)
+        })
+        .expect("layer");
+        let a = put_item(&mut s, "a", "objectives");
+        let b = put_item(&mut s, "b", "");
+        let sub = s
+            .put_marker(EntityId(0), 1, 0, golden_submenu().spec)
+            .expect("menu")
+            .0;
+        s.remove_marker(b).expect("remove");
+        s.count_played(3, 1, 10.0);
+        s.count_played(3, 1, 70.0);
+        s.commit().expect("commit");
+        // Campaign model time is written at checkpoint rate.
+        s.checkpoint(1_000, Vec::new()).expect("checkpoint");
+        let (dcs_a, dcs_b) = (s.marker(a).unwrap().dcs_id, s.marker(b).unwrap().dcs_id);
+        s.close().expect("close");
+
+        let mut s = Store::open(&path, 10).expect("open");
+        assert_eq!(s.marker(a).unwrap().dcs_id, dcs_a);
+        assert_eq!(s.marker_by_label("a"), Some(a));
+        assert_eq!(
+            s.marker_by_label("b"),
+            None,
+            "a removed item frees its label"
+        );
+        assert!(s.marker(b).unwrap().removed);
+        assert!(s.marker(sub).is_some());
+        assert_eq!(s.layer("objectives").unwrap().cap, Some(5));
+        assert_eq!(s.played_s(), 60.0);
+        // The next slot is derived past every row, removed ones included.
+        let c = put_item(&mut s, "c", "");
+        assert!(s.marker(c).unwrap().dcs_id > dcs_b);
+        // Downtime in the same boot and generation counts.
+        s.count_played(3, 1, 100.0);
+        assert_eq!(s.played_s(), 90.0);
+        // A removed layer and a purged marker leave the file.
+        s.remove_layer("objectives").expect("remove layer");
+        assert!(s.purge_marker(b));
+        s.commit().expect("commit");
+        s.close().expect("close");
+        let s = Store::open(&path, 10).expect("open again");
+        assert!(s.layer("objectives").is_none());
+        assert!(s.marker(b).is_none());
+        assert!(s.marker(a).unwrap().removed);
+        assert_eq!(s.marker(a).unwrap().layer, "objectives");
+    }
+
+    #[test]
+    fn a_restart_in_the_boot_never_reissues_an_id_and_a_new_boot_resets() {
+        let d = tempfile::tempdir().expect("dir");
+        let path = d.path().join("store.sqlite");
+        let mut s = Store::new(CampaignId(7), 10);
+        s.save_as(&path, record()).expect("save");
+        let loaded = |boot| Loaded {
+            agent_boot: boot,
+            mission_gen: 1,
+            theater: "Caucasus".into(),
+        };
+        s.set_loaded(loaded(7));
+        let a = put_item(&mut s, "a", "");
+        let a_id = s.marker(a).unwrap().dcs_id;
+        // The item is removed and purged: no row holds its ID, only the mark.
+        s.remove_marker(a).expect("remove");
+        assert!(s.purge_marker(a));
+        s.commit().expect("commit");
+        s.close().expect("close");
+
+        let mut s = Store::open(&path, 10).expect("open");
+        assert!(s.dcs_issued_in_boot(7, a_id));
+        let c = put_item(&mut s, "c", "");
+        assert!(s.marker(c).unwrap().dcs_id > a_id);
+        let c_id = s.marker(c).unwrap().dcs_id;
+        s.commit().expect("commit");
+        s.close().expect("close");
+
+        // The same boot again keeps the marks and the IDs.
+        let mut s = Store::open(&path, 10).expect("open");
+        s.set_loaded(loaded(7));
+        assert_eq!(s.marker(c).unwrap().dcs_id, c_id);
+        assert_eq!(s.dcs_slots_left(), super::super::dcs_ids::SLOTS - 2);
+        // A new boot: DCS holds nothing, the marks start again, the old
+        // boot's span stays for its events.
+        s.set_loaded(loaded(8));
+        assert_eq!(s.marker(c).unwrap().dcs_id, 0);
+        assert_eq!(s.dcs_slots_left(), super::super::dcs_ids::SLOTS);
+        assert!(s.dcs_issued_in_boot(7, c_id) && !s.dcs_issued_now(c_id));
+        assert_eq!(s.issue_dcs_id(c, false).unwrap().0, a_id);
+        s.commit().expect("commit");
+        s.close().expect("close");
+        let s = Store::open(&path, 10).expect("open");
+        assert_eq!(s.dcs_boot(), Some(8));
+        assert!(s.dcs_issued_in_boot(7, c_id) && s.dcs_issued_in_boot(8, a_id));
+        assert!(!s.dcs_issued_in_boot(8, c_id));
+    }
+
+    #[test]
+    fn a_file_without_the_issue_table_opens_and_takes_its_marks_from_the_rows() {
+        let d = tempfile::tempdir().expect("dir");
+        let path = d.path().join("store.sqlite");
+        let mut s = Store::new(CampaignId(7), 10);
+        s.save_as(&path, record()).expect("save");
+        let a = put_item(&mut s, "a", "");
+        let a_id = s.marker(a).unwrap().dcs_id;
+        s.commit().expect("commit");
+        s.close().expect("close");
+        connect(&path)
+            .expect("conn")
+            .execute_batch("DROP TABLE dcs_issue;")
+            .expect("drop");
+        let mut s = Store::open(&path, 10).expect("open");
+        let b = put_item(&mut s, "b", "");
+        assert!(s.marker(b).unwrap().dcs_id > a_id);
+    }
+
+    #[test]
+    fn a_schema_1_file_gains_empty_marker_tables() {
+        let d = tempfile::tempdir().expect("dir");
+        let path = d.path().join("store.sqlite");
+        let mut s = Store::new(CampaignId(7), 10);
+        s.save_as(&path, record()).expect("save");
+        s.close().expect("close");
+        {
+            let conn = connect(&path).expect("conn");
+            conn.execute_batch("DROP TABLE marker; DROP TABLE layer;")
+                .expect("drop");
+            let tx_meta = encode(&Lv::Number(1.0));
+            conn.execute(
+                "UPDATE meta SET value = ?1 WHERE key = 'schema'",
+                params![tx_meta],
+            )
+            .expect("schema 1");
+        }
+        assert_eq!(schema_of(&path).expect("schema"), 1);
+        let s = Store::open(&path, 10).expect("migrated");
+        assert_eq!(s.markers().count(), 0);
+        assert_eq!(schema_of(&path).expect("schema"), 2);
+    }
+
+    #[test]
+    fn an_open_refuses_bad_marker_rows() {
+        let refuse = |edit: &dyn Fn(&Connection), want: &str| {
+            let d = tempfile::tempdir().expect("dir");
+            let path = d.path().join("store.sqlite");
+            let mut s = Store::new(CampaignId(7), 10);
+            s.save_as(&path, record()).expect("save");
+            put_item(&mut s, "a", "");
+            put_item(&mut s, "b", "");
+            s.commit().expect("commit");
+            s.close().expect("close");
+            edit(&connect(&path).expect("conn"));
+            match Store::open(&path, 10).expect_err("refused") {
+                DiskError::Corrupt(m) => assert!(m.contains(want), "{m:?} lacks {want:?}"),
+                e => panic!("not Corrupt: {e}"),
+            }
+        };
+        let rewrite = |conn: &Connection, id: i64, m: &Marker| {
+            conn.execute(
+                "UPDATE marker SET body = ?1 WHERE id = ?2",
+                params![encode(&enc_marker(m)), id],
+            )
+            .expect("update");
+        };
+        let first = |conn: &Connection| -> (i64, Marker) {
+            let (id, body): (i64, Vec<u8>) = conn
+                .query_row("SELECT id, body FROM marker ORDER BY id LIMIT 1", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .expect("row");
+            (
+                id,
+                dec_marker(EntityId(id as u64), &decode(&body).unwrap()).unwrap(),
+            )
+        };
+        // Two live items under one label, or one DCS ID.
+        refuse(
+            &|c| {
+                let (id, m) = first(c);
+                rewrite(
+                    c,
+                    id,
+                    &Marker {
+                        label: "b".into(),
+                        ..m
+                    },
+                );
+            },
+            "label \"b\" held twice",
+        );
+        refuse(
+            &|c| {
+                let (id, m) = first(c);
+                rewrite(
+                    c,
+                    id,
+                    &Marker {
+                        dcs_id: m.dcs_id + 1,
+                        ..m
+                    },
+                );
+            },
+            "held twice",
+        );
+        // A live item in a layer with no row.
+        refuse(
+            &|c| {
+                let (id, m) = first(c);
+                rewrite(
+                    c,
+                    id,
+                    &Marker {
+                        layer: "none".into(),
+                        ..m
+                    },
+                );
+            },
+            "has no row",
+        );
+        // A menu item under a parent that is no menu item: the first row
+        // becomes one under the second, a drawing.
+        refuse(
+            &|c| {
+                let (id, m) = first(c);
+                rewrite(
+                    c,
+                    id,
+                    &Marker {
+                        spec: MarkerSpec::MenuItem {
+                            parent: EntityId(id as u64 + 1),
+                            submenu: false,
+                            text: "x".into(),
+                        },
+                        ..m
+                    },
+                );
+            },
+            "is no menu item",
+        );
+        // A marker ID at or past the next EntityId.
+        refuse(
+            &|c| {
+                let (id, _) = first(c);
+                c.execute("UPDATE marker SET id = 1000000 WHERE id = ?1", params![id])
+                    .expect("update");
+            },
+            "at or past the next EntityId",
+        );
+        // Two live items under one draw rank.
+        refuse(
+            &|c| {
+                let (id, m) = first(c);
+                rewrite(c, id, &Marker { rank: 2, ..m });
+            },
+            "draw rank 2 held twice",
+        );
+        // A mark whose DCS ID is outside the pool.
+        refuse(
+            &|c| {
+                let (id, m) = first(c);
+                rewrite(
+                    c,
+                    id,
+                    &Marker {
+                        spec: golden_mark().spec,
+                        dcs_id: 5,
+                        ..m
+                    },
+                );
+            },
+            "out of the pool",
+        );
+        // A label over the limit.
+        refuse(
+            &|c| {
+                let (id, m) = first(c);
+                rewrite(
+                    c,
+                    id,
+                    &Marker {
+                        label: "x".repeat(300),
+                        ..m
+                    },
+                );
+            },
+            "bad label",
+        );
+        // An expiry that is not a number of seconds.
+        refuse(
+            &|c| {
+                let (id, m) = first(c);
+                rewrite(
+                    c,
+                    id,
+                    &Marker {
+                        expires_at: Some(f64::INFINITY),
+                        ..m
+                    },
+                );
+            },
+            "expires_at",
+        );
+        // Layer rows: an expiry that is not above 0.
+        refuse(
+            &|c| {
+                insert_layer(
+                    c,
+                    &Layer {
+                        expire_after_s: Some(0.0),
+                        name: "L".into(),
+                        ..golden_layer(None)
+                    },
+                )
+            },
+            "expire_after_s",
+        );
+        // A model time that is not finite, or is negative.
+        for t in [f64::NAN, -1.0] {
+            refuse(&|c| set_played_at(c, t), "played_at");
+        }
+    }
+
+    /// Replace `played_at` in the stored world with a boot, a generation
+    /// and the model time `t`.
+    fn set_played_at(c: &Connection, t: f64) {
+        let Lv::Table(pairs) = get_meta(c, "world").expect("world") else {
+            panic!("world is not a table");
+        };
+        let mut pairs: Vec<(Lv, Lv)> = pairs
+            .into_iter()
+            .filter(|(k, _)| *k != s("played_at"))
+            .collect();
+        pairs.push((s("played_at"), enc_played_at(Some((1, 1, t)))));
+        c.execute(
+            "UPDATE meta SET value = ?1 WHERE key = 'world'",
+            params![encode(&Lv::Table(pairs))],
+        )
+        .expect("update");
+    }
+
+    fn insert_layer(c: &Connection, l: &Layer) {
+        c.execute(
+            "INSERT INTO layer (name, body) VALUES (?1, ?2)",
+            params![l.name, encode(&enc_layer(l))],
+        )
+        .expect("layer row");
+    }
+
+    #[test]
+    fn markers_layers_and_played_time_round_trip() {
+        for m in [
+            golden_mark(),
+            golden_drawing(),
+            golden_submenu(),
+            golden_removed(Some(RemoveCause::Evicted)),
+            golden_removed(Some(RemoveCause::Expired)),
+        ] {
+            let back = dec_marker(m.id, &decode(&encode(&enc_marker(&m))).unwrap()).unwrap();
+            assert_eq!(back, m);
+        }
+        // A removed row written without a cause is the controller's.
+        let back = dec_marker(
+            EntityId(43),
+            &decode(&encode(&enc_marker(&golden_removed(None)))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(back.removed_cause, Some(RemoveCause::Controller));
+        for l in [golden_layer(None), golden_layer(Some(20))] {
+            let back = dec_layer(&l.name, &decode(&encode(&enc_layer(&l))).unwrap()).unwrap();
+            assert_eq!(back, l);
+        }
+        let i = golden_issue();
+        let back = dec_issue(&decode(&encode(&enc_issue(&i))).unwrap()).unwrap();
+        assert_eq!(back, i);
+        let at = Some((11, 2, 600.25));
+        assert_eq!(dec_played_at(&enc_played_at(at)).unwrap(), at);
+        assert_eq!(dec_played_at(&Lv::Nil).unwrap(), None);
     }
 
     fn golden_rows() -> Vec<(String, Vec<u8>)> {
@@ -3654,6 +4617,29 @@ mod tests {
                     cause: RemoveCause::Expired,
                 })),
             ),
+            // A layer's oldest item a put over its cap removed, and a
+            // layer made and removed (spec/world.md, "Labels and markup groups").
+            (
+                "entry.removed.evicted".to_owned(),
+                encode(&enc_entry(&Entry::Removed {
+                    entity: g,
+                    cause: RemoveCause::Evicted,
+                })),
+            ),
+            (
+                "entry.layer".to_owned(),
+                encode(&enc_entry(&Entry::Layer {
+                    name: "front".into(),
+                    removed: false,
+                })),
+            ),
+            (
+                "entry.layer.removed".to_owned(),
+                encode(&enc_entry(&Entry::Layer {
+                    name: "front".into(),
+                    removed: true,
+                })),
+            ),
             (
                 "entry.purged".to_owned(),
                 encode(&enc_entry(&Entry::Purged { entity: g })),
@@ -3663,6 +4649,41 @@ mod tests {
             (
                 "group.further".to_owned(),
                 encode(&enc_group(&heliport_group())),
+            ),
+            // Marks, drawings, menu items and layers (spec/world.md, "Labels
+            // and layers").
+            (
+                "marker.mark".to_owned(),
+                encode(&enc_marker(&golden_mark())),
+            ),
+            (
+                "marker.drawing".to_owned(),
+                encode(&enc_marker(&golden_drawing())),
+            ),
+            (
+                "marker.submenu".to_owned(),
+                encode(&enc_marker(&golden_submenu())),
+            ),
+            (
+                "marker.removed".to_owned(),
+                encode(&enc_marker(&golden_removed(None))),
+            ),
+            (
+                "marker.removed.evicted".to_owned(),
+                encode(&enc_marker(&golden_removed(Some(RemoveCause::Evicted)))),
+            ),
+            ("layer".to_owned(), encode(&enc_layer(&golden_layer(None)))),
+            (
+                "layer.capped".to_owned(),
+                encode(&enc_layer(&golden_layer(Some(20)))),
+            ),
+            ("dcs_issue".to_owned(), encode(&enc_issue(&golden_issue()))),
+            (
+                "world.played".to_owned(),
+                encode(&t(vec![
+                    ("played_s", f(1234.5)),
+                    ("played_at", enc_played_at(Some((11, 2, 600.25)))),
+                ])),
             ),
             // The S19 keys of `meta.world`, as the store writes them.
             (

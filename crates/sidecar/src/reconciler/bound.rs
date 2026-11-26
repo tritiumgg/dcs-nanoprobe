@@ -151,6 +151,8 @@ impl Reconciler {
                 }
             }
         }
+        // Marks and drawings past their expiry in campaign model time.
+        store.expire_markers(PURGE_BATCH);
         // What DCS may still hold: bound objects, commands in flight.
         let bound: HashSet<EntityId> = self
             .binding

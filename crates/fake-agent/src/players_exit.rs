@@ -118,6 +118,10 @@ const SUBMENU: u64 = 0x5316_0001;
 const COMMAND: u64 = 0x5316_0002;
 const MARK: u64 = 0x5316_0003;
 const DRAWING: u64 = 0x5316_0004;
+/// The DCS mark IDs the probe gives its mark and drawing: the first of the
+/// mark range and of drawing band 255, order 0 (spec/world.md, "DCS IDs").
+const MARK_DCS_ID: u64 = 1 << 30;
+const DRAWING_DCS_ID: u64 = (1 << 30) + (1 << 24) + 255 * (1 << 20);
 /// The extension's name and the event it emits.
 const EXTENSION: &str = "np_s16_ext";
 const EMIT_NAME: &str = "np.s16.test";
@@ -841,6 +845,7 @@ fn marks(r: &mut Rig) -> Result<(), String> {
         x: 1000.0,
         y: 0.0,
         z: 1000.0,
+        dcs_id: MARK_DCS_ID,
         text: MARK_TEXT.into(),
     };
     r.cleanup.push((MARK, Body::MarkRemove));
@@ -874,6 +879,7 @@ fn marks(r: &mut Rig) -> Result<(), String> {
         scope: ALL,
         shape: 1,
         target: 0,
+        dcs_id: DRAWING_DCS_ID,
         args,
     };
     if let Err(e) = r.expect("DRAWING_SET", DRAWING, 1, drawing, 0) {

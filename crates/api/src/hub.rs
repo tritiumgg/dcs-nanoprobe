@@ -683,9 +683,14 @@ impl Inner {
                 },
             );
             let unit = |o: u64| bound(o).map(|b| b.0);
+            let issued = |boot: u64, id: u64| {
+                env.as_ref()
+                    .is_some_and(|e| e.borrow().1.dcs_issued_in_boot(boot, id))
+            };
             let look = Lookup {
                 unit: &unit,
                 roster: Some(&self.roster),
+                issued: &issued,
             };
             let mut group = Vec::new();
             if let Some(read) = self.link.read_with(r, &look) {
@@ -1276,9 +1281,43 @@ impl Inner {
         }
     }
 
+    /// The DCS IDs left in the pool of the DCS process now running. The pool
+    /// is shared by every campaign: the active campaign's store holds the
+    /// count; with none active, the server store's mark (a full pool when it
+    /// has none).
+    pub fn dcs_ids_left(&self) -> u64 {
+        use nanoprobe_sidecar::store::dcs_ids;
+        if let Some(slot) = self.active.and_then(|id| self.campaigns.get(&id)) {
+            // A store of another boot has the pool of that process; the
+            // running one has a full pool.
+            return match slot.store.dcs_boot() {
+                Some(b) if b != self.link.agent_boot => dcs_ids::SLOTS,
+                _ => slot.store.dcs_slots_left(),
+            };
+        }
+        let mark = self
+            .server
+            .as_ref()
+            .and_then(|s| s.dcs_mark().ok().flatten())
+            .filter(|(boot, _)| *boot == self.link.agent_boot)
+            .map_or(0, |(_, next)| next);
+        dcs_ids::SLOTS.saturating_sub(mark)
+    }
+
     /// The campaign folders, when the stores are on disk.
     pub fn files(&self) -> Option<&Campaigns> {
         self.files.as_ref()
+    }
+
+    /// Raise campaign `id`'s DCS ID mark to the server store's row.
+    fn raise_from_server(&mut self, id: u64) -> Result<(), Status> {
+        let (Some(server), Some(slot)) = (self.server.as_ref(), self.campaigns.get_mut(&id)) else {
+            return Ok(());
+        };
+        if let Some((boot, next)) = server.dcs_mark().map_err(|e| disk_status(id, &e))? {
+            slot.store.raise_dcs_mark(boot, next);
+        }
+        Ok(())
     }
 
     /// Open a campaign's store file if it is on disk and not open yet
@@ -1307,6 +1346,11 @@ impl Inner {
         slot.store = store;
         slot.opened = true;
         if let Some(server) = self.server.as_ref() {
+            // The DCS ID pool is shared by every campaign: this one starts at
+            // the mark the others closed with.
+            if let Some((boot, next)) = server.dcs_mark().map_err(|e| disk_status(id, &e))? {
+                slot.store.raise_dcs_mark(boot, next);
+            }
             for (key, at_ms) in keys {
                 let row = nanoprobe_sidecar::store::IdemRow {
                     key,
@@ -1436,12 +1480,14 @@ impl Inner {
             return;
         }
         let at = wall_ms();
+        let server = self.server.as_ref();
+        let running = (self.link.agent_boot != 0).then_some(self.link.agent_boot);
         let r = match outcome {
-            Some(o) => files.finish(&mut slot.store, at, achieved, o),
+            Some(o) => files.finish_with(server, running, &mut slot.store, at, achieved, o),
             None if state == CampaignState::Finished => {
-                files.finish(&mut slot.store, at, achieved, Vec::new())
+                files.finish_with(server, running, &mut slot.store, at, achieved, Vec::new())
             }
-            None => files.suspend(&mut slot.store, at, achieved),
+            None => files.suspend_with(server, running, &mut slot.store, at, achieved),
         };
         if let Err(e) = r {
             panic!("campaign {id} could not be closed, stopping: {e}");
@@ -1813,6 +1859,17 @@ impl Inner {
                 EventLog::new(cfg.events_keep),
             ),
         };
+        let mut store = store;
+        if let Some((boot, next)) = self
+            .server
+            .as_ref()
+            .map(ServerStore::dcs_mark)
+            .transpose()
+            .map_err(|e| disk_status(id, &e))?
+            .flatten()
+        {
+            store.raise_dcs_mark(boot, next);
+        }
         self.campaigns.insert(
             id,
             Slot {
@@ -2121,6 +2178,13 @@ impl Inner {
         }
         // Opened after the suspend: if the open fails, no campaign is active.
         if let Err(e) = self.open_store(id) {
+            self.send_no_campaign();
+            self.restart(cfg);
+            return Err(e);
+        }
+        // The pool is shared: this campaign takes the server store's mark
+        // whether or not its store was already open.
+        if let Err(e) = self.raise_from_server(id) {
             self.send_no_campaign();
             self.restart(cfg);
             return Err(e);

@@ -177,6 +177,8 @@ pub struct FakeMark {
     pub rev: u64,
     /// The DCS group a `GROUP` scope named, 0 otherwise.
     pub dcs_group: u64,
+    /// The DCS mark ID.
+    pub dcs_id: u64,
 }
 
 /// A map drawing the agent holds.
@@ -192,6 +194,10 @@ pub struct FakeDrawing {
     pub args: Lv,
     /// The spec revision applied.
     pub rev: u64,
+    /// The DCS mark ID.
+    pub dcs_id: u64,
+    /// The `DRAWING_UPDATE`s applied to it since its set.
+    pub updates: u32,
 }
 
 /// An F10 menu item the agent holds.
@@ -233,6 +239,18 @@ pub struct FarpSpawns {
     /// The replaced static's `OBJECT_GONE`, then a sample of the new
     /// airbase, then the spawn's `RESULT`.
     pub sample_before_result: bool,
+}
+
+/// What the shim and DCS did with an add of a mark or drawing.
+enum Add {
+    /// DCS added it.
+    Added,
+    /// The entity already holds the ID: answered with no change.
+    Held,
+    /// The shim refused it with this message, without a DCS call.
+    Refused(String),
+    /// DCS ignored it without a panel or an event.
+    Ignored,
 }
 
 /// One airbase of the mission: its DCS object ID, owner and warehouse.
@@ -294,6 +312,9 @@ pub struct Ledger {
     /// Of those, the spawns at a spec revision above the one the replaced
     /// group was spawned at: a changed spec spawned in place.
     pub in_place: u64,
+    /// `DRAWING_SET`s refused for a shape or arguments that are not a known
+    /// layout, as the shim refuses them before DCS is called.
+    pub drawing_layouts_refused: u64,
     /// Spawns that reached the handler: agent boot, generation, group entity,
     /// spec revision, and the unit entities spawned.
     pub spawns: Vec<(u64, u32, u64, u64, Vec<u64>)>,
@@ -370,9 +391,20 @@ pub struct Ledger {
     pub mission_loads: Vec<String>,
     /// Extensions the agent removed, by name.
     pub extension_removals: Vec<String>,
-    /// `MARK_SET`, `DRAWING_SET` and `MENU_SET` commands the agent applied
-    /// (not `AT_REVISION`), by entity.
+    /// `MARK_SET`, `DRAWING_SET`, `DRAWING_UPDATE` and `MENU_SET` commands
+    /// the agent applied (not `AT_REVISION`), by entity.
     pub pin_sets: BTreeMap<u64, u32>,
+    /// `MARK_CLEAR` DCS IDs the agent applied.
+    pub mark_clears: Vec<u64>,
+    /// DCS IDs of `MARK_SET`s and `DRAWING_SET`s DCS itself ignored without
+    /// a panel or an event, past the shim's guard (an ID DCS removed that the
+    /// process mark does not cover; LIVE, docs/results/2026-11-25-drawing-layers.md).
+    /// The command is still answered `APPLIED`. The shim refuses the other
+    /// cases with `DCS_REFUSED`.
+    pub ignored_adds: Vec<u64>,
+    /// `MARK_SET`s and `DRAWING_SET`s the shim refused with `DCS_REFUSED`
+    /// (an ID at or below the process mark, or one held).
+    pub refused_adds: u32,
     /// `MODERATE` commands the agent applied, as sent.
     pub moderations: Vec<Body>,
     /// `PLAYERS` queries the agent answered.
@@ -520,6 +552,12 @@ pub struct FakeSim {
     // What the agent holds in DCS for the players.
     marks: BTreeMap<u64, FakeMark>,
     drawings: BTreeMap<u64, FakeDrawing>,
+    /// DCS mark IDs removed in this mission, or dropped by a campaign switch:
+    /// an add under one shows nothing and emits nothing. A mission load frees
+    /// every ID (LIVE), so it empties the set.
+    dead_ids: BTreeSet<u64>,
+    /// The shim's process mark: the highest mark or drawing ID it added.
+    process_mark: u64,
     menus: BTreeMap<u64, FakeMenu>,
     menu_order: u64,
     /// Records the agent writes in its next frame.
@@ -580,12 +618,17 @@ pub struct FakeSim {
     /// `DAMAGE` commands to answer `DCS_REFUSED`.
     refuse_damages: u32,
     refuse_ruins: u32,
+    /// `MARK_SET`s and `DRAWING_SET`s still to refuse as at or below the
+    /// process mark, whatever their ID.
+    refuse_adds: u32,
     reject_ruins: u32,
     farp: FarpSpawns,
     /// `WAREHOUSE_SET` commands still to answer `NOT_READY`.
     stock_not_ready: u32,
     /// `STATIC_SPAWN` commands still to answer `NOT_READY`.
     static_not_ready: u32,
+    /// `MARK_SET` and `DRAWING_SET` commands still to answer `NOT_READY`.
+    pin_not_ready: u32,
     /// `AIRBASE` rows the agent drops, as a full ring drops a sample row
     /// alone; their `WAREHOUSE` rows still go.
     drop_airbase_rows: bool,
@@ -700,6 +743,8 @@ impl FakeSim {
             applied_extension: HashMap::new(),
             marks: BTreeMap::new(),
             drawings: BTreeMap::new(),
+            dead_ids: BTreeSet::new(),
+            process_mark: 0,
             menus: BTreeMap::new(),
             menu_order: 0,
             queued_out: Vec::new(),
@@ -734,10 +779,12 @@ impl FakeSim {
             refuse_destroys: 0,
             refuse_damages: 0,
             refuse_ruins: 0,
+            refuse_adds: 0,
             reject_ruins: 0,
             farp: FarpSpawns::default(),
             stock_not_ready: 0,
             static_not_ready: 0,
+            pin_not_ready: 0,
             drop_airbase_rows: false,
             life0_of: HashMap::new(),
             refuse_loads: 0,
@@ -923,6 +970,12 @@ impl FakeSim {
         self.binds_received
     }
 
+    /// The DCS mark IDs that are dead: removed since the last mission load, or
+    /// dropped by a campaign switch. An add under one is ignored.
+    pub fn dead_ids(&self) -> &BTreeSet<u64> {
+        &self.dead_ids
+    }
+
     /// The mark the agent holds for an entity.
     pub fn mark(&self, entity: u64) -> Option<&FakeMark> {
         self.marks.get(&entity)
@@ -936,6 +989,12 @@ impl FakeSim {
     /// The drawing the agent holds for an entity.
     pub fn drawing(&self, entity: u64) -> Option<&FakeDrawing> {
         self.drawings.get(&entity)
+    }
+
+    /// DCS loses a drawing with no word to the sidecar, as a mission script
+    /// removing it would.
+    pub fn lose_drawing(&mut self, entity: u64) {
+        self.drawings.remove(&entity);
     }
 
     /// Every drawing the agent holds, by entity.
@@ -1731,7 +1790,10 @@ impl FakeSim {
         self.ruins.clear();
         self.applied_spec.clear();
         self.applied_order.clear();
-        // Marks, drawings and menu items are gone with the mission.
+        // Marks, drawings and menu items are gone with the mission, and the
+        // load frees every DCS mark ID (LIVE): none is dead any more. The
+        // shim's process mark does not reset.
+        self.dead_ids.clear();
         self.marks.clear();
         self.drawings.clear();
         self.menus.clear();
@@ -1848,6 +1910,7 @@ impl FakeSim {
         self.applied_spec.clear();
         self.applied_order.clear();
         self.applied_extension.clear();
+        self.kill_all_ids();
         self.marks.clear();
         self.drawings.clear();
         self.menus.clear();
@@ -1973,6 +2036,12 @@ impl FakeSim {
         self.static_not_ready = n;
     }
 
+    /// The next `n` `MARK_SET` and `DRAWING_SET` commands are answered
+    /// `NOT_READY`: the shim never sees them, so its process mark stays.
+    pub fn pin_not_ready(&mut self, n: u32) {
+        self.pin_not_ready = n;
+    }
+
     /// The next `n` `WAREHOUSE_SET` commands are answered `NOT_READY`, and
     /// DCS changes nothing.
     pub fn stock_not_ready(&mut self, n: u32) {
@@ -1983,6 +2052,12 @@ impl FakeSim {
     /// answered from now on.
     pub fn farp_spawns(&mut self, f: FarpSpawns) {
         self.farp = f;
+    }
+
+    /// The next `n` `MARK_SET`s and `DRAWING_SET`s are refused by the shim as
+    /// at or below its process mark, whatever their ID.
+    pub fn refuse_adds(&mut self, n: u32) {
+        self.refuse_adds = n;
     }
 
     /// The next `n` `STATIC_SPAWN` commands with `dead = true` are answered
@@ -2792,6 +2867,7 @@ impl FakeSim {
                 | Body::MarkSet { .. }
                 | Body::MarkRemove
                 | Body::DrawingSet { .. }
+                | Body::DrawingUpdate { .. }
                 | Body::DrawingRemove
                 | Body::MenuSet { .. }
                 | Body::MenuRemove
@@ -2962,6 +3038,7 @@ impl FakeSim {
             | opcode::STATIC_SPAWN
             | opcode::MARK_SET
             | opcode::DRAWING_SET
+            | opcode::DRAWING_UPDATE
             | opcode::MENU_SET => Some(&self.applied_spec),
             opcode::GROUP_ORDER => Some(&self.applied_order),
             _ => None,
@@ -3214,6 +3291,10 @@ impl FakeSim {
                 self.ledger.picture_stops += 1;
                 self.result(&cmd, rc::APPLIED, 0, "", Lv::Nil);
             }
+            Body::MarkSet { .. } | Body::DrawingSet { .. } if self.pin_not_ready > 0 => {
+                self.pin_not_ready -= 1;
+                self.result(&cmd, rc::NOT_READY, 0, "injected: not ready", Lv::Nil);
+            }
             Body::MarkSet {
                 scope,
                 read_only,
@@ -3221,11 +3302,20 @@ impl FakeSim {
                 x,
                 y,
                 z,
+                dcs_id,
                 text,
             } => {
                 let Some(dcs_group) = self.pin_group(h.campaign, *scope, *target, true) else {
                     return self.pin_refused(&cmd, *scope, true);
                 };
+                match self.dcs_add(h.entity, *dcs_id) {
+                    Add::Added => {}
+                    Add::Held => return self.pin_applied(&cmd),
+                    Add::Refused(why) => {
+                        return self.result(&cmd, rc::DCS_REFUSED, 0, &why, Lv::Nil);
+                    }
+                    Add::Ignored => return self.pin_applied(&cmd),
+                }
                 self.marks.insert(
                     h.entity,
                     FakeMark {
@@ -3236,6 +3326,7 @@ impl FakeSim {
                         text: text.clone(),
                         rev: h.rev,
                         dcs_group,
+                        dcs_id: *dcs_id,
                     },
                 );
                 self.pin_applied(&cmd);
@@ -3244,10 +3335,30 @@ impl FakeSim {
                 scope,
                 shape,
                 target,
+                dcs_id,
                 args,
             } => {
                 if self.pin_group(h.campaign, *scope, *target, false).is_none() {
                     return self.pin_refused(&cmd, *scope, false);
+                }
+                // As the shim: only a known shape's layout reaches DCS.
+                if !nanoprobe_sidecar::store::drawing_layout_ok(*shape, args) {
+                    self.ledger.drawing_layouts_refused += 1;
+                    return self.result(
+                        &cmd,
+                        rc::DCS_REFUSED,
+                        0,
+                        "the shape and arguments are not a known layout",
+                        Lv::Nil,
+                    );
+                }
+                match self.dcs_add(h.entity, *dcs_id) {
+                    Add::Added => {}
+                    Add::Held => return self.pin_applied(&cmd),
+                    Add::Refused(why) => {
+                        return self.result(&cmd, rc::DCS_REFUSED, 0, &why, Lv::Nil);
+                    }
+                    Add::Ignored => return self.pin_applied(&cmd),
                 }
                 self.drawings.insert(
                     h.entity,
@@ -3257,9 +3368,35 @@ impl FakeSim {
                         shape: *shape,
                         args: args.clone(),
                         rev: h.rev,
+                        dcs_id: *dcs_id,
+                        updates: 0,
                     },
                 );
                 self.pin_applied(&cmd);
+            }
+            Body::DrawingUpdate { dcs_id, changes } => {
+                // In place, as setMarkup* does: the style keys of the
+                // arguments' tail change; the ID and place stay.
+                let Some(d) = self
+                    .drawings
+                    .get_mut(&h.entity)
+                    .filter(|d| d.dcs_id == *dcs_id)
+                else {
+                    return self.result(&cmd, rc::NOT_BOUND, 0, "", Lv::Nil);
+                };
+                d.args = update_args(d.shape, &d.args, changes);
+                d.rev = h.rev;
+                d.updates += 1;
+                self.pin_applied(&cmd);
+            }
+            Body::MarkClear { dcs_id } => {
+                let held = self.marks.values().any(|m| m.dcs_id == *dcs_id)
+                    || self.drawings.values().any(|d| d.dcs_id == *dcs_id);
+                if held {
+                    return self.result(&cmd, rc::BAD_PAYLOAD, 0, "held", Lv::Nil);
+                }
+                self.ledger.mark_clears.push(*dcs_id);
+                self.result(&cmd, rc::APPLIED, 0, "", Lv::Nil);
             }
             Body::MenuSet {
                 parent,
@@ -3302,8 +3439,12 @@ impl FakeSim {
                 self.pin_applied(&cmd);
             }
             Body::MarkRemove | Body::DrawingRemove => {
-                self.marks.remove(&h.entity);
-                self.drawings.remove(&h.entity);
+                if let Some(m) = self.marks.remove(&h.entity) {
+                    self.dead_ids.insert(m.dcs_id);
+                }
+                if let Some(d) = self.drawings.remove(&h.entity) {
+                    self.dead_ids.insert(d.dcs_id);
+                }
                 self.applied_spec.remove(&h.entity);
                 self.result(&cmd, rc::APPLIED, 0, "", Lv::Nil);
             }
@@ -3375,6 +3516,58 @@ impl FakeSim {
             rc::BAD_PAYLOAD
         };
         self.result(cmd, code, 0, "", Lv::Nil);
+    }
+
+    /// The shim's and DCS's side of a `MARK_SET` or `DRAWING_SET` under
+    /// `dcs_id`, as lua/agent/shim.lua `set_mark` does: the entity held under
+    /// that ID is answered with no change; an ID at or below the process mark,
+    /// or held by another entity, is refused with no DCS call; otherwise the
+    /// entity's old ID is removed (it dies), the ID becomes the process mark,
+    /// and DCS adds. The mark outlives a mission load and a campaign switch
+    /// and starts empty with a new process; a mission load frees every ID. An
+    /// add DCS itself ignores (an ID removed earlier that the mark does not
+    /// cover) is recorded in `ledger.ignored_adds`.
+    fn dcs_add(&mut self, entity: u64, dcs_id: u64) -> Add {
+        let mine = self.marks.get(&entity).map(|m| m.dcs_id) == Some(dcs_id)
+            || self.drawings.get(&entity).map(|d| d.dcs_id) == Some(dcs_id);
+        if mine {
+            return Add::Held;
+        }
+        let held_by_any = self.marks.values().any(|m| m.dcs_id == dcs_id)
+            || self.drawings.values().any(|d| d.dcs_id == dcs_id);
+        let forced = self.refuse_adds > 0;
+        self.refuse_adds = self.refuse_adds.saturating_sub(1);
+        if forced || dcs_id <= self.process_mark || held_by_any {
+            self.ledger.refused_adds += 1;
+            return Add::Refused(format!(
+                "id {dcs_id} at or below the process mark {}",
+                self.process_mark
+            ));
+        }
+        if let Some(m) = self.marks.remove(&entity) {
+            self.dead_ids.insert(m.dcs_id);
+        }
+        if let Some(d) = self.drawings.remove(&entity) {
+            self.dead_ids.insert(d.dcs_id);
+        }
+        self.process_mark = dcs_id;
+        if self.dead_ids.contains(&dcs_id) {
+            self.ledger.ignored_adds.push(dcs_id);
+            return Add::Ignored;
+        }
+        Add::Added
+    }
+
+    /// A campaign switch removes every mark and drawing from DCS: their IDs
+    /// stay dead until the next mission load.
+    fn kill_all_ids(&mut self) {
+        let ids: Vec<u64> = self
+            .marks
+            .values()
+            .map(|m| m.dcs_id)
+            .chain(self.drawings.values().map(|d| d.dcs_id))
+            .collect();
+        self.dead_ids.extend(ids);
     }
 
     fn pin_applied(&mut self, cmd: &Command) {
@@ -3692,6 +3885,13 @@ impl FakeSim {
             return;
         };
         // The marks and menu items of the group's ID go with it.
+        let dead: Vec<u64> = self
+            .marks
+            .values()
+            .filter(|m| m.dcs_group == gid)
+            .map(|m| m.dcs_id)
+            .collect();
+        self.dead_ids.extend(dead);
         self.marks.retain(|_, m| m.dcs_group != gid);
         self.menus.retain(|_, m| m.dcs_group != gid);
         // A group DCS destroyed leaves nothing to revive.
@@ -3829,4 +4029,37 @@ fn is_seat(slot: &str) -> bool {
     slot.rsplit_once('_').is_some_and(|(base, n)| {
         !base.is_empty() && !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit())
     })
+}
+
+/// A drawing's arguments after a `DRAWING_UPDATE`'s changes: the tail holds
+/// color, fill, line type (a text's font size), read only and the message
+/// (a text's text).
+fn update_args(shape: u32, args: &Lv, changes: &Lv) -> Lv {
+    use nanoprobe_sidecar::sim::wire::lv;
+    let mut items: Vec<Lv> = lv::items(args).into_iter().cloned().collect();
+    let n = items.len();
+    // Only the full layout the sidecar sends in place: the points of the
+    // shape, then color, fill, line type, read only and the message.
+    let styled = n >= 6
+        && [n - 5, n - 4]
+            .iter()
+            .all(|&i| lv::items(&items[i]).len() == 4)
+        && matches!(items[n - 3], Lv::Number(_))
+        && matches!(items[n - 2], Lv::Bool(_))
+        && matches!(items[n - 1], Lv::String(_));
+    if !styled {
+        return args.clone();
+    }
+    let third = if shape == 5 { "font_size" } else { "line_type" };
+    for (key, at) in [
+        ("color", n - 5),
+        ("fill", n - 4),
+        (third, n - 3),
+        ("text", n - 1),
+    ] {
+        if let Some(v) = lv::get(changes, key) {
+            items[at] = v.clone();
+        }
+    }
+    lv::list(items)
 }

@@ -31,13 +31,20 @@ local function cross(source)
   return value
 end
 
--- Make two events, and give the world a moment before the caller reads.
-local EVENTS = [[
+-- Make two events, and give the world a moment before the caller reads. DCS
+-- ignores an add under an ID removed earlier in the process (LIVE), so each run
+-- takes a new ID, from 500,000,000 plus the hook's real time in tenths of a second.
+-- That stays below 900,000,000 (the drawing-layers experiments' base, and far
+-- below the platform pool, 2^30 to 2^31 - 1) for 4.0e7 s, about 463 days.
+local function events()
+  local id = 500000000 + math.floor(DCS.getRealTime() * 10)
+  return string.format([[
 local o = E.lib('scenario').origin()
-trigger.action.markToAll(536870912, 'np-s16-survive', { x = o.x, y = 0, z = o.z }, true)
-trigger.action.removeMark(536870912)
+trigger.action.markToAll(%d, 'np-s16-survive', { x = o.x, y = 0, z = o.z }, true)
+trigger.action.removeMark(%d)
 return 'events'
-]]
+]], id, id)
+end
 
 local INSTALL = [[
 local count = { count = 0, dead = false }
@@ -83,7 +90,7 @@ end
 local first = rawget(_G, MARKER)
 if not first then
   E.observe('install', cross(INSTALL), { info = true })
-  cross(EVENTS)
+  cross(events())
   return after(1, function()
     local counted = tonumber(cross(READ))
     rawset(_G, MARKER, { count = counted })
@@ -105,7 +112,7 @@ if held == 'none' then
   return 'the load gave the server state a new Lua state'
 end
 local before = tonumber(held)
-cross(EVENTS)
+cross(events())
 return after(1, function()
   local after_count = tonumber(cross(READ))
   E.observe('state_reset', false, { info = true })

@@ -67,7 +67,10 @@
 --   - Controller:setOption records each option's value by group.
 --   - trigger.action.markToAll, markToCoalition, markToGroup and markupToAll
 --     add to `sim.marks` by ID and send S_EVENT_MARK_ADDED; removeMark takes
---     one out. outText and its Coalition, Country, Group and Unit forms record
+--     one out. An add over a held ID, or under an ID removed since the last
+--     mission load (`sim.dead_marks`), is ignored with no panel and no event
+--     (LIVE). A mission load frees every ID (LIVE).
+--     A removeMark of an ID never held blocks nothing. outText and its Coalition, Country, Group and Unit forms record
 --     each call in `sim.messages`. missionCommands keeps one menu tree per
 --     scope; `sim:menu_list(key)` and `sim:menu_select(key, path)` read it.
 --     What DCS returns for a path is UNVERIFIED beyond a table of names.
@@ -151,6 +154,11 @@ function Sim:clear()
   -- newer FARP holds the name: it still answers lookups by name.
   self.doomed_farps = {}
   self.groups, self.statics = {}, {}
+  -- IDs removed since the last load: an add under one shows nothing and emits
+  -- nothing (LIVE, docs/results/2026-11-25-drawing-layers.md). A mission load
+  -- removes every mark and drawing and frees every ID, dead ones included (LIVE,
+  -- one kind of load: a reload of the same mission).
+  self.dead_marks = {}
   self.marks = {}
   -- F10 menu trees by scope key (`all`, `c<coalition>`, `g<group ID>`), and
   -- the text calls of trigger.action.outText and its forms.
@@ -1337,14 +1345,32 @@ local function scripting(host, name)
       -- (LIVE, the S9 event catalogue). The mock's time is the time of day.
       markToAll = function(id, text, point, read_only)
         mark_check('markToAll', id, text, point)
+        -- An add over a held ID, or under an ID removed earlier in this
+        -- process, changes nothing and emits no event (LIVE for drawings; the
+        -- same for marks is modeled alike).
+        if sim.marks[id] or sim.dead_marks[id] then
+          return
+        end
         mark_event('S_EVENT_MARK_ADDED', id, text, point, 255, false, nil, { read_only = read_only })
       end,
       markToCoalition = function(id, text, point, side, read_only)
         mark_check('markToCoalition', id, text, point)
+        -- An add over a held ID, or under an ID removed earlier in this
+        -- process, changes nothing and emits no event (LIVE for drawings; the
+        -- same for marks is modeled alike).
+        if sim.marks[id] or sim.dead_marks[id] then
+          return
+        end
         mark_event('S_EVENT_MARK_ADDED', id, text, point, side, false, nil, { read_only = read_only })
       end,
       markToGroup = function(id, text, point, group, read_only)
         mark_check('markToGroup', id, text, point)
+        -- An add over a held ID, or under an ID removed earlier in this
+        -- process, changes nothing and emits no event (LIVE for drawings; the
+        -- same for marks is modeled alike).
+        if sim.marks[id] or sim.dead_marks[id] then
+          return
+        end
         if type(group) ~= 'number' then
           error('mock: markToGroup takes a group ID', 2)
         end
@@ -1358,18 +1384,113 @@ local function scripting(host, name)
         if sim.mark_raises then
           error('mock: markupToAll raises', 2)
         end
+        -- An add over a held ID, or under an ID removed earlier in this
+        -- process, changes nothing and emits no event (LIVE,
+        -- docs/results/2026-11-25-drawing-layers.md).
+        if sim.marks[id] or sim.dead_marks[id] then
+          return
+        end
         local first = ...
         local point = type(first) == 'table' and first.x and first or { x = 0, y = 0, z = 0 }
-        mark_event('S_EVENT_MARK_ADDED', id, '', point, side == -1 and 255 or side, false, nil,
+        -- The text is the last argument (UNVERIFIED: the mock reads it so).
+        local n = select('#', ...)
+        local last = n > 0 and select(n, ...) or nil
+        local text = type(last) == 'string' and last or ''
+        mark_event('S_EVENT_MARK_ADDED', id, text, point, side == -1 and 255 or side, false, nil,
           { shape = shape, args = { ... }, drawing = true })
       end,
       lineToAll = function(side, id, from)
-        mark_event('S_EVENT_MARK_ADDED', id, '', from, side == -1 and 255 or side)
+        if sim.marks[id] or sim.dead_marks[id] then
+          return
+        end
+        mark_event('S_EVENT_MARK_ADDED', id, '', from, side == -1 and 255 or side, false, nil, { drawing = true })
+      end,
+      circleToAll = function(side, id, center)
+        if sim.marks[id] or sim.dead_marks[id] then
+          return
+        end
+        mark_event('S_EVENT_MARK_ADDED', id, '', center, side == -1 and 255 or side, false, nil, { drawing = true })
+      end,
+      -- A filled rectangle between two corners (LIVE, rectToAll draws one).
+      rectToAll = function(side, id, from, to, color, fill, line_type, read_only, text)
+        if sim.marks[id] or sim.dead_marks[id] then
+          return
+        end
+        mark_event('S_EVENT_MARK_ADDED', id, type(text) == 'string' and text or '', from,
+          side == -1 and 255 or side, false, nil, { drawing = true })
+      end,
+      -- A text box at one point.
+      textToAll = function(side, id, point, color, fill, size, read_only, text)
+        if sim.marks[id] or sim.dead_marks[id] then
+          return
+        end
+        mark_event('S_EVENT_MARK_ADDED', id, type(text) == 'string' and text or '', point,
+          side == -1 and 255 or side, false, nil, { drawing = true })
+      end,
+      -- Changes to a held drawing in place emit no event (LIVE). The mock keeps
+      -- the text and records every other change on the mark as `set[call]`.
+      setMarkupText = function(id, text)
+        local mark = sim.marks[id]
+        if mark then
+          mark.text = text
+        end
+      end,
+      setMarkupColor = function(id, value)
+        local mark = sim.marks[id]
+        if mark then
+          mark.set = mark.set or {}
+          mark.set.color = value
+        end
+      end,
+      setMarkupColorFill = function(id, value)
+        local mark = sim.marks[id]
+        if mark then
+          mark.set = mark.set or {}
+          mark.set.fill = value
+        end
+      end,
+      -- DCS has it and it resizes a circle, fill included (LIVE,
+      -- docs/results/2026-11-25-drawing-layers.md). The mock records the value as set.radius.
+      setMarkupRadius = function(id, value)
+        local mark = sim.marks[id]
+        if mark then
+          mark.set = mark.set or {}
+          mark.set.radius = value
+        end
+      end,
+      setMarkupFontSize = function(id, value)
+        local mark = sim.marks[id]
+        if mark then
+          mark.set = mark.set or {}
+          mark.set.font_size = value
+        end
+      end,
+      setMarkupTypeLine = function(id, value)
+        local mark = sim.marks[id]
+        if mark then
+          mark.set = mark.set or {}
+          mark.set.line_type = value
+        end
+      end,
+      setMarkupPositionStart = function(id, value)
+        local mark = sim.marks[id]
+        if mark then
+          mark.set = mark.set or {}
+          mark.set.start = value
+        end
+      end,
+      setMarkupPositionEnd = function(id, value)
+        local mark = sim.marks[id]
+        if mark then
+          mark.set = mark.set or {}
+          mark.set['end'] = value
+        end
       end,
       removeMark = function(id)
         local mark = sim.marks[id]
         if mark then
           sim.marks[id] = nil
+          sim.dead_marks[id] = true
           mark_event('S_EVENT_MARK_REMOVED', id, mark.text, mark.point, mark.coalition, true, mark.group)
         end
       end,

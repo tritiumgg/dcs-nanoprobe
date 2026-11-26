@@ -344,6 +344,7 @@ codes opcode
   30 MENU_REMOVE class=set-state entity=menu_item campaign=active gen=bound state=server payload=none
   31 EXTENSION_SET class=set-state rev=spec campaign=active state=server payload=layout
   32 EXTENSION_REMOVE class=set-state campaign=active state=server payload=layout
+  33 DRAWING_UPDATE class=set-state entity=drawing rev=spec campaign=active gen=bound state=server payload=layout
   48 EXPLOSION class=effect campaign=active gen=bound state=server payload=layout
   49 MESSAGE class=effect campaign=any state=server payload=layout
   50 SOUND class=effect campaign=any state=server payload=layout
@@ -364,6 +365,7 @@ codes opcode
   65 COUNTRIES class=query campaign=any gen=bound state=server payload=none
   66 PLAYERS class=query campaign=any state=hook payload=none
   67 BANS class=query campaign=any state=hook payload=none
+  68 MARK_CLEAR class=effect campaign=any gen=bound state=server payload=layout
 codes result
   0 APPLIED class=success
   2 AT_REVISION class=success
@@ -427,19 +429,26 @@ layout WAREHOUSE_SET fixed=0
 layout WAREHOUSE_ADJUST fixed=0
   + str airbase
   + lv delta
-layout MARK_SET fixed=40
+layout MARK_SET fixed=48
   0x0000 u32 scope
   0x0004 u32 read_only
   0x0008 u64 target
   0x0010 f64 x
   0x0018 f64 y
   0x0020 f64 z
+  0x0028 u64 dcs_id
   + str text
-layout DRAWING_SET fixed=16
+layout DRAWING_SET fixed=24
   0x0000 u32 scope
   0x0004 u32 shape
   0x0008 u64 target
+  0x0010 u64 dcs_id
   + lv args
+layout DRAWING_UPDATE fixed=8
+  0x0000 u64 dcs_id
+  + lv changes
+layout MARK_CLEAR fixed=8
+  0x0000 u64 dcs_id
 layout MENU_SET fixed=24
   0x0000 u64 parent
   0x0008 u64 target
@@ -542,4 +551,4 @@ codes moderation
   2 BAN call=net.banlist_add(player,_seconds,_reason);_with_player_0,_net.banlist_add_by_ucid(ucid,_seconds,_reason)
   3 UNBAN call=net.banlist_remove(ucid)
   4 SLOT call=net.force_player_slot(player,_side,_slot)
-hash f5fc454fe3951463
+hash 38fc24c11e1688e7

@@ -77,6 +77,9 @@ of the `Event` message of the package named in the events file's `meta`
 | `idempotency` | `key TEXT PRIMARY KEY`, `at_ms INTEGER`, `request_hash BLOB`, `response BLOB` | One per changing call answered on this campaign |
 | `checkpoint` | `seq INTEGER PRIMARY KEY`, `body BLOB` | The last checkpoint, one row |
 | `template` | `theater TEXT PRIMARY KEY`, `body BLOB` | One per theater the campaign has its own template for: the bytes of the `.miz` file as they were when `SetCampaignTemplate` named it (plan revision 35). A schema 1 file without the table gains it at open. |
+| `marker` | `id INTEGER PRIMARY KEY`, `body BLOB` | One per mark, drawing and menu item, live or removed, until the purge takes a removed one (spec/world.md, "Labels and markup groups") |
+| `layer` | `name TEXT PRIMARY KEY`, `body BLOB` | One per markup group. The commit of `RemoveMarkupGroup` deletes the row; a markup group made again under the name starts with its defaults. |
+| `dcs_issue` | `boot INTEGER PRIMARY KEY`, `body BLOB` | One per agent boot of the newest 16: the high-water mark of the one pool of DCS mark IDs, as the next slot to give (spec/world.md, "DCS IDs"). A schema 2 file without the table gains it at open. |
 
 A removed extension keeps its `extension` row as a tombstone: `removed` is true, the
 body holds no source, and `spec_rev` is the highest revision the extension had. A
@@ -86,11 +89,11 @@ registration of the name after a reopen gets a revision above it.
 
 | Key | Value |
 |---|---|
-| `schema` | The schema version, a number. 1 is this document. |
+| `schema` | The schema version, a number. 2 is this document. |
 | `campaign_id` | The campaign ID. It must equal the folder's name. |
 | `journal_bytes` | The bytes of the bodies of the journal rows, decimal text. The sidecar writes it in the transaction that adds journal rows and in the one that deletes them. A file without it gets it at open, from one sum over the table. |
 | `campaign` | The campaign record: ID, name, state (`active`, `suspended`, `finished`), theaters, the theater to load, clock, created time, the author's component schema versions, and the outcome of a finished campaign. Its `state` key keeps its layout in every schema version, so the state is read before a migration. The platform schema version is `schema`. |
-| `world` | The next `EntityId`, the store revision, whether the store is open, the loaded mission (agent boot, mission generation, theater), the last agent record folded in (agent boot and record number) with the stamp it was read under (agent boot, mission generation, campaign), which records delivered again before their next `FRAME` keep, the desired airbase owners and warehouse stocks with their revisions, the sample rates the controller set, the mission load an activation or a reload owes (the shell as DCS opens it, the start written into it, and the command's epoch and sequence number once sent; absent when none is owed), the start written into the running mission's shell, the model time of that generation's first sample with its agent boot and generation, the shell slot DCS may hold (the last load applied, or one sent whose outcome is unknown, left in flight, or dropped by a suspend), the next mission's settings (`SetNextMission`), the agent's country-to-coalition map, the model time of the last samples, and the route events not yet published. |
+| `world` | The next `EntityId`, the store revision, whether the store is open, the loaded mission (agent boot, mission generation, theater), the last agent record folded in (agent boot and record number) with the stamp it was read under (agent boot, mission generation, campaign), which records delivered again before their next `FRAME` keep, the desired airbase owners and warehouse stocks with their revisions, the sample rates the controller set, the mission load an activation or a reload owes (the shell as DCS opens it, the start written into it, and the command's epoch and sequence number once sent; absent when none is owed), the start written into the running mission's shell, the model time of that generation's first sample with its agent boot and generation, the shell slot DCS may hold (the last load applied, or one sent whose outcome is unknown, left in flight, or dropped by a suspend), the next mission's settings (`SetNextMission`), the agent's country-to-coalition map, the model time of the last samples, the route events not yet published, and the campaign model time: `played_s`, with the agent boot, generation and model time of the sample it was last counted at (`played_at`), both written at checkpoint rate. A body without `played_s` reads 0. |
 
 An entity body carries every field of its row in spec/world.md: for a group or static
 its spec, order and revisions, lifecycle state, authority, lost policy, error, whether
@@ -111,9 +114,22 @@ has none. A further unit has no `unit` row. A load refuses a store whose further
 retired IDs are at or past the next `EntityId`, are also a group or unit, or are held
 twice.
 
+A `marker` body holds `kind` (`mark`, `drawing` or `menu`), `spec_rev`, `scope`,
+`target`, `removed`, `removed_at_ms` and `removed_cause` (`expired` or `evicted`; absent
+for the controller's). A mark adds `theater`, `x`, `y`, `z`, `text` and `read_only`; a
+drawing `shape` and `args`; each of them `dcs_id` (absent for 0: an item DCS holds no
+ID for), `rank` (absent for 0; the draw rank: the value of a counter of adds when an add of the item was
+last sent, rising with every add the item is given; 0 for an item never sent), and `label`,
+`layer` and `expires_at` when set. A menu item adds `parent`, `submenu` and `text`. A `layer` body holds
+`visible`, and `expire_after_s` and `cap` when set. A `dcs_issue` body holds
+`ordinal` (the order the boots began in, rising; the newest is the current boot) and `next`,
+the next slot of the pool as decimal text (0 when none was given). A removed item keeps its
+markup group's name though the markup group may have no row.
+
 The journal holds the entries spec/world.md says are journalled, each with its `kind`
-(`command`, `outcome`, `death`, `removed` with its `cause`, `controller` or `expired`
-(an entry without one is the controller's), `purged`, and so on), the entity it names (0 for none), the wall
+(`command`, `outcome`, `death`, `removed` with its `cause`, `controller`, `expired` or
+`evicted` (an entry without one is the controller's), `purged`, `layer` with its `name`
+and whether it was `removed`, and so on), the entity it names (0 for none), the wall
 time it was made and its fields. The journal is an audit trail: the sidecar appends to
 it and never reads an entry's body back. An `inflight` row is inserted with the `command` entry that
 sends it and deleted with the entry that gives its outcome, in the same transaction; it
@@ -152,6 +168,9 @@ journal each store holds in memory, once an hour, except a finished campaign's. 
 is the bytes of each entry's body as the store file would encode it, kept as a running
 count.
 
+Markup group entries and the entries of a markup group replacement follow the same limits. A
+replacement that changes nothing journals nothing.
+
 `inflight` is not touched, and a restart needs nothing from the journal. A command
 whose `command` entry was deleted and that has no outcome is still owed, and its
 outcome resolves it.
@@ -184,6 +203,8 @@ A commit writes:
 |---|---|
 | The journal entries made since the last commit, and the `inflight` rows they insert or delete | Every commit |
 | Every group, unit or extension row whose spec, order, lifecycle, authority, policy, error, death, mark or object ID changed | Every commit |
+| Every `marker` row that changed or was purged, and every `layer` row that changed or was removed | Every commit |
+| Every `dcs_issue` row that changed or fell out of the newest 16 boots: few rows, all compared | Every commit |
 | `meta.world` and `meta.campaign` when they changed | Every commit |
 | The idempotency rows of calls answered | Every commit |
 | Positions, life, warehouse stock: the sampled state | Only at a checkpoint |
@@ -193,7 +214,16 @@ units, marks the group, and the commit compares only the marked groups and their
 members with what the file holds. A new store file and the first commit after a new
 mission generation compare every row. A checkpoint compares the groups marked since the
 last checkpoint, and their members, sampled state included. Debug builds compare every
-row at every commit and checkpoint and fail when the marks missed one.
+row at every commit and checkpoint and fail when the marks missed one. A marker's
+change marks its row the same way. Markup groups are few: every commit compares them all. The
+commit that writes a `ReplaceMarkupGroup`, a cap's evictions or an expiry holds its rows, its
+journal entries, its idempotency row and its commands in flight in one transaction, and
+the marks are cleared only after it commits. The reconciler takes the DCS ID of a mark or
+drawing add in the step that sends it: the pool's high-water mark and the item's `dcs_id`
+are written in the same commit as the `command` entry that carries the ID, and the command
+reaches DCS after it. A restart never gives an ID again that a command already sent or about
+to be sent carried. A put, `PutMarkupGroup` or `ReplaceMarkupGroup` that needs slots the pool lacks
+(spec/world.md, "DCS IDs") is refused before any write.
 
 A checkpoint is a commit that also writes every row whose sampled state changed, and
 replaces the checkpoint row. Neither a commit nor a checkpoint reads the rows nothing
@@ -255,12 +285,26 @@ the achieved periods; the targets are not shown.
 1. Read `meta.schema`. A version newer than the sidecar's is refused: the sidecar does
    not open the campaign and reports the version it found.
 2. An older version is migrated (below).
-3. Load `meta`, the entities, the extensions, the `inflight` rows and the checkpoint row
-   into memory. The journal is not read. A tombstone is not an extension: it sets the
+3. Load `meta`, the entities, the extensions, the markers, the markup groups, the `inflight`
+   rows and the checkpoint row into memory. The journal is not read. A tombstone is not an extension: it sets the
    name's revision floor and the agent's pending removal, so `EXTENSION_REMOVE` is sent
    until the agent confirms it.
 4. Copy the idempotency rows younger than `idempotency_keep_h` into the server store's
    key index (below).
+
+The open refuses a store whose markers break the rules spec/world.md sets: a marker ID
+at or past the next `EntityId` or also a group or unit; a label or `dcs_id` held by two
+live marks or drawings (any number may hold 0); a `rank` held by two live marks or drawings
+(any number may hold 0); a mark's or drawing's `dcs_id`, live or
+removed, other than 0 and outside the pool (2^30 to 2^31 - 1); a `dcs_issue` row
+with a next slot past the pool's size; a live item whose markup group has no row;
+a menu item whose parent is not a menu item; a label or a markup group name
+out of its limits; a markup group with a cap of 0; a campaign model time that is not
+finite or is negative. A menu item has no `dcs_id` or `rank` and skips the ID checks.
+The draw counter is rebuilt as the highest `rank` any row holds, removed rows included. The label
+index is rebuilt from the live rows. The current agent boot is the `dcs_issue` row with the
+highest `ordinal`, and its next slot is the stored mark, raised to one past the
+highest `dcs_id` any row holds, removed rows included, so no ID DCS may hold is given again.
 
 The spatial grid and the change list a watch resumes from are not stored. The grid is
 rebuilt from the units' last positions. A watch that resumes from before the open gets
@@ -292,7 +336,15 @@ reads. On open, a store at version N below the current version M:
 3. Is opened.
 
 A step that fails rolls back the transaction: the store stays at version N, the backup
-is kept, and the campaign is not opened. Migrating the author's components is the
+is kept, and the campaign is not opened.
+
+| Step | What it does |
+|---|---|
+| 2 | Creates the `marker`, `layer` and `dcs_issue` tables, empty |
+
+There is no downgrade. A sidecar of schema 1 refuses a schema 2 file, as it refuses any
+newer version. The way back is to restore the `pre_migration` backup, which loses every
+change made after the migration. Migrating the author's components is the
 author's step, run through the Extension service after the platform's steps; the
 campaign record keeps each component schema's version for it.
 
@@ -394,6 +446,22 @@ limit deleted it, is refused with `SEQUENCE_EXPIRED` (spec/errors.md).
 | `idempotency` | `key TEXT PRIMARY KEY`, `at_ms INTEGER`, `campaign INTEGER`, `request_hash BLOB`, `response BLOB` | One per changing call answered: for a call on no campaign, the whole answer; for a call on a campaign, the index (`campaign` set, `request_hash` and `response` null) |
 | `extension` | `name TEXT PRIMARY KEY`, `body BLOB` | Server-scoped extension data, by name |
 | `deleted_campaign` | `id INTEGER PRIMARY KEY`, `at_ms INTEGER` | One per campaign deleted through the API, so its tag is never given again (spec/world.md, "Names") |
+| `dcs_issue` | `boot INTEGER PRIMARY KEY`, `next INTEGER` | At most one row: the agent boot the last campaign closed in, and the next slot of the shared pool of DCS mark IDs it left. A file without the table gains it at open. |
+
+A DCS process has one pool of mark and drawing IDs, and the shim's process mark covers every
+campaign the process runs: a campaign switch frees no ID. So the campaigns of a boot share one
+mark. A campaign keeps its own mark committed with its commands (the `dcs_issue` row of its
+store). Its closing transaction (suspend or finish) writes the server store's `dcs_issue` row
+first, as it writes an idempotency index row: the campaign's current agent boot and mark, never
+lower than the row's for the same boot; the row of another boot is replaced. When a campaign
+activates, its store takes the server row's mark for that boot, now if the store is in that
+boot and otherwise when it begins it, so its first add takes an ID above every earlier
+campaign's. A boot that began with no row, or a campaign that ended without its closing
+transaction (a crash), leaves the row lower than the shim's mark. The shim then refuses the
+campaign's first add, `DCS_REFUSED` with the message `id <ID> at or below the process mark <N>`
+(spec/commands.md); the reconciler raises the campaign's mark past N (past the refused ID when
+the message names none) and sends the add once more under a fresh ID. A second such refusal at
+the same revision is final.
 
 The command epoch is written before any command of the new epoch reaches DCS. It
 grows across a campaign switch and a sidecar restart.
@@ -557,7 +625,8 @@ active campaign.
 `ExportCampaign` streams JSON lines, each a whole object with a `kind`: a `header` line
 (export format 1, the campaign ID, the store's schema version, and the Protobuf package
 of the events), then `meta` (each key, its value decoded), `entity` (each row, kind and
-body decoded), `extension`, `journal`, `inflight`, `template` (theater, size and SHA-256
+body decoded), `extension`, `marker` (ID and body), `layer` (name and body), `journal`,
+`inflight`, `template` (theater, size and SHA-256
 of the campaign's copy) and `checkpoint` rows, then `event`
 rows with the event's Protobuf encoding in base 64 (`event_b64`). A stored body is
 decoded to JSON by the rule of spec/world.md, "Lua tables in the API"; a string that is
@@ -632,6 +701,30 @@ generation, so a new generation or a new DCS process owes the spawn again. A sid
 restart within a generation owes nothing for a ruin whose spawn was answered or whose
 static died there. A ruin's spawn left unanswered is sent again, and answered
 `AT_REVISION` if it ran (spec/world.md, "Ruins").
+
+### Marks, drawings and markup groups at a restart
+
+- After a new agent boot or mission generation DCS holds no marker (LIVE for a mission
+  load, docs/results/2026-11-25-drawing-layers.md, "Run 3, part B"): every live item's
+  `dcs_id` reads 0, and the reconciler adds every visible live mark and drawing
+  together, ascending by draw rank (an item never sent last, by creation), each under a
+  new ID, then the menu items, a parent before its children (spec/world.md, "Redraw
+  order"). A new agent boot resets the high-water mark; a mission generation keeps
+  it.
+- After a sidecar start in the agent boot and generation the store holds as loaded, the
+  shim may still hold what the old process set. The reconciler sends the removal of every
+  removed marker not purged and of every live item of a hidden markup group, then adds every
+  visible live item again, each under a new ID and at a new revision: the agent answers a set
+  at a revision it holds `AT_REVISION`, and the shim removes the ID it held. A removal names
+  the entity, and the shim removes the ID it holds for it. The high-water marks are those the
+  store file holds, so no ID is given twice.
+  Removals go before sets in a step, and menu items before their submenu. The purge of a
+  removed marker waits until DCS holds it no more.
+- Each step sends at most 32 marker commands, and the agent applies them under its
+  per-frame commanded-work budget (spec/commands.md, "Budget").
+- The campaign model time goes on from `played_at`: the first sample of the same agent
+  boot and generation adds the model time since, while the sidecar was down; a new boot
+  or generation adds nothing before its own samples.
 
 ### Restore burst
 

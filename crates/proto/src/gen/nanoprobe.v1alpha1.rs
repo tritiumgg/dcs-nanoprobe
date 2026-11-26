@@ -375,6 +375,9 @@ pub enum ErrorReason {
     Unverified = 27,
     /// The store's file system has less free space than the store needs.
     SpaceLow = 28,
+    /// A pool of DCS mark IDs has too few unused slots in the DCS process now
+    /// running for the adds a call needs.
+    DcsIdsFull = 29,
 }
 impl ErrorReason {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -412,6 +415,7 @@ impl ErrorReason {
             Self::Internal => "ERROR_REASON_INTERNAL",
             Self::Unverified => "ERROR_REASON_UNVERIFIED",
             Self::SpaceLow => "ERROR_REASON_SPACE_LOW",
+            Self::DcsIdsFull => "ERROR_REASON_DCS_IDS_FULL",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -446,6 +450,7 @@ impl ErrorReason {
             "ERROR_REASON_INTERNAL" => Some(Self::Internal),
             "ERROR_REASON_UNVERIFIED" => Some(Self::Unverified),
             "ERROR_REASON_SPACE_LOW" => Some(Self::SpaceLow),
+            "ERROR_REASON_DCS_IDS_FULL" => Some(Self::DcsIdsFull),
             _ => None,
         }
     }
@@ -1292,10 +1297,27 @@ pub struct Mark {
     #[prost(uint64, tag = "6")]
     pub spec_revision: u64,
     /// The revision DCS has applied, and the error if DCS refused the last one.
+    /// 0 while its markup group is hidden.
     #[prost(uint64, tag = "7")]
     pub applied_spec_revision: u64,
     #[prost(string, tag = "8")]
     pub last_error: ::prost::alloc::string::String,
+    /// Unique among the campaign's live marks and drawings; empty for none.
+    #[prost(string, tag = "9")]
+    pub label: ::prost::alloc::string::String,
+    /// The markup group it is drawn in; empty for none.
+    #[prost(string, tag = "10")]
+    pub markup_group: ::prost::alloc::string::String,
+    /// The campaign model time it expires at, seconds (spec/world.md, "Labels
+    /// and markup groups"). Absent when it does not expire.
+    #[prost(double, optional, tag = "11")]
+    pub expires_at: ::core::option::Option<f64>,
+    /// Output only: the DCS ID the item is drawn under. 0 while it is hidden or
+    /// not yet drawn. It changes on every add: a full set, a show, a mission
+    /// load, a restart. Set by the sidecar and ignored on input. To tell the
+    /// platform's own mark events from a player's, read WorldEvent.platform_mark.
+    #[prost(uint64, tag = "12")]
+    pub dcs_id: u64,
 }
 /// A map drawing the controller set.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1304,17 +1326,53 @@ pub struct Drawing {
     pub id: u64,
     #[prost(message, optional, tag = "2")]
     pub audience: ::core::option::Option<Audience>,
-    /// The DCS shape ID.
+    /// The DCS markupToAll shape number: 1 line, 3 polygon through its points (a line with
+    /// two), 4 arrow, 5 text box, 6 quad (four points), 7 freeform. 2 is unknown.
     #[prost(uint32, tag = "3")]
     pub shape: u32,
     #[prost(message, optional, tag = "4")]
     pub args: ::core::option::Option<::prost_types::ListValue>,
     #[prost(uint64, tag = "5")]
     pub spec_revision: u64,
+    /// 0 while its markup group is hidden.
     #[prost(uint64, tag = "6")]
     pub applied_spec_revision: u64,
     #[prost(string, tag = "7")]
     pub last_error: ::prost::alloc::string::String,
+    /// Unique among the campaign's live marks and drawings; empty for none.
+    #[prost(string, tag = "8")]
+    pub label: ::prost::alloc::string::String,
+    /// The markup group it is drawn in; empty for none.
+    #[prost(string, tag = "9")]
+    pub markup_group: ::prost::alloc::string::String,
+    /// The campaign model time it expires at, seconds. Absent when it does not
+    /// expire.
+    #[prost(double, optional, tag = "10")]
+    pub expires_at: ::core::option::Option<f64>,
+    /// Output only: the DCS ID the item is drawn under. 0 while it is hidden or
+    /// not yet drawn. It changes on every add: a full set, a show, a mission
+    /// load, a restart. Set by the sidecar and ignored on input. To tell the
+    /// platform's own mark events from a player's, read WorldEvent.platform_mark.
+    #[prost(uint64, tag = "11")]
+    pub dcs_id: u64,
+}
+/// A named set of marks and drawings, shown or hidden together (spec/world.md,
+/// "Labels and markup groups").
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MarkupGroup {
+    /// 1 to 64 bytes with no control character; unique in the campaign.
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+    /// PutMarkupGroup sets it as given: false hides the group. A group that a put of an
+    /// item creates is visible.
+    #[prost(bool, tag = "2")]
+    pub visible: bool,
+    /// Model seconds an item put in the group lives, when its put gives none.
+    #[prost(double, optional, tag = "4")]
+    pub expire_after_s: ::core::option::Option<f64>,
+    /// The most live items the group holds: a put over it removes the oldest.
+    #[prost(uint32, optional, tag = "5")]
+    pub cap: ::core::option::Option<u32>,
 }
 /// An F10 menu item the controller set.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1381,6 +1439,10 @@ pub struct WorldFilter {
     /// Leave unmanaged entities out.
     #[prost(bool, tag = "6")]
     pub managed_only: bool,
+    /// Only marks and drawings in these markup groups; "" names items with no
+    /// markup group. Empty does not filter. Other kinds pass.
+    #[prost(string, repeated, tag = "7")]
+    pub markup_groups: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListWorldRequest {
@@ -1433,7 +1495,7 @@ pub struct PositionBatch {
     #[prost(message, optional, tag = "6")]
     pub sampled: ::core::option::Option<Stamp>,
 }
-/// A group or static the watcher held was removed. It follows the upsert of
+/// An entity the watcher held was removed. It follows the upsert of
 /// the entity's last state.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Removal {
@@ -1642,8 +1704,11 @@ pub enum RemovalCause {
     Unspecified = 0,
     /// The controller, with RemoveEntity.
     Controller = 1,
-    /// The sidecar: a dead group past dead_keep_h.
+    /// The sidecar: a dead group past dead_keep_h, or a mark or drawing past
+    /// its expiry.
     Expired = 2,
+    /// The sidecar: the oldest item of a markup group over its cap.
+    Evicted = 3,
 }
 impl RemovalCause {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -1655,6 +1720,7 @@ impl RemovalCause {
             Self::Unspecified => "REMOVAL_CAUSE_UNSPECIFIED",
             Self::Controller => "REMOVAL_CAUSE_CONTROLLER",
             Self::Expired => "REMOVAL_CAUSE_EXPIRED",
+            Self::Evicted => "REMOVAL_CAUSE_EVICTED",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -1663,6 +1729,7 @@ impl RemovalCause {
             "REMOVAL_CAUSE_UNSPECIFIED" => Some(Self::Unspecified),
             "REMOVAL_CAUSE_CONTROLLER" => Some(Self::Controller),
             "REMOVAL_CAUSE_EXPIRED" => Some(Self::Expired),
+            "REMOVAL_CAUSE_EVICTED" => Some(Self::Evicted),
             _ => None,
         }
     }
@@ -2232,6 +2299,16 @@ pub struct WorldEvent {
     pub launch_players: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(enumeration = "LaunchRule", tag = "17")]
     pub launch_rule: i32,
+    /// The DCS mark ID of a mark event (added, changed, removed).
+    #[prost(uint64, optional, tag = "18")]
+    pub mark_id: ::core::option::Option<u64>,
+    /// True when the platform issued mark_id in the DCS process that made the
+    /// event: the mark is one of the platform's own marks or drawings, shown or
+    /// retired. False for a player's mark and when mark_id is absent. A
+    /// controller uses it to tell the platform's own mark events from a
+    /// player's.
+    #[prost(bool, tag = "19")]
+    pub platform_mark: bool,
 }
 /// Progress of a group along its route order (spec/world.md, "Route
 /// progress"). The sidecar writes it from position samples, so it is as
@@ -3117,6 +3194,17 @@ pub struct ServerStatus {
     /// extended result code when SQLite failed; empty for none.
     #[prost(string, tag = "23")]
     pub backup_error: ::prost::alloc::string::String,
+    /// The DCS IDs left in the DCS process now running, for marks and drawings
+    /// of every campaign together: the pool is 2^30 to 2^31-1, each add takes
+    /// one, and none is given back until DCS restarts. A put that adds more than
+    /// are left is RESOURCE_EXHAUSTED (DCS_IDS_FULL) with nothing written; items
+    /// already shown stay and every other call works.
+    #[prost(uint64, tag = "24")]
+    pub dcs_ids_left: u64,
+    /// The pool is low: dcs_ids_left is under 1% of the pool (about 10.7
+    /// million IDs). Not part of health: restarting DCS is the owner's call.
+    #[prost(bool, tag = "25")]
+    pub dcs_ids_low: bool,
 }
 /// What the active campaign's store holds and how fast it is bounded
 /// (spec/persistence.md, "Size"). The counters count since the campaign's
@@ -9838,6 +9926,17 @@ pub struct PutMarkRequest {
     pub text: ::prost::alloc::string::String,
     #[prost(bool, tag = "6")]
     pub read_only: bool,
+    /// With mark_id 0, a label a live mark holds changes that mark. Empty sets
+    /// no label. A label a drawing holds fails with ALREADY_EXISTS.
+    #[prost(string, tag = "7")]
+    pub label: ::prost::alloc::string::String,
+    /// The markup group to draw it in, made with defaults if new. Empty for none.
+    #[prost(string, tag = "8")]
+    pub markup_group: ::prost::alloc::string::String,
+    /// Model seconds from now until the mark is removed. Absent keeps the
+    /// mark's expiry, or for a new mark takes its markup group's.
+    #[prost(double, optional, tag = "9")]
+    pub expire_after_s: ::core::option::Option<f64>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct PutMarkResponse {
@@ -9856,12 +9955,26 @@ pub struct PutDrawingRequest {
     /// Everyone or one coalition.
     #[prost(message, optional, tag = "3")]
     pub audience: ::core::option::Option<Audience>,
-    /// The DCS shape ID.
+    /// The DCS markupToAll shape number: 1 line (two points), 3 polygon through two or more
+    /// points (a line with two), 4 arrow (two points), 5 text box (one point), 6 quad (four
+    /// points), 7 freeform (three or more points). Any other shape is INVALID_ARGUMENT: DCS
+    /// can crash on one.
     #[prost(uint32, tag = "4")]
     pub shape: u32,
-    /// The shape's arguments, as DCS takes them.
+    /// The shape's arguments, as DCS takes them: the points, each an object of finite x, y
+    /// and z, then color and fill (each a list of four finite numbers), the line type (the
+    /// font size for shape 5, a finite number), read only (a bool) and the message (a
+    /// string). Any other layout is
+    /// INVALID_ARGUMENT.
     #[prost(message, optional, tag = "5")]
     pub args: ::core::option::Option<::prost_types::ListValue>,
+    /// As in PutMarkRequest.
+    #[prost(string, tag = "6")]
+    pub label: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
+    pub markup_group: ::prost::alloc::string::String,
+    #[prost(double, optional, tag = "8")]
+    pub expire_after_s: ::core::option::Option<f64>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct PutDrawingResponse {
@@ -9911,6 +10024,124 @@ pub struct ErasePlayerRequest {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ErasePlayerResponse {}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PutMarkupGroupRequest {
+    #[prost(message, optional, tag = "1")]
+    pub write: ::core::option::Option<Write>,
+    /// Every field is set as given.
+    #[prost(message, optional, tag = "2")]
+    pub markup_group: ::core::option::Option<MarkupGroup>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PutMarkupGroupResponse {
+    #[prost(uint64, tag = "1")]
+    pub revision: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RemoveMarkupGroupRequest {
+    #[prost(message, optional, tag = "1")]
+    pub write: ::core::option::Option<Write>,
+    #[prost(string, tag = "2")]
+    pub name: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RemoveMarkupGroupResponse {
+    #[prost(uint64, tag = "1")]
+    pub revision: u64,
+}
+/// A mark or drawing of a ReplaceMarkupGroup call.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MarkupGroupItem {
+    /// Required, unique in the call.
+    #[prost(string, tag = "1")]
+    pub label: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "2")]
+    pub audience: ::core::option::Option<Audience>,
+    #[prost(double, optional, tag = "3")]
+    pub expire_after_s: ::core::option::Option<f64>,
+    #[prost(oneof = "markup_group_item::Kind", tags = "4, 5")]
+    pub kind: ::core::option::Option<markup_group_item::Kind>,
+}
+/// Nested message and enum types in `MarkupGroupItem`.
+pub mod markup_group_item {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Kind {
+        #[prost(message, tag = "4")]
+        Mark(super::MarkupGroupMark),
+        #[prost(message, tag = "5")]
+        Drawing(super::MarkupGroupDrawing),
+    }
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MarkupGroupMark {
+    #[prost(message, optional, tag = "1")]
+    pub position: ::core::option::Option<Position>,
+    #[prost(string, tag = "2")]
+    pub text: ::prost::alloc::string::String,
+    #[prost(bool, tag = "3")]
+    pub read_only: bool,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MarkupGroupDrawing {
+    /// As in PutDrawingRequest.
+    #[prost(uint32, tag = "1")]
+    pub shape: u32,
+    #[prost(message, optional, tag = "2")]
+    pub args: ::core::option::Option<::prost_types::ListValue>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ReplaceMarkupGroupRequest {
+    #[prost(message, optional, tag = "1")]
+    pub write: ::core::option::Option<Write>,
+    /// The markup group, made with defaults if new.
+    #[prost(string, tag = "2")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "3")]
+    pub items: ::prost::alloc::vec::Vec<MarkupGroupItem>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ReplaceMarkupGroupResponse {
+    /// Each item's entity, in the order given.
+    #[prost(uint64, repeated, tag = "1")]
+    pub ids: ::prost::alloc::vec::Vec<u64>,
+    #[prost(uint64, tag = "2")]
+    pub revision: u64,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListMarkupGroupsRequest {
+    /// The campaign to read, 0 for the active one.
+    #[prost(uint64, tag = "1")]
+    pub campaign_id: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListMarkupGroupsResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub markup_groups: ::prost::alloc::vec::Vec<MarkupGroup>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RemovePlayerMarkRequest {
+    #[prost(message, optional, tag = "1")]
+    pub write: ::core::option::Option<Write>,
+    /// The DCS mark ID, from a mark event's mark_id. An ID the platform issued in
+    /// the running DCS process (WorldEvent.platform_mark), held or retired, fails
+    /// with INVALID_ARGUMENT.
+    #[prost(uint64, tag = "2")]
+    pub mark_id: u64,
+    /// The sequence number of that mark event (Event.sequence). The sidecar
+    /// reads the event from its log: the call fails with FAILED_PRECONDITION
+    /// when the event is no longer held, or when it is from another DCS process
+    /// or mission generation than the running one, since DCS gives the ID to
+    /// another mark there. A controller must act while the event is held. The
+    /// event must be a mark event (25 to 27) with this mark_id, else the call
+    /// fails with INVALID_ARGUMENT.
+    #[prost(uint64, tag = "3")]
+    pub event_sequence: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RemovePlayerMarkResponse {
+    #[prost(message, optional, tag = "1")]
+    pub result: ::core::option::Option<CommandResult>,
+}
 /// Generated client implementations.
 pub mod players_service_client {
     #![allow(
@@ -10210,6 +10441,156 @@ pub mod players_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Create or change a markup group of marks and drawings.
+        pub async fn put_markup_group(
+            &mut self,
+            request: impl tonic::IntoRequest<super::PutMarkupGroupRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::PutMarkupGroupResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nanoprobe.v1alpha1.PlayersService/PutMarkupGroup",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "nanoprobe.v1alpha1.PlayersService",
+                        "PutMarkupGroup",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Remove a markup group and every item in it.
+        pub async fn remove_markup_group(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RemoveMarkupGroupRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RemoveMarkupGroupResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nanoprobe.v1alpha1.PlayersService/RemoveMarkupGroup",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "nanoprobe.v1alpha1.PlayersService",
+                        "RemoveMarkupGroup",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Make a markup group hold exactly the items given, by label, in one write.
+        pub async fn replace_markup_group(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ReplaceMarkupGroupRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ReplaceMarkupGroupResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nanoprobe.v1alpha1.PlayersService/ReplaceMarkupGroup",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "nanoprobe.v1alpha1.PlayersService",
+                        "ReplaceMarkupGroup",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn list_markup_groups(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListMarkupGroupsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListMarkupGroupsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nanoprobe.v1alpha1.PlayersService/ListMarkupGroups",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "nanoprobe.v1alpha1.PlayersService",
+                        "ListMarkupGroups",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Remove a mark the platform does not hold, such as a player's, by its DCS
+        /// ID. An effect.
+        pub async fn remove_player_mark(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RemovePlayerMarkRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RemovePlayerMarkResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nanoprobe.v1alpha1.PlayersService/RemovePlayerMark",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "nanoprobe.v1alpha1.PlayersService",
+                        "RemovePlayerMark",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         /// Erase one player's records, or move them to a new key.
         pub async fn erase_player(
             &mut self,
@@ -10304,6 +10685,46 @@ pub mod players_service_server {
             request: tonic::Request<super::PutMenuItemRequest>,
         ) -> std::result::Result<
             tonic::Response<super::PutMenuItemResponse>,
+            tonic::Status,
+        >;
+        /// Create or change a markup group of marks and drawings.
+        async fn put_markup_group(
+            &self,
+            request: tonic::Request<super::PutMarkupGroupRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::PutMarkupGroupResponse>,
+            tonic::Status,
+        >;
+        /// Remove a markup group and every item in it.
+        async fn remove_markup_group(
+            &self,
+            request: tonic::Request<super::RemoveMarkupGroupRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RemoveMarkupGroupResponse>,
+            tonic::Status,
+        >;
+        /// Make a markup group hold exactly the items given, by label, in one write.
+        async fn replace_markup_group(
+            &self,
+            request: tonic::Request<super::ReplaceMarkupGroupRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ReplaceMarkupGroupResponse>,
+            tonic::Status,
+        >;
+        async fn list_markup_groups(
+            &self,
+            request: tonic::Request<super::ListMarkupGroupsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListMarkupGroupsResponse>,
+            tonic::Status,
+        >;
+        /// Remove a mark the platform does not hold, such as a player's, by its DCS
+        /// ID. An effect.
+        async fn remove_player_mark(
+            &self,
+            request: tonic::Request<super::RemovePlayerMarkRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RemovePlayerMarkResponse>,
             tonic::Status,
         >;
         /// Erase one player's records, or move them to a new key.
@@ -10737,6 +11158,236 @@ pub mod players_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = PutMenuItemSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/nanoprobe.v1alpha1.PlayersService/PutMarkupGroup" => {
+                    #[allow(non_camel_case_types)]
+                    struct PutMarkupGroupSvc<T: PlayersService>(pub Arc<T>);
+                    impl<
+                        T: PlayersService,
+                    > tonic::server::UnaryService<super::PutMarkupGroupRequest>
+                    for PutMarkupGroupSvc<T> {
+                        type Response = super::PutMarkupGroupResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::PutMarkupGroupRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as PlayersService>::put_markup_group(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = PutMarkupGroupSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/nanoprobe.v1alpha1.PlayersService/RemoveMarkupGroup" => {
+                    #[allow(non_camel_case_types)]
+                    struct RemoveMarkupGroupSvc<T: PlayersService>(pub Arc<T>);
+                    impl<
+                        T: PlayersService,
+                    > tonic::server::UnaryService<super::RemoveMarkupGroupRequest>
+                    for RemoveMarkupGroupSvc<T> {
+                        type Response = super::RemoveMarkupGroupResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RemoveMarkupGroupRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as PlayersService>::remove_markup_group(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RemoveMarkupGroupSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/nanoprobe.v1alpha1.PlayersService/ReplaceMarkupGroup" => {
+                    #[allow(non_camel_case_types)]
+                    struct ReplaceMarkupGroupSvc<T: PlayersService>(pub Arc<T>);
+                    impl<
+                        T: PlayersService,
+                    > tonic::server::UnaryService<super::ReplaceMarkupGroupRequest>
+                    for ReplaceMarkupGroupSvc<T> {
+                        type Response = super::ReplaceMarkupGroupResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ReplaceMarkupGroupRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as PlayersService>::replace_markup_group(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ReplaceMarkupGroupSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/nanoprobe.v1alpha1.PlayersService/ListMarkupGroups" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListMarkupGroupsSvc<T: PlayersService>(pub Arc<T>);
+                    impl<
+                        T: PlayersService,
+                    > tonic::server::UnaryService<super::ListMarkupGroupsRequest>
+                    for ListMarkupGroupsSvc<T> {
+                        type Response = super::ListMarkupGroupsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListMarkupGroupsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as PlayersService>::list_markup_groups(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListMarkupGroupsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/nanoprobe.v1alpha1.PlayersService/RemovePlayerMark" => {
+                    #[allow(non_camel_case_types)]
+                    struct RemovePlayerMarkSvc<T: PlayersService>(pub Arc<T>);
+                    impl<
+                        T: PlayersService,
+                    > tonic::server::UnaryService<super::RemovePlayerMarkRequest>
+                    for RemovePlayerMarkSvc<T> {
+                        type Response = super::RemovePlayerMarkResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RemovePlayerMarkRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as PlayersService>::remove_player_mark(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RemovePlayerMarkSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

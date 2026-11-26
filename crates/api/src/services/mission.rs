@@ -17,6 +17,11 @@ use crate::hub::{Call, Inner, Need};
 use crate::hub::{Hub, server_sim_state};
 use crate::next::Next;
 
+/// `ServerStatus.dcs_ids_low` is set when fewer IDs than this are left in the
+/// pool of 2^30. 1% of the pool (about 10.7 million) is far more than a
+/// campaign adds in a day, so the owner has time to plan a DCS restart.
+pub const DCS_IDS_LOW: u64 = nanoprobe_sidecar::store::dcs_ids::SLOTS / 100;
+
 /// The service.
 pub struct Mission(pub Arc<Hub>);
 
@@ -35,6 +40,7 @@ impl MissionService for Mission {
             nanos: i32::try_from(d.subsec_nanos()).unwrap_or(0),
         });
         let state: SimState = server_sim_state(health, g.link.lifecycle);
+        let ids_left = g.dcs_ids_left();
         Ok(Response::new(GetServerStatusResponse {
             status: Some(ServerStatus {
                 health: health as i32,
@@ -69,6 +75,8 @@ impl MissionService for Mission {
                     .as_ref()
                     .map(|(_, why)| why.clone())
                     .unwrap_or_default(),
+                dcs_ids_left: ids_left,
+                dcs_ids_low: ids_left < DCS_IDS_LOW,
                 ..ServerStatus::default()
             }),
         }))

@@ -27,7 +27,7 @@ entities by `EntityId` within a campaign.
 | Static | `EntityId` | yes | A spec and observed state. Spawned and destroyed alone. One that dies stays, as a ruin ("Ruins"). |
 | Airbase | theater and DCS name | no | Owner (coalition) |
 | Warehouse | theater and DCS name of its airbase | no | Stock |
-| Mark, drawing, menu item | `EntityId` | yes | Player-facing objects. Set again after every mission load. |
+| Mark, drawing, menu item | `EntityId` | yes | Player-facing objects. Set again after every mission load. A mark or drawing may carry a label and a markup group ("Labels and markup groups"). |
 | Extension | name | yes | A registered Lua chunk (spec/commands.md, "Extensions") |
 
 The platform creates an airbase and its warehouse only as part of a static DCS makes
@@ -1093,6 +1093,198 @@ was the same, with the hand-written pylons and their `settings` (LIVE, DCS
 docs/results/2026-11-24-payload-presets.md). DCS spawned both with `settings` in their
 pylons; whether it applied the fuze settings is UNVERIFIED, since the scripting API
 reads no fuze.
+
+## Labels and markup groups
+
+A mark or a drawing may carry a label and belong to a markup group. Menu items take neither.
+
+**Labels.** A label is 1 to 128 bytes of UTF-8 with no control character. It is unique
+among the campaign's live marks and drawings together, and is free again once its item
+is removed. `PutMark` or `PutDrawing` with ID 0 and a label a live item of the same kind
+holds changes that item (an upsert); a label an item of the other kind holds is
+`ALREADY_EXISTS`, and so is an ID with a label another item holds. A put always sets the
+label it carries; an empty label clears it. A label is not spec: it never reaches DCS
+and takes no new spec revision.
+
+**Markup groups.** A markup group is a name (1 to 64 bytes, no control character,
+unique in the campaign), `visible` (true for a group that a put of an item makes;
+`PutMarkupGroup` sets it as given, so a put that leaves it out hides the group),
+an optional `expire_after_s` and an optional `cap`. Markup groups are flat. A put naming
+a markup group the campaign lacks makes it with the defaults. An item with no markup
+group is always visible. A put always sets the markup group it carries; an empty one takes
+the item out of its markup group.
+
+A client draws by DCS ID, and the platform chooses the ID of every add. A markup group
+holds no order of its own: a change to one item does not add the items above it again
+("Redraw order").
+
+| Call | Effect |
+|---|---|
+| `PutMarkupGroup` | Makes or changes a markup group; every field is set as given |
+| `RemoveMarkupGroup` | Removes the markup group and every item in it, in one write. An unknown name is `NOT_FOUND` |
+| `ReplaceMarkupGroup` | Makes the markup group hold exactly the items given, in one write: it changes the items whose label the markup group holds, adds the others, and removes its items whose label is not given, those with no label included. Every item needs a label, unique in the call and held by no item of another markup group. An item whose spec is unchanged keeps its revision and DCS ID. More items than the markup group's cap is `INVALID_ARGUMENT`. Nothing is written when any check fails. |
+| `ListMarkupGroups` | The campaign's markup groups |
+
+`ListWorld` and `WatchWorld` list marks and drawings with their label, markup group and expiry,
+and `WorldFilter.markup_groups` keeps only the items of the markup groups named ("" for none). A
+drawing has no place of its own, so it passes no area filter. A coalition filter keeps
+an item for everyone or for a group, and an item for a coalition it names.
+
+**Visibility.** A hidden markup group's items stay in the store with their revisions; the
+sidecar removes them from DCS, and their applied revision and their `dcs_id` read 0 (ADR
+0017). Showing the markup group adds them again, each under a new DCS ID ("DCS IDs").
+`Mark` and `Drawing` carry the DCS ID of the last add the sidecar sent as `dcs_id`: 0
+while the item is hidden, new, or not sent since the agent boot or mission load. It is output only,
+and it changes on every add (a full set, a show, a load, a restart). A mission load adds
+only visible items. A hidden item keeps aging toward its expiry.
+
+**Expiry.** An item expires at campaign model time: the model seconds DCS ran the
+campaign's missions, summed over every mission generation. Paused time does not count.
+Model time between a sidecar stop and its next sample in the same agent boot and
+generation counts; the time before a generation's first sample does not. A put that gives `expire_after_s` sets the expiry from now; one that
+gives none keeps the item's, and a new item takes its markup group's. An expired item is
+removed by the sidecar, journalled as `removed` with cause `expired`, and a watch gets a
+`Removal` with cause `EXPIRED`. The check runs with the reconciler's once-a-second pass,
+at most 1,000 items in a step.
+
+**Cap.** A put that brings a markup group over its cap removes the markup group's oldest items, by
+creation, in the same write: each is journalled as `removed` with cause `evicted`, and a
+watch gets a `Removal` with cause `EVICTED`. A lower cap set by `PutMarkupGroup` removes the
+same way. No cap by default.
+
+Removed items follow the purge of "Removal". A removed markup group's row goes in the same write;
+its items are purged as any removed item.
+
+### DCS IDs
+
+The sidecar chooses every mark's and drawing's DCS mark ID (spec/commands.md, "Marks,
+drawings and menu items in DCS"). An ID is used once per DCS process: after
+`removeMark(id)`, an add under that ID shows nothing and emits nothing until the next
+mission load (LIVE, docs/results/2026-11-25-drawing-layers.md). An add over an ID DCS
+holds is ignored for a drawing (LIVE, same file) and UNVERIFIED for a mark. A mission
+load removes every mark and drawing and frees every ID, a removed one included (LIVE;
+one kind of load, a reload of the same mission). The platform reuses no ID within a DCS
+process: its mark does not reset at a load. Reuse after a load is an open item (the
+results file's "Open" list).
+`world.getMarkPanels` lists markup in ascending ID order, not creation order (LIVE).
+A client draws markup by ascending DCS ID, whether it was connected for the adds or
+joined later, and across shape kinds (LIVE). A higher ID draws on top, whatever the
+creation order. The platform chooses every ID, but a group still has no order of its own.
+
+Marks and drawings share one pool of IDs, 2^30 to 2^31 - 1. IDs below 2^30 belong to
+player marks and mission scripts (UNVERIFIED for player marks:
+docs/results/2026-11-25-drawing-layers.md, "Open"). The pool is the same for every
+campaign: a DCS process has one ID space, and a campaign switch frees no ID. The pool
+is a constant of the store (`dcs_ids`); a slot is the next ID the pool has not given.
+
+- **Every add takes a never-used ID.** An add is a new item, a full set of an item
+  already drawn (any change but those below, and the fallback to a full set when DCS
+  does not take an update in place), a show of a hidden markup group, a re-add after a
+  mission load, and a re-add after a sidecar restart. The reconciler takes the next ID
+  of the pool when it sends the add, and the item's `dcs_id` is that ID. A resend of an
+  add that did not take is sent under the same ID.
+- **A style change uses no ID.** A change of only a drawing's colors, its line type, a
+  text's font size or a text's text is sent as `DRAWING_UPDATE` under the held ID. A
+  server reads that these calls do not raise, emit no event and keep the order, and a
+  client draws the new color, line type, font size and text (LIVE,
+  docs/results/2026-11-25-drawing-layers.md).
+- **Capacity is a rate.** The pool holds 2^30 = 1,073,741,824 adds per DCS process, for
+  every campaign the process runs. A removal gives none back, and only a new DCS process
+  refills the pool. At one add a second the pool lasts 34 years. At 100 adds a second it
+  lasts about 4 months, and at 1,000 adds a second about 12 days. A style change costs
+  nothing, so a controller that recolors or retitles an item should change it in place
+  and not remove it and add it again. The server status reports the DCS IDs left in the
+  running process (`dcs_ids_left`) and sets `dcs_ids_low` when under 1% are left.
+- **A full pool refuses new adds.** A put, a `ReplaceMarkupGroup` and a `PutMarkupGroup`
+  that shows a group check that the pool has the IDs the adds need, counting the live
+  visible items that wait for one. Without them the call fails with
+  `RESOURCE_EXHAUSTED`, reason `DCS_IDS_FULL`, and nothing is written. An item whose add
+  finds the pool full at send time is not sent until its revision changes. Items DCS
+  already shows stay, and the sidecar keeps working.
+- **High-water mark.** The pool keeps a high-water mark per DCS process: the next ID to
+  give. An ID below it is never given again, not after a removal, a purge, a mission
+  load or a sidecar restart. The campaign's store commits the mark in the same write as
+  the item's `dcs_id` and the command that carries the ID, which reaches DCS only after
+  that write (spec/persistence.md, "Writes"). The campaign's closing transaction writes
+  the mark to the server store, and an activation raises the campaign's mark to the
+  server store's for the same DCS process (spec/persistence.md, "The server store"). A new
+  DCS process resets the mark to 0 and sets every live item's `dcs_id` to 0; so does a
+  mission load, with the mark kept. The marks of the newest 16 agent boots are kept.
+- **After a crash.** When the sidecar stops without its closing write, the server store
+  can hold a lower mark than the shim. The shim then refuses an add with `id <ID> at or
+  below the process mark <N>` (spec/commands.md). The sidecar raises the campaign's mark
+  past N and sends the add once more under a fresh ID. The retry is made once per
+  revision of the item.
+- **A mission script that uses an ID in the pool collides.** The shim cannot call
+  `removeMark` on an ID it does not hold, since that could only remove a mission
+  script's mark and kill the ID. If a script holds an ID the platform later issues, DCS
+  ignores the platform's add over it (UNVERIFIED for a mark, LIVE for a drawing): the
+  item reads applied to the shim and shows nothing. If a script removed the ID, the add
+  draws nothing until the next mission load (LIVE). The platform does not know either
+  case. A script should keep to IDs below 2^30.
+- **Telling the platform's mark events from a player's.** `WorldEvent.platform_mark` is
+  true when the event's `mark_id` is one the platform issued in the agent boot that made
+  the event, whether the item holds it now or it was retired by a later add. A
+  controller reads that field; it does not compare `mark_id` with `dcs_id`, which reads 0
+  while an item is hidden and changes on every add. The sidecar sets the field when it
+  logs the event. An ID the platform issued in agent boot B is one below that boot's
+  mark; the store answers this for the current boot and for each boot it keeps. An event
+  takes its boot from its source key (spec/persistence.md, "Event history").
+- **After every mission load** the sidecar adds every visible item again, each under a
+  new ID, in ascending draw rank (below).
+- Sets and removals share the reconciler's 32 commands a step.
+
+### Redraw order
+
+A client draws by ascending DCS ID (LIVE), and every add takes the next ID, so the order
+of adds is the draw order. Every item has a draw rank: a sequence number stored in its
+marker row that rises with every add the item is given (spec/persistence.md, "Marks,
+drawings and markup groups at a restart"). A full redraw adds marks and drawings together
+in ascending rank. An item never sent goes last, by creation.
+
+| Redraw | Where the item draws |
+|---|---|
+| A new item | On top |
+| A full set | On top |
+| A geometry change | On top (a remove and an add under a new ID) |
+| A show of a hidden markup group | On top |
+| A style or text update | Keeps its place (LIVE): the ID stays |
+| A mission load | Keeps its rank order: the items are added again in persisted draw-rank order |
+| A DCS restart | Keeps its rank order in the same way; the order a client shows after it is UNVERIFIED |
+| A sidecar restart | Held items stay in place; re-sent items go on top, in rank order |
+
+Two redraws of different items put the later one on top once the earlier one was
+applied, so a controller that needs one markup group above another draws it after the
+first is applied. Items waiting to be sent together are added in their stored rank
+order, which is the order of their last adds, not of the requests. An item that waits
+for its audience, such as a group mark before its group binds, is added when it can be
+and goes on top: the reconciler does not hold the items above it back. A change to a lower
+item moves only that item to the top; the platform does not add the items above it again.
+
+### Removing a player's mark
+
+`RemovePlayerMark` removes a mark the platform does not hold, such as one a player made,
+by the DCS mark ID a mark event carries (`WorldEvent.mark_id`, filled on
+`S_EVENT_MARK_ADDED`, `S_EVENT_MARK_CHANGE` and `S_EVENT_MARK_REMOVED`). It is an effect,
+sent once as `MARK_CLEAR`. The call names the event by its sequence number
+(`event_sequence`, `Event.sequence`), and a controller must act while the campaign's event
+log holds the event. The sidecar reads the event: the mission generation from its stamp and the agent
+boot from its source key (spec/persistence.md, "Event history"). It refuses with
+`FAILED_PRECONDITION` when the log no longer holds the event, when the event has no
+source key (it is from no agent boot), or when the stamp or boot differs from the
+running agent boot and mission generation, since
+DCS restarts its generation count and gives the ID to another mark there. An event that is
+not a mark event with the call's `mark_id` is `INVALID_ARGUMENT`. An ID the
+platform issued in the running agent boot is `INVALID_ARGUMENT`, whether or not an item
+holds it now; `WorldEvent.platform_mark` marks such an event. A second
+`removeMark` of an ID emits a second `S_EVENT_MARK_REMOVED` (LIVE); a controller takes
+the first.
+
+### Persistence
+
+Marks, drawings, menu items and markup groups are rows of the store file, with the campaign
+model time (spec/persistence.md). A sidecar restart restores them, and sends DCS what it
+needs by the rules of spec/persistence.md, "Marks, drawings and markup groups at a restart".
 
 ## Lua tables in the API
 

@@ -753,8 +753,21 @@ scenario('world', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   assert(gen and gen > 0, 'the agent has no mission generation:\n' .. dump(ctx))
   local campaign = 7
   local first = true
-  -- Run `commands` as one script; returns the results by seq.
-  local function run(commands, what)
+  local function results_by_seq()
+    local results = {}
+    for _, e in ipairs(ctx.events()) do
+      if e.ev == 'result' then
+        results[e.seq] = e
+      end
+    end
+    return results
+  end
+  -- Run `commands` as one script; returns the results by seq. The agent
+  -- samples only while a sidecar is attached, and a script's sidecar leaves
+  -- 300 ms after its last RESULT, often before births have the budget to
+  -- resolve. With `row`, the sidecar stays 40 s and the run waits for the
+  -- first result's object to get a row, then stops it.
+  local function run(commands, what, row)
     if not first then
       ctx.stop()
     end
@@ -763,15 +776,17 @@ scenario('world', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
       c.gen = c.gen or gen
       c.wait_result = true
     end
-    ctx.script(json({ campaign = campaign, commands = commands }))
-    finish(ctx, what)
-    local results = {}
-    for _, e in ipairs(ctx.events()) do
-      if e.ev == 'result' then
-        results[e.seq] = e
-      end
+    ctx.script(json({ campaign = campaign, commands = commands }), row and 40000 or nil)
+    if row then
+      assert(ctx.run(30, function()
+        local first_result = results_by_seq()[1]
+        return first_result ~= nil and server.__nanoprobe_shim.T.slot_of[first_result.object] ~= nil
+      end), what .. ': no row while the sidecar was attached:\n' .. dump(ctx))
+      ctx.stop()
+    else
+      finish(ctx, what)
     end
-    return results
+    return results_by_seq()
   end
   local function expect(r, code, what)
     assert(r and r.code == code, what .. ': answered ' .. tostring(r and r.code_name) .. ' '
@@ -1070,7 +1085,7 @@ scenario('world', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   local airbases_before = #shim.T.airbases
   r = run({ { op = 'STATIC_SPAWN', entity = 40, rev = 1, country = USA, name = PG1,
     static = { name = PG_GROUP, units = { pg_unit(PG1, 3000), pg_unit(PG2, 3100) }, dynamicSpawn = true } } },
-    'a heliport group')
+    'a heliport group', true)
   expect(r[1], APPLIED, 'STATIC_SPAWN of a heliport group')
   assert(r[1].object ~= 0, 'the group spawn names no object')
   assert(#shim.T.airbases == airbases_before + 1, 'a heliport group made other than one airbase entry')
@@ -1094,7 +1109,7 @@ scenario('world', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   -- A static of the name is there; the refused group replaced it, so its
   -- ID is reported destroyed with the refusal.
   r = run({ { op = 'STATIC_SPAWN', entity = 41, rev = 1, country = USA, name = PLAIN,
-    static = { name = PLAIN, type = 'Barrier', x = 3150, y = 3150, heading = 0 } } }, 'a static to be replaced')
+    static = { name = PLAIN, type = 'Barrier', x = 3150, y = 3150, heading = 0 } } }, 'a static to be replaced', true)
   expect(r[1], APPLIED, 'STATIC_SPAWN of the static a refused group replaces')
   local old_object = r[1].object
   assert(ctx.run(30, function()
@@ -1138,7 +1153,7 @@ scenario('world', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   -- from its entity, so the old static of entity 42 is `np#hGxg`.
   local KEEP, OTHER = 'np#hGxg', 'np#hGxN2'
   r = run({ { op = 'STATIC_SPAWN', entity = 42, rev = 1, country = USA, name = KEEP,
-    static = { name = KEEP, type = 'Barrier', x = 3400, y = 3400, heading = 0 } } }, 'a static to be kept')
+    static = { name = KEEP, type = 'Barrier', x = 3400, y = 3400, heading = 0 } } }, 'a static to be kept', true)
   expect(r[1], APPLIED, 'STATIC_SPAWN of the static a refused group leaves')
   local kept_object = r[1].object
   assert(ctx.run(30, function()
@@ -1168,7 +1183,7 @@ scenario('world', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   local OLDF, OTHERF = 'np#hGxh', 'np#hGxS'
   r = run({ { op = 'STATIC_SPAWN', entity = 43, rev = 1, country = USA, name = OLDF,
     static = { name = 'np!hGxR', units = { pg_unit(OLDF, 3600), pg_unit('np#hGxT', 3700) }, dynamicSpawn = true } } },
-    'a FARP to be removed by a refused group')
+    'a FARP to be removed by a refused group', true)
   expect(r[1], APPLIED, 'STATIC_SPAWN of the FARP a refused group removes')
   local farp_object = r[1].object
   assert(ctx.run(30, function()
@@ -1218,7 +1233,7 @@ scenario('world', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   for _, case in ipairs({ { RPL, 44, true }, { KEPT, 45, false } }) do
     local name, entity, replaced = case[1], case[2], case[3]
     r = run({ { op = 'STATIC_SPAWN', entity = entity, rev = 1, country = USA, name = name,
-      static = { name = name, type = 'Barrier', x = 3900, y = 3900, heading = 0 } } }, 'a static for a no-ID group')
+      static = { name = name, type = 'Barrier', x = 3900, y = 3900, heading = 0 } } }, 'a static for a no-ID group', true)
     expect(r[1], APPLIED, 'STATIC_SPAWN of the static a no-ID group meets')
     local object = r[1].object
     assert(ctx.run(30, function()
@@ -1250,7 +1265,7 @@ scenario('world', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   local TW1, TW2 = 'np#hGxk', 'np#hGxV2'
   r = run({ { op = 'STATIC_SPAWN', entity = 46, rev = 1, country = USA, name = TW1,
     static = { name = 'np!hGxW', units = { pg_unit(TW1, 4000), pg_unit(TW2, 4100) }, dynamicSpawn = true } } },
-    'a two-unit heliport group')
+    'a two-unit heliport group', true)
   expect(r[1], APPLIED, 'STATIC_SPAWN of a two-unit heliport group')
   local two_object = r[1].object
   assert(ctx.run(30, function()
@@ -2650,14 +2665,25 @@ local function with(op, header, bytes)
   return header
 end
 
-local function mark(entity, rev, scope, target, text, read_only)
+-- The DCS IDs the sidecar would choose: a mark's 2^30 + entity, a drawing's
+-- 2^30 + 2^24 + entity, unless `dcs_id` names one.
+local function mark(entity, rev, scope, target, text, read_only, dcs_id)
   return with('MARK_SET', { entity = entity, rev = rev }, PACK.u32(scope) .. PACK.u32(read_only == false and 0 or 1)
-    .. PACK.u64(target) .. PACK.f64(10.5) .. PACK.f64(20) .. PACK.f64(-30.25) .. PACK.str(text))
+    .. PACK.u64(target) .. PACK.f64(10.5) .. PACK.f64(20) .. PACK.f64(-30.25)
+    .. PACK.u64(dcs_id or 2 ^ 30 + entity) .. PACK.str(text))
 end
 
-local function drawing(entity, rev, scope, target, args)
-  return with('DRAWING_SET', { entity = entity, rev = rev }, PACK.u32(scope) .. PACK.u32(7)
-    .. PACK.u64(target) .. PACK.lv(args))
+local function drawing(entity, rev, scope, target, args, dcs_id, shape)
+  return with('DRAWING_SET', { entity = entity, rev = rev }, PACK.u32(scope) .. PACK.u32(shape or 7)
+    .. PACK.u64(target) .. PACK.u64(dcs_id or 2 ^ 30 + 2 ^ 24 + entity) .. PACK.lv(args))
+end
+
+local function drawing_update(entity, rev, dcs_id, changes)
+  return with('DRAWING_UPDATE', { entity = entity, rev = rev }, PACK.u64(dcs_id) .. PACK.lv(changes))
+end
+
+local function mark_clear(dcs_id)
+  return with('MARK_CLEAR', {}, PACK.u64(dcs_id))
 end
 
 local function menu(entity, rev, parent, scope, target, submenu, text)
@@ -2698,33 +2724,74 @@ end
 scenario('marks', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   local sim, run, expect = effect_world(ctx)
   local NOT_BOUND = 18
+  local DCS_REFUSED = 22
   local group_id = sim.groups['np!hGx1'].id
   local r
 
-  -- A mark to everyone, then the same entity again: the old DCS mark goes
-  -- and the new one has a new ID, from the shim's own range.
+  -- DCS calls that add or remove, counted, to show what the shim does not call.
+  local server_trigger = ctx.host.states.server.trigger.action
+  local calls = 0
+  for _, name in ipairs({ 'markToAll', 'markToCoalition', 'markToGroup', 'markupToAll', 'removeMark' }) do
+    local real = server_trigger[name]
+    server_trigger[name] = function(...)
+      calls = calls + 1
+      return real(...)
+    end
+  end
+  -- A never-used ID in the mark range, above every ID the test used before.
+  local fresh_id = 2 ^ 30 + 1000
+  local function fresh()
+    fresh_id = fresh_id + 1
+    return fresh_id
+  end
+
+  -- A mark to everyone under the sidecar's ID, then the same entity again
+  -- under it: the shim answers APPLIED and calls DCS not at all (a resend).
+  -- Then under a higher ID: the old one goes, and DCS ignores a later add
+  -- under it. An ID at or below the mark is refused.
   r = run({ mark(10, 1, 1, 0, 'alpha') }, 'a mark to all')
   expect(r[1], APPLIED, 'MARK_SET to all')
   local first, m = only(sim.marks)
-  assert(first >= 2 ^ 30, 'the mark ID ' .. first .. ' is below 2^30')
+  assert(first == 2 ^ 30 + 10, 'the mark ID is ' .. first)
   assert(m.text == 'alpha' and m.read_only == true and m.coalition == 255 and m.group == nil, 'the mark differs')
   assert(m.point.x == 10.5 and m.point.y == 20 and m.point.z == -30.25, 'the mark is at ' .. m.point.x)
-  r = run({ mark(10, 2, 1, 0, 'beta', false) }, 'a replaced mark')
-  expect(r[1], APPLIED, 'MARK_SET replacing')
+  local before_calls = calls
+  r = run({ mark(10, 2, 1, 0, 'beta', false) }, 'a resent mark')
+  expect(r[1], APPLIED, 'MARK_SET resent under its held ID')
   local second
   second, m = only(sim.marks)
-  assert(second ~= first and second >= 2 ^ 30, 'the replacement kept the ID ' .. first)
-  assert(m.text == 'beta' and m.read_only == false, 'the replacement differs')
+  assert(calls == before_calls, 'a resent MARK_SET called DCS ' .. (calls - before_calls) .. ' times')
+  assert(second == first and m.text == 'alpha', 'the resend changed the mark')
+  r = run({ mark(10, 3, 1, 0, 'beta', false, 2 ^ 30 + 500) }, 'a mark under a new ID')
+  expect(r[1], APPLIED, 'MARK_SET under a new ID')
+  second, m = only(sim.marks)
+  assert(second == 2 ^ 30 + 500 and m.text == 'beta', 'the mark is under ' .. second)
+  assert(sim.dead_marks[first] and not sim.dead_marks[second], 'the old ID is not dead')
+  before_calls = calls
+  r = run({ mark(10, 4, 1, 0, 'gamma', false, 2 ^ 30 + 400), mark(10, 5, 1, 0, 'gamma', false, first) }, 'marks at or below the mark')
+  expect(r[1], DCS_REFUSED, 'MARK_SET below the high-water mark')
+  expect(r[2], DCS_REFUSED, 'MARK_SET under an ID the shim removed')
+  assert(r[1].message == 'id ' .. string.format('%.0f', 2 ^ 30 + 400) .. ' at or below the process mark '
+    .. string.format('%.0f', 2 ^ 30 + 500), 'the refusal text is ' .. tostring(r[1].message))
+  assert(r[2].message:match('process mark (%d+)') == string.format('%.0f', 2 ^ 30 + 500), 'the mark is not in ' .. tostring(r[2].message))
+  assert(calls == before_calls, 'a refused MARK_SET called DCS')
+  second, m = only(sim.marks)
+  assert(second == 2 ^ 30 + 500 and m.text == 'beta', 'a refused MARK_SET changed DCS')
+  -- DCS itself ignores an add under a removed ID, with no panel and no event.
+  sim.marks[first] = nil
+  server_trigger.markToAll(first, 'dead', { x = 0, y = 0, z = 0 }, true)
+  assert(sim.marks[first] == nil, 'DCS added under a removed ID')
 
   -- A coalition and a group.
+  local blue_id = fresh()
   r = run({
-    mark(11, 1, 2, 2, 'blue'),
-    mark(12, 1, 3, 1, 'group'),
-    mark(13, 1, 3, 99, 'nogroup'),
-    mark(14, 1, 4, 2, 'unit scope'),
-    mark(15, 1, 5, 2, 'country scope'),
-    mark(16, 1, 0, 0, 'no scope'),
-    mark(17, 1, 2, 4294967296, 'big coalition'),
+    mark(11, 1, 2, 2, 'blue', true, blue_id),
+    mark(12, 1, 3, 1, 'group', true, fresh()),
+    mark(13, 1, 3, 99, 'nogroup', true, fresh()),
+    mark(14, 1, 4, 2, 'unit scope', true, fresh()),
+    mark(15, 1, 5, 2, 'country scope', true, fresh()),
+    mark(16, 1, 0, 0, 'no scope', true, fresh()),
+    mark(17, 1, 2, 4294967296, 'big coalition', true, fresh()),
   }, 'mark scopes')
   expect(r[1], APPLIED, 'MARK_SET to a coalition')
   expect(r[2], APPLIED, 'MARK_SET to a group')
@@ -2742,9 +2809,11 @@ scenario('marks', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
 
   -- A mark DCS refuses.
   sim.mark_raises = true
-  r = run({ mark(18, 1, 1, 0, 'refused') }, 'a refused mark')
+  local raised_id = fresh()
+  r = run({ mark(18, 1, 1, 0, 'refused', true, raised_id) }, 'a refused mark')
   expect(r[1], 22, 'MARK_SET that raises')
   sim.mark_raises = nil
+  assert(ctx.host.states.server.__nanoprobe_shim.high == raised_id, 'the raising add did not take its ID')
   assert(count(sim.marks) == 3, 'a refused mark is in DCS')
 
   -- Removal: the held mark goes, one nobody holds is APPLIED.
@@ -2759,19 +2828,62 @@ scenario('marks', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   assert(count(sim.marks) == 2 and sim.marks[second] == nil, 'the removed mark is in DCS')
 
   -- Drawings: coalition -1 for all, the arguments unpacked after the ID.
-  local points = { { x = 1, y = 2, z = 3 }, { x = 4, y = 5, z = 6 }, 'extra' }
+  local P1, P2, P3 = { x = 1, y = 2, z = 3 }, { x = 4, y = 5, z = 6 }, { x = 7, y = 8, z = 9 }
+  local RED, CLEAR = { 1, 0, 0, 1 }, { 0, 0, 0, 0 }
+  local points = { P1, P2, P3, RED, CLEAR, 1, true, 'extra' }
   r = run({
     drawing(20, 1, 1, 0, points),
     drawing(21, 1, 2, 1, points),
     drawing(22, 1, 3, 1, points),
     drawing(23, 1, 4, 1, points),
-    drawing(24, 1, 1, 0, {}),
+    drawing(24, 1, 1, 0, { P1, RED, CLEAR, 14, true, 'a text' }, nil, 5),
   }, 'drawings')
   expect(r[1], APPLIED, 'DRAWING_SET to all')
   expect(r[2], APPLIED, 'DRAWING_SET to a coalition')
   expect(r[3], BAD_PAYLOAD, 'DRAWING_SET to a group')
   expect(r[4], BAD_PAYLOAD, 'DRAWING_SET to a unit')
-  expect(r[5], APPLIED, 'DRAWING_SET with no arguments')
+  expect(r[5], APPLIED, 'DRAWING_SET of a text')
+
+  -- Only the known shapes with their layouts reach DCS: DCS can crash inside
+  -- markupToAll on another, where pcall does not help (LOG).
+  local refused_calls = calls
+  local style = function(...)
+    local t = { ... }
+    for _, v in ipairs({ RED, CLEAR, 1, true, 'm' }) do
+      t[#t + 1] = v
+    end
+    return t
+  end
+  local bad = {
+    { 2, style(P1, P2) }, -- shape 2: layout unknown
+    { 8, style(P1, P2, P3, P1) }, -- shape 8 crashed DCS; 9 to 12 untested
+    { 12, style(P1, P2, P3, P1) },
+    { 0, style(P1, P2) },
+    { 1, style(P1) }, -- a line with one point
+    { 1, style(P1, P2, P3) }, -- a line with three
+    { 4, style(P1, P2, P3) }, -- an arrow with three
+    { 5, style(P1, P2) }, -- a text with two
+    { 6, style(P1, P2, P3) }, -- a quad with three
+    { 7, style(P1, P2) }, -- a freeform with two
+    { 3, style(P1) }, -- a polygon with one
+    { 1, { P1, P2, RED, CLEAR, 1, true } }, -- no message
+    { 1, { P1, P2, RED, 1, true, 'm' } }, -- no fill
+    { 1, { P1, P2, RED, CLEAR, 1, 1, 'm' } }, -- read only not a boolean
+    { 1, { P1, P2, { 1, 0, 0 }, CLEAR, 1, true, 'm' } }, -- a color of three
+    { 1, { P1, P2, RED, CLEAR, 'dash', true, 'm' } }, -- a line type not a number
+    { 1, { P1, P2, { 0 / 0, 0, 0, 1 }, CLEAR, 1, true, 'm' } }, -- a color that is not finite
+    { 1, { P1, P2, RED, CLEAR, 1 / 0, true, 'm' } }, -- a line type that is not finite
+    { 1, { P1, P2, { 1, 0, 0, 1, a = 1 }, CLEAR, 1, true, 'm' } }, -- a color with an extra key
+    { 1, style(P1, { x = 1, z = 2 }) }, -- a point with no y
+    { 1, style(P1, { x = 1, y = 0 / 0, z = 2 }) }, -- a point that is not finite
+    { 1, style(P1, 5) }, -- a point that is a number
+    { 1, {} },
+  }
+  for i, case in ipairs(bad) do
+    r = run({ drawing(40 + i, 1, 1, 0, case[2], nil, case[1]) }, 'bad layout ' .. i)
+    expect(r[1], DCS_REFUSED, 'DRAWING_SET of bad layout ' .. i .. ' (shape ' .. case[1] .. ')')
+  end
+  assert(calls == refused_calls, 'a refused layout called DCS')
   local drawn = {}
   for id, d in pairs(sim.marks) do
     if d.drawing then
@@ -2782,30 +2894,151 @@ scenario('marks', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   table.sort(drawn, function(x, y)
     return x.id < y.id
   end)
-  assert(drawn[1].d.shape == 7 and drawn[1].d.coalition == 255 and #drawn[1].d.args == 3
-    and drawn[1].d.args[2].z == 6 and drawn[1].d.args[3] == 'extra', 'the drawing to all differs')
+  assert(drawn[1].d.shape == 7 and drawn[1].d.coalition == 255 and #drawn[1].d.args == 8
+    and drawn[1].d.args[2].z == 6 and drawn[1].d.args[8] == 'extra', 'the drawing to all differs')
   assert(drawn[2].d.coalition == 1, 'the drawing for a coalition is for ' .. tostring(drawn[2].d.coalition))
   local before = drawn[1].id
-  r = run({ drawing(20, 2, 1, 0, points) }, 'a replaced drawing')
-  expect(r[1], APPLIED, 'DRAWING_SET replacing')
-  assert(sim.marks[before] == nil, 'the replaced drawing is still in DCS')
+  before_calls = calls
+  r = run({ drawing(20, 2, 1, 0, points) }, 'a resent drawing')
+  expect(r[1], APPLIED, 'DRAWING_SET resent under its held ID')
+  assert(calls == before_calls, 'a resent DRAWING_SET called DCS')
+  r = run({ drawing(20, 3, 1, 0, points, 2 ^ 30 + 2 ^ 24 + 19) }, 'a drawing at or below the mark')
+  expect(r[1], DCS_REFUSED, 'DRAWING_SET below the high-water mark')
+  assert(calls == before_calls, 'a refused DRAWING_SET called DCS')
+  assert(sim.marks[before] ~= nil and sim.marks[before].shape == 7, 'the replaced drawing left its ID')
   assert(count(sim.marks) == 5, 'DCS holds ' .. count(sim.marks) .. ' marks and drawings, not 5')
+
+  -- In place: the held drawing's style changes under its ID; another ID is
+  -- NOT_BOUND.
+  local d21 = 2 ^ 30 + 2 ^ 24 + 21
+  -- Marks and drawings share one pool and one process mark: later marks go above
+  -- the drawings.
+  fresh_id = 2 ^ 30 + 2 ^ 24 + 1000
+  r = run({
+    drawing_update(21, 2, d21, { color = { 0, 1, 0, 1 }, line_type = 2 }),
+    drawing_update(21, 3, d21 + 1, { color = { 0, 0, 1, 1 } }),
+    drawing_update(99, 1, d21, { color = { 0, 0, 1, 1 } }),
+  }, 'drawing updates')
+  expect(r[1], APPLIED, 'DRAWING_UPDATE')
+  expect(r[2], NOT_BOUND, 'DRAWING_UPDATE under another ID')
+  expect(r[3], NOT_BOUND, 'DRAWING_UPDATE of an entity not held')
+  r = run({
+    drawing_update(21, 4, d21, { color = { 0, 1, 0 } }),
+    drawing_update(21, 5, d21, { line_type = 'dash' }),
+    drawing_update(21, 6, d21, { radius = 5 }),
+  }, 'bad drawing updates')
+  expect(r[1], DCS_REFUSED, 'DRAWING_UPDATE with a color of three')
+  expect(r[2], DCS_REFUSED, 'DRAWING_UPDATE with a line type not a number')
+  expect(r[3], DCS_REFUSED, 'DRAWING_UPDATE with an unknown key')
+  assert(#sim.marks[d21].set.color == 4 and sim.marks[d21].set.line_type == 2, 'a refused DRAWING_UPDATE reached DCS')
+  assert(sim.marks[d21].set.color[2] == 1 and sim.marks[d21].set.line_type == 2, 'the update did not reach DCS')
+
+  -- A mark the platform does not hold is removed by its ID; a held one is
+  -- refused.
+  sim.marks[77] = { text = 'player', point = { x = 0, y = 0, z = 0 }, coalition = 2 }
+  r = run({ mark_clear(77), mark_clear(d21), mark_clear(78) }, 'mark clears')
+  expect(r[1], APPLIED, 'MARK_CLEAR of a player mark')
+  expect(r[2], BAD_PAYLOAD, 'MARK_CLEAR of a held ID')
+  expect(r[3], APPLIED, 'MARK_CLEAR of an ID DCS does not hold')
+  assert(sim.marks[77] == nil and sim.marks[d21] ~= nil, 'MARK_CLEAR removed the wrong mark')
+
+  -- A set under an ID another entity holds is refused: DCS would ignore it, and
+  -- the holder keeps its mark.
+  r = run({ mark(30, 1, 1, 0, 'over', true, blue_id), { op = 'MARK_REMOVE', entity = 11 } }, 'a taken ID')
+  expect(r[1], DCS_REFUSED, 'MARK_SET under a held ID')
+  expect(r[2], APPLIED, 'MARK_REMOVE of the holder')
+  assert(sim.marks[blue_id] == nil, 'the holder was not removed')
+  r = run({ mark(30, 2, 1, 0, 'taker', true, fresh()), { op = 'MARK_REMOVE', entity = 30 } }, 'remove the taker')
+  expect(r[1], APPLIED, 'MARK_SET of the taker')
+  expect(r[2], APPLIED, 'MARK_REMOVE of the taker')
   r = run({ { op = 'DRAWING_REMOVE', entity = 20 }, { op = 'DRAWING_REMOVE', entity = 20 } }, 'drawing removal')
   expect(r[1], APPLIED, 'DRAWING_REMOVE')
   expect(r[2], APPLIED, 'DRAWING_REMOVE of nothing')
-  assert(count(sim.marks) == 4, 'DCS holds ' .. count(sim.marks) .. ' marks and drawings, not 4')
+  assert(count(sim.marks) == 3, 'DCS holds ' .. count(sim.marks) .. ' marks and drawings, not 3')
 
-  -- A new mission generation: the shim forgets what it held.
+  -- The ID index mirrors the held marks after each kind of change.
   local shim = ctx.host.states.server.__nanoprobe_shim
+  local function index_agrees(what)
+    local n = 0
+    for entity, held in pairs(shim.marks) do
+      n = n + 1
+      assert(shim.by_id[held.id] == entity, what .. ': the index lacks entity ' .. entity)
+    end
+    assert(count(shim.by_id) == n, what .. ': the index holds ' .. count(shim.by_id) .. ' IDs for ' .. n .. ' marks')
+  end
+  index_agrees('after a removal')
+  local shared = fresh()
+  r = run({ mark(40, 1, 1, 0, 'one', true, shared), mark(41, 1, 1, 0, 'two', true, shared) }, 'a collision')
+  expect(r[2], DCS_REFUSED, 'MARK_SET over a held ID')
+  assert(shim.by_id[shared] == '40' and shim.marks['41'] == nil, 'the collision kept the first holder')
+  index_agrees('after a collision')
+  r = run({ { op = 'MARK_REMOVE', entity = 40 }, mark_clear(shared) }, 'a removal then a clear')
+  expect(r[2], APPLIED, 'MARK_CLEAR of an ID no entity holds now')
+  assert(shim.by_id[shared] == nil, 'the index kept a removed ID')
+  index_agrees('after a clear')
+  local mark_high = shim.high
+  assert(mark_high ~= nil and mark_high >= shared, 'the shim kept no high-water mark')
+  -- A reload runs the shim again over this one, as the hook's reload does.
+  local server = ctx.host.states.server
+  local body = setfenv(assert(loadfile(shim.dir .. 'lua/shim.lua')), server)
+  local new = body(shim.agent, root, shim.dir, shim)
+  assert(new ~= shim and new.by_id == shim.by_id and count(new.by_id) > 0, 'the reload dropped the index')
+  assert(new.high == mark_high, 'the reload dropped the high-water mark')
+  server.__nanoprobe_shim = new
+  shim = new
+  index_agrees('after a reload')
+  -- A reload over a shim that kept no index rebuilds it from the marks.
+  shim.by_id = nil
+  new = body(shim.agent, root, shim.dir, shim)
+  server.__nanoprobe_shim = new
+  shim = new
+  index_agrees('after a reload without an index')
+  r = run({ mark_clear(d21), mark(50, 1, 1, 0, 'again', true, shared), mark(51, 1, 1, 0, 'next', true, fresh()) }, 'after a reload')
+  expect(r[1], BAD_PAYLOAD, 'MARK_CLEAR of a held ID after a reload')
+  expect(r[2], DCS_REFUSED, 'MARK_SET under a used ID after a reload')
+  expect(r[3], APPLIED, 'MARK_SET under a fresh ID after a reload')
+  mark_high = shim.high
+
+  -- A mission script's mark under an ID the shim does not hold: the shim's add
+  -- does not remove it first (that would kill the ID), so the script's mark stays.
+  local script_id = fresh()
+  server_trigger.markToAll(script_id, 'script', { x = 0, y = 0, z = 0 }, true)
+  r = run({ mark(90, 1, 1, 0, 'over script', false, script_id) }, 'a mark over a script mark')
+  assert(sim.marks[script_id] and sim.marks[script_id].text == 'script', 'the shim removed a mission script mark')
+  assert(not sim.dead_marks[script_id], 'the shim killed the ID of a mission script mark')
+  r = run({ { op = 'MARK_REMOVE', entity = 90 } }, 'remove the over-script mark')
+  server_trigger.removeMark(script_id)
+  mark_high = shim.high
+  -- A new mission generation: the shim forgets what it held.
   assert(count(shim.marks) > 0, 'the shim holds no marks')
+  local pre_load = next(sim.marks)
+  assert(pre_load, 'DCS holds no mark before the load')
   ctx.stop()
   ctx.host:load_mission('second', { paused = true })
   -- The reset comes with the first pump of the new generation. With the
   -- sidecar gone the hook may run no pump, so the test runs one itself.
   ctx.run(0.1)
   shim.pump()
-  assert(count(shim.marks) == 0 and count(shim.menus) == 0, 'the shim kept marks across a mission load')
-  S.ok('MARK_SET, DRAWING_SET and their removals: scopes, replacement under a new ID, NOT_BOUND, BAD_PAYLOAD, DCS_REFUSED, a load forgets them')
+  assert(count(shim.marks) == 0 and count(shim.by_id) == 0 and count(shim.menus) == 0, 'the shim kept marks across a mission load')
+  assert(shim.high == mark_high, 'a mission load reset the process mark')
+  -- A load removes the marks and frees every ID, a removed one included: DCS
+  -- draws under a pre-load ID again (LIVE).
+  assert(sim.marks[pre_load] == nil and not sim.dead_marks[pre_load], 'the load did not free the ID the mission held')
+  server_trigger.markToAll(pre_load, 'after load', { x = 0, y = 0, z = 0 }, true)
+  assert(sim.marks[pre_load] and sim.marks[pre_load].text == 'after load', 'DCS refused an ID that a mission load freed')
+  server_trigger.removeMark(pre_load)
+  -- The shim's mark does not reset, so the platform reuses no ID: an add at or
+  -- below the mark is refused.
+  run_script(ctx, 2, { mark(91, 1, 1, 0, 'reuse', true, mark_high) }, 'an add at the mark after a load')
+  local reused
+  for _, e in ipairs(ctx.events()) do
+    if e.ev == 'result' and e.seq == 1 then
+      reused = e
+    end
+  end
+  expect(reused, DCS_REFUSED, 'the shim added at its mark after a load')
+  assert(count(shim.marks) == 0 and sim.marks[mark_high] == nil, 'the shim added at its mark after a load')
+  S.ok('MARK_SET, DRAWING_SET, DRAWING_UPDATE, MARK_CLEAR and removals: chosen IDs, scopes, NOT_BOUND, BAD_PAYLOAD, DCS_REFUSED, a load forgets them')
 end, '\n[lua]\nraw = true\n')
 
 scenario('menus', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
@@ -3887,8 +4120,18 @@ scenario('extension-errors', SHIM, function(ctx)
   local bad = "return { on_frame = function() error('oops') end, invoke = function() return 'bad' end }"
   -- Nine errors and a success never reach ten in a row.
   local flaky = "local n = 0 return { on_frame = function() n = n + 1 if n % 10 ~= 0 then error('flaky') end end }"
-  play(ctx, { ext_set('bad', 1, bad), ext_set('flaky', 1, flaky), ext_invoke('bad', 600), ext_invoke('bad', 0) },
-    nil, 'hooks that raise')
+  -- The first invoke waits for the stop itself: a successful invoke resets the
+  -- count of errors in a row, so one that runs early on a loaded machine
+  -- (the sidecar's wait is wall time) keeps the extension from stopping.
+  local stop_file, released = ctx.profile .. 'bad-stopped', false
+  play(ctx, { ext_set('bad', 1, bad), ext_set('flaky', 1, flaky), ext_invoke('bad', 0, stop_file), ext_invoke('bad', 0) },
+    function()
+      local b = shim.extensions.bad
+      if b and b.stopped and not released then
+        released = true
+        S.write(stop_file, '')
+      end
+    end, 'hooks that raise')
   local e = shim.extensions.bad
   assert(e.stopped and e.errors >= 10 and e.calls == 10, 'the bad extension: stopped ' .. tostring(e.stopped)
     .. ', ' .. e.errors .. ' errors, ' .. e.calls .. ' calls')

@@ -265,10 +265,26 @@ end
 -- text (spec/commands.md, "Marks, drawings and menu items in DCS"). They
 -- outlive a shim reload and are dropped on a new mission generation.
 M.marks = previous and previous.marks or {}
+-- The entity holding each DCS mark ID, the reverse of `marks`: a set or a
+-- MARK_CLEAR finds the holder of an ID without walking every held mark.
+M.by_id = previous and previous.by_id
+if not M.by_id then
+  -- A reload over a shim that kept no index: one pass over the held marks.
+  M.by_id = {}
+  for entity, held in pairs(M.marks) do
+    M.by_id[held.id] = entity
+  end
+end
 M.menus = previous and previous.menus or {}
--- The next DCS ID for a mark or a drawing, and the next menu order number.
--- DCS's own mark IDs are UNVERIFIED to start low, so these start at 2^30.
-M.next_mark = previous and previous.next_mark or 2 ^ 30
+-- The highest DCS mark or drawing ID the shim added: one process mark for the
+-- shared pool, 2^30 to 2^31 - 1. DCS ignores an add under an ID it removed
+-- earlier in the process, and a mission load does not free it (LIVE,
+-- docs/results/2026-11-25-drawing-layers.md), so the shim adds only above this
+-- mark. It outlives a shim reload, a mission load and a campaign switch, and
+-- starts empty with a new Lua state.
+M.high = previous and type(previous.high) == 'number' and previous.high or 0
+-- The next menu order number. A mark's or drawing's DCS ID is the
+-- sidecar's (`dcs_id`).
 M.next_menu = previous and previous.next_menu or 1
 
 -- Filled when the handler is registered, once world.event exists.
@@ -943,7 +959,7 @@ local function reset(gen)
   -- finds again is not counted again.
   T.cleared = {}
   -- A mission load removed every mark, drawing and menu item from DCS.
-  M.marks, M.menus = {}, {}
+  M.marks, M.by_id, M.menus = {}, {}, {}
   M.read_airbases()
 end
 
@@ -977,7 +993,7 @@ local function functions()
 end
 
 -- Result codes (spec/commands.md, "Codes: result").
-local APPLIED, NOT_BOUND, UNKNOWN_OPCODE, DCS_REFUSED, LUA_ERROR = 0, 18, 20, 22, 23
+local APPLIED, NOT_BOUND, BAD_PAYLOAD, UNKNOWN_OPCODE, DCS_REFUSED, LUA_ERROR = 0, 18, 19, 20, 22, 23
 
 -- Extensions by name (spec/commands.md, "Extensions"). The registry survives
 -- a shim reload. Each holds its source, its hooks, the queue of events for
@@ -1535,14 +1551,8 @@ function M.row_id(slot)
   return id and string.format('%.0f', id) or ''
 end
 
--- Marks and drawings share DCS's mark ID space. Each gets an ID from the
--- shim's counter; a replacement removes the held mark first and adds the new
--- one under a new ID.
-local function new_mark_id()
-  local id = M.next_mark
-  M.next_mark = id + 1
-  return id
-end
+-- Marks and drawings share DCS's mark ID space. The sidecar chooses each
+-- one's ID (spec/world.md, "DCS IDs").
 
 -- Remove the held mark or drawing of `entity` from DCS and forget it. An
 -- entity the shim does not hold is gone already.
@@ -1556,25 +1566,123 @@ local function remove_mark(entity)
     return DCS_REFUSED, nil, tostring(err)
   end
   M.marks[entity] = nil
+  M.by_id[held.id] = nil
   return APPLIED
 end
 
--- Replace the mark or drawing of `entity`: the old one is removed, then
--- `add(id)` calls DCS with the new ID.
-local function set_mark(entity, add)
+-- Set the mark or drawing of `entity` under the DCS ID `id`. DCS shows nothing
+-- and emits nothing for an add over a held ID or under an ID removed earlier,
+-- until the next mission load (LIVE), so:
+--   - a set for an entity held under `id` is `APPLIED` with no DCS call;
+--   - an `id` at or below the process mark, or held by another entity, is
+--     `DCS_REFUSED` with no DCS call;
+--   - the entity's held ID is removed when it differs from `id`; an ID the shim
+--     does not hold is not removed first, since that could only remove a
+--     mission script's mark and kill the ID (LIVE);
+--   - `id` becomes the process mark before `add(id)` calls DCS, even when that
+--     raises.
+local function set_mark(entity, id, add)
   local held = M.marks[entity]
+  if held and held.id == id then
+    return APPLIED
+  end
+  if id <= M.high or M.by_id[id] ~= nil then
+    return DCS_REFUSED, nil, 'id ' .. string.format('%.0f', id)
+      .. ' at or below the process mark ' .. string.format('%.0f', M.high)
+  end
+  M.marks[entity] = nil
   if held then
     pcall(trigger.action.removeMark, held.id)
-    M.marks[entity] = nil
+    M.by_id[held.id] = nil
   end
-  local id = new_mark_id()
+  M.high = id
   local ok, err = pcall(add, id)
   if not ok then
     return DCS_REFUSED, nil, tostring(err)
   end
   M.marks[entity] = { id = id }
+  M.by_id[id] = entity
   return APPLIED
 end
+
+-- The `setMarkup*` call for each key of a DRAWING_UPDATE's changes, in the
+-- order they are applied.
+local MARKUP_SETTERS = {
+  { 'color', 'setMarkupColor' },
+  { 'fill', 'setMarkupColorFill' },
+  { 'line_type', 'setMarkupTypeLine' },
+  { 'font_size', 'setMarkupFontSize' },
+  { 'text', 'setMarkupText' },
+}
+
+-- The points each known `markupToAll` shape takes before its style, as
+-- { least, most } (LIVE, docs/results/2026-11-25-drawing-layers.md). DCS can
+-- crash inside `markupToAll` on another shape or layout, where pcall does not
+-- help (LOG), so DRAWING_SET calls it with nothing else.
+local SHAPE_POINTS = {
+  [1] = { 2, 2 },
+  [3] = { 2, math.huge },
+  [4] = { 2, 2 },
+  [5] = { 1, 1 },
+  [6] = { 4, 4 },
+  [7] = { 3, math.huge },
+}
+
+local function is_finite(v)
+  return type(v) == 'number' and v == v and v ~= math.huge and v ~= -math.huge
+end
+
+local function is_color(v)
+  if type(v) ~= 'table' or table.maxn(v) ~= 4 then
+    return false
+  end
+  local n = 0
+  for _ in pairs(v) do
+    n = n + 1
+  end
+  return n == 4 and is_finite(v[1]) and is_finite(v[2]) and is_finite(v[3]) and is_finite(v[4])
+end
+
+-- Whether `args` is a known shape's layout: its points, each a table of
+-- finite x, y and z, then color, fill, the line type or font size, read
+-- only and the message, as a list with keys 1 to n and nothing else.
+local function layout_ok(shape, args)
+  local range = type(shape) == 'number' and SHAPE_POINTS[shape]
+  if not range or type(args) ~= 'table' then
+    return false
+  end
+  local n = table.maxn(args)
+  local keys = 0
+  for _ in pairs(args) do
+    keys = keys + 1
+  end
+  local points = n - 5
+  if keys ~= n or points < range[1] or points > range[2] then
+    return false
+  end
+  for i = 1, points do
+    local p = args[i]
+    if type(p) ~= 'table' or not is_finite(p.x) or not is_finite(p.y) or not is_finite(p.z) then
+      return false
+    end
+  end
+  return is_color(args[n - 4])
+    and is_color(args[n - 3])
+    and is_finite(args[n - 2])
+    and type(args[n - 1]) == 'boolean'
+    and type(args[n]) == 'string'
+end
+
+-- The value type each DRAWING_UPDATE change takes.
+local CHANGE_OK = {
+  color = is_color,
+  fill = is_color,
+  line_type = is_finite,
+  font_size = is_finite,
+  text = function(v)
+    return type(v) == 'string'
+  end,
+}
 
 -- The mission ID of a GROUP scope's group, for a command whose scope is 3.
 -- Returns nothing for another scope.
@@ -1933,7 +2041,7 @@ local HANDLERS = {
     end
     local point = { x = a.x, y = a.y, z = a.z }
     local read_only = a.read_only and true or false
-    return set_mark(a.entity, function(id)
+    return set_mark(a.entity, a.dcs_id, function(id)
       if a.scope == 1 then
         trigger.action.markToAll(id, a.text, point, read_only)
       elseif a.scope == 2 then
@@ -1953,13 +2061,40 @@ local HANDLERS = {
     if a.scope ~= 1 and a.scope ~= 2 then
       return DCS_REFUSED, nil, 'the scope is not 1 or 2'
     end
-    if type(a.args) ~= 'table' then
-      return DCS_REFUSED, nil, 'the arguments are not an array'
+    if not layout_ok(a.shape, a.args) then
+      return DCS_REFUSED, nil, 'the shape and arguments are not a known layout'
     end
     local coalition = a.scope == 1 and -1 or a.target
-    return set_mark(a.entity, function(id)
+    return set_mark(a.entity, a.dcs_id, function(id)
       trigger.action.markupToAll(a.shape, coalition, id, unpack(a.args, 1, table.maxn(a.args)))
     end)
+  end,
+  -- DRAWING_UPDATE: the held drawing's style or text, in place. DCS keeps
+  -- its ID and order and emits no event (LIVE).
+  [33] = function(a)
+    local held = M.marks[a.entity]
+    if not held or held.id ~= a.dcs_id then
+      return NOT_BOUND, nil, 'the drawing is not held under this ID'
+    end
+    if type(a.changes) ~= 'table' then
+      return DCS_REFUSED, nil, 'the changes are not a table'
+    end
+    for key, value in pairs(a.changes) do
+      local ok = CHANGE_OK[key]
+      if not ok or not ok(value) then
+        return DCS_REFUSED, nil, 'the change ' .. tostring(key) .. ' is not a known key and value'
+      end
+    end
+    for _, setter in ipairs(MARKUP_SETTERS) do
+      local value = a.changes[setter[1]]
+      if value ~= nil then
+        local ok, err = pcall(trigger.action[setter[2]], a.dcs_id, value)
+        if not ok then
+          return DCS_REFUSED, nil, tostring(err)
+        end
+      end
+    end
+    return APPLIED
   end,
   -- DRAWING_REMOVE
   [28] = function(a)
@@ -2182,6 +2317,18 @@ local HANDLERS = {
     end
     return NOT_BOUND, nil, 'no group or static of that name'
   end,
+  -- MARK_CLEAR: a mark or drawing the platform does not hold, by its DCS ID.
+  -- An ID the shim holds for an entity is refused.
+  [68] = function(a)
+    if M.by_id[a.dcs_id] ~= nil then
+      return BAD_PAYLOAD, nil, 'the platform holds this mark ID'
+    end
+    local ok, err = pcall(trigger.action.removeMark, a.dcs_id)
+    if not ok then
+      return DCS_REFUSED, nil, tostring(err)
+    end
+    return APPLIED
+  end,
   -- COUNTRIES: each country's coalition in this mission.
   [65] = function()
     local out = {}
@@ -2232,7 +2379,7 @@ local function clear_held()
       pcall(menu_remove, item)
     end
   end
-  M.marks, M.menus = {}, {}
+  M.marks, M.by_id, M.menus = {}, {}, {}
 end
 
 -- The campaign the shim last saw, as the agent's decimal text. A switch to

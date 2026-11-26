@@ -17,9 +17,18 @@ use nanoprobe_proto::v1alpha1::{
     PutMenuItemRequest, PutMenuItemResponse, SendChatRequest, SendChatResponse, SendMessageRequest,
     SendMessageResponse,
 };
+use nanoprobe_proto::v1alpha1::{
+    ListMarkupGroupsRequest, ListMarkupGroupsResponse, PutMarkupGroupRequest,
+    PutMarkupGroupResponse, RemoveMarkupGroupRequest, RemoveMarkupGroupResponse,
+    RemovePlayerMarkRequest, RemovePlayerMarkResponse, ReplaceMarkupGroupRequest,
+    ReplaceMarkupGroupResponse,
+};
 use nanoprobe_sidecar::ids::EntityId;
 use nanoprobe_sidecar::sim::wire::Body;
-use nanoprobe_sidecar::store::{Kind, MarkerError, MarkerSpec, scope};
+use nanoprobe_sidecar::store::{
+    Kind, Layer, MarkerError, MarkerPut, MarkerSpec, drawing_layout_ok, scope,
+};
+use nanoprobe_transport::codec::Lv;
 use tonic::{Code, Request, Response, Status};
 
 use super::commands::{OVERHEAD, dcs_not_ready, fits, lv_len, place, scope_of, unleased};
@@ -115,9 +124,43 @@ fn marker_error(e: MarkerError, field: &str) -> Status {
         MarkerError::Exhausted => status(
             Code::Internal,
             ErrorReason::Internal,
-            "the campaign has used every entity ID",
+            "the campaign has used every entity ID, or every DCS mark ID of a range",
             0,
             "",
+        ),
+        MarkerError::DcsIdsFull(_) => status(
+            Code::ResourceExhausted,
+            ErrorReason::DcsIdsFull,
+            "the DCS ID pool has too few unused slots in this DCS process for the adds this change needs; nothing was written. Items already shown stay, and a change that adds none still applies. A new DCS process starts with all slots free. GetServerStatus reports dcs_ids_left".to_string(),
+            0,
+            field,
+        ),
+        MarkerError::LabelTaken(l) => status(
+            Code::AlreadyExists,
+            ErrorReason::InvalidField,
+            format!("the label `{l}` is held by another item, or by one in another markup group"),
+            0,
+            "label",
+        ),
+        MarkerError::BadLabel => invalid(
+            "label",
+            "1 to 128 bytes with no control character, unique in the call; marks and drawings only",
+        ),
+        MarkerError::BadLayer => invalid(
+            "markup_group",
+            "1 to 64 bytes with no control character; marks and drawings only",
+        ),
+        MarkerError::NoSuchLayer(n) => status(
+            Code::NotFound,
+            ErrorReason::InvalidField,
+            format!("the campaign has no markup group `{n}`"),
+            0,
+            "name",
+        ),
+        MarkerError::BadExpiry => invalid("expire_after_s", "a finite number above 0"),
+        MarkerError::BadCap => invalid(
+            "cap",
+            "above 0, and no smaller than the items a replacement gives",
         ),
     }
 }
@@ -129,24 +172,40 @@ fn put_mark(g: &mut Inner, c: u64, r: &PutMarkRequest) -> Result<PutMarkResponse
     let at = place(r.position.as_ref(), slot, "position")?;
     let theater = r.position.as_ref().expect("placed").theater.clone();
     fits(OVERHEAD + r.text.len(), limit, "text")?;
-    let (id, _) = slot
+    let put = slot
         .store
-        .put_marker(
-            EntityId(r.mark_id),
+        .put_marker_with(MarkerPut {
+            id: EntityId(r.mark_id),
             scope,
             target,
-            MarkerSpec::Mark {
+            spec: MarkerSpec::Mark {
                 theater,
                 at,
                 text: r.text.clone(),
                 read_only: r.read_only,
             },
-        )
+            label: Some(r.label.clone()),
+            layer: Some(r.markup_group.clone()),
+            expire_after_s: r.expire_after_s,
+        })
         .map_err(|e| marker_error(e, "mark_id"))?;
     Ok(PutMarkResponse {
-        mark_id: id.0,
+        mark_id: put.id.0,
         revision: slot.store.revision(),
     })
+}
+
+/// Refuses a drawing whose shape and arguments are not a layout DCS is known
+/// to draw: DCS can crash inside `markupToAll` on any other (spec/commands.md,
+/// "Marks, drawings and menu items in DCS").
+fn check_layout(shape: u32, args: &Lv, field: &str) -> Result<(), Status> {
+    if drawing_layout_ok(shape, args) {
+        return Ok(());
+    }
+    Err(invalid(
+        field,
+        "shape 1 or 4 with two points, 3 with two or more, 5 with one, 6 with four, or 7 with three or more; each point an object of finite x, y and z; then color and fill (each a list of four finite numbers), the line type (the font size for shape 5, a finite number), read only and the message",
+    ))
 }
 
 fn put_drawing(g: &mut Inner, c: u64, r: &PutDrawingRequest) -> Result<PutDrawingResponse, Status> {
@@ -158,21 +217,25 @@ fn put_drawing(g: &mut Inner, c: u64, r: &PutDrawingRequest) -> Result<PutDrawin
         )),
     });
     fits(OVERHEAD + lv_len(&args), limit, "args")?;
+    check_layout(r.shape, &args, "args")?;
     let slot = g.campaigns.get_mut(&c).expect("resolved campaign");
-    let (id, _) = slot
+    let put = slot
         .store
-        .put_marker(
-            EntityId(r.drawing_id),
+        .put_marker_with(MarkerPut {
+            id: EntityId(r.drawing_id),
             scope,
             target,
-            MarkerSpec::Drawing {
+            spec: MarkerSpec::Drawing {
                 shape: r.shape,
                 args,
             },
-        )
+            label: Some(r.label.clone()),
+            layer: Some(r.markup_group.clone()),
+            expire_after_s: r.expire_after_s,
+        })
         .map_err(|e| marker_error(e, "drawing_id"))?;
     Ok(PutDrawingResponse {
-        drawing_id: id.0,
+        drawing_id: put.id.0,
         revision: slot.store.revision(),
     })
 }
@@ -206,6 +269,208 @@ fn put_menu_item(
         item_id: id.0,
         revision: slot.store.revision(),
     })
+}
+
+/// A markup group as the API shows it.
+pub(crate) fn markup_group_pb(l: &Layer) -> pb::MarkupGroup {
+    pb::MarkupGroup {
+        name: l.name.clone(),
+        visible: l.visible,
+        expire_after_s: l.expire_after_s,
+        cap: l.cap,
+    }
+}
+
+fn put_markup_group(
+    g: &mut Inner,
+    c: u64,
+    r: &PutMarkupGroupRequest,
+) -> Result<PutMarkupGroupResponse, Status> {
+    let l = r
+        .markup_group
+        .as_ref()
+        .ok_or_else(|| invalid("markup_group", "a markup group is required"))?;
+    let slot = g.campaigns.get_mut(&c).expect("resolved campaign");
+    slot.store
+        .put_layer(Layer {
+            name: l.name.clone(),
+            visible: l.visible,
+            expire_after_s: l.expire_after_s,
+            cap: l.cap,
+        })
+        .map_err(|e| match e {
+            MarkerError::BadLayer => invalid(
+                "markup_group.name",
+                "1 to 64 bytes with no control character",
+            ),
+            MarkerError::BadExpiry => {
+                invalid("markup_group.expire_after_s", "a finite number above 0")
+            }
+            MarkerError::BadCap => invalid("markup_group.cap", "above 0"),
+            e => marker_error(e, "markup_group"),
+        })?;
+    Ok(PutMarkupGroupResponse {
+        revision: slot.store.revision(),
+    })
+}
+
+fn remove_markup_group(
+    g: &mut Inner,
+    c: u64,
+    r: &RemoveMarkupGroupRequest,
+) -> Result<RemoveMarkupGroupResponse, Status> {
+    let slot = g.campaigns.get_mut(&c).expect("resolved campaign");
+    slot.store
+        .remove_layer(&r.name)
+        .map_err(|e| marker_error(e, "name"))?;
+    Ok(RemoveMarkupGroupResponse {
+        revision: slot.store.revision(),
+    })
+}
+
+fn replace_markup_group(
+    g: &mut Inner,
+    c: u64,
+    r: &ReplaceMarkupGroupRequest,
+) -> Result<ReplaceMarkupGroupResponse, Status> {
+    let limit = g.backend.max_command();
+    let mut puts = Vec::with_capacity(r.items.len());
+    for (i, item) in r.items.iter().enumerate() {
+        let field = format!("items[{i}]");
+        let put = match &item.kind {
+            Some(pb::markup_group_item::Kind::Mark(m)) => {
+                let (scope, target) = pin_scope(
+                    g,
+                    c,
+                    item.audience.as_ref(),
+                    &format!("{field}.audience"),
+                    true,
+                )?;
+                let slot = g.campaigns.get_mut(&c).expect("resolved campaign");
+                let at = place(m.position.as_ref(), slot, &format!("{field}.position"))?;
+                let theater = m.position.as_ref().expect("placed").theater.clone();
+                fits(OVERHEAD + m.text.len(), limit, &format!("{field}.text"))?;
+                (
+                    scope,
+                    target,
+                    MarkerSpec::Mark {
+                        theater,
+                        at,
+                        text: m.text.clone(),
+                        read_only: m.read_only,
+                    },
+                )
+            }
+            Some(pb::markup_group_item::Kind::Drawing(d)) => {
+                let (scope, target) = pin_scope(
+                    g,
+                    c,
+                    item.audience.as_ref(),
+                    &format!("{field}.audience"),
+                    false,
+                )?;
+                let args = to_lua(&prost_types::Value {
+                    kind: Some(prost_types::value::Kind::ListValue(
+                        d.args.clone().unwrap_or_default(),
+                    )),
+                });
+                fits(OVERHEAD + lv_len(&args), limit, &format!("{field}.args"))?;
+                check_layout(d.shape, &args, &format!("{field}.args"))?;
+                (
+                    scope,
+                    target,
+                    MarkerSpec::Drawing {
+                        shape: d.shape,
+                        args,
+                    },
+                )
+            }
+            None => return Err(invalid(&field, "a mark or a drawing is required")),
+        };
+        let (scope, target, spec) = put;
+        puts.push(MarkerPut {
+            id: EntityId(0),
+            scope,
+            target,
+            spec,
+            label: Some(item.label.clone()),
+            layer: Some(r.name.clone()),
+            expire_after_s: item.expire_after_s,
+        });
+    }
+    let slot = g.campaigns.get_mut(&c).expect("resolved campaign");
+    let (ids, _) = slot
+        .store
+        .replace_layer(&r.name, puts)
+        .map_err(|e| match e {
+            MarkerError::BadLayer => invalid("name", "1 to 64 bytes with no control character"),
+            MarkerError::BadLabel => invalid(
+                "items.label",
+                "every item needs a label of 1 to 128 bytes with no control character, unique in the call",
+            ),
+            MarkerError::BadCap => invalid("items", "more items than the markup group's cap"),
+            e => marker_error(e, "items"),
+        })?;
+    Ok(ReplaceMarkupGroupResponse {
+        ids: ids.into_iter().map(|(_, id)| id.0).collect(),
+        revision: slot.store.revision(),
+    })
+}
+
+fn player_mark_start(
+    g: &mut Inner,
+    c: u64,
+    r: &RemovePlayerMarkRequest,
+) -> Result<(u64, u64), Status> {
+    if r.mark_id == 0 || r.mark_id >= 1 << 53 {
+        return Err(invalid("mark_id", "1 to 2^53 - 1"));
+    }
+    let slot = g.campaigns.get(&c).expect("resolved campaign");
+    if slot.store.markers().any(|m| m.dcs_id == r.mark_id) || slot.store.dcs_issued_now(r.mark_id) {
+        return Err(invalid(
+            "mark_id",
+            "the platform issued this mark ID in this DCS process: remove the item with RemoveEntity",
+        ));
+    }
+    // The event names the mark: it must be held, be a mark event with this
+    // ID, and come from the DCS process and mission generation now running,
+    // since DCS gives the ID to another mark elsewhere.
+    let (held_event, boot) = slot.events.get(r.event_sequence).ok_or_else(|| {
+        status(
+            Code::FailedPrecondition,
+            ErrorReason::InvalidField,
+            "the log no longer holds this event: act on a mark event while it is held",
+            0,
+            "event_sequence",
+        )
+    })?;
+    let marks_this = match &held_event.body {
+        Some(pb::event::Body::World(w)) => {
+            (25..=27).contains(&w.dcs_id) && w.mark_id == Some(r.mark_id)
+        }
+        _ => false,
+    };
+    if !marks_this {
+        return Err(invalid(
+            "event_sequence",
+            "a mark event (DCS event 25 to 27) with this mark_id",
+        ));
+    }
+    let at = held_event.stamp.unwrap_or_default();
+    let running = slot.store.loaded().map(|l| (l.agent_boot, l.mission_gen));
+    if running != Some((boot, at.mission_generation)) {
+        return Err(status(
+            Code::FailedPrecondition,
+            ErrorReason::InvalidField,
+            "the event is from another DCS process or mission generation: DCS gives the ID to another mark",
+            0,
+            "event_sequence",
+        ));
+    }
+    let id = r.mark_id;
+    g.with_rec(c, |rec, store, sim| rec.mark_clear(store, sim, id))
+        .flatten()
+        .ok_or_else(dcs_not_ready)
 }
 
 fn message_start(g: &mut Inner, c: u64, r: &SendMessageRequest) -> Result<(u64, u64), Status> {
@@ -403,6 +668,86 @@ impl PlayersService for Players {
                 &hashed,
                 EffectKind::Chat,
                 |g: &mut Inner, c| chat_start(g, c, &r),
+            )
+            .await?;
+        Ok(Response::new(resp))
+    }
+
+    async fn put_markup_group(
+        &self,
+        req: Request<PutMarkupGroupRequest>,
+    ) -> Result<Response<PutMarkupGroupResponse>, Status> {
+        super::commands::changing!(
+            self,
+            req,
+            "PutMarkupGroup",
+            Need::Campaign,
+            put_markup_group
+        )
+    }
+
+    async fn remove_markup_group(
+        &self,
+        req: Request<RemoveMarkupGroupRequest>,
+    ) -> Result<Response<RemoveMarkupGroupResponse>, Status> {
+        super::commands::changing!(
+            self,
+            req,
+            "RemoveMarkupGroup",
+            Need::Campaign,
+            remove_markup_group
+        )
+    }
+
+    async fn replace_markup_group(
+        &self,
+        req: Request<ReplaceMarkupGroupRequest>,
+    ) -> Result<Response<ReplaceMarkupGroupResponse>, Status> {
+        super::commands::changing!(
+            self,
+            req,
+            "ReplaceMarkupGroup",
+            Need::Campaign,
+            replace_markup_group
+        )
+    }
+
+    async fn list_markup_groups(
+        &self,
+        req: Request<ListMarkupGroupsRequest>,
+    ) -> Result<Response<ListMarkupGroupsResponse>, Status> {
+        require(&req, Access::Observer)?;
+        let r = req.into_inner();
+        let mut g = self.0.lock();
+        let campaign = g.resolve_read(r.campaign_id)?;
+        g.open_archive(campaign)?;
+        let store = &g.campaigns[&campaign].store;
+        let markup_groups = store.layers().map(markup_group_pb).collect();
+        Ok(Response::new(ListMarkupGroupsResponse { markup_groups }))
+    }
+
+    async fn remove_player_mark(
+        &self,
+        req: Request<RemovePlayerMarkRequest>,
+    ) -> Result<Response<RemovePlayerMarkResponse>, Status> {
+        require(&req, Access::Controller)?;
+        let r = req.into_inner();
+        let mut hashed = r.clone();
+        hashed.write = unleased(&r.write);
+        let w = r.write.clone().unwrap_or_default();
+        let resp = self
+            .0
+            .effect(
+                Call {
+                    method: "RemovePlayerMark",
+                    key: w.idempotency.as_ref(),
+                    lease: w.lease.as_ref(),
+                    campaign: w.campaign_id,
+                    need: Need::Active,
+                },
+                &hashed,
+                EffectKind::PlayerMark,
+                |g: &mut Inner, c| player_mark_start(g, c, &r),
             )
             .await?;
         Ok(Response::new(resp))
