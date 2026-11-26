@@ -3307,8 +3307,9 @@ pub struct DynamicSpawn {
     /// `dynamicSpawn`: players may spawn aircraft from the airport's stock.
     /// True also makes the airport's aircraft limited (`unlimitedAircrafts`
     /// false), so dynamic spawn offers the aircraft stock the controller sets
-    /// (SetWarehouseStock). Whether the owner SetAirbaseOwner sets decides the
-    /// coalition it offers them to is UNVERIFIED (spec/persistence.md). AI the
+    /// (SetWarehouseStock). The owner SetAirbaseOwner sets decides the
+    /// coalition it offers them to (spec/persistence.md: LIVE that
+    /// getAirdromesCoalition gives that owner). AI the
     /// mission spawns there use the same stock.
     #[prost(bool, tag = "2")]
     pub enabled: bool,

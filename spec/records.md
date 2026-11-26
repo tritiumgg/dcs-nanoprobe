@@ -162,7 +162,7 @@ a character boundary, so the replacement always fits. An `EVENT`'s values are `l
 | 0x0020 | u64 | epoch | Command epoch |
 | 0x0028 | u64 | last_applied_seq | Highest sequence number handled in `epoch` |
 | 0x0030 | u64 | in_head | The inbound read position: every command before it was handled, and its `RESULT` is before this record |
-| 0x0038 | u32 | interface | The agent DLL's interface version, as in the status block: the DLL-to-shim ABI, which the sidecar logs and does not check |
+| 0x0038 | u32 | interface | The agent DLL's interface version, as in the status block: the DLL-to-shim ABI, which the sidecar reports as `agent_interface` in `GetServerStatus` and does not check |
 | 0x003C | u32 | flags | `agent_flags` bits |
 | + | str | dcs_version | The DCS version string, read once by the hook |
 

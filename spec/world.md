@@ -221,9 +221,9 @@ with a death fact is never spawned alive again: DCS gets its ruin ("Ruins").
 | `spec_rev` | group, static, mark, drawing, menu item, extension | Its spec changes, or a `lost` group or static is respawned, whose spec may be the same |
 | `order_rev` | group | Its order changes, or the target of a sent or applied attack order (a group, a unit's group, or a static) gets new DCS object IDs. The new revision is taken when the target's spawn resolves `applied`, and the order is compiled after it. Not on a mission generation change, after which every order is sent again. |
 
-A group's spec is its country, coalition, category, extra keys of its DCS table, and
+A group's spec is its country, category, extra keys of its DCS table, and
 its units: each one's type, skill and extra keys. A static's is its country,
-coalition, type, place, heading, extra keys and further units: a static stays where it
+type, place, heading, extra keys and further units: a static stays where it
 was spawned, so its place is spec ("Revising a static"): the `POSITIONS` rows the agent
 writes for it (spec/sampling.md) do not change it. A static whose spec's `extra.category`
 is `Cargos` keeps its last known place instead, which a revision's place replaces. The
@@ -569,8 +569,9 @@ diagnostics bundle reads it. With persistence off nothing is written, and the ke
 as long as the sidecar process.
 
 **Kill attribution.** DCS sends a weapon kill's `KILL` and `SCORE` with the late death
-event, up to 77.1 s after the object stops existing (LIVE,
-docs/results/2026-11-14-e38-life-and-ammunition.md), when the
+event. That event comes up to 103 s after the object stops existing (LIVE, 77.1 s in
+docs/results/2026-11-14-e38-life-and-ammunition.md, 103 s in
+docs/results/2026-11-16-clear-debris.md, as in spec/records.md). By then the
 victim and maybe the killer have left the agent's table. The sidecar keeps, per mission
 generation, a memory of the rows that left: object ID, `EntityId`, type, coalition, the
 player keys that occupied it, and the time it left. It resolves a late event's object

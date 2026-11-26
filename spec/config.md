@@ -146,8 +146,9 @@ sha256 = "<64 lower-case hex digits>"
 The file holds the SHA-256 of each token's text, never the token. A caller sends the
 token itself (`authorization: Bearer <token>`); the sidecar hashes it and compares the
 hash with every entry in constant time. A token is at least 32 characters of printable
-ASCII with no spaces; 64 hex digits from 32 random bytes, as the installer makes the
-agent's token, is the intended form. The sidecar refuses a presented token that breaks
+ASCII with no spaces. The intended form is 64 hex digits from 32 random bytes. The
+installer makes only the agent's handshake token, in this form, and no API token.
+The sidecar refuses a presented token that breaks
 this rule, since the file holds only hashes and cannot say what a token looks like. An
 unknown key, an unknown role, a hash that is not 64 lower-case hex digits, and two
 entries with one hash are errors: the sidecar refuses to start.
