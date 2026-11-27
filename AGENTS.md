@@ -27,7 +27,9 @@ Writing a controller: read `docs/controller-guide.md`. Running a server: read
   recordings, missions, or any file copied from a DCS install.
 - **Development and test tooling stays generic and out of releases.** It may live in
   this repository, but it reads every target from configuration outside it, and a user
-  builds it from source to run it.
+  builds it from source to run it. The fake sidecar (`crates/fake-sidecar`) is a tool
+  for controller authors and ships in the release archives (`spec/install.md`); keep
+  its `--help` fit for users.
 
 ## Evidence
 

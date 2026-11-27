@@ -2532,7 +2532,7 @@ pub struct WorldEvent {
     /// Model time of the kill, for a KILL or DEAD: the victim's BDA time when
     /// one came, else the time the victim's row left the table. DCS's own time
     /// of the event stays in extra.time. A weapon kill's KILL and DEAD come up
-    /// to 83 s after the object stopped existing; this is the time to count.
+    /// to 103 s after the object stopped existing; this is the time to count.
     #[prost(double, optional, tag = "15")]
     pub dated_time: ::core::option::Option<f64>,
     /// The players who launched the weapon of a HIT or KILL. initiator_players

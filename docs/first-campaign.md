@@ -15,14 +15,18 @@ release's schema.
 
 ## Run it without DCS
 
-The repository holds a fake sidecar: the real API server over a simulated DCS. It is
-development tooling, built from source, and is not in a release. It lets you write and
-test a controller with no DCS at all.
+The fake sidecar, `nanoprobe-fake-sidecar`, is the real API server over a simulated
+DCS. It lets you write and test a controller with no DCS at all. It is in each release
+archive; from the unpacked folder, run:
 
 ```sh
-mise install
-cargo run -p nanoprobe-fake-sidecar -- --listen 127.0.0.1:47311
+./nanoprobe-fake-sidecar --listen 127.0.0.1:47311
 ```
+
+On Windows the program is `nanoprobe-fake-sidecar.exe`. In a checkout, run `mise install`, then
+`cargo run -p nanoprobe-fake-sidecar -- --listen 127.0.0.1:47311`.
+[controller-guide.md](controller-guide.md), "Test without DCS", has its options and
+its limits.
 
 In another terminal:
 

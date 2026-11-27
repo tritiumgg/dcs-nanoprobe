@@ -1,4 +1,5 @@
-//! `nanoprobe-fake-sidecar`: the API server over the fake sim.
+//! `nanoprobe-fake-sidecar`: the API server over the fake sim, for
+//! controller development. Released beside the sidecar.
 
 use std::process::ExitCode;
 use std::time::Duration;
@@ -8,35 +9,40 @@ use nanoprobe_fake_sidecar::{fake_config, start_with};
 use nanoprobe_sim_fake::FakeSim;
 
 const USAGE: &str = "\
-Usage: nanoprobe-fake-sidecar [--listen ADDR] [--tokens PATH] [--frame-ms MS]
-                              [--store DIR] [--theater NAME]
-                              [--leak-kib-per-s N] [--removed-keep-s S]
-                              [--dead-keep-s S] [--backup-interval-s S]
-                              [--run PROGRAM [ARGS...]]
+Usage: nanoprobe-fake-sidecar [OPTIONS] [--run PROGRAM [ARGS...]]
 
-Serve the nanoprobe API over a fake DCS, for development and tests.
+Serve the real nanoprobe API over a simulated DCS, to develop and test a
+controller without a DCS server. The simulation follows what the project
+has observed of DCS. A controller that works here can still behave
+differently against a real server.
 
---listen ADDR   Where to listen (default 127.0.0.1:47311; port 0 picks one).
---tokens PATH   A tokens file (spec/config.md); required off loopback.
---frame-ms MS   Milliseconds per fake frame (default 20).
---store DIR     Keep the campaigns in DIR (spec/persistence.md). Without it
-                they are in memory and end with the process.
---theater NAME  Start the fake DCS with a mission on NAME loaded, as a DCS
-                that started its own mission. Without it no mission is
-                loaded until an activation loads one.
---leak-kib-per-s N
-                Leak N KiB of memory each second, for a test that a drift
-                check catches a leak (`cargo xtask soak rehearse`).
---removed-keep-s S, --dead-keep-s S, --backup-interval-s S
-                `removed_keep_h`, `dead_keep_h` and `backup_interval_h`
-                (spec/config.md) in seconds, so a rehearsal of minutes
-                sees the purge, the expiry and scheduled backups. The
-                backup interval needs --store.
---run PROGRAM   Run PROGRAM with NANOPROBE_ADDR set to the server's URL, then
-                stop and exit with its exit code. Without it, serve until
-                Ctrl-C.
+Options:
+  --listen ADDR   Where to listen (default 127.0.0.1:47311; port 0 picks a
+                  free port).
+  --tokens PATH   A tokens file, in the sidecar's format; required when ADDR
+                  is not a loopback address.
+  --store DIR     Keep campaigns in DIR. Without it they are in memory and
+                  end with the process.
+  --theater NAME  Start with a mission on theater NAME loaded, as a DCS that
+                  started its own mission. Without it no mission is loaded
+                  until a campaign is activated.
+  --frame-ms MS   Milliseconds per simulated frame (default 20).
+  --run PROGRAM [ARGS...]
+                  Run PROGRAM with every argument after it, and with
+                  NANOPROBE_ADDR set to the server's URL. When it exits,
+                  stop and exit with its exit code. Without --run, serve
+                  until Ctrl-C.
+  -h, --help      Print this text.
 
-The server prints `listening on http://ADDR` once it accepts connections.";
+Options for the project's own tests:
+  --removed-keep-s S, --dead-keep-s S, --backup-interval-s S
+                  The sidecar's removed_keep_h, dead_keep_h and
+                  backup_interval_h, in seconds. The backup interval needs
+                  --store.
+  --leak-kib-per-s N
+                  Leak N KiB of memory each second.
+
+Prints `listening on http://ADDR` once it accepts connections.";
 
 struct Args {
     cfg: Config,

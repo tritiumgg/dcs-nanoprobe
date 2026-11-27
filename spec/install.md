@@ -124,6 +124,7 @@ they are published. Each archive holds one folder,
 ```
 nanoprobe[.exe]                 doctor, install, uninstall, inspect, top, watch, restore
 nanoprobe-sidecar[.exe]         the sidecar (spec/config.md)
+nanoprobe-fake-sidecar[.exe]    the API over a simulated DCS, for controller development
 install.cmd, uninstall.cmd      Windows only: run the program on a double click
 install.sh, uninstall.sh        Linux only: run the program with their arguments
 README.txt                      what the folder holds and the first steps
@@ -166,7 +167,7 @@ folder (spec/config.md) and stay. The exception is a folder the user puts
 inside `<profile>/nanoprobe`, the mission folder included, which undeploy removes with
 the rest.
 
-The platforms are `windows-x86_64` (a zip) and `linux-x86_64` (a tar.gz whose two
+The platforms are `windows-x86_64` (a zip) and `linux-x86_64` (a tar.gz whose three
 programs are static). The payload is the same in both: a Linux server runs DCS under Wine.
 `nanoprobe install` reads `payload/` beside the program. It installs into the one DCS
 profile it finds, or the one `--profile` names: a folder named `DCS` or `DCS.<branch>`

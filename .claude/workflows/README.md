@@ -48,6 +48,10 @@ when its fixes changed the design and not only the wording.
 | `intended` | Known and intended differences, which reviewers do not report |
 | `history` | Judge only: one line per round |
 
+`fixed`, `rejected`, `intended` and `history` each take a list of strings. A single
+string counts as a one-item list, and an empty string as none. Any other type stops the
+run with an error.
+
 ## Notes
 
 - A round runs 7 agents and takes 10 to 15 minutes.

@@ -217,7 +217,7 @@ start.
    [Python](examples/hello-python) or [Kotlin](examples/hello-kotlin). It starts a
    campaign and drives two vehicles one kilometer.
    [docs/first-campaign.md](docs/first-campaign.md) walks through it. You can also run
-   it with no DCS at all, against the fake sidecar.
+   it with no DCS at all, against `nanoprobe-fake-sidecar` from the release folder.
 
 ## Configuration
 

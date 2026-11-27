@@ -2,16 +2,23 @@ nanoprobe for DCS World under Wine on Linux
 
 This folder holds:
 
-  nanoprobe           doctor, install, uninstall, inspect, top, watch, restore
-  nanoprobe-sidecar   the sidecar: connects to the agent in DCS and serves the API
-  install.sh          runs "nanoprobe install" with the arguments it is given
-  uninstall.sh        runs "nanoprobe uninstall" with the arguments it is given
-  deploy/             the sidecar's container image, a compose overlay and an
-                      example sidecar.toml for it; start at deploy/README.md
-  payload/            the agent that install puts in the DCS profile
+  nanoprobe                doctor, install, uninstall, inspect, top, watch,
+                           restore
+  nanoprobe-sidecar        the sidecar: connects to the agent in DCS and serves
+                           the API
+  nanoprobe-fake-sidecar   the API over a simulated DCS, to develop a
+                           controller without DCS; run it with --help
+  install.sh               runs "nanoprobe install" with the arguments it is
+                           given
+  uninstall.sh             runs "nanoprobe uninstall" with the arguments it is
+                           given
+  deploy/                  the sidecar's container image, a compose overlay and
+                           an example sidecar.toml for it; start at
+                           deploy/README.md
+  payload/                 the agent that install puts in the DCS profile
   LICENSE
 
-Both programs are static and need nothing installed.
+The three programs are static and need nothing installed.
 
 Install
 

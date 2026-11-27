@@ -1,9 +1,9 @@
-# Development tooling: the API server over the fake sim. Built from source,
-# never released.
+# The API server over the fake sim, for controller development and the
+# project's tests. Released beside the sidecar (spec/install.md).
 
 [package]
 name = "nanoprobe-fake-sidecar"
-description = "The nanoprobe API server over the fake sim, for development and tests. Not released."
+description = "The nanoprobe API server over a simulated DCS, for controller development and tests."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

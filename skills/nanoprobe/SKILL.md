@@ -68,9 +68,12 @@ server's version.
      Set only the weather fields you change in `conditions`; the template keeps the
      rest. Play or show a file after the load by its name (`DoEffect` `sound`,
      `picture`, `broadcast`).
-4. Test against the fake sidecar before a real server, when a checkout is present:
-   `cargo run -p nanoprobe-fake-sidecar -- --listen 127.0.0.1:47311`
-   (`docs/first-campaign.md`).
+4. Test against the fake sidecar before a real server:
+   `nanoprobe-fake-sidecar --listen 127.0.0.1:47311` from a release folder, or
+   `cargo run -p nanoprobe-fake-sidecar -- --listen 127.0.0.1:47311` in a checkout.
+   `--run PROGRAM [ARGS...]` runs a test with `NANOPROBE_ADDR` set and exits with its
+   code. It simulates DCS; passing against it does not prove behavior on a real server
+   (`docs/controller-guide.md`, "Test without DCS").
 
 ## Running nanoprobe on a server
 

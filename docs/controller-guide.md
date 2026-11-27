@@ -661,6 +661,30 @@ position came from DCS.
 { "result": { "outcome": "OUTCOME_APPLIED", "costUs": 10, "code": "RESULT_CODE_APPLIED" } }
 ```
 
+## Test without DCS
+
+`nanoprobe-fake-sidecar` is the real API server over a simulated DCS. It is in each
+release archive beside `nanoprobe-sidecar`; in a checkout, run it with
+`cargo run -p nanoprobe-fake-sidecar --`. A controller connects to it as it does to the
+sidecar.
+
+```sh
+nanoprobe-fake-sidecar --listen 127.0.0.1:47311
+```
+
+- `--listen ADDR` sets the address; port 0 picks a free port. The default is
+  `127.0.0.1:47311`, the sidecar's.
+- `--run PROGRAM [ARGS...]` starts the server, runs the program with
+  `NANOPROBE_ADDR` set to the server's URL, then stops and exits with the program's
+  exit code. Use it in a test script or CI.
+
+`--help` lists the other options: a store folder, a tokens file, a mission already
+loaded. Without `--store` the campaigns are in memory and end with the process.
+
+The simulation models DCS from the project's own results. It does not run DCS. A
+controller that passes against it can still fail on a real server: test there before
+you rely on it.
+
 ## Recipes
 
 Each recipe names the calls. The hello examples run recipes 1 and 2 in full:

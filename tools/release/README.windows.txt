@@ -2,12 +2,16 @@ nanoprobe for DCS World on Windows
 
 This folder holds:
 
-  nanoprobe.exe           doctor, install, uninstall, inspect, top, watch, restore
-  nanoprobe-sidecar.exe   the sidecar: connects to the agent in DCS and serves the API
-  install.cmd             runs "nanoprobe.exe install"
-  uninstall.cmd           runs "nanoprobe.exe uninstall"
-  sidecar.toml            example settings for the sidecar
-  payload\                the agent that install puts in the DCS profile
+  nanoprobe.exe                doctor, install, uninstall, inspect, top, watch,
+                               restore
+  nanoprobe-sidecar.exe        the sidecar: connects to the agent in DCS and
+                               serves the API
+  nanoprobe-fake-sidecar.exe   the API over a simulated DCS, to develop a
+                               controller without DCS; run it with --help
+  install.cmd                  runs "nanoprobe.exe install"
+  uninstall.cmd                runs "nanoprobe.exe uninstall"
+  sidecar.toml                 example settings for the sidecar
+  payload\                     the agent that install puts in the DCS profile
   LICENSE
 
 Install

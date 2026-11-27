@@ -1,6 +1,7 @@
 //! The API server over the fake sim: a [`Backend`] for
 //! [`FakeSim`](nanoprobe_sim_fake::FakeSim), and helpers to run it in a test
-//! or as a process. Development tooling; never released.
+//! or as a process. The process, `nanoprobe-fake-sidecar`, ships in the release
+//! archives for controller development (spec/install.md).
 
 use std::net::SocketAddr;
 use std::sync::Arc;

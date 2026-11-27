@@ -4,7 +4,7 @@
 # Both archives carry the same payload: the loader, the agent DLL and the
 # version's Lua, which `nanoprobe install` puts in a DCS Saved Games profile.
 # A Linux DCS server runs under Wine, so its archive carries the Windows DLL
-# too. The two programs differ: Windows executables, or static Linux ones.
+# too. The three programs differ: Windows executables, or static Linux ones.
 #
 #   dist/nanoprobe-<v>-windows-x86_64.zip
 #   dist/nanoprobe-<v>-linux-x86_64.tar.gz
@@ -26,6 +26,8 @@
 #   nanoprobe[.exe]                  doctor, install, uninstall, inspect, top, watch,
 #                                    restore
 #   nanoprobe-sidecar[.exe]          the sidecar
+#   nanoprobe-fake-sidecar[.exe]     the API over a simulated DCS, for controller
+#                                    development
 #   install.cmd, uninstall.cmd       Windows: run the program on a double click
 #   install.sh, uninstall.sh         Linux: run the program with their arguments
 #   README.txt                       what the folder holds and the first steps
@@ -38,7 +40,7 @@
 #   payload/lua/hook.lua, log.lua, shim.lua
 #
 # Run it through `mise run package`, which first builds the DLL and checks it
-# with tools/checkdll.sh. This script builds the two programs for both
+# with tools/checkdll.sh. This script builds the three programs for both
 # platforms. .github/workflows/release.yml runs the same task on a Linux
 # runner to build a release.
 #
@@ -89,11 +91,12 @@ sh tools/checkdll.sh "$DLL" >/dev/null
 # Windows build's nanoprobe.pdb would replace the agent's, which has the same
 # name.
 CLI_TARGET=target/release-cli
-PROGRAMS='-p nanoprobe-cli --bin nanoprobe -p nanoprobe-api --bin nanoprobe-sidecar'
+PROGRAMS='-p nanoprobe-cli --bin nanoprobe -p nanoprobe-api --bin nanoprobe-sidecar
+    -p nanoprobe-fake-sidecar --bin nanoprobe-fake-sidecar'
 # shellcheck disable=SC2086 # PROGRAMS is a list of arguments.
 cargo xwin build --release $PROGRAMS --target "$WIN" --target-dir "$CLI_TARGET" \
     --config "$(sh tools/remap.sh "$WIN")"
-# Both programs hold the bundled SQLite, which needs a C compiler for musl:
+# The programs hold the bundled SQLite, which needs a C compiler for musl:
 # zig's, unless the caller names another.
 : "${CC_x86_64_unknown_linux_musl:=$ROOT/tools/zigcc-musl.sh}"
 : "${AR_x86_64_unknown_linux_musl:=$ROOT/tools/zigar.sh}"
@@ -124,11 +127,11 @@ rm -f "$OUT"/nanoprobe-*-windows-x86_64.zip "$OUT"/nanoprobe-*-linux-x86_64.tar.
     "$OUT"/nanoprobe-*-agent.pdb \
     "$OUT"/nanoprobe-*-schema.tar.gz "$OUT"/nanoprobe-*-schema.binpb "$OUT/SHA256SUMS"
 
-# stage <platform> <program> <sidecar>
+# stage <platform> <program> <sidecar> <fake sidecar>
 stage() {
     dir=$OUT/stage/nanoprobe-$VERSION-$1
     mkdir -p "$dir/payload/lua"
-    cp "$2" "$3" "$dir/"
+    cp "$2" "$3" "$4" "$dir/"
     cp LICENSE "$dir/LICENSE"
     cp lua/hook/nanoprobe-hook.lua "$dir/payload/nanoprobe-hook.lua"
     cp "$DLL" "$dir/payload/nanoprobe_agent.dll"
@@ -146,7 +149,8 @@ crlf() {
 }
 
 stage windows-x86_64 "$CLI_TARGET/$WIN/release/nanoprobe.exe" \
-    "$CLI_TARGET/$WIN/release/nanoprobe-sidecar.exe"
+    "$CLI_TARGET/$WIN/release/nanoprobe-sidecar.exe" \
+    "$CLI_TARGET/$WIN/release/nanoprobe-fake-sidecar.exe"
 WINDIR=$OUT/stage/nanoprobe-$VERSION-windows-x86_64
 for verb in install uninstall; do
     printf '@echo off\r\n"%%~dp0nanoprobe.exe" %s %%*\r\npause\r\n' "$verb" >"$WINDIR/$verb.cmd"
@@ -155,10 +159,12 @@ crlf tools/release/README.windows.txt "$WINDIR/README.txt"
 crlf tools/release/sidecar.windows.toml "$WINDIR/sidecar.toml"
 
 stage linux-x86_64 "$CLI_TARGET/$LINUX/release/nanoprobe" \
-    "$CLI_TARGET/$LINUX/release/nanoprobe-sidecar"
+    "$CLI_TARGET/$LINUX/release/nanoprobe-sidecar" \
+    "$CLI_TARGET/$LINUX/release/nanoprobe-fake-sidecar"
 LINUXDIR=$OUT/stage/nanoprobe-$VERSION-linux-x86_64
 cp tools/release/install.sh tools/release/uninstall.sh "$LINUXDIR/"
 chmod 0755 "$LINUXDIR/nanoprobe" "$LINUXDIR/nanoprobe-sidecar" \
+    "$LINUXDIR/nanoprobe-fake-sidecar" \
     "$LINUXDIR/install.sh" "$LINUXDIR/uninstall.sh"
 cp tools/release/README.linux.txt "$LINUXDIR/README.txt"
 mkdir "$LINUXDIR/deploy"

@@ -66,7 +66,7 @@ map_path = ""               # the mapped file as the sidecar opens it; required
 handshake = "127.0.0.1:47310"
 token_path = ""             # the token file as the sidecar opens it; required
 poll_ms = 2                 # how often the sidecar reads the file, 1 to 5
-command_queue = 4096        # effects and queries waiting for the inbound ring; more is QUEUE_FULL
+command_queue = 4096        # accepted; no effect
 
 [api]
 listen = "127.0.0.1:47311"  # gRPC listener
@@ -105,8 +105,8 @@ on_lost = "report"          # report, respawn or dead: the default policy for a 
 destroy_retries = 3         # refused or unknown destroys of one entity before the sidecar stops
 
 [log]
-dir = "logs"
-level = "info"
+dir = "logs"                # accepted; no effect
+level = "info"              # accepted; no effect
 
 [missions]
 dir = ""                    # the mission folder as the sidecar opens it: templates, and shells/
@@ -117,6 +117,7 @@ template_dirs = []          # folders a call may name a template, image or sound
 | Key | Rule |
 |---|---|
 | `[agent] map_path`, `token_path` | Paths on the sidecar's side. Under Wine with a native sidecar they are Linux paths to the same files the agent names with Windows paths. |
+| `[agent] command_queue`, `[log] dir`, `[log] level` | Accepted, so a file that sets them still starts, and have no effect. The sidecar writes its log to standard output and standard error. |
 | `[api] listen` | Loopback by default. A listener on any other address refuses to start without `tokens_path`. |
 | `tokens_path` | A TOML file of tokens, each with a role: `observer`, `controller` or `admin` (spec/errors.md, "Roles"). Kept outside any repository. Its layout is under "Tokens file". |
 | `[store] enabled` | With `false` the stores are in memory and last as long as the sidecar process (spec/world.md). The purge, the expiry, the journal's and the event history's limits and `server_log_days` apply in memory too. |

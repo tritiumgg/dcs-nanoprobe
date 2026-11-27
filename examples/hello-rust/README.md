@@ -12,7 +12,11 @@ from a release's schema ([docs/api-clients.md](../../docs/api-clients.md), "Rust
 
 ## Run
 
-Start a server, such as the fake sidecar:
+Start a server, such as the fake sidecar from a release folder:
+
+    ./nanoprobe-fake-sidecar --listen 127.0.0.1:47311
+
+(on Windows, `nanoprobe-fake-sidecar.exe`) or, in this checkout:
 
     cargo run -p nanoprobe-fake-sidecar -- --listen 127.0.0.1:47311
 

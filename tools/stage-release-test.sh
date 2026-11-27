@@ -3,6 +3,7 @@
 # files spec/install.md lists, the programs are Windows executables and static
 # Linux ones, both carry the same payload, the texts are the repository's, the
 # Linux scripts pass on their arguments and the program's exit code, the
+# fake sidecar runs (on a Linux x86_64 host only), the
 # schema is staged (tools/stage-schema-test.sh), no PDB is in the release
 # while the released DLL's is kept in dist/private/, and SHA256SUMS matches.
 #
@@ -43,12 +44,12 @@ payload() {
 {
     payload "$WIN"
     printf '%s\n' "$WIN/README.txt" "$WIN/install.cmd" "$WIN/nanoprobe-sidecar.exe" \
-        "$WIN/nanoprobe.exe" "$WIN/sidecar.toml" "$WIN/uninstall.cmd"
+        "$WIN/nanoprobe-fake-sidecar.exe" "$WIN/nanoprobe.exe" "$WIN/sidecar.toml" "$WIN/uninstall.cmd"
 } | LC_ALL=C sort >"$TMP/win.want"
 {
     payload "$LINUX"
     printf '%s\n' "$LINUX/README.txt" "$LINUX/install.sh" "$LINUX/nanoprobe" \
-        "$LINUX/nanoprobe-sidecar" "$LINUX/uninstall.sh"
+        "$LINUX/nanoprobe-sidecar" "$LINUX/nanoprobe-fake-sidecar" "$LINUX/uninstall.sh"
     (cd "$ROOT" && git ls-files -- deploy) | sed "s|^|$LINUX/|"
 } | LC_ALL=C sort >"$TMP/linux.want"
 
@@ -73,7 +74,7 @@ mkdir "$TMP/win" "$TMP/linux"
 magic() {
     od -An -tx1 -N4 "$1" | tr -d ' \n'
 }
-for name in nanoprobe nanoprobe-sidecar; do
+for name in nanoprobe nanoprobe-sidecar nanoprobe-fake-sidecar; do
     case $(magic "$TMP/win/$WIN/$name.exe") in
         4d5a*) pass "$name.exe is a Windows executable" ;;
         *) fail "$name.exe is not a Windows executable" ;;
@@ -90,10 +91,28 @@ for name in nanoprobe nanoprobe-sidecar; do
         pass "$name is static"
     fi
 done
-for name in nanoprobe nanoprobe-sidecar install.sh uninstall.sh; do
+for name in nanoprobe nanoprobe-sidecar nanoprobe-fake-sidecar install.sh uninstall.sh; do
     [ -x "$TMP/linux/$LINUX/$name" ] && pass "$name is executable" ||
         fail "$name has no execute permission"
 done
+
+# The released fake sidecar runs: its help is the user's, and it serves and
+# runs a program. Only a Linux x86_64 host, such as the release runner, can
+# run the Linux build.
+if [ "$(uname -s)-$(uname -m)" = Linux-x86_64 ]; then
+    fake=$TMP/linux/$LINUX/nanoprobe-fake-sidecar
+    "$fake" --help 2>&1 | grep -q '^Usage: nanoprobe-fake-sidecar ' &&
+        pass "nanoprobe-fake-sidecar --help prints its usage" ||
+        fail "nanoprobe-fake-sidecar --help does not print its usage"
+    if timeout 60 "$fake" --listen 127.0.0.1:0 --run true >"$TMP/fake.log" 2>&1; then
+        pass "nanoprobe-fake-sidecar serves and runs a program"
+    else
+        fail "nanoprobe-fake-sidecar --run true failed:"
+        cat "$TMP/fake.log" >&2
+    fi
+else
+    printf 'skip  running nanoprobe-fake-sidecar: needs a Linux x86_64 host\n'
+fi
 
 # The texts are the repository's: the Windows ones with Windows line ends.
 uncr() {

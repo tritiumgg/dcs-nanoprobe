@@ -21,10 +21,17 @@ export const meta = {
 //   rejected  issues rejected by vote in earlier rounds, as short lines
 //   intended  known and intended differences that are not to be reported
 //   history   judge mode: one line per round, e.g. 'round 1: 12 issues, 2 High, all fixed'
+// fixed, rejected, intended and history each take a list of strings; a string is a one-item list,
+// and a missing value or an empty string is none. Any other type stops the run.
 
 const a = args || {}
 const mode = a.mode || 'round'
-const list = (title, items) => (items && items.length) ? `\n${title}\n${items.map(x => '- ' + x).join('\n')}\n` : ''
+const list = (title, value) => {
+  if (value === undefined || value === null || value === '') return ''
+  const items = typeof value === 'string' ? [value] : value
+  if (!Array.isArray(items)) throw new Error(`review-round: ${title} expects a string or a list of strings`)
+  return items.length ? `\n${title}\n${items.map(x => '- ' + x).join('\n')}\n` : ''
+}
 const BRIEF = `Step under review: ${a.step}. Repository: ${a.root}.
 ${a.work}
 What the work must satisfy:

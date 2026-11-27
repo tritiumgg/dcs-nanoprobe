@@ -119,10 +119,11 @@ mise tools and the builds need, and installs with apt the readline and ncurses h
 that mise's Lua build needs. Then it runs `mise run package` from nothing, with no
 cache, and the archive test `tools/stage-release-test.sh`. That test fails when
 an archive holds other files than spec/install.md lists, when a program is not static,
-when a file names the runner's home folder or checkout, or when a PDB is among the
-release's files. The files are kept as the workflow artifact `release-files-<commit>`
-and the PDB folder as `agent-symbols-<commit>`, each for 14 days, where `<commit>` is
-the first 12 characters of the commit they were built from. No release is made.
+when a file names the runner's home folder or checkout, when a PDB is among the
+release's files, or when the Linux `nanoprobe-fake-sidecar` does not run. The files
+are kept as the workflow artifact `release-files-<commit>` and the PDB folder as
+`agent-symbols-<commit>`, each for 14 days, where `<commit>` is the first 12
+characters of the commit they were built from. No release is made.
 
 A few seconds after starting it, watch the run; the command exits nonzero when it
 fails. Then print the full commit it built, and download its files and PDB folder into
@@ -183,13 +184,13 @@ release), on a commit on main whose CI passed.
 
 When a dry run's files were tested, the commit to tag must differ from that run's
 commit only in files the release build does not read: the documents, the test results
-and their scripts, and the test tooling (`crates/xtask`, the fake agent and sidecar,
-`examples/`, and every `lua/` folder but `lua/hook` and `lua/agent`). This prints
-nothing when that holds:
+and their scripts, and the test tooling (`crates/xtask`, the fake agent,
+`examples/`, and every `lua/` folder but `lua/hook` and `lua/agent`). The fake sidecar
+is released, so it is not among them. This prints nothing when that holds:
 
 ```bash
 git diff --stat <dry-run commit> main -- . ':(exclude)docs' ':(exclude)README.md' \
-    ':(exclude)crates/xtask' ':(exclude)crates/fake-agent' ':(exclude)crates/fake-sidecar' \
+    ':(exclude)crates/xtask' ':(exclude)crates/fake-agent' \
     ':(exclude)examples' ':(exclude,glob)lua/[!ah]*/**'
 ```
 
