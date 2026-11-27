@@ -1,5 +1,51 @@
 # Release notes
 
+## 0.3.0
+
+Tested on DCS 2.9.32.30490 (dedicated server under Wine).
+
+### Added
+
+- `SetNextMission` takes typed weather (`conditions`). Each field set replaces the
+  template's, within the Mission Editor's ranges and cross-field checks
+  ([ADR 0053](adr/0053-mission-content.md)).
+- `SetNextMission` sets the sortie name, the situation and each coalition's task
+  (`briefing`), in every language the template holds.
+- `SetNextMission` sets each coalition's briefing images and the coalition selection
+  screen's images (`briefing_images`).
+- `SetMissionFile` and `ListMissionFiles` pack PNG, JPEG, Ogg Vorbis and WAV files into
+  a campaign's missions: briefing images, sounds, pictures, broadcasts and kneeboard
+  pages. A campaign holds at most 64 files and 64 MiB; a full campaign is refused with
+  reason `FILES_FULL`.
+- `DoEffect` broadcasts a mission sound file on a radio frequency in Hz, AM or FM
+  (`broadcast`), and stops it by name (`broadcast_stop`).
+- The release archives include `nanoprobe-fake-sidecar`: the API over a simulated DCS,
+  to develop and test a controller without a DCS server. It models DCS from the
+  project's results, so a controller that passes against it can still behave
+  differently on a real server ([ADR 0054](adr/0054-the-fake-sidecar-ships-in-releases.md),
+  [controller guide](controller-guide.md)).
+- Guides: [controller-guide.md](controller-guide.md) for writing a controller,
+  [operator-guide.md](operator-guide.md) for running a server, and
+  [configuration.md](configuration.md) for every setting.
+- An Agent Skill in `skills/nanoprobe/` points AI coding tools at the guides and the
+  schema. Its README says where each tool looks for it.
+
+### Changed
+
+- **The campaign store is schema 3.** A sidecar migrates an older store when it opens
+  it, after taking a `pre_migration` backup. An older sidecar cannot open a migrated
+  store: to go back, restore the `pre_migration` backup, which loses what the campaign
+  did since. Back the store up before upgrading if you may roll back.
+- **The `weather` Struct in `NextMission` is deprecated**; set `conditions`. Setting
+  both is `INVALID_FIELD`, and a `weather` table without `clouds` or `season` is
+  refused.
+- The README is rewritten, with example messages, what nanoprobe adds to DCS,
+  performance figures and limitations.
+- The configuration reference says `sidecar.toml`'s `[agent] command_queue`,
+  `[log] dir` and `[log] level` are accepted and have no effect.
+- The `dated_time` field's documentation gives the time a late kill can arrive as up to
+  103 s.
+
 ## 0.2.0
 
 ### Added
