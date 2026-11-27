@@ -128,6 +128,81 @@ tail -n 1 "$OUT" | grep -qF '| File | Holds |' && ! grep -q 'Older' "$OUT" &&
     pass "without RELEASE_LINK_BASE the links stay as written" ||
     fail "the links changed with no base: $(cat "$SCRATCH/plain.md")"
 
+# tools/release-links.awk, which the notes share with the archives' documents,
+# gives the notes' rule byte for byte: `../x` to <base>/x, any other relative
+# `x` to <base>/docs/x, the rest as written, and nothing in a fenced code
+# block. The reference below states that rule on its own, and both run over
+# every link form and the repository's own notes.
+cat >"$SCRATCH/forms.md" <<'EOF'
+[a](../README.md) [b](install.md) [c](results/r.md#part) [d](../../up.md) [e](./here.md)
+[f](https://example.com/x) [g](http://e.org) [h](mailto:a@b.c) [i](#files) [j](/abs) [k]()
+![l](img/x.png) [m](../spec/) text ](odd) [n](a/../b.md)
+```lua
+handlers[name](args)
+```
+[o](after.md)
+EOF
+reference() {
+    awk -v base="$1" '
+        function fix(target) {
+            if (base == "" || target ~ /^(https?:|mailto:|#|\/)/) return target
+            if (substr(target, 1, 3) == "../") return base "/" substr(target, 4)
+            return base "/docs/" target
+        }
+        /^[ \t]*(```|~~~)/ { code = !code; print; next }
+        code { print; next }
+        {
+            line = $0
+            out = ""
+            while (match(line, /\]\([^)]*\)/)) {
+                target = substr(line, RSTART + 2, RLENGTH - 3)
+                out = out substr(line, 1, RSTART + 1) fix(target) ")"
+                line = substr(line, RSTART + RLENGTH)
+            }
+            print out line
+        }
+    ' "$2"
+}
+SAME=1
+for input in "$SCRATCH/forms.md" "$ROOT/docs/release-notes.md"; do
+    for b in "$base" ""; do
+        reference "$b" "$input" >"$SCRATCH/ref.out"
+        awk -f "$ROOT/tools/release-links.awk" -v base="$b" -v dir=docs "$input" >"$SCRATCH/links.out"
+        cmp -s "$SCRATCH/ref.out" "$SCRATCH/links.out" || {
+            SAME=0
+            diff "$SCRATCH/ref.out" "$SCRATCH/links.out" >&2 || true
+        }
+    done
+done
+[ "$SAME" = 1 ] && pass "tools/release-links.awk rewrites the notes byte for byte by the notes' rule" ||
+    fail "tools/release-links.awk differs from the notes' rule (- rule, + awk)"
+awk -f "$ROOT/tools/release-links.awk" -v base="$base" -v dir=docs "$SCRATCH/forms.md" |
+    grep -qxF 'handlers[name](args)' && pass "a fenced code block keeps its \`](\` as written" ||
+    fail "tools/release-links.awk rewrote a line inside a fenced code block"
+
+# The archives' mode: a link to a kept file or to a folder that holds one stays,
+# any other relative link names the tag, and a link to the repository's main
+# branch names the tag.
+printf '# kept\nREADME.md\ndocs/guide.md\nspec/world.md\n' >"$SCRATCH/keep"
+cat >"$SCRATCH/doc.md" <<'EOF'
+[a](guide.md#x) [b](../README.md) [c](../spec/) [d](../spec/world.md) [e](results/r.md)
+[f](../examples/hello) [g](https://github.com/o/r/blob/main/docs/guide.md) [h](https://github.com/o/r/tree/main/proto)
+[i](https://github.com/o/rr/blob/main/x) [j](#here)
+EOF
+cat >"$SCRATCH/doc.want" <<'EOF'
+[a](guide.md#x) [b](../README.md) [c](../spec/) [d](../spec/world.md) [e](https://github.com/o/r/blob/v9.9.9/docs/results/r.md)
+[f](https://github.com/o/r/blob/v9.9.9/examples/hello) [g](https://github.com/o/r/blob/v9.9.9/docs/guide.md) [h](https://github.com/o/r/tree/v9.9.9/proto)
+[i](https://github.com/o/rr/blob/main/x) [j](#here)
+EOF
+awk -f "$ROOT/tools/release-links.awk" -v base=https://github.com/o/r/blob/v9.9.9 -v dir=docs \
+    -v keep="$SCRATCH/keep" -v repo=https://github.com/o/r -v ref=v9.9.9 "$SCRATCH/doc.md" >"$SCRATCH/doc.got"
+if cmp -s "$SCRATCH/doc.want" "$SCRATCH/doc.got"; then
+    pass "tools/release-links.awk keeps the archive's links, and points the rest and main's at the tag"
+else
+    fail "tools/release-links.awk in the archives' mode (- expected, + found):"
+    diff "$SCRATCH/doc.want" "$SCRATCH/doc.got" >&2 || true
+fi
+
 # Each refusal, on a copy of the passing notes changed in one way.
 refused() {
     # refused <what> <grep pattern> <sed program for docs/release-notes.md>

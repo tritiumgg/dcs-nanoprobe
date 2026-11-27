@@ -12,6 +12,9 @@ This folder holds:
   uninstall.cmd                runs "nanoprobe.exe uninstall"
   sidecar.toml                 example settings for the sidecar
   payload\                     the agent that install puts in the DCS profile
+  README.md, docs\, spec\      the project's documents
+  skills\nanoprobe\            the nanoprobe skill for AI coding tools; see
+                               skills\nanoprobe\README.md
   LICENSE
 
 Install
@@ -32,5 +35,5 @@ Uninstall
   added, and the whole "nanoprobe" folder in the profile: copy out any
   mission template you keep there first. The sidecar's folder stays.
 
-The full documents (install guide, first campaign, API) are in the project's
-repository, in README.md and docs\. Run "nanoprobe.exe help" for every option.
+The full documents are in this folder: start at docs\install.md, then
+docs\first-campaign.md. Run "nanoprobe.exe help" for every option.

@@ -11,8 +11,8 @@ DCS, reads state and applies commands. The sidecar, beside DCS, stores the world
 DCS match it, and serves a gRPC API on `127.0.0.1:47311` by default. A controller calls
 only the sidecar.
 
-The documents below win over this file. Read them from a local checkout when one is
-present, else from GitHub.
+The documents below win over this file. Read them from a local checkout or an unpacked
+release folder when one is present, at the same paths, else from GitHub.
 
 | Document | Path in the repository | On GitHub |
 |---|---|---|
@@ -69,7 +69,8 @@ server's version.
      rest. Play or show a file after the load by its name (`DoEffect` `sound`,
      `picture`, `broadcast`).
 4. Test against the fake sidecar before a real server:
-   `nanoprobe-fake-sidecar --listen 127.0.0.1:47311` from a release folder, or
+   `nanoprobe-fake-sidecar --listen 127.0.0.1:47311` from a release folder (on macOS,
+   the `macos-universal` archive; `docs/install.md`, "macOS"), or
    `cargo run -p nanoprobe-fake-sidecar -- --listen 127.0.0.1:47311` in a checkout.
    `--run PROGRAM [ARGS...]` runs a test with `NANOPROBE_ADDR` set and exits with its
    code. It simulates DCS; passing against it does not prove behavior on a real server

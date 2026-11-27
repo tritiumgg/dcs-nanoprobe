@@ -40,5 +40,7 @@ Other tools that support the format are listed at <https://agentskills.io/client
 
 ## Versions
 
-The skill links the guides on the `main` branch. Generate your client from the schema
-of the release your server runs; the guides say where to find it.
+In the repository the skill links the guides on the `main` branch. Each release archive
+carries a copy in `skills/nanoprobe/` whose links name that release's tag; install that
+copy to match the release your server runs. Generate your client from the schema of the
+same release; the guides say where to find it.

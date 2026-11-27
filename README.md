@@ -217,7 +217,12 @@ start.
    [Python](examples/hello-python) or [Kotlin](examples/hello-kotlin). It starts a
    campaign and drives two vehicles one kilometer.
    [docs/first-campaign.md](docs/first-campaign.md) walks through it. You can also run
-   it with no DCS at all, against `nanoprobe-fake-sidecar` from the release folder.
+   it with no DCS at all, against `nanoprobe-fake-sidecar` from the release folder. On a
+   Mac, the macOS archive holds that program alone
+   ([docs/install.md](docs/install.md), "macOS").
+
+Each release archive also carries the documents and the
+[skill for AI coding tools](skills/nanoprobe/), for the version you unpacked.
 
 ## Configuration
 

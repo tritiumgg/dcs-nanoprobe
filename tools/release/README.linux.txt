@@ -16,6 +16,9 @@ This folder holds:
                            an example sidecar.toml for it; start at
                            deploy/README.md
   payload/                 the agent that install puts in the DCS profile
+  README.md, docs/, spec/  the project's documents
+  skills/nanoprobe/        the nanoprobe skill for AI coding tools; see
+                           skills/nanoprobe/README.md
   LICENSE
 
 The three programs are static and need nothing installed.
@@ -45,5 +48,5 @@ Uninstall
   copy out any mission template you keep there first. The sidecar's files
   stay.
 
-The full documents (install guide, first campaign, API) are in the project's
-repository, in README.md and docs/. Run "./nanoprobe help" for every option.
+The full documents are in this folder: start at docs/install.md, then
+docs/first-campaign.md. Run "./nanoprobe help" for every option.

@@ -18,7 +18,7 @@ word.
 
 | Step | Who |
 |---|---|
-| 1. Turn on Actions (once), 2. push main, 3. the dry run (required before 0.1, optional later), 4. the signed tag | the maintainer |
+| 1. Turn on Actions (once), 2. push main, 3. the release notes and the dry run, 4. the signed tag | the maintainer |
 | 5. Keep the released DLL's PDB | the maintainer or an agent |
 
 ## 1. Turn on GitHub Actions
@@ -109,40 +109,12 @@ a commit whose CI failed.
 
 ## 3. Dry run of the release build
 
-```bash
-gh workflow run release.yml --ref main
-```
-
-It runs the job Build on an `ubuntu-24.04` runner. The job first deletes the image's
-preinstalled toolchains and tool cache, which it does not use, for the disk space the
-mise tools and the builds need, and installs with apt the readline and ncurses headers
-that mise's Lua build needs. Then it runs `mise run package` from nothing, with no
-cache, and the archive test `tools/stage-release-test.sh`. That test fails when
-an archive holds other files than spec/install.md lists, when a program is not static,
-when a file names the runner's home folder or checkout, when a PDB is among the
-release's files, or when the Linux `nanoprobe-fake-sidecar` does not run. The files
-are kept as the workflow artifact `release-files-<commit>` and the PDB folder as
-`agent-symbols-<commit>`, each for 14 days, where `<commit>` is the first 12
-characters of the commit they were built from. No release is made.
-
-A few seconds after starting it, watch the run; the command exits nonzero when it
-fails. Then print the full commit it built, and download its files and PDB folder into
-a folder no task writes, named after that commit:
-
-```bash
-run=$(gh run list --workflow release.yml --event workflow_dispatch --branch main --limit 1 --json databaseId --jq '.[0].databaseId')
-gh run watch --exit-status "$run"
-gh run view "$run" --json headSha --jq .headSha
-commit=$(gh run view "$run" --json headSha --jq .headSha | cut -c1-12)
-gh run download "$run" -n "release-files-$commit" -D "dist/runner-$commit"
-gh run download "$run" -n "agent-symbols-$commit" -D "dist/runner-$commit/private"
-```
-
-`mise run package` rewrites the release files at the top of `dist/` but never this
-folder. Keep the full commit with any test of the files. A dry run is optional for a
-later release. Before 0.1 it is required: the 0.1 acceptance run, which runs once,
-tests a dry run's files (docs/acceptance.md). Before the tag, finish the version's
-section of `docs/release-notes.md`. Draft it from the commits since the last tag:
+Every release needs a dry run: its files are the ones checked on a Mac below. The
+archives carry `docs/release-notes.md`, so finish the version's section and push it to
+main first; the check in step 4 fails when the tagged commit differs from the dry run's
+in a released file. A dry run does not check the notes, so check them before it with
+`sh tools/release-notes.sh <version> /dev/null`. Draft the section from the commits
+since the last tag:
 
 ```bash
 mise run release-notes-draft -- 0.2.0
@@ -167,9 +139,73 @@ when its heading is the version with optional words after it, such as
 `## 0.1.0, the first release`, without "Draft", and no line in it says "To be
 completed", "not yet run", "TBD" or "TODO".
 
+Then start the dry run:
+
+```bash
+gh workflow run release.yml --ref main
+```
+
+It runs the job Build on an `ubuntu-24.04` runner. The job first deletes the image's
+preinstalled toolchains and tool cache, which it does not use, for the disk space the
+mise tools and the builds need, and installs with apt the readline and ncurses headers
+that mise's Lua build needs. Then it runs `mise run package` from nothing, with no
+cache, and the archive test `tools/stage-release-test.sh`. That test fails when
+an archive holds other files than spec/install.md lists, when a program is not static,
+when the macOS fake sidecar is not a universal program for macOS 11 that loads only
+the system's libraries, with a signed arm64 build, when the archives' documents differ
+or one of their relative links resolves outside its archive, when a file names a home
+folder or the checkout, when a PDB is among the release's files, or when the Linux
+`nanoprobe-fake-sidecar` does not run. The runner cannot run or verify the macOS
+program; the step after the download below does that on a Mac. The files
+are kept as the workflow artifact `release-files-<commit>` and the PDB folder as
+`agent-symbols-<commit>`, each for 14 days, where `<commit>` is the first 12
+characters of the commit they were built from. No release is made.
+
+A few seconds after starting it, watch the run; the command exits nonzero when it
+fails. Then print the full commit it built, and download its files and PDB folder into
+a folder no task writes, named after that commit:
+
+```bash
+run=$(gh run list --workflow release.yml --event workflow_dispatch --branch main --limit 1 --json databaseId --jq '.[0].databaseId')
+gh run watch --exit-status "$run"
+gh run view "$run" --json headSha --jq .headSha
+commit=$(gh run view "$run" --json headSha --jq .headSha | cut -c1-12)
+gh run download "$run" -n "release-files-$commit" -D "dist/runner-$commit"
+gh run download "$run" -n "agent-symbols-$commit" -D "dist/runner-$commit/private"
+```
+
+`mise run package` rewrites the release files at the top of `dist/` but never this
+folder. Keep the full commit with any test of the files.
+
+Before any tag, check the runner's macOS fake sidecar on an Apple silicon Mac, natively
+and as x86_64. `gh run download` marks nothing for Gatekeeper. Each command must
+succeed, and `--help` must print its usage:
+
+```bash
+mkdir "dist/runner-$commit/macos" && tar -xzf "dist/runner-$commit/nanoprobe-"*-macos-universal.tar.gz -C "dist/runner-$commit/macos"
+fake=$(echo "dist/runner-$commit/macos/"*/nanoprobe-fake-sidecar)
+codesign -v --strict --arch arm64 "$fake"
+"$fake" --help
+perl -e 'alarm 60; exec @ARGV' "$fake" --listen 127.0.0.1:0 --run true
+```
+
+The x86_64 build runs under Rosetta. Install it first if `arch -x86_64 /usr/bin/true`
+fails (`softwareupdate --install-rosetta`), then run:
+
+```bash
+arch -x86_64 "$fake" --help
+perl -e 'alarm 60; exec @ARGV' arch -x86_64 "$fake" --listen 127.0.0.1:0 --run true
+```
+
+If one fails, do not tag: the macOS build moves to a macOS runner job
+([ADR 0055](adr/0055-releases-carry-a-macos-fake-sidecar-and-the-docs.md)). The 0.1
+acceptance run, which ran once, also tested a dry run's files (docs/acceptance.md).
+
 The first dry run is also the first time `mise run package` runs on a Linux host. If it
 fails, the log names the step. The tools come from `mise.toml`: zig as the C compiler
-for the static programs, cargo-xwin and LLVM for the Windows files, buf for the schema.
+for the static programs, cargo-xwin and LLVM for the Windows files, cargo-zigbuild and
+zig for the macOS fake sidecar, LLVM's `llvm-lipo` and `llvm-objdump` for its check,
+buf for the schema.
 mise builds Lua 5.1 from source, which needs the readline and ncurses development
 headers (`libreadline-dev libncurses-dev` on Debian and Ubuntu); the job installs them
 with apt. `gh` is pinned in `mise.toml` too. The runner supplies rustup, which installs
@@ -182,25 +218,24 @@ the shell tools.
 The tag is `v` and the workspace version in `Cargo.toml` (`0.1.0` for the first
 release), on a commit on main whose CI passed.
 
-When a dry run's files were tested, the commit to tag must differ from that run's
-commit only in files the release build does not read: the documents, the test results
-and their scripts, and the test tooling (`crates/xtask`, the fake agent,
-`examples/`, and every `lua/` folder but `lua/hook` and `lua/agent`). The fake sidecar
-is released, so it is not among them. This prints nothing when that holds:
+The commit to tag must differ from the tested dry run's commit only in files the
+release build does not read: the test results and the ADRs,
+the documents for maintainers (`docs/acceptance.md`, this file, `AGENTS.md`), and the
+test tooling (`crates/xtask`, the fake agent, `examples/`, and every `lua/` folder but
+`lua/hook` and `lua/agent`). The fake sidecar is released, and so are the documents
+`tools/release/docs.txt` lists, so they are not among them. This prints nothing when
+that holds:
 
 ```bash
-git diff --stat <dry-run commit> main -- . ':(exclude)docs' ':(exclude)README.md' \
+git diff --stat <dry-run commit> main -- . ':(exclude)docs/results' ':(exclude)docs/adr' \
+    ':(exclude)docs/acceptance.md' ':(exclude)docs/releasing.md' ':(exclude)AGENTS.md' \
     ':(exclude)crates/xtask' ':(exclude)crates/fake-agent' \
     ':(exclude)examples' ':(exclude,glob)lua/[!ah]*/**'
 ```
 
 If it lists a file, the tested files are not the source being tagged: run a dry run of
-main and test again. Then push main with the final notes, wait for its CI to pass (the
-watch command in step 2), and tag the same commit:
-
-```bash
-git push origin main
-```
+main and test again. Check that main's CI passed (the watch command in step 2), and tag
+the same commit:
 
 ```bash
 git tag -s v0.1.0 -m 'nanoprobe 0.1.0' main
@@ -219,7 +254,7 @@ the job Build checks that the tag is `v` plus the workspace version, that its co
 on main, that the version's section of `docs/release-notes.md` in that commit is final
 (`tools/release-notes.sh`), and that no release has the tag. Then it builds as in the
 dry run. The job Publish checks the files against their `SHA256SUMS`, refuses if any
-release or draft has the tag, and publishes the release: the two archives, the schema's
+release or draft has the tag, and publishes the release: the three archives, the schema's
 two files and `SHA256SUMS`, with the notes from the tagged commit, relative links made
 absolute to the tag. It is marked the latest release. Check it:
 
@@ -227,9 +262,10 @@ absolute to the tag. It is marked the latest release. Check it:
 gh release view v0.1.0 --json isDraft,assets --jq '{isDraft, assets: [.assets[].name]}'
 ```
 
-A correct release shows `"isDraft": false` and exactly five assets:
+A correct release shows `"isDraft": false` and exactly six assets:
 `nanoprobe-0.1.0-windows-x86_64.zip`, `nanoprobe-0.1.0-linux-x86_64.tar.gz`,
-`nanoprobe-0.1.0-schema.tar.gz`, `nanoprobe-0.1.0-schema.binpb` and `SHA256SUMS`. On
+`nanoprobe-0.1.0-macos-universal.tar.gz`, `nanoprobe-0.1.0-schema.tar.gz`,
+`nanoprobe-0.1.0-schema.binpb` and `SHA256SUMS`. On
 the release page, the notes' links open files under `blob/v0.1.0`. If any of this is
 wrong, delete the release and the tag ("When a release step fails") and fix the cause
 before tagging again.
@@ -268,7 +304,8 @@ Nothing is public until the job Publish succeeds.
   main. Delete the tag and tag the right commit:
   `git push origin :refs/tags/v0.1.0 && git tag -d v0.1.0`, then step 4.
 - **The notes check fails.** The message names the placeholder or the heading. Finish
-  the notes on main, push, delete the tag as above, and tag the new commit.
+  the notes on main, push, delete the tag as above, and go back to step 3: the archives
+  carry the notes, so the new commit needs its own dry run and Mac check before the tag.
 - **The build fails.** No release is made. Fix the cause on main, push, delete the tag
   as above, and go back to step 4: after a tested dry run, a fix in a file the release
   build reads needs a new dry run and a new test before the tag.

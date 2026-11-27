@@ -4,7 +4,9 @@
 
 Accepted. Amends [ADR 0042](0042-releases-are-built-on-one-linux-runner-from-a-tag.md):
 its "No fake sidecar, conformance command or test tooling ships" does not apply to the
-fake sidecar, and each platform archive holds three programs.
+fake sidecar, and each platform archive holds three programs. Amended by
+[ADR 0055](0055-releases-carry-a-macos-fake-sidecar-and-the-docs.md): the macOS archive
+holds the fake sidecar alone.
 
 ## Context
 

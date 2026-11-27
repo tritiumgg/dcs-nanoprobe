@@ -1,0 +1,27 @@
+# The documents every release archive carries, at these repository paths
+# (spec/install.md, "Release"). tools/stage-release.sh copies them through
+# tools/release-links.awk, and tools/stage-release-test.sh checks them. A link
+# from one of them to a file not listed here names the release's tag on GitHub.
+README.md
+docs/api-clients.md
+docs/configuration.md
+docs/controller-guide.md
+docs/first-campaign.md
+docs/install.md
+docs/mission-templates.md
+docs/operator-guide.md
+docs/release-notes.md
+skills/nanoprobe/README.md
+skills/nanoprobe/SKILL.md
+spec/commands.md
+spec/config.md
+spec/errors.md
+spec/eval.md
+spec/faults.md
+spec/install.md
+spec/log.md
+spec/persistence.md
+spec/records.md
+spec/sampling.md
+spec/transport.md
+spec/world.md

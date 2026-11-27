@@ -51,6 +51,11 @@ gradle = "9.9.1"
 "cargo:cargo-xwin" = { version = "0.23.1", os = ["linux", "macos"] }
 "github:llvm/llvm-project" = { version = "23.1.5", version_prefix = "llvmorg-", os = ["linux", "macos"] }
 
+# Cross-build of the release's universal macOS fake sidecar on macOS and Linux
+# (`mise run package`). zig links it against the macOS stubs zig ships; no
+# macOS SDK is downloaded. LLVM's llvm-lipo and llvm-objdump check it.
+"cargo:cargo-zigbuild" = { version = "0.24.1", os = ["linux", "macos"] }
+
 # Fuzzing of the transport's decoders (`mise run fuzz`). cargo-fuzz and Miri
 # run on the rustup `nightly` toolchain, which `mise run nightly` installs.
 "cargo:cargo-fuzz" = { version = "0.13.2", os = ["linux", "macos"] }
@@ -168,7 +173,7 @@ description = "Run the Kotlin hello campaign against the fake sidecar on a free 
 run = "sh examples/hello-kotlin/check.sh"
 
 [tasks.package]
-description = "Stage the Windows and Linux release archives in dist/ and check them"
+description = "Stage the Windows, Linux and macOS release archives in dist/ and check them"
 depends = ["dll"]
 run = ["sh tools/stage-release.sh", "sh tools/stage-release-test.sh"]
 

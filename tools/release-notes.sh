@@ -10,7 +10,8 @@
 #
 # A release page resolves no relative link, so with RELEASE_LINK_BASE set
 # (such as https://github.com/<owner>/<repo>/blob/<tag>), each relative link
-# becomes absolute: `../x` to <base>/x and `x` to <base>/docs/x.
+# becomes absolute: `../x` to <base>/x and `x` to <base>/docs/x
+# (tools/release-links.awk).
 #
 # Run in the repository's checkout.
 #
@@ -22,6 +23,7 @@ set -eu
 VERSION=$1
 NOTES_OUT=$2
 ROOT=$(git rev-parse --show-toplevel)
+LINKS=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/release-links.awk
 
 refuse() {
     printf 'refused: %s\n' "$1" >&2
@@ -72,21 +74,5 @@ fi
 awk 'NF { for (; blank > 0; blank--) print ""; print; seen = 1; next } seen { blank++ }' "$TMP/section" >"$TMP/body"
 [ -s "$TMP/body" ] || refuse "the notes for $VERSION are empty"
 
-awk -v base="${RELEASE_LINK_BASE:-}" '
-    function fix(target) {
-        if (base == "" || target ~ /^(https?:|mailto:|#|\/)/) return target
-        if (substr(target, 1, 3) == "../") return base "/" substr(target, 4)
-        return base "/docs/" target
-    }
-    {
-        line = $0
-        out = ""
-        while (match(line, /\]\([^)]*\)/)) {
-            target = substr(line, RSTART + 2, RLENGTH - 3)
-            out = out substr(line, 1, RSTART + 1) fix(target) ")"
-            line = substr(line, RSTART + RLENGTH)
-        }
-        print out line
-    }
-' "$TMP/body" >"$NOTES_OUT"
+awk -f "$LINKS" -v base="${RELEASE_LINK_BASE:-}" -v dir=docs "$TMP/body" >"$NOTES_OUT"
 printf 'ok  the notes for %s are final; written to %s\n' "$VERSION" "$NOTES_OUT"

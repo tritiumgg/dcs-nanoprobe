@@ -1,18 +1,22 @@
 #!/bin/sh
-# Stage the release archives for Windows and Linux.
+# Stage the release archives for Windows, Linux and macOS.
 #
-# Both archives carry the same payload: the loader, the agent DLL and the
-# version's Lua, which `nanoprobe install` puts in a DCS Saved Games profile.
-# A Linux DCS server runs under Wine, so its archive carries the Windows DLL
-# too. The three programs differ: Windows executables, or static Linux ones.
+# The Windows and Linux archives carry the same payload: the loader, the agent
+# DLL and the version's Lua, which `nanoprobe install` puts in a DCS Saved
+# Games profile. A Linux DCS server runs under Wine, so its archive carries the
+# Windows DLL too. The three programs differ: Windows executables, or static
+# Linux ones. The macOS archive holds only the fake sidecar, a universal
+# binary, since no DCS server runs on macOS. Every archive carries the
+# documents tools/release/docs.txt lists.
 #
 #   dist/nanoprobe-<v>-windows-x86_64.zip
 #   dist/nanoprobe-<v>-linux-x86_64.tar.gz
+#   dist/nanoprobe-<v>-macos-universal.tar.gz
 #   dist/nanoprobe-<v>-schema.tar.gz the API schema, and its descriptor set
 #   dist/nanoprobe-<v>-schema.binpb  (tools/stage-schema.sh)
-#   dist/SHA256SUMS                  over the four files above
+#   dist/SHA256SUMS                  over the five files above
 #
-# The release is those five files. The agent's PDB is not one of them: it
+# The release is those six files. The agent's PDB is not one of them: it
 # names the build machine's folders, and the builder keeps it with the DLL to
 # turn a crash record into function names (spec/install.md, "Release"). The
 # folder is named by the signature a crash record's `pdb` carries
@@ -38,19 +42,27 @@
 #   payload/nanoprobe-hook.lua
 #   payload/nanoprobe_agent.dll
 #   payload/lua/hook.lua, log.lua, shim.lua
+#   README.md, docs/, spec/,         the documents of tools/release/docs.txt,
+#   skills/nanoprobe/                their links rewritten by
+#                                    tools/release-links.awk
+#
+# The macOS archive's folder, nanoprobe-<v>-macos-universal/, holds
+# nanoprobe-fake-sidecar, README.txt, LICENSE and the documents.
 #
 # Run it through `mise run package`, which first builds the DLL and checks it
-# with tools/checkdll.sh. This script builds the three programs for both
-# platforms. .github/workflows/release.yml runs the same task on a Linux
-# runner to build a release.
+# with tools/checkdll.sh. This script builds the three programs for Windows
+# and Linux, and the fake sidecar for macOS with cargo-zigbuild, which links
+# it against the macOS stubs zig ships, with no macOS SDK.
+# .github/workflows/release.yml runs the same task on a Linux runner to build a
+# release.
 #
 # Runs on macOS and Linux. A Windows host can build the DLL (`mise run dll`)
 # but not stage a release: the Linux programs need a C compiler for musl, and
 # tools/remap.sh maps POSIX paths.
 #
 # Usage: sh tools/stage-release.sh [out-dir]
-# POSIX sh. Needs cargo, cargo-xwin, zig, buf, git, zip, tar, awk, and
-# sha256sum or shasum.
+# POSIX sh. Needs cargo, cargo-xwin, cargo-zigbuild, zig, buf, git, zip, tar,
+# awk, and sha256sum or shasum.
 set -eu
 
 case $(uname -s) in
@@ -116,6 +128,26 @@ export CFLAGS_x86_64_unknown_linux_musl
 cargo build --release $PROGRAMS --target "$LINUX" --target-dir "$CLI_TARGET" \
     --config "$(sh tools/remap.sh "$LINUX")"
 
+# The macOS fake sidecar: one universal binary of an arm64 and an x86_64
+# build, for macOS 11 and later. cargo-zigbuild builds both and joins them;
+# zig compiles the bundled SQLite and links. Its own target folder, since this
+# build alone strips debug information: the macOS debug map names each object
+# file the linker read by its absolute path, the toolchain's under the home
+# folder, and no remapping reaches it. The fake sidecar needs no line tables:
+# crash records are the agent's. -dead_strip_dylibs drops the libraries no
+# symbol is taken from.
+MAC=universal2-apple-darwin
+MAC_TARGET=target/release-macos
+MACOSX_DEPLOYMENT_TARGET=11.0
+export MACOSX_DEPLOYMENT_TARGET
+cargo zigbuild --release -p nanoprobe-fake-sidecar --bin nanoprobe-fake-sidecar \
+    --target "$MAC" --target-dir "$MAC_TARGET" \
+    --config "$(sh tools/remap.sh aarch64-apple-darwin)" \
+    --config "$(sh tools/remap.sh x86_64-apple-darwin)" \
+    --config "target.aarch64-apple-darwin.rustflags=['-Clink-arg=-Wl,-dead_strip_dylibs']" \
+    --config "target.x86_64-apple-darwin.rustflags=['-Clink-arg=-Wl,-dead_strip_dylibs']" \
+    --config 'profile.release.strip="debuginfo"'
+
 sha() {
     if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi
 }
@@ -124,8 +156,30 @@ sha() {
 mkdir -p "$OUT"
 rm -rf "$OUT/stage"
 rm -f "$OUT"/nanoprobe-*-windows-x86_64.zip "$OUT"/nanoprobe-*-linux-x86_64.tar.gz \
-    "$OUT"/nanoprobe-*-agent.pdb \
+    "$OUT"/nanoprobe-*-macos-universal.tar.gz "$OUT"/nanoprobe-*-agent.pdb \
     "$OUT"/nanoprobe-*-schema.tar.gz "$OUT"/nanoprobe-*-schema.binpb "$OUT/SHA256SUMS"
+
+# The documents, at their repository paths. A link to a file the archive does
+# not hold, and a link to the repository's main branch, name this version's
+# tag instead (tools/release-links.awk).
+REPO_URL=https://github.com/tritiumgg/dcs-nanoprobe
+DOCS_LIST=tools/release/docs.txt
+KEEP=$OUT/.keep
+mkdir -p "$OUT"
+{ grep -v -e '^#' -e '^$' "$DOCS_LIST"; printf 'LICENSE\n'; } >"$KEEP"
+# docs <archive folder>
+docs() {
+    grep -v -e '^#' -e '^$' "$DOCS_LIST" | while IFS= read -r f; do
+        mkdir -p "$1/$(dirname "$f")"
+        case $f in
+            */*) fdir=${f%/*} ;;
+            *) fdir= ;;
+        esac
+        awk -f tools/release-links.awk -v base="$REPO_URL/blob/v$VERSION" -v dir="$fdir" \
+            -v keep="$KEEP" -v repo="$REPO_URL" -v ref="v$VERSION" "$f" >"$1/$f"
+        chmod 0644 "$1/$f"
+    done
+}
 
 # stage <platform> <program> <sidecar> <fake sidecar>
 stage() {
@@ -133,6 +187,7 @@ stage() {
     mkdir -p "$dir/payload/lua"
     cp "$2" "$3" "$4" "$dir/"
     cp LICENSE "$dir/LICENSE"
+    docs "$dir"
     cp lua/hook/nanoprobe-hook.lua "$dir/payload/nanoprobe-hook.lua"
     cp "$DLL" "$dir/payload/nanoprobe_agent.dll"
     for name in hook.lua log.lua shim.lua; do
@@ -176,15 +231,27 @@ git ls-files -- deploy | while IFS= read -r f; do
 done
 chmod 0644 "$LINUXDIR/README.txt"
 
+# macOS: the fake sidecar, its README, the license and the documents.
+MACDIR=$OUT/stage/nanoprobe-$VERSION-macos-universal
+mkdir -p "$MACDIR"
+cp "$MAC_TARGET/$MAC/release/nanoprobe-fake-sidecar" "$MACDIR/"
+chmod 0755 "$MACDIR/nanoprobe-fake-sidecar"
+cp LICENSE "$MACDIR/LICENSE"
+cp tools/release/README.macos.txt "$MACDIR/README.txt"
+chmod 0644 "$MACDIR/LICENSE" "$MACDIR/README.txt"
+docs "$MACDIR"
+rm "$KEEP"
+
 # Archive entries in a fixed order, without macOS metadata files.
 (
     cd "$OUT/stage"
     name=nanoprobe-$VERSION-windows-x86_64
     find "$name" -type f | LC_ALL=C sort | zip -q -X "../$name.zip" -@
-    name=nanoprobe-$VERSION-linux-x86_64
-    find "$name" | LC_ALL=C sort >../.list
-    COPYFILE_DISABLE=1 tar --numeric-owner --no-recursion -cf - -T ../.list | gzip -n -9 >"../$name.tar.gz"
-    rm ../.list
+    for name in nanoprobe-$VERSION-linux-x86_64 nanoprobe-$VERSION-macos-universal; do
+        find "$name" | LC_ALL=C sort >../.list
+        COPYFILE_DISABLE=1 tar --numeric-owner --no-recursion -cf - -T ../.list | gzip -n -9 >"../$name.tar.gz"
+        rm ../.list
+    done
 )
 rm -rf "$OUT/stage"
 

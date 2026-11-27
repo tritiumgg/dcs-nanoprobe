@@ -10,12 +10,47 @@ A release is on the project's GitHub releases page:
 |---|---|
 | `nanoprobe-<version>-windows-x86_64.zip` | DCS on Windows |
 | `nanoprobe-<version>-linux-x86_64.tar.gz` | DCS under Wine on Linux |
+| `nanoprobe-<version>-macos-universal.tar.gz` | the fake sidecar on a Mac, to write a controller without DCS |
 | `nanoprobe-<version>-schema.tar.gz`, `-schema.binpb` | API clients ([api-clients.md](api-clients.md)) |
 | `SHA256SUMS` | checking the files above |
 
 Check the files you downloaded with `sha256sum -c --ignore-missing SHA256SUMS` (Linux)
 or `shasum -a 256 -c --ignore-missing SHA256SUMS` (macOS). On Windows, compare the
 output of `Get-FileHash` in PowerShell with the file's line in `SHA256SUMS`.
+
+Each archive also holds this guide and the project's other documents, at the paths they
+have in the repository, and the skill for AI coding tools in `skills/nanoprobe/`. Their
+links to files the archive does not hold open the release's tag on GitHub.
+
+## macOS
+
+No DCS server runs on macOS. The macOS archive holds only `nanoprobe-fake-sidecar`
+([controller-guide.md](controller-guide.md), "Test without DCS"), one program for Apple
+silicon and Intel Macs, macOS 11 or later. It is not notarized by Apple, so macOS
+refuses to open it after a download by a web browser. Download it with the GitHub CLI or
+`curl`, which macOS does not mark, check it, and unpack it:
+
+```sh
+gh release download v<version> --repo tritiumgg/dcs-nanoprobe -p 'nanoprobe-*-macos-universal.tar.gz' -p SHA256SUMS
+shasum -a 256 -c --ignore-missing SHA256SUMS
+tar -xzf nanoprobe-<version>-macos-universal.tar.gz
+```
+
+With `curl` in place of the GitHub CLI, the first line is two:
+
+```sh
+curl -LO https://github.com/tritiumgg/dcs-nanoprobe/releases/download/v<version>/nanoprobe-<version>-macos-universal.tar.gz
+curl -LO https://github.com/tritiumgg/dcs-nanoprobe/releases/download/v<version>/SHA256SUMS
+```
+
+After a browser download, unpack the archive and clear the mark in the unpacked folder:
+
+```sh
+xattr -dr com.apple.quarantine nanoprobe-<version>-macos-universal
+```
+
+Or run the program once, let macOS refuse it, and choose "Open Anyway" in System
+Settings, Privacy & Security.
 
 ## 1. Install the agent
 

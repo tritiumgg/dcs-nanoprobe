@@ -1,7 +1,8 @@
 # Build and publish a release (docs/releasing.md).
 #
 # A pushed tag `v<version>` builds every released file on one Linux runner
-# with `mise run package`, the task a developer runs, which checks the
+# with `mise run package`, the task a developer runs, the macOS fake sidecar
+# included (cross-built with cargo-zigbuild, ADR 0055), which checks the
 # archives with tools/stage-release-test.sh, and publishes them as the
 # release with the version's notes from docs/release-notes.md in the tagged
 # commit. A manual run is a dry run: the same build, its files kept as

@@ -28,8 +28,8 @@ Writing a controller: read `docs/controller-guide.md`. Running a server: read
 - **Development and test tooling stays generic and out of releases.** It may live in
   this repository, but it reads every target from configuration outside it, and a user
   builds it from source to run it. The fake sidecar (`crates/fake-sidecar`) is a tool
-  for controller authors and ships in the release archives (`spec/install.md`); keep
-  its `--help` fit for users.
+  for controller authors and ships in the release archives, alone in the macOS one
+  (`spec/install.md`); keep its `--help` fit for users.
 
 ## Evidence
 
@@ -108,6 +108,10 @@ On Linux, install `libreadline-dev` and `libncurses-dev` before `mise install`.
   in `docs/`, `AGENTS.md` and `skills/nanoprobe/`. Keep each one's audience: the README
   is for people, the guides for people and AI agents, `AGENTS.md` and the skill for AI
   agents.
+- Every release archive carries the documents `tools/release/docs.txt` lists. A new
+  user document goes on that list. A shipped document never writes the start of a
+  macOS or Linux home folder path or rustup's folder name: the archive test rejects
+  them.
 - Test new behavior against `crates/fake-sidecar`, `crates/fake-agent` and
   `crates/sim-fake` before a DCS server.
 - `cargo xtask` (`crates/xtask`) deploys, probes and collects redacted bundles on a

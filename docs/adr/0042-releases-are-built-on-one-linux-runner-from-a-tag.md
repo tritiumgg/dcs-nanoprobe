@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted
+Accepted. Amended by [ADR 0054](0054-the-fake-sidecar-ships-in-releases.md) and
+[ADR 0055](0055-releases-carry-a-macos-fake-sidecar-and-the-docs.md).
 
 ## Context
 

@@ -23,7 +23,9 @@ archive; from the unpacked folder, run:
 ./nanoprobe-fake-sidecar --listen 127.0.0.1:47311
 ```
 
-On Windows the program is `nanoprobe-fake-sidecar.exe`. In a checkout, run `mise install`, then
+On Windows the program is `nanoprobe-fake-sidecar.exe`. On a Mac, use the macOS
+archive, which holds this program alone ([install.md](install.md), "macOS"). In a
+checkout, run `mise install`, then
 `cargo run -p nanoprobe-fake-sidecar -- --listen 127.0.0.1:47311`.
 [controller-guide.md](controller-guide.md), "Test without DCS", has its options and
 its limits.

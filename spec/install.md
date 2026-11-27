@@ -102,10 +102,11 @@ needs or that it cannot read, by line number and key, and nothing else from the 
 
 ## Release
 
-A release is two archives, the API schema, and `SHA256SUMS` over the four files. A
-pushed tag `v<version>` builds them on one Linux runner of GitHub Actions with
-`mise run package` (`tools/stage-release.sh`, cross-building the Windows files with
-`cargo-xwin`), which a developer also runs on macOS or Linux, and publishes them as the
+A release is three archives (Windows, Linux and macOS), the API schema, and
+`SHA256SUMS` over the five files. A pushed tag `v<version>` builds them on one Linux
+runner of GitHub Actions with `mise run package` (`tools/stage-release.sh`,
+cross-building the Windows files with `cargo-xwin` and the macOS fake sidecar with
+`cargo-zigbuild`), which a developer also runs on macOS or Linux, and publishes them as the
 release with the version's section of `docs/release-notes.md` in the tagged commit
 (`.github/workflows/release.yml`). A manual run of the workflow builds the same files
 without releasing them; the 0.1 acceptance run, once before the 0.1 tag, tests those
@@ -119,11 +120,13 @@ is `nanoprobe-<version>-schema.tar.gz`, one folder `nanoprobe-<version>-schema/`
 descriptor set `buf build` makes of it, with its imports and comments. Users generate
 client code from them (docs/api-clients.md). The GitHub release is the only place
 they are published. Each archive holds one folder,
-`nanoprobe-<version>-<platform>/`:
+`nanoprobe-<version>-<platform>/`, where `<platform>` is `windows-x86_64`,
+`linux-x86_64` or `macos-universal`:
 
 ```
-nanoprobe[.exe]                 doctor, install, uninstall, inspect, top, watch, restore
-nanoprobe-sidecar[.exe]         the sidecar (spec/config.md)
+nanoprobe[.exe]                 Windows and Linux: doctor, install, uninstall, inspect,
+                                top, watch, restore
+nanoprobe-sidecar[.exe]         Windows and Linux: the sidecar (spec/config.md)
 nanoprobe-fake-sidecar[.exe]    the API over a simulated DCS, for controller development
 install.cmd, uninstall.cmd      Windows only: run the program on a double click
 install.sh, uninstall.sh        Linux only: run the program with their arguments
@@ -131,10 +134,36 @@ README.txt                      what the folder holds and the first steps
 sidecar.toml                    Windows only: an example for a sidecar beside DCS
 deploy/                         Linux only: the repository's deploy/ folder
 LICENSE
-payload/nanoprobe-hook.lua      the loader
-payload/nanoprobe_agent.dll     the agent DLL
-payload/lua/hook.lua, log.lua, shim.lua
+README.md, docs/, spec/,        the documents tools/release/docs.txt lists, at their
+skills/nanoprobe/               repository paths
+payload/nanoprobe-hook.lua      Windows and Linux: the loader
+payload/nanoprobe_agent.dll     Windows and Linux: the agent DLL
+payload/lua/hook.lua, log.lua,  Windows and Linux: the version's Lua
+  shim.lua
 ```
+
+The macOS archive holds only the fake sidecar, `README.txt`, `LICENSE` and the
+documents: no DCS server runs on macOS. Its `nanoprobe-fake-sidecar` is one universal
+program of an arm64 and an x86_64 build, each for macOS 11 and later and loading only
+`/usr/lib/libSystem.B.dylib` and `/usr/lib/libiconv.2.dylib`. zig links it against the
+macOS library stubs zig ships; no macOS SDK is downloaded. The arm64 build carries the
+ad-hoc signature its linker writes, which macOS needs to run it; the program has no
+Developer ID signature and is not notarized, so macOS refuses it after a browser
+download until the user allows it (docs/install.md). The macOS build alone is built
+without debug information: its debug map names every object file the linker read by
+its absolute path, the toolchain's under the builder's home folder, and the path
+remapping does not reach it. The fake sidecar needs no line tables, since crash
+records are the agent's. The Windows and Linux programs keep their line tables.
+
+The documents are the files `tools/release/docs.txt` names, the same bytes in every
+archive. Each is the repository's file with its Markdown links rewritten
+(`tools/release-links.awk`): a relative link to a file the archive holds, or to a
+folder that holds one, stays as written; any other relative link names the file at the
+release's tag, `https://github.com/tritiumgg/dcs-nanoprobe/blob/v<version>/<path>`; and
+a link to the repository's `main` branch names the tag instead, so a copy of the
+release's skill matches the release. The archive test checks that each relative link
+resolves inside the archive's folder, and that each link of a source document, and each
+link to the tag in a copy, names a path git tracks.
 
 `install.sh` and `uninstall.sh` run `nanoprobe install` and `nanoprobe uninstall` with
 the program beside them, and pass on every argument and the program's exit code.
@@ -146,7 +175,8 @@ is one the sidecar accepts once its placeholders are replaced. The Windows archi
 
 No file in an archive holds a path of the machine that built it: the builds map the
 checkout, cargo's registry and the toolchain to `nanoprobe`, `cargo` and `rust`
-(`tools/remap.sh`), and the archive test fails on the builder's home folder.
+(`tools/remap.sh`), and the archive test fails on the builder's home folder, and on
+the start of any macOS or Linux home folder path or rustup's folder name in a file.
 
 The agent's PDB is not released: the linker writes into it the absolute path of every
 object file and library it read. `mise run package` keeps it with the DLL it belongs

@@ -148,8 +148,8 @@ its path: `nanoprobe-sidecar run --config sidecar.toml`. The sidecar reads it on
 start, so a change needs a sidecar restart.
 
 The sidecar refuses to start when the file has an unknown key or a bad value. Relative
-paths are relative to the folder that holds the file. Each release archive holds an
-example to start from.
+paths are relative to the folder that holds the file. The Windows and Linux release
+archives hold an example to start from.
 
 ### Overview
 

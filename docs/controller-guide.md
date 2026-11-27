@@ -664,7 +664,9 @@ position came from DCS.
 ## Test without DCS
 
 `nanoprobe-fake-sidecar` is the real API server over a simulated DCS. It is in each
-release archive beside `nanoprobe-sidecar`; in a checkout, run it with
+release archive, beside `nanoprobe-sidecar` for Windows and Linux. The macOS archive
+holds it alone, as one program for Apple silicon and Intel Macs
+([install.md](install.md), "macOS"). In a checkout, run it with
 `cargo run -p nanoprobe-fake-sidecar --`. A controller connects to it as it does to the
 sidecar.
 
