@@ -714,7 +714,7 @@ checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 
 [[package]]
 name = "nanoprobe-agent"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "libc",
  "nanoprobe-agent-link",
@@ -724,7 +724,7 @@ dependencies = [
 
 [[package]]
 name = "nanoprobe-agent-link"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "nanoprobe-transport",
  "proptest",
@@ -734,7 +734,7 @@ dependencies = [
 
 [[package]]
 name = "nanoprobe-api"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "getrandom 0.3.4",
  "nanoprobe-proto",
@@ -758,7 +758,7 @@ dependencies = [
 
 [[package]]
 name = "nanoprobe-cli"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "libc",
  "nanoprobe-agent-link",
@@ -775,7 +775,7 @@ dependencies = [
 
 [[package]]
 name = "nanoprobe-fake-agent"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "nanoprobe-agent-link",
  "nanoprobe-sidecar",
@@ -785,7 +785,7 @@ dependencies = [
 
 [[package]]
 name = "nanoprobe-fake-sidecar"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "hyper-util",
  "nanoprobe-api",
@@ -808,7 +808,7 @@ dependencies = [
 
 [[package]]
 name = "nanoprobe-hello"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "nanoprobe-proto",
  "tokio",
@@ -817,7 +817,7 @@ dependencies = [
 
 [[package]]
 name = "nanoprobe-install"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "getrandom 0.3.4",
  "nanoprobe-agent-link",
@@ -827,7 +827,7 @@ dependencies = [
 
 [[package]]
 name = "nanoprobe-proto"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "prost",
  "prost-types",
@@ -837,7 +837,7 @@ dependencies = [
 
 [[package]]
 name = "nanoprobe-sidecar"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "getrandom 0.3.4",
  "libc",
@@ -854,7 +854,7 @@ dependencies = [
 
 [[package]]
 name = "nanoprobe-sim-fake"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "nanoprobe-sidecar",
  "nanoprobe-transport",
@@ -864,7 +864,7 @@ dependencies = [
 
 [[package]]
 name = "nanoprobe-transport"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "libc",
  "loom",
@@ -1931,7 +1931,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "xtask"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "getrandom 0.3.4",
  "hmac",

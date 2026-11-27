@@ -1,5 +1,16 @@
 # Release notes
 
+## 0.3.1
+
+### Added
+
+- Releases include `nanoprobe-0.3.1-macos-universal.tar.gz`: the fake sidecar for
+  macOS 11 and later, on Apple silicon and Intel Macs. It is not notarized;
+  [install.md](install.md), "macOS", says how to run it
+  ([ADR 0055](adr/0055-releases-carry-a-macos-fake-sidecar-and-the-docs.md)).
+- Every release archive includes the guides, the specifications, `README.md` and the
+  nanoprobe skill for AI coding tools, matching that release.
+
 ## 0.3.0
 
 Tested on DCS 2.9.32.30490 (dedicated server under Wine).
