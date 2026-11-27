@@ -89,6 +89,7 @@ Writing a controller: read `docs/controller-guide.md`. Running a server: read
 | After a change to `proto/` | `mise run proto`: Buf lint, the breaking check, generated code current |
 | After a change to the transport tables in `spec/transport.md` | `mise run spec`: rewrites `spec/transport.golden` |
 | After an intended change to a store encoding or a drawing's DCS call | `NANOPROBE_BLESS=1 cargo test -p nanoprobe-sidecar -p nanoprobe-api --no-default-features`: rewrites the `store.*` and `event.*` lines of `spec/persistence.golden`, and `spec/drawing.golden`. Review the diff. |
+| After an intended change to what the shell writer writes | `NANOPROBE_BLESS=1 cargo test -p nanoprobe-sidecar --lib shell`: rewrites `spec/shell.golden`. Review the diff. |
 
 On Linux, install `libreadline-dev` and `libncurses-dev` before `mise install`.
 
@@ -128,6 +129,7 @@ On Linux, install `libreadline-dev` and `libncurses-dev` before `mise install`.
 | Agent commands and opcodes | `spec/commands.md` |
 | Settings | `spec/config.md` |
 | Stores, backups, migrations | `spec/persistence.md` |
+| Mission shells: weather, briefing, files | `spec/persistence.md`, "Mission shells" to "When the content takes effect" |
 | Install layout, doctor, kill switch | `spec/install.md` |
 | Design decisions | `docs/adr/` |
 | Live evidence | `docs/results/` |

@@ -964,6 +964,164 @@ async fn sound_and_picture_effects() {
     assert_eq!(fake(&hub, |s| s.ledger().sounds.len()), 5);
 }
 
+/// `Broadcast` and `BroadcastStop` through `DoEffect`: the DCS modulation value
+/// and the default power reach DCS, and each bad field is `INVALID_FIELD`
+/// with its path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn broadcast_effects() {
+    use nanoprobe_proto::errors::detail;
+    use nanoprobe_sidecar::sim::wire::Body;
+    use pb::ErrorReason;
+    let (hub, ch) = in_process(cfg(), fake_config()).await.expect("server");
+    let l = lease(&ch).await;
+    let c = campaign(&ch, &l).await;
+    let mut cmd = CommandsServiceClient::new(ch.clone());
+    let g = cmd
+        .put_group(group(&l, "g", c, 0.0, 2, false))
+        .await
+        .expect("put")
+        .into_inner();
+    until(&ch, c, g.group_id, live).await;
+    let effect = |key: &str, e: pb::effect::Effect| pb::DoEffectRequest {
+        write: write(&l, key, c),
+        effect: Some(pb::Effect { effect: Some(e) }),
+    };
+    let at = |theater: &str, north: f64| {
+        Some(pb::Position {
+            theater: theater.into(),
+            north,
+            east: -200.0,
+            alt: 50.0,
+        })
+    };
+    let good = || pb::Broadcast {
+        name: "Beacon 1".into(),
+        file: "beacon.ogg".into(),
+        position: at("Caucasus", 100.0),
+        frequency_hz: 251_000_000,
+        modulation: pb::RadioModulation::Fm as i32,
+        r#loop: true,
+        power_w: None,
+    };
+    let applied = |r: pb::DoEffectResponse| {
+        assert_eq!(
+            r.result.expect("result").outcome,
+            pb::Outcome::Applied as i32
+        );
+    };
+    applied(
+        cmd.do_effect(effect("b-fm", pb::effect::Effect::Broadcast(good())))
+            .await
+            .expect("broadcast")
+            .into_inner(),
+    );
+    let mut am = good();
+    am.modulation = pb::RadioModulation::Am as i32;
+    am.power_w = Some(2_500.0);
+    am.r#loop = false;
+    applied(
+        cmd.do_effect(effect("b-am", pb::effect::Effect::Broadcast(am)))
+            .await
+            .expect("broadcast")
+            .into_inner(),
+    );
+    applied(
+        cmd.do_effect(effect(
+            "b-stop",
+            pb::effect::Effect::BroadcastStop(pb::BroadcastStop {
+                name: "Beacon 1".into(),
+            }),
+        ))
+        .await
+        .expect("stop")
+        .into_inner(),
+    );
+    let (broadcasts, stops) = fake(&hub, |s| {
+        (
+            s.ledger().broadcasts.clone(),
+            s.ledger().broadcast_stops.clone(),
+        )
+    });
+    let body = |modulation, looping, power_w| Body::Broadcast {
+        position: [100.0, 50.0, -200.0],
+        frequency_hz: 251_000_000,
+        power_w,
+        modulation,
+        looping,
+        name: "Beacon 1".into(),
+        file: "beacon.ogg".into(),
+    };
+    assert_eq!(broadcasts, vec![body(1, 1, 100.0), body(0, 0, 2_500.0)]);
+    assert_eq!(stops, vec!["Beacon 1".to_owned()]);
+
+    let with = |f: &dyn Fn(&mut pb::Broadcast)| {
+        let mut b = good();
+        f(&mut b);
+        pb::effect::Effect::Broadcast(b)
+    };
+    let stop =
+        |name: &str| pb::effect::Effect::BroadcastStop(pb::BroadcastStop { name: name.into() });
+    let bad = [
+        ("name-empty", with(&|b| b.name.clear()), "name"),
+        ("name-long", with(&|b| b.name = "a".repeat(65)), "name"),
+        ("name-quote", with(&|b| b.name = "a\"b".into()), "name"),
+        ("file-empty", with(&|b| b.file.clear()), "file"),
+        ("file-long", with(&|b| b.file = "a".repeat(256)), "file"),
+        ("file-quote", with(&|b| b.file = "a\"b".into()), "file"),
+        ("no-position", with(&|b| b.position = None), "position"),
+        (
+            "theater",
+            with(&|b| b.position = at("Syria", 0.0)),
+            "position.theater",
+        ),
+        (
+            "nan",
+            with(&|b| b.position = at("Caucasus", f64::NAN)),
+            "position.north",
+        ),
+        (
+            "freq-low",
+            with(&|b| b.frequency_hz = 199_999),
+            "frequency_hz",
+        ),
+        (
+            "freq-high",
+            with(&|b| b.frequency_hz = 30_000_000_001),
+            "frequency_hz",
+        ),
+        (
+            "modulation",
+            with(&|b| b.modulation = pb::RadioModulation::Unspecified as i32),
+            "modulation",
+        ),
+        ("power-low", with(&|b| b.power_w = Some(0.5)), "power_w"),
+        (
+            "power-high",
+            with(&|b| b.power_w = Some(10_001.0)),
+            "power_w",
+        ),
+        (
+            "power-nan",
+            with(&|b| b.power_w = Some(f64::NAN)),
+            "power_w",
+        ),
+    ];
+    for (key, e, field) in bad {
+        let e = cmd.do_effect(effect(key, e)).await.expect_err(key);
+        assert_eq!(e.code(), tonic::Code::InvalidArgument, "{key}");
+        let d = detail(&e).expect("a detail");
+        assert_eq!(d.reason, ErrorReason::InvalidField as i32, "{key}");
+        assert_eq!(d.field, format!("effect.broadcast.{field}"), "{key}");
+    }
+    for (key, name) in [("s-empty", ""), ("s-slash", "a/b")] {
+        let e = cmd.do_effect(effect(key, stop(name))).await.expect_err(key);
+        assert_eq!(e.code(), tonic::Code::InvalidArgument, "{key}");
+        let d = detail(&e).expect("a detail");
+        assert_eq!(d.field, "effect.broadcast_stop.name", "{key}");
+    }
+    assert_eq!(fake(&hub, |s| s.ledger().broadcasts.len()), 2);
+}
+
 async fn route_events(ch: &Channel, c: u64) -> Vec<pb::RouteEvent> {
     let r = EventsServiceClient::new(ch.clone())
         .read_events(pb::ReadEventsRequest {

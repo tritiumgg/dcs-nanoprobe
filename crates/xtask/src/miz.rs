@@ -59,7 +59,7 @@ pub fn test_resources() -> Vec<Resource> {
         Resource {
             key: "ResKey_Action_901".into(),
             file: "np-tone.wav".into(),
-            bytes: tone_wav(),
+            bytes: tone_wav(440.0, 0.5),
         },
         Resource {
             key: "ResKey_Action_902".into(),
@@ -69,10 +69,10 @@ pub fn test_resources() -> Vec<Resource> {
     ]
 }
 
-/// A 16-bit mono 22,050 Hz WAV of a 440 Hz sine, half a second.
-fn tone_wav() -> Vec<u8> {
+/// A 16-bit mono 22,050 Hz WAV of a sine at `freq_hz`, `seconds` long.
+pub fn tone_wav(freq_hz: f64, seconds: f64) -> Vec<u8> {
     let rate = 22_050u32;
-    let samples = rate / 2;
+    let samples = (f64::from(rate) * seconds).round() as u32;
     let data_len = samples * 2;
     let mut out = Vec::new();
     out.extend_from_slice(b"RIFF");
@@ -89,7 +89,7 @@ fn tone_wav() -> Vec<u8> {
     out.extend_from_slice(&data_len.to_le_bytes());
     for i in 0..samples {
         let t = i as f64 / rate as f64;
-        let v = (t * 440.0 * std::f64::consts::TAU).sin() * 12_000.0;
+        let v = (t * freq_hz * std::f64::consts::TAU).sin() * 12_000.0;
         out.extend_from_slice(&(v as i16).to_le_bytes());
     }
     out
@@ -146,6 +146,44 @@ fn picture_png() -> Vec<u8> {
     let mut ihdr = Vec::new();
     ihdr.extend_from_slice(&8u32.to_be_bytes());
     ihdr.extend_from_slice(&8u32.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+    chunk(b"IHDR", &ihdr);
+    chunk(b"IDAT", &z);
+    chunk(b"IEND", &[]);
+    out
+}
+
+/// A `width` by `height` RGB PNG of one color, with stored (uncompressed)
+/// deflate blocks of at most 65,535 bytes each.
+pub fn solid_png(width: u32, height: u32, rgb: [u8; 3]) -> Vec<u8> {
+    let mut raw = Vec::with_capacity((height * (1 + 3 * width)) as usize);
+    let mut row = vec![0u8];
+    for _ in 0..width {
+        row.extend_from_slice(&rgb);
+    }
+    for _ in 0..height {
+        raw.extend_from_slice(&row);
+    }
+    let mut z = vec![0x78, 0x01];
+    let blocks: Vec<&[u8]> = raw.chunks(65_535).collect();
+    for (i, block) in blocks.iter().enumerate() {
+        z.push(u8::from(i + 1 == blocks.len()));
+        z.extend_from_slice(&(block.len() as u16).to_le_bytes());
+        z.extend_from_slice(&(!(block.len() as u16)).to_le_bytes());
+        z.extend_from_slice(block);
+    }
+    z.extend_from_slice(&adler32(&raw).to_be_bytes());
+    let mut out = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    let mut chunk = |kind: &[u8; 4], data: &[u8]| {
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        let mut body = kind.to_vec();
+        body.extend_from_slice(data);
+        out.extend_from_slice(&body);
+        out.extend_from_slice(&crc32(&body).to_be_bytes());
+    };
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&height.to_be_bytes());
     ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
     chunk(b"IHDR", &ihdr);
     chunk(b"IDAT", &z);

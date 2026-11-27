@@ -510,7 +510,9 @@ message Picture {
   EffectScope scope = 1;
   uint64 target = 2;
   // The picture's resource key in the mission, or its file name. Letters,
-  // digits, space and `_.-/()+,#`, at most 255 bytes.
+  // digits, space and `_.-/()+,#`, at most 255 bytes. DCS shows a picture by
+  // its key and not by its bare file name, so a file name that the loaded
+  // mission's `mapResource` keys is sent as its key.
   string file = 3;
   // How long the picture stays, 0 to 86400; 0 until PictureStop.
   double seconds = 4;
@@ -525,6 +527,42 @@ message Picture {
 
 // Take every picture off screen.
 message PictureStop {}
+
+enum RadioModulation {
+  RADIO_MODULATION_UNSPECIFIED = 0;
+  RADIO_MODULATION_AM = 1;
+  RADIO_MODULATION_FM = 2;
+}
+
+// Broadcast a sound file that is in the mission on a radio frequency, from a
+// point, as the Mission Editor's "radio transmission" does. That a load or a
+// DCS restart ends it is UNVERIFIED; the platform does not start it again.
+message Broadcast {
+  // 1 to 64 characters of letters, digits, space and `_.-`; BroadcastStop
+  // names it.
+  string name = 1;
+  // The sound file's name in the mission: 1 to 255 bytes of letters, digits,
+  // space and `_.-/()+,#`. DCS plays the file only by its path in the
+  // mission (LIVE, docs/results/2026-11-26-mission-content.md, run 5), so a
+  // file the loaded mission holds in `l10n/DEFAULT/` is sent as that path,
+  // which must also fit 255 bytes; any other value is sent as given. That a
+  // client hears a broadcast sent this way is UNVERIFIED.
+  string file = 2;
+  // The transmitter. `alt` is above sea level.
+  Position position = 3;
+  // Hertz, 200000 to 30000000000.
+  uint64 frequency_hz = 4;
+  RadioModulation modulation = 5;
+  // Play the file again and again until BroadcastStop.
+  bool loop = 6;
+  // Watts, 1 to 10000. Absent is 100, the Mission Editor's default.
+  optional double power_w = 7;
+}
+
+// Stop a broadcast by its name.
+message BroadcastStop {
+  string name = 1;
+}
 
 // A sphere, in DCS coordinates. The center's `alt` is above sea level, and 0
 // is sea level: a 30 m sphere at 0 removed nothing on an airfield about
@@ -598,6 +636,8 @@ message Effect {
     Picture picture = 7;
     PictureStop picture_stop = 8;
     ClearDebris clear_debris = 9;
+    Broadcast broadcast = 10;
+    BroadcastStop broadcast_stop = 11;
   }
 }
 

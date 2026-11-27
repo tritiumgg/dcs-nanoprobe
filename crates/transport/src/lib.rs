@@ -52,6 +52,35 @@ pub fn picture_file_ok(file: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b" _.-/()+,#".contains(&b))
 }
 
+/// The longest `BROADCAST` name, in bytes.
+pub const BROADCAST_NAME_MAX: usize = 64;
+
+/// Whether a `BROADCAST` or `BROADCAST_STOP` name is valid: 1 to
+/// [`BROADCAST_NAME_MAX`] bytes of ASCII letters, digits, space and `_.-`
+/// (spec/commands.md, "Layout: BROADCAST").
+pub fn broadcast_name_ok(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= BROADCAST_NAME_MAX
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b" _.-".contains(&b))
+}
+
+#[cfg(test)]
+mod broadcast_name_tests {
+    use super::broadcast_name_ok;
+
+    #[test]
+    fn only_plain_names_pass() {
+        for ok in ["a", "Beacon 1", "a_b.c-d", &"x".repeat(64)] {
+            assert!(broadcast_name_ok(ok), "{ok}");
+        }
+        for bad in ["", "a/b", "a\"b", "\u{e9}", &"x".repeat(65)] {
+            assert!(!broadcast_name_ok(bad), "{bad}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod picture_file_tests {
     use super::picture_file_ok;

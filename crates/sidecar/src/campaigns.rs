@@ -1085,7 +1085,10 @@ mod tests {
         fn step(tx: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
             tx.execute_batch("CREATE TABLE later (x);")
         }
-        let steps = [Migration { to: 2, run: step }];
+        let steps = [Migration {
+            to: SCHEMA + 1,
+            run: step,
+        }];
         assert!(matches!(
             c.open_with(CampaignId(2), 1, &steps),
             Err(DiskError::Finished(CampaignId(2)))

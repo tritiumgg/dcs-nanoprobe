@@ -80,6 +80,7 @@ of the `Event` message of the package named in the events file's `meta`
 | `marker` | `id INTEGER PRIMARY KEY`, `body BLOB` | One per mark, drawing and menu item, live or removed, until the purge takes a removed one (spec/world.md, "Labels and markup groups") |
 | `layer` | `name TEXT PRIMARY KEY`, `body BLOB` | One per markup group. The commit of `RemoveMarkupGroup` deletes the row; a markup group made again under the name starts with its defaults. |
 | `dcs_issue` | `boot INTEGER PRIMARY KEY`, `body BLOB` | One per agent boot of the newest 16: the high-water mark of the one pool of DCS mark IDs, as the next slot to give (spec/world.md, "DCS IDs"). A schema 2 file without the table gains it at open. |
+| `mission_file` | `kind INTEGER`, `aircraft_type TEXT`, `name TEXT`, `body BLOB`; the key is `kind`, `aircraft_type` and `name` | One per mission file the campaign carries ("Mission files"): `kind` 1 for the mission's resources, 2 for a kneeboard page for every aircraft, 3 for one aircraft type, which `aircraft_type` names (empty otherwise); the name as `SetMissionFile` gave it; the bytes as they were when it named the path. From schema 3. |
 
 A removed extension keeps its `extension` row as a tombstone: `removed` is true, the
 body holds no source, and `spec_rev` is the highest revision the extension had. A
@@ -354,8 +355,9 @@ is kept, and the campaign is not opened.
 | Step | What it does |
 |---|---|
 | 2 | Creates the `marker`, `layer` and `dcs_issue` tables, empty |
+| 3 | Creates the `mission_file` table, empty. A next mission in `meta.world` without the new keys reads as before |
 
-There is no downgrade. A sidecar of schema 1 refuses a schema 2 file, as it refuses any
+There is no downgrade. A sidecar of schema 2 refuses a schema 3 file, as it refuses any
 newer version. The way back is to restore the `pre_migration` backup, which loses every
 change made after the migration. Migrating the author's components is the
 author's step, run through the Extension service after the platform's steps; the
@@ -585,7 +587,12 @@ template with only these values changed, every other byte of every member kept:
 | Member | Value | From |
 |---|---|---|
 | `mission` | `date` (`Day`, `Month`, `Year`) and `start_time` | `NextMission.start` when set, else the campaign clock, else the template's own |
-| `mission` | `weather` | `NextMission.weather` when set, else the template's |
+| `mission` | `weather` | `NextMission.conditions` merged over the template's ("Weather"), or `NextMission.weather` in place of it, else the template's |
+| `mission` | `sortie`, `descriptionText`, `descriptionBlueTask`, `descriptionRedTask`, `descriptionNeutralsTask`, `maxDictId` | A key for each text `NextMission.briefing` sets ("Briefing text") |
+| `mission` | `pictureFileNameB`, `pictureFileNameR`, `pictureFileNameN`, `pictureFileNameServer` | `NextMission.briefing_images` ("Briefing images") |
+| `l10n/<locale>/dictionary` | The text under each key | `NextMission.briefing`, in every locale the template holds and in `DEFAULT` |
+| `l10n/DEFAULT/mapResource` | A key for each file and image that has none | The campaign's files and `NextMission.briefing_images` |
+| `l10n/DEFAULT/<name>`, `l10n/<locale>/<name>`, `KNEEBOARD/IMAGES/<name>`, `KNEEBOARD/<type>/IMAGES/<name>` | The file's bytes, in place of the template's or added after its members | The campaign's files ("Mission files") |
 | `warehouses` | `airports[<id>].dynamicSpawn`, `allowHotStart`; `unlimitedAircrafts` false, and `aircrafts = {}` when the airport has no `aircrafts`, where `dynamicSpawn` is true | `NextMission.dynamic_spawn`, by the airport ID in the template's `warehouses`; airports not named, and airports named with `enabled` false, keep the template's `unlimitedAircrafts`; airports not named keep every flag. An ID the template does not hold is `INVALID_FIELD` |
 
 Airbase owners and warehouse stocks are not written into the file: the reconciler sets
@@ -626,6 +633,143 @@ A load whose outcome is `UNKNOWN`, or that left the commands in flight, and one 
 dropped after it was sent, count as holding their slot. Dates and times are the mission's own calendar time, carried
 in Timestamp fields with no time-zone conversion.
 
+### Weather
+
+`NextMission.conditions` is the weather in the Mission Editor's terms. Each field left
+unset keeps the template's value: the sidecar reads the template's `weather` table, sets
+the fields given, checks the result as a whole, and writes the table back. Any field set
+also writes `atmosphere_type` 0, so a template with dynamic weather becomes static, and
+`enable_fog` false, so the legacy fog never applies; `cyclones`, `type_weather`, `name`
+and `modifiedTime` stay the template's. The keys, units and ranges are the editor's
+(ED-CODE, DCS 2.9.31.29434, `MissionEditor/modules/me_weather.lua`, `me_mission.lua`,
+`me_utilities.lua`, `dialogs/me_weather_panel.dlg`):
+
+| Field | Key | Range |
+|---|---|---|
+| `temperature_c` | `season.temperature`, °C; the sim keeps it within the map's range for the mission's date (LIVE, `docs/results/2026-11-26-mission-content.md`, runs 1, 3 and 4; the editor's `applyTempRestrictions`, ED-CODE) | -50 to 50 |
+| `qnh_mmhg` | `qnh`, mmHg (the editor's metric unit) | 720 to 790 |
+| `visibility_m` | `visibility.distance`, m; the editor has no control for it | 0 to 80,000 (UNVERIFIED that a client sees it) |
+| `wind_ground`, `wind_2000m`, `wind_8000m` | `wind.atGround`, `at2000`, `at8000`: `speed` m/s, `dir` the direction the wind blows toward, degrees from north (LIVE, docs/results/2026-11-26-mission-content.md) | 0 to 50; 0 to 359 |
+| `ground_turbulence_mps` | `groundTurbulence`, ten times the editor's m/s value (LIVE, runs 1 and 4: 2 m/s is written as 20 and briefed as 2 m/s) | 0 to 6 |
+| `clouds.preset` | `clouds.preset`; NONE removes it | the presets below |
+| `clouds.base_m` | `clouds.base`, m | 300 to 5000 with no preset, else the preset's range |
+| `clouds.thickness_m`, `clouds.density` | `clouds.thickness` m, `clouds.density` | 200 to 2000, 0 to 10; only with no preset |
+| `clouds.precipitation` | `clouds.iprecptns`: 0 none, 1 rain, 2 thunderstorm, 3 snow, 4 snowstorm | only with no preset |
+| `fog` | `fog2`: absent when off (the editor drops it), `mode` 2 auto, 4 manual with `manual` keys `{time, visibility, thickness}` | 1 to 16 keys, each with a time, times 0 to 86,400 s in whole seconds strictly increasing, visibility 0 to 100,000 m, thickness 0 to 5000 m |
+| `dust` | `enable_dust`, `dust_density` (visibility in the dust, m; 0 when off) | 300 to 20,000 |
+| `halo` | `halo.preset`: `off`, `auto`, `AtmoHighClouds`, `CirrusOnly`, `HighClouds`, `VolumetricOnly`; `halo.crystalsPreset`: `AllKinds`, `BasicHaloCircle`, `BasicHaloWithSundogs`, `BasicSundogsTangents`, `SundogsArcs`, `Tangents` (`Config/Effects/icehalo.lua`) | crystals only with a preset other than `off` |
+
+Checks across fields, on the merged table: a preset allows no thickness, density or
+precipitation from the controller, and its base must be in its range; with no preset,
+rain and snow need a density of 5 or more and the thunderstorm kinds 9 or more, rain and
+thunderstorm a temperature of 0 or more, snow and snowstorm 0 or less (ED-CODE,
+`me_weather.lua` `precptns`); fog that is not off and dust are not both on; the table
+holds `clouds` and `season` tables. The cloud presets the editor offers, with the range
+of bases each allows (ED-CODE, `Config/Effects/clouds.lua`, `presetAltMin` and
+`presetAltMax`, the presets with `visibleInGUI`):
+
+| Preset | Base, m | Preset | Base, m | Preset | Base, m |
+|---|---|---|---|---|---|
+| `Preset1` | 840-4200 | `Preset13` | 1680-3360 | `Preset25` | 420-3360 |
+| `Preset2` | 1260-2520 | `Preset14` | 1680-3360 | `Preset26` | 420-2940 |
+| `Preset3` | 840-2520 | `Preset15` | 840-5040 | `Preset27` | 420-2520 |
+| `Preset4` | 1260-2520 | `Preset16` | 1260-4200 | `RainyPreset1` | 420-2940 |
+| `Preset5` | 1260-4620 | `Preset17` | 0-2520 | `RainyPreset2` | 840-2520 |
+| `Preset6` | 1260-4200 | `Preset18` | 0-3780 | `RainyPreset3` | 840-2520 |
+| `Preset7` | 1680-5040 | `Preset19` | 0-2940 | `RainyPreset4` | 1260-4200 |
+| `Preset8` | 3780-5460 | `Preset20` | 0-3780 | `RainyPreset5` | 1260-2520 |
+| `Preset9` | 1680-3780 | `Preset21` | 1260-4200 | `RainyPreset6` | 1260-2940 |
+| `Preset10` | 1260-4200 | `Preset22` | 420-4200 | `NEWRAINPRESET4` | 840-5174.4 |
+| `Preset11` | 2520-5460 | `Preset23` | 840-3360 | | |
+| `Preset12` | 1680-3360 | `Preset24` | 420-2520 | | |
+
+`NextMission.weather`, the deprecated whole table, replaces the template's as it is; it
+must hold `clouds` and `season` tables, without which the editor's loader raises
+(ED-CODE, `me_weather.lua` `setData`). Setting it together with `conditions` is
+`INVALID_FIELD`.
+
+### Briefing text
+
+The mission's sortie name and texts are keys into the dictionaries: `mission.sortie`,
+`descriptionText`, `descriptionBlueTask`, `descriptionRedTask` and
+`descriptionNeutralsTask` each hold `DictKey_<field>_<N>`, and
+`l10n/<locale>/dictionary` maps the key to the text (ED-CODE, `Scripts/dictionary.lua`,
+`me_mission.lua`). For each text `NextMission.briefing` sets, the sidecar writes the
+text under the key the template's field names, in `l10n/DEFAULT/dictionary` and in every
+other locale's dictionary the template holds, so every client reads the controller's
+text. It removes no key. A field that holds no `DictKey_` string gets a new key,
+`DictKey_<field>_<N>` with `N` above `mission.maxDictId`, which is raised; the sidecar
+never writes plain text into `mission`. A dictionary the template lacks for `DEFAULT` is
+added. Text is UTF-8, at most 65,536 bytes, with no NUL; it is written as a Lua string
+with byte escapes.
+
+### Briefing images
+
+`mission.pictureFileNameB`, `R` and `N` (each coalition's briefing) and
+`pictureFileNameServer` (the coalition selection screen) are lists of resource keys, and
+`l10n/DEFAULT/mapResource` maps a key to a file name in `l10n/DEFAULT/` (ED-CODE,
+`me_mission.lua`, `me_setImage.lua`, `Scripts/dictionary.lua`).
+`NextMission.briefing_images` sets a list in order, 0 to 16 images, from `blue`, `red`,
+`neutral` and `coalition_selection`; a list not set keeps the template's.
+Each name is a campaign file of kind `MISSION` or a file in the template's
+`l10n/DEFAULT/`, and a PNG or JPEG by its name. A file `mapResource` already maps keeps
+its key; one it does not gets `ResKey_np_<N>`, numbered with the dictionary keys above
+`maxDictId`. A name neither the campaign nor the template holds is `INVALID_FIELD`
+(`next`) at `SetNextMission`, and the shell write refuses it again.
+
+### Mission files
+
+`SetMissionFile` names an image or sound file by its path as the sidecar opens it,
+under `[missions] template_dirs`, as `SetCampaignTemplate` does (ADR 0006). The sidecar
+reads the file once, checks it, and keeps its bytes in the `mission_file` table; every
+shell written from then on carries it, and the path is never read again. A backup and a
+restore carry the files; an export lists each as a `mission_file` line with its kind,
+type, name, size and SHA-256. No path removes the file. `ListMissionFiles` lists them.
+
+- A file is a PNG, JPEG (`.jpg`, `.jpeg`), Ogg Vorbis (`.ogg`) or PCM WAV (`.wav`)
+  file, by its name, at most 8 MiB. Its bytes are read past the magic bytes: a PNG's
+  `IHDR` with its checksum, a JPEG's start of frame, the Ogg stream's Vorbis
+  identification header, a WAV file's `fmt ` chunk with format 1. An image is at most
+  8192 pixels on a side; a sound has 1 to 8 channels at 8000 to 192,000 Hz. The editor
+  offers these types (ED-CODE, `MissionEditor/modules/FileDialogFilters.lua`).
+- A campaign holds at most 64 files and 64 MiB of them (`RESOURCE_EXHAUSTED`,
+  `FILES_FULL`), and the free space check of "Free space" adds the file's size.
+- Kind `MISSION` goes to `l10n/DEFAULT/<name>` with a key in `mapResource`. `PlaySound`,
+  `Picture`, a broadcast and the template's triggers name it. Kind `KNEEBOARD` goes to
+  `KNEEBOARD/IMAGES/<name>`, kind `KNEEBOARD_TYPE` to `KNEEBOARD/<type>/IMAGES/<name>`;
+  a kneeboard file is an image. The editor keeps `KNEEBOARD` members of a mission it
+  saves (ED-CODE, `Scripts/dictionary.lua`), and a UH-1H cockpit shows a page from each
+  folder (LIVE, `docs/results/2026-11-26-mission-content.md`, runs 3 and 4).
+- A name is 1 to 64 characters of `A`-`Z`, `a`-`z`, `0`-`9`, `_`, `-` and `.`, and no
+  two paths in the mission differ only in case: two `KNEEBOARD_TYPE` types that differ
+  only in case are `INVALID_FIELD` (`aircraft_type`), whatever the names, and two names
+  of one kind and type that differ only in case are `INVALID_FIELD` (`name`). A file the
+  template holds under the same folder and exact name is replaced: its bytes in the
+  shell are the campaign's, and a file of the same name in an `l10n/<locale>/` folder is
+  replaced too. Such a name may be outside the rule, if it holds no `/`, `\`, `..` or
+  NUL and a template of the campaign holds it. The same holds against a template of the
+  campaign at `SetMissionFile`: a type whose folder differs only in case from one the
+  template holds is `INVALID_FIELD` (`aircraft_type`), and a name that differs only in
+  case from a file in the kind's folder is `INVALID_FIELD` (`name`); the shell write
+  refuses such a name again for a template set later.
+- A file a stored `NextMission.briefing_images` names cannot be removed
+  (`FAILED_PRECONDITION`, `field` `name`).
+
+A file set while a mission runs is in the next shell, not in the running mission's
+`.miz`: it plays or shows after the next load.
+
+### When the content takes effect
+
+Everything in "Weather", "Briefing text", "Briefing images" and "Mission files" is
+written into the shell, so it takes effect at the next mission load: a `Reload`, an
+activation, or a load of the next mission's theater. `Reload` writes the shell from the
+stored next mission and the campaign's files, and loads it. `SetNextMission` renders the
+shell for its theater (the campaign's when it names none) when the template is at hand
+and refuses what would not render, so a reload does not find the fault; dynamic-spawn
+airports keep their check at the load. Typed weather, the deprecated weather, briefing
+text and images follow `NextMission`'s theater rule above; the campaign's files go into
+every theater's shell.
+
 ### Reading a campaign that is not open
 
 A read of a campaign whose store is not open, finished or suspended, opens no store: the
@@ -643,7 +787,7 @@ active campaign.
 of the events), then `meta` (each key, its value decoded), `entity` (each row, kind and
 body decoded), `extension`, `marker` (ID and body), `layer` (name and body), `journal`,
 `inflight`, `template` (theater, size and SHA-256
-of the campaign's copy) and `checkpoint` rows, then `event`
+of the campaign's copy), `mission_file` (kind, type, name, size and SHA-256) and `checkpoint` rows, then `event`
 rows with the event's Protobuf encoding in base 64 (`event_b64`). A stored body is
 decoded to JSON by the rule of spec/world.md, "Lua tables in the API"; a string that is
 not UTF-8 is `{"bytes_b64": ...}`. The store is read in one read transaction on a
@@ -658,7 +802,8 @@ campaign in any state.
 
 The status reports the free bytes on the file system that holds `[store] dir`. A
 campaign holds its store, the store's WAL and its events file there. A backup, a read
-copy, and `SetCampaignTemplate` (with the template's size added) are refused with
+copy, `SetCampaignTemplate` (with the template's size added) and `SetMissionFile` (with
+the file's) are refused with
 `SPACE_LOW` when the free bytes are fewer than that; a scheduled backup is then skipped,
 logged, and tried one interval later. A failed store write still stops the sidecar.
 

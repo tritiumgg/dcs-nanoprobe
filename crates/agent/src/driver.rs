@@ -1234,6 +1234,44 @@ fn arguments_with(
             f.text("vertical", &vertical.to_string());
             f.text("size_units", &size_units.to_string());
         }
+        op::BROADCAST => {
+            let (x, y, z) = (
+                rd.f64().ok()? + 0.0,
+                rd.f64().ok()? + 0.0,
+                rd.f64().ok()? + 0.0,
+            );
+            let frequency_hz = rd.u64().ok()?;
+            let power_w = rd.f64().ok()? + 0.0;
+            let modulation = rd.u32().ok()?;
+            let looping = rd.u32().ok()?;
+            let name = rd.str().ok()?;
+            let file = rd.str().ok()?;
+            if ![x, y, z, power_w].iter().all(|n| n.is_finite())
+                || !(BROADCAST_FREQUENCY_MIN..=BROADCAST_FREQUENCY_MAX).contains(&frequency_hz)
+                || !(1.0..=BROADCAST_POWER_MAX).contains(&power_w)
+                || modulation > 1
+                || !nanoprobe_transport::broadcast_name_ok(name)
+                || !nanoprobe_transport::picture_file_ok(file)
+            {
+                return None;
+            }
+            f.text("name", name);
+            f.text("file", file);
+            f.num("x", x);
+            f.num("y", y);
+            f.num("z", z);
+            f.num("frequency_hz", frequency_hz as f64);
+            f.num("modulation", f64::from(modulation));
+            f.push("loop", &Lv::Bool(looping != 0));
+            f.num("power_w", power_w);
+        }
+        op::BROADCAST_STOP => {
+            let name = rd.str().ok()?;
+            if !nanoprobe_transport::broadcast_name_ok(name) {
+                return None;
+            }
+            f.text("name", name);
+        }
         op::CAPTURE => {
             f.text("name", &group());
             f.text(
@@ -1403,6 +1441,12 @@ fn arguments_with(
 /// The farthest from 0 a `CLEAR_DEBRIS` coordinate or radius may be, in
 /// meters: 10,000 km.
 const DEBRIS_REACH_MAX: f64 = 10_000_000.0;
+
+/// The lowest and highest `BROADCAST` frequency, in Hz.
+const BROADCAST_FREQUENCY_MIN: u64 = 200_000;
+const BROADCAST_FREQUENCY_MAX: u64 = 30_000_000_000;
+/// The highest `BROADCAST` power, in W.
+const BROADCAST_POWER_MAX: f64 = 10_000.0;
 
 /// The longest a `PICTURE` stays, in seconds.
 const PICTURE_SECONDS_MAX: f64 = 86_400.0;
@@ -2770,6 +2814,87 @@ mod tests {
         assert!(arguments(op::SOUND as u16, &h, &sound(2, 1 << 32, "x")).is_none());
         assert!(arguments(op::SOUND as u16, &h, &sound(4, 1 << 53, "x")).is_none());
         assert!(arguments(op::SOUND as u16, &h, &[0; 15]).is_none());
+    }
+
+    fn broadcast(
+        x: f64,
+        freq: u64,
+        power: f64,
+        modulation: u32,
+        name: &str,
+        file: &str,
+    ) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.f64(x)
+            .f64(2.0)
+            .f64(3.0)
+            .u64(freq)
+            .f64(power)
+            .u32(modulation)
+            .u32(1)
+            .str(name)
+            .str(file);
+        w.finish()
+    }
+
+    #[test]
+    fn a_broadcast_has_its_values_and_a_bad_one_is_refused() {
+        let h = header(71, 0);
+        expect(
+            op::BROADCAST,
+            &h,
+            &broadcast(1.5, 251_000_000, 100.0, 1, "Beacon 1", "a.ogg"),
+            vec![
+                ("name", s("Beacon 1")),
+                ("file", s("a.ogg")),
+                ("x", n(1.5)),
+                ("y", n(2.0)),
+                ("z", n(3.0)),
+                ("frequency_hz", n(251_000_000.0)),
+                ("modulation", n(1.0)),
+                ("loop", Lv::Bool(true)),
+                ("power_w", n(100.0)),
+            ],
+        );
+        let bad = |b: Vec<u8>| arguments(op::BROADCAST as u16, &h, &b).is_none();
+        assert!(bad(broadcast(
+            f64::NAN,
+            251_000_000,
+            100.0,
+            0,
+            "a",
+            "a.ogg"
+        )));
+        assert!(bad(broadcast(1.0, 199_999, 100.0, 0, "a", "a.ogg")));
+        assert!(bad(broadcast(1.0, 30_000_000_001, 100.0, 0, "a", "a.ogg")));
+        assert!(bad(broadcast(1.0, 251_000_000, 0.5, 0, "a", "a.ogg")));
+        assert!(bad(broadcast(1.0, 251_000_000, 10_001.0, 0, "a", "a.ogg")));
+        assert!(bad(broadcast(
+            1.0,
+            251_000_000,
+            f64::INFINITY,
+            0,
+            "a",
+            "a.ogg"
+        )));
+        assert!(bad(broadcast(1.0, 251_000_000, 100.0, 2, "a", "a.ogg")));
+        assert!(bad(broadcast(1.0, 251_000_000, 100.0, 0, "", "a.ogg")));
+        assert!(bad(broadcast(1.0, 251_000_000, 100.0, 0, "a/b", "a.ogg")));
+        assert!(bad(broadcast(1.0, 251_000_000, 100.0, 0, "a", "")));
+        assert!(bad(broadcast(1.0, 251_000_000, 100.0, 0, "a", "a\"b")));
+        assert!(bad(vec![0; 47]));
+        let mut w = Writer::new();
+        w.str("Beacon 1");
+        expect(
+            op::BROADCAST_STOP,
+            &h,
+            &w.finish(),
+            vec![("name", s("Beacon 1"))],
+        );
+        let mut w = Writer::new();
+        w.str("a'b");
+        assert!(arguments(op::BROADCAST_STOP as u16, &h, &w.finish()).is_none());
+        assert!(arguments(op::BROADCAST_STOP as u16, &h, &[]).is_none());
     }
 
     #[test]

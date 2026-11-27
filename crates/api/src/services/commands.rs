@@ -1508,6 +1508,8 @@ fn effect_start(g: &mut Inner, c: u64, e: &pb::effect::Effect) -> Result<(u64, u
             .flatten()
             .ok_or_else(dcs_not_ready),
         pb::effect::Effect::ClearDebris(d) => clear_debris_start(g, c, d),
+        pb::effect::Effect::Broadcast(b) => broadcast_start(g, c, b),
+        pb::effect::Effect::BroadcastStop(b) => broadcast_stop_start(g, c, b),
         _ => Err(not_built("DoEffect for this effect")),
     }
 }
@@ -1711,6 +1713,78 @@ fn sound_start(g: &mut Inner, c: u64, s: &pb::Sound) -> Result<(u64, u64), Statu
     .ok_or_else(dcs_not_ready)
 }
 
+const BROADCAST_NAME_RULE: &str = "1 to 64 characters of letters, digits, space and _.-";
+
+fn broadcast_start(g: &mut Inner, c: u64, b: &pb::Broadcast) -> Result<(u64, u64), Status> {
+    if !nanoprobe_transport::broadcast_name_ok(&b.name) {
+        return Err(invalid("effect.broadcast.name", BROADCAST_NAME_RULE));
+    }
+    if !nanoprobe_transport::picture_file_ok(&b.file) {
+        return Err(invalid(
+            "effect.broadcast.file",
+            "1 to 255 bytes of letters, digits, space and _.-/()+,#",
+        ));
+    }
+    let slot = g.campaigns.get(&c).expect("resolved campaign");
+    let at = place(b.position.as_ref(), slot, "effect.broadcast.position")?;
+    if !(200_000..=30_000_000_000).contains(&b.frequency_hz) {
+        return Err(invalid(
+            "effect.broadcast.frequency_hz",
+            "200000 to 30000000000 Hz",
+        ));
+    }
+    // The DCS `radio.modulation` value: AM 0, FM 1.
+    let modulation = match pb::RadioModulation::try_from(b.modulation) {
+        Ok(pb::RadioModulation::Am) => 0,
+        Ok(pb::RadioModulation::Fm) => 1,
+        _ => {
+            return Err(invalid(
+                "effect.broadcast.modulation",
+                "AM or FM is required",
+            ));
+        }
+    };
+    let power_w = b.power_w.unwrap_or(100.0);
+    if !(power_w.is_finite() && (1.0..=10_000.0).contains(&power_w)) {
+        return Err(invalid("effect.broadcast.power_w", "finite, 1 to 10000"));
+    }
+    // DCS plays a broadcast's file by its path in the mission, not by its
+    // bare file name (LIVE): a name the loaded shell holds is sent as its
+    // path.
+    let file = g.sound_path(c, &b.file).unwrap_or_else(|| b.file.clone());
+    if !nanoprobe_transport::picture_file_ok(&file) {
+        return Err(invalid(
+            "effect.broadcast.file",
+            "the file's path in the mission is over 255 bytes",
+        ));
+    }
+    let body = Body::Broadcast {
+        position: [at.x, at.y, at.z],
+        frequency_hz: b.frequency_hz,
+        power_w,
+        modulation,
+        looping: u32::from(b.r#loop),
+        name: b.name.clone(),
+        file,
+    };
+    g.with_rec(c, |rec, store, sim| rec.broadcast(store, sim, body))
+        .flatten()
+        .ok_or_else(dcs_not_ready)
+}
+
+fn broadcast_stop_start(
+    g: &mut Inner,
+    c: u64,
+    b: &pb::BroadcastStop,
+) -> Result<(u64, u64), Status> {
+    if !nanoprobe_transport::broadcast_name_ok(&b.name) {
+        return Err(invalid("effect.broadcast_stop.name", BROADCAST_NAME_RULE));
+    }
+    g.with_rec(c, |rec, store, sim| rec.broadcast_stop(store, sim, &b.name))
+        .flatten()
+        .ok_or_else(dcs_not_ready)
+}
+
 fn picture_start(g: &mut Inner, c: u64, p: &pb::Picture) -> Result<(u64, u64), Status> {
     if !(p.seconds.is_finite() && (0.0..=86_400.0).contains(&p.seconds)) {
         return Err(invalid("effect.picture.seconds", "finite, 0 to 86400"));
@@ -1725,6 +1799,9 @@ fn picture_start(g: &mut Inner, c: u64, p: &pb::Picture) -> Result<(u64, u64), S
         ));
     }
     let scope = scope_of(g, c, p.scope, p.target, "effect.picture")?;
+    // DCS shows a picture by its resource key, not by its bare file name
+    // (LIVE): a name the loaded shell keys is sent as its key.
+    let file = g.picture_key(c, &p.file).unwrap_or_else(|| p.file.clone());
     let body = Body::Picture {
         scope,
         target: p.target,
@@ -1734,7 +1811,7 @@ fn picture_start(g: &mut Inner, c: u64, p: &pb::Picture) -> Result<(u64, u64), S
         horizontal: p.horizontal,
         vertical: p.vertical,
         size_units: p.size_units,
-        file: p.file.clone(),
+        file,
     };
     g.with_rec(c, |rec, store, sim| rec.picture(store, sim, body))
         .flatten()
@@ -2184,6 +2261,8 @@ impl CommandsService for Commands {
                 | pb::effect::Effect::Sound(_)
                 | pb::effect::Effect::Picture(_)
                 | pb::effect::Effect::PictureStop(_)
+                | pb::effect::Effect::Broadcast(_)
+                | pb::effect::Effect::BroadcastStop(_)
                 | pb::effect::Effect::ClearDebris(_)),
             ) => e.clone(),
             Some(_) => return Err(not_built("DoEffect for this effect")),

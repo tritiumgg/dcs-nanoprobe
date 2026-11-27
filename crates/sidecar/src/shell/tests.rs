@@ -42,6 +42,14 @@ fn weather() -> Lv {
             )]),
         ),
         (s("name"), s("np \"weather\"")),
+        (
+            s("clouds"),
+            Lv::Table(vec![(s("density"), Lv::Number(0.0))]),
+        ),
+        (
+            s("season"),
+            Lv::Table(vec![(s("temperature"), Lv::Number(15.0))]),
+        ),
     ])
 }
 
@@ -86,6 +94,7 @@ fn only_the_runtime_fields_change() {
                 hot_start: false,
             },
         ],
+        ..Runtime::default()
     };
     let out = write(CAUCASUS, &rt).unwrap();
     let (a, b) = (members(CAUCASUS).unwrap(), members(&out).unwrap());
@@ -353,5 +362,387 @@ fn an_enabled_airport_gets_limited_aircraft() {
             ]
         ),
         Lv::Number(1.0)
+    );
+}
+
+/// A template from `CAUCASUS` with members added: a Russian dictionary that
+/// holds the sortie key, a sound the triggers would play, the same sound in
+/// the Russian folder, an image with a key and one without, and a kneeboard
+/// page.
+fn rich_template() -> Vec<u8> {
+    let mut m = members(CAUCASUS).unwrap();
+    let ru =
+        b"dictionary = \n{\n\t[\"DictKey_sortie_5\"] = \"\\208\\159\",\n} -- end of dictionary\n";
+    m.push(("l10n/RU/dictionary".into(), ru.to_vec()));
+    m.push((
+        "l10n/DEFAULT/alarm.ogg".into(),
+        media::tests::ogg_file(1, 22_050),
+    ));
+    m.push((
+        "l10n/RU/alarm.ogg".into(),
+        media::tests::ogg_file(1, 22_050),
+    ));
+    m.push(("l10n/DEFAULT/map.png".into(), media::tests::png_file(2, 2)));
+    m.push((
+        "l10n/DEFAULT/loose.jpg".into(),
+        media::tests::jpeg_file(2, 2),
+    ));
+    m.push((
+        "KNEEBOARD/IMAGES/page.png".into(),
+        media::tests::png_file(3, 3),
+    ));
+    for (n, d) in &mut m {
+        if n == "l10n/DEFAULT/mapResource" {
+            *d = b"mapResource = \n{\n\t[\"ResKey_Action_7\"] = \"alarm.ogg\",\n\t[\"ResKey_ImageBriefing_8\"] = \"map.png\",\n} -- end of mapResource\n".to_vec();
+        }
+    }
+    zip_of(&m)
+}
+
+fn zip_of(m: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let mut w = ZipWriter::new(Cursor::new(Vec::new()));
+    let o = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    for (n, d) in m {
+        w.start_file(n.as_str(), o).unwrap();
+        w.write_all(d).unwrap();
+    }
+    w.finish().unwrap().into_inner()
+}
+
+fn file(kind: content::FileKind, name: &str, body: Vec<u8>) -> content::File {
+    content::File {
+        kind,
+        name: name.into(),
+        body,
+    }
+}
+
+/// The runtime of the golden shell: typed weather, every briefing text,
+/// images for two coalitions, and files of each kind.
+fn rich_runtime() -> Runtime {
+    use content::FileKind;
+    Runtime {
+        conditions: Some(weather::WeatherSet {
+            temperature_c: Some(-4.0),
+            qnh_mmhg: Some(748.0),
+            wind: [
+                Some(weather::Wind {
+                    speed_mps: 6.0,
+                    toward_deg: 240,
+                }),
+                None,
+                None,
+            ],
+            cloud_preset: Some(None),
+            cloud_base_m: Some(900.0),
+            cloud_thickness_m: Some(800.0),
+            cloud_density: Some(9),
+            precipitation: Some(3),
+            fog: Some(weather::Fog::Manual(vec![
+                (0, 2000.0, 150.0),
+                (7200, 9000.0, 50.0),
+            ])),
+            ..weather::WeatherSet::default()
+        }),
+        briefing: content::Briefing {
+            sortie: Some("Operation \"Ice\"".into()),
+            description: Some("Line 1\nLine 2: Привет".into()),
+            blue_task: Some("Hold the pass.".into()),
+            red_task: Some(Vec::new()),
+            neutral_task: None,
+        },
+        images: [
+            Some(vec![
+                "map.png".into(),
+                "intel.png".into(),
+                "loose.jpg".into(),
+            ]),
+            Some(Vec::new()),
+            None,
+            Some(vec!["intel.png".into()]),
+        ],
+        files: vec![
+            file(
+                FileKind::Mission,
+                "alarm.ogg",
+                media::tests::ogg_file(2, 44_100),
+            ),
+            file(FileKind::Mission, "intel.png", media::tests::png_file(4, 4)),
+            file(FileKind::Mission, "call.wav", media::tests::wav_file(1, 16)),
+            file(
+                FileKind::Kneeboard,
+                "page.png",
+                media::tests::png_file(5, 5),
+            ),
+            file(
+                FileKind::KneeboardType("UH-1H".into()),
+                "freqs.jpg",
+                media::tests::jpeg_file(6, 6),
+            ),
+        ],
+        ..Runtime::default()
+    }
+}
+
+fn dict(src: &[u8], key: &str) -> Option<Lv> {
+    let d = lua::parse(src).unwrap();
+    d.root.get(&Key::s(key)).and_then(|n| lua::value(src, n))
+}
+
+fn text(v: &str) -> Lv {
+    Lv::String(v.as_bytes().to_vec())
+}
+
+#[test]
+fn briefing_text_goes_into_every_dictionary_under_the_mission_keys() {
+    let out = write(&rich_template(), &rich_runtime()).unwrap();
+    let m = members(&out).unwrap();
+    let mission = get(&m, "mission");
+    // The template's keys are kept; the sortie text is in both locales.
+    assert_eq!(at(mission, &[Key::s("sortie")]), text("DictKey_sortie_5"));
+    for loc in ["DEFAULT", "RU"] {
+        let d = get(&m, &format!("l10n/{loc}/dictionary"));
+        assert_eq!(
+            dict(d, "DictKey_sortie_5"),
+            Some(text("Operation \"Ice\"")),
+            "{loc}"
+        );
+        assert_eq!(
+            dict(d, "DictKey_descriptionText_1"),
+            Some(text("Line 1\nLine 2: Привет")),
+            "{loc}"
+        );
+        assert_eq!(
+            dict(d, "DictKey_descriptionRedTask_2"),
+            Some(text("")),
+            "{loc}"
+        );
+    }
+    // The neutral task is kept.
+    assert_eq!(
+        dict(
+            get(&m, "l10n/DEFAULT/dictionary"),
+            "DictKey_descriptionNeutralsTask_4"
+        ),
+        Some(text(""))
+    );
+}
+
+#[test]
+fn a_plain_string_field_gets_a_new_key_above_max_dict_id() {
+    let mut m = members(CAUCASUS).unwrap();
+    for (n, d) in &mut m {
+        if n == "mission" {
+            let s = String::from_utf8(d.clone()).unwrap();
+            *d = s.replace("\"DictKey_sortie_5\"", "\"plain\"").into_bytes();
+        }
+    }
+    let rt = Runtime {
+        briefing: content::Briefing {
+            sortie: Some("New".into()),
+            ..content::Briefing::default()
+        },
+        ..Runtime::default()
+    };
+    let out = write(&zip_of(&m), &rt).unwrap();
+    let m = members(&out).unwrap();
+    let mission = get(&m, "mission");
+    assert_eq!(at(mission, &[Key::s("sortie")]), text("DictKey_sortie_6"));
+    assert_eq!(at(mission, &[Key::s("maxDictId")]), Lv::Number(6.0));
+    assert_eq!(
+        dict(get(&m, "l10n/DEFAULT/dictionary"), "DictKey_sortie_6"),
+        Some(text("New"))
+    );
+}
+
+#[test]
+fn files_replace_the_templates_by_name_or_are_added_with_new_keys() {
+    let out = write(&rich_template(), &rich_runtime()).unwrap();
+    let m = members(&out).unwrap();
+    let new_ogg = media::tests::ogg_file(2, 44_100);
+    assert_eq!(get(&m, "l10n/DEFAULT/alarm.ogg"), &new_ogg[..]);
+    assert_eq!(get(&m, "l10n/RU/alarm.ogg"), &new_ogg[..]);
+    assert_eq!(
+        get(&m, "KNEEBOARD/IMAGES/page.png"),
+        &media::tests::png_file(5, 5)[..]
+    );
+    assert_eq!(
+        get(&m, "KNEEBOARD/UH-1H/IMAGES/freqs.jpg"),
+        &media::tests::jpeg_file(6, 6)[..]
+    );
+    let map = get(&m, "l10n/DEFAULT/mapResource");
+    // The template's keys stay; the new files and the unkeyed image get keys
+    // above maxDictId (5), which is raised.
+    assert_eq!(dict(map, "ResKey_Action_7"), Some(text("alarm.ogg")));
+    assert_eq!(dict(map, "ResKey_np_6"), Some(text("intel.png")));
+    assert_eq!(dict(map, "ResKey_np_7"), Some(text("call.wav")));
+    assert_eq!(dict(map, "ResKey_np_8"), Some(text("loose.jpg")));
+    let mission = get(&m, "mission");
+    assert_eq!(at(mission, &[Key::s("maxDictId")]), Lv::Number(8.0));
+    assert_eq!(
+        at(mission, &[Key::s("pictureFileNameB")]),
+        Lv::Table(vec![
+            (Lv::Number(1.0), text("ResKey_ImageBriefing_8")),
+            (Lv::Number(2.0), text("ResKey_np_6")),
+            (Lv::Number(3.0), text("ResKey_np_8")),
+        ])
+    );
+    assert_eq!(
+        at(mission, &[Key::s("pictureFileNameR")]),
+        Lv::Table(Vec::new())
+    );
+    assert_eq!(
+        at(mission, &[Key::s("pictureFileNameN")]),
+        Lv::Table(Vec::new())
+    );
+    // The selection screen's image shares the key of the same file.
+    assert_eq!(
+        at(mission, &[Key::s("pictureFileNameServer")]),
+        Lv::Table(vec![(Lv::Number(1.0), text("ResKey_np_6"))])
+    );
+}
+
+#[test]
+fn a_shell_reads_back_through_the_writer() {
+    // The .miz round trip: a written shell is a template the writer takes,
+    // and writing it again with the same runtime changes nothing.
+    let out = write(&rich_template(), &rich_runtime()).unwrap();
+    check(&out, "Caucasus").unwrap();
+    let again = write(&out, &rich_runtime()).unwrap();
+    let (a, b) = (members(&out).unwrap(), members(&again).unwrap());
+    let names = |m: &[(String, Vec<u8>)]| m.iter().map(|x| x.0.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&a), names(&b));
+    for ((n, x), (_, y)) in a.iter().zip(&b) {
+        if n == "mission" {
+            let rest = ["weather"];
+            assert_eq!(without(x, &rest), without(y, &rest));
+            assert_eq!(at(x, &[Key::s("weather")]), at(y, &[Key::s("weather")]));
+        } else {
+            assert_eq!(x, y, "{n}");
+        }
+    }
+}
+
+#[test]
+fn content_refusals_name_the_problem() {
+    use content::FileKind;
+    let cases: Vec<(Runtime, &str)> = vec![
+        (
+            Runtime {
+                images: [None, None, None, Some(vec!["nowhere.png".into()])],
+                ..Runtime::default()
+            },
+            "neither a campaign file nor in the template",
+        ),
+        (
+            Runtime {
+                images: [Some(vec!["alarm.ogg".into()]), None, None, None],
+                ..Runtime::default()
+            },
+            "not an image",
+        ),
+        (
+            Runtime {
+                files: vec![file(
+                    FileKind::Mission,
+                    "ALARM.ogg",
+                    media::tests::ogg_file(1, 8000),
+                )],
+                ..Runtime::default()
+            },
+            "differs only in case",
+        ),
+        (
+            Runtime {
+                files: vec![file(
+                    FileKind::Kneeboard,
+                    "x.ogg",
+                    media::tests::ogg_file(1, 8000),
+                )],
+                ..Runtime::default()
+            },
+            "a kneeboard page is an image",
+        ),
+        (
+            Runtime {
+                files: vec![file(
+                    FileKind::Mission,
+                    "Odd name.ogg",
+                    media::tests::ogg_file(1, 8000),
+                )],
+                ..Runtime::default()
+            },
+            "not a file name",
+        ),
+        (
+            Runtime {
+                weather: Some(weather()),
+                conditions: Some(weather::WeatherSet {
+                    qnh_mmhg: Some(760.0),
+                    ..weather::WeatherSet::default()
+                }),
+                ..Runtime::default()
+            },
+            "both set",
+        ),
+        (
+            Runtime {
+                weather: Some(Lv::Table(vec![(text("qnh"), Lv::Number(1.0))])),
+                ..Runtime::default()
+            },
+            "no clouds table",
+        ),
+        (
+            Runtime {
+                conditions: Some(weather::WeatherSet {
+                    cloud_base_m: Some(100.0),
+                    ..weather::WeatherSet::default()
+                }),
+                ..Runtime::default()
+            },
+            "cloud base",
+        ),
+    ];
+    for (rt, want) in cases {
+        let e = write(&rich_template(), &rt).expect_err(want);
+        assert!(e.contains(want), "{want}: {e}");
+    }
+}
+
+/// The golden shell (spec/shell.golden): each member [`rich_runtime`]
+/// changes or adds, Lua members as text and other files by size and
+/// SHA-256 prefix. Set `NANOPROBE_BLESS=1` to write it after an intended
+/// change.
+#[test]
+fn the_rich_shell_matches_the_golden_file() {
+    const GOLDEN: &str = include_str!("../../../../spec/shell.golden");
+    let template = members(&rich_template()).unwrap();
+    let out = members(&write(&rich_template(), &rich_runtime()).unwrap()).unwrap();
+    let mut lines = String::new();
+    for (name, data) in &out {
+        if template.iter().any(|(n, d)| n == name && d == data) {
+            continue;
+        }
+        lines.push_str(&format!("== {name}\n"));
+        if media::Media::of_name(name).is_some() {
+            use sha2::Digest;
+            let h = sha2::Sha256::digest(data);
+            let hex: String = h.iter().take(8).map(|b| format!("{b:02x}")).collect();
+            lines.push_str(&format!("{} bytes sha256 {hex}\n", data.len()));
+        } else {
+            lines.push_str(&String::from_utf8_lossy(data));
+            if !lines.ends_with('\n') {
+                lines.push('\n');
+            }
+        }
+    }
+    if std::env::var_os("NANOPROBE_BLESS").is_some() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../spec/shell.golden");
+        std::fs::write(path, &lines).expect("write the golden file");
+        return;
+    }
+    assert_eq!(
+        GOLDEN, lines,
+        "the shell changed; review and bless spec/shell.golden"
     );
 }

@@ -1743,6 +1743,22 @@ local CHANGE_OK = {
   end,
 }
 
+-- BROADCAST's DCS call, in this argument order. The frequency is in Hz,
+-- `modulation` is AM 0 or FM 1, and `file` is the file's path in the mission,
+-- `l10n/DEFAULT/<name>`, which the sidecar sends: a bare file name is not
+-- heard (LIVE, docs/results/2026-11-26-mission-content.md).
+local function radio_transmit(a)
+  trigger.action.radioTransmission(
+    a.file,
+    { x = a.x, y = a.y, z = a.z },
+    a.modulation,
+    a['loop'] and true or false,
+    a.frequency_hz,
+    a.power_w,
+    a.name
+  )
+end
+
 -- The mission ID of a GROUP scope's group, for a command whose scope is 3.
 -- Returns nothing for another scope.
 local function scope_group(a)
@@ -2391,6 +2407,31 @@ local HANDLERS = {
       return BAD_PAYLOAD, nil, 'the platform holds this mark ID'
     end
     local ok, err = pcall(trigger.action.removeMark, a.dcs_id)
+    if not ok then
+      return DCS_REFUSED, nil, tostring(err)
+    end
+    return APPLIED
+  end,
+  -- BROADCAST: a sound file from the mission on a radio frequency, through
+  -- `radio_transmit` (the call form is LIVE there). APPLIED says only that
+  -- DCS took the call.
+  [69] = function(a)
+    if type(trigger.action.radioTransmission) ~= 'function' then
+      return DCS_REFUSED, nil, 'this DCS has no trigger.action.radioTransmission'
+    end
+    local ok, err = pcall(radio_transmit, a)
+    if not ok then
+      return DCS_REFUSED, nil, tostring(err)
+    end
+    return APPLIED
+  end,
+  -- BROADCAST_STOP: stopRadioTransmission(name). A stop of a playing name
+  -- silenced it, and a name DCS does not hold raised nothing (LIVE).
+  [70] = function(a)
+    if type(trigger.action.stopRadioTransmission) ~= 'function' then
+      return DCS_REFUSED, nil, 'this DCS has no trigger.action.stopRadioTransmission'
+    end
+    local ok, err = pcall(trigger.action.stopRadioTransmission, a.name)
     if not ok then
       return DCS_REFUSED, nil, tostring(err)
     end

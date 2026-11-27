@@ -223,7 +223,7 @@ codes! {
         CHAT = 55, MISSION_LOAD = 56, EXTENSION_INVOKE = 57, EVAL = 58,
         WAREHOUSE_ADJUST = 59, PICTURE = 60, PICTURE_STOP = 61, MODERATE = 62,
         CLEAR_DEBRIS = 63, CAPTURE = 64, COUNTRIES = 65, PLAYERS = 66, BANS = 67,
-        MARK_CLEAR = 68,
+        MARK_CLEAR = 68, BROADCAST = 69, BROADCAST_STOP = 70,
     }
 }
 
@@ -334,7 +334,7 @@ pub const fn opcode_row(code: u64) -> Option<Opcode> {
             gen_bound: true,
             state: Some(HandlerState::Hook),
         }),
-        49 | 50 => row(Effect, None, false, false),
+        49 | 50 | 69 | 70 => row(Effect, None, false, false),
         55 | 56 | 60 | 61 | 62 => Some(Opcode {
             state: Some(HandlerState::Hook),
             ..Opcode {

@@ -2312,6 +2312,67 @@ scenario('sound', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   S.ok('SOUND: each scope calls its DCS form, a missing object or campaign 0 is NOT_BOUND, a bad payload is BAD_PAYLOAD')
 end, '\n[lua]\nraw = true\n')
 
+-- BROADCAST and BROADCAST_STOP (shim): this checks that the handler passes the
+-- payload on in the order DCS takes (LIVE, run 5 of
+-- docs/results/2026-11-26-mission-content.md), which the mock records.
+scenario('broadcast', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
+  local sim, run, expect = effect_world(ctx)
+  local function cast(extra)
+    local c = {
+      op = 'BROADCAST', name = 'Beacon 1', file = 'beacon.ogg', x = 100, y = 50, z = -200,
+      frequency_hz = 251000000, power_w = 250, modulation = 1, ['loop'] = 1,
+    }
+    for k, v in pairs(extra or {}) do
+      c[k] = v
+    end
+    return c
+  end
+  local r = run({
+    cast(),
+    cast({ name = 'Beacon 2', file = 'b.ogg', modulation = 0, ['loop'] = 0 }),
+    { op = 'BROADCAST_STOP', name = 'Beacon 1' },
+    cast({ modulation = 2 }),
+    cast({ frequency_hz = 100 }),
+    cast({ power_w = 0 }),
+    cast({ name = 'a"b' }),
+    cast({ file = '' }),
+    { op = 'BROADCAST_STOP', name = '' },
+  }, 'broadcast')
+  expect(r[1], APPLIED, 'BROADCAST')
+  expect(r[2], APPLIED, 'BROADCAST with AM and no loop')
+  expect(r[3], APPLIED, 'BROADCAST_STOP')
+  for seq = 4, 9 do
+    expect(r[seq], BAD_PAYLOAD, 'a bad BROADCAST or BROADCAST_STOP ' .. seq)
+  end
+  assert(#sim.broadcasts == 2, 'DCS got ' .. #sim.broadcasts .. ' broadcasts, not 2')
+  local b = sim.broadcasts[1]
+  assert(b.file == 'beacon.ogg' and b.name == 'Beacon 1' and b.modulation == 1 and b.loop == true
+    and b.frequency == 251000000 and b.power == 250
+    and b.point.x == 100 and b.point.y == 50 and b.point.z == -200, 'the first broadcast differs')
+  b = sim.broadcasts[2]
+  assert(b.modulation == 0 and b.loop == false and b.name == 'Beacon 2', 'the second broadcast differs')
+  assert(#sim.broadcast_stops == 1 and sim.broadcast_stops[1] == 'Beacon 1', 'the stop differs')
+
+  -- A call that raises is DCS_REFUSED.
+  sim.radio_raises = true
+  r = run({ cast(), { op = 'BROADCAST_STOP', name = 'Beacon 1' } }, 'broadcast that raises')
+  expect(r[1], 22, 'BROADCAST that raises')
+  expect(r[2], 22, 'BROADCAST_STOP that raises')
+  sim.radio_raises = nil
+
+  -- A DCS without the functions is DCS_REFUSED, with the reason.
+  local action = ctx.host.states.server.trigger.action
+  local transmit, stop = action.radioTransmission, action.stopRadioTransmission
+  action.radioTransmission, action.stopRadioTransmission = nil, nil
+  r = run({ cast(), { op = 'BROADCAST_STOP', name = 'Beacon 1' } }, 'broadcast with no function')
+  action.radioTransmission, action.stopRadioTransmission = transmit, stop
+  expect(r[1], 22, 'BROADCAST with no radioTransmission')
+  expect(r[2], 22, 'BROADCAST_STOP with no stopRadioTransmission')
+  assert(tostring(r[1].message):find('radioTransmission', 1, true), 'the refusal gives no reason')
+
+  S.ok('BROADCAST and BROADCAST_STOP: the payload reaches DCS, a bad payload is BAD_PAYLOAD, a raise or a missing function is DCS_REFUSED')
+end, '\n[lua]\nraw = true\n')
+
 scenario('clear-debris', S.read(root .. 'lua/agent/shim.lua'), function(ctx)
   local sim, run, expect = effect_world(ctx)
   local unit = sim.by_name['np.hGx2']

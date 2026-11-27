@@ -52,6 +52,7 @@ use crate::install::Profile as _;
 use crate::sampling::live::Run;
 
 pub mod drawing_layers;
+pub mod mission_content;
 pub mod payload_preset;
 pub mod saved_files;
 pub mod static_replace;
@@ -1036,6 +1037,7 @@ fn weather_struct(v: &Lv) -> Option<prost_types::Struct> {
 
 /// Run the part's steps; each records its result under its name.
 #[allow(clippy::too_many_arguments)]
+#[allow(deprecated)] // the Struct weather stays supported
 pub fn drive(
     run: &Run,
     endpoint: &str,
@@ -1090,6 +1092,7 @@ pub fn drive(
             }),
             weather: weather_struct(&weather),
             dynamic_spawn: Vec::new(),
+            ..pb::NextMission::default()
         },
     )?;
     api.reload()?;

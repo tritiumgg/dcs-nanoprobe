@@ -197,3 +197,13 @@ and `make.lua` through `farp-pairs/run.sh <server> parking <airbase>` and
 `run.sh <server> make <try>`. Each try of `make.lua` adds FARPs that stay until the next
 mission load. `lua/tests/farp_pairs_experiments.lua` rehearses them on the mock. The
 results are in `docs/results/2026-11-25-farp-pairs.md`.
+
+## Radio transmission
+
+The snippets in `radio-transmission/` settle the arguments of
+`trigger.action.radioTransmission` with a person listening in an aircraft. The runner
+does not pick them up. Fill the placeholders of `case.lua` (its header lists them), one
+unknown per request, and run it with `cargo xtask eval <server> server <file>` while a
+mission with a blue player runs; `stop.lua` stops every case. The mock has no
+`coalition.getPlayers`, so they were rehearsed under stock Lua 5.1 with stubs of the two
+calls. The results are in `docs/results/2026-11-26-mission-content.md`, run 5.

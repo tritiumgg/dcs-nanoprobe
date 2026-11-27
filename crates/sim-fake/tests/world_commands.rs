@@ -625,6 +625,15 @@ fn sounds_and_pictures_are_effects_sent_once() {
         size_units: 0,
         file: "Key".into(),
     };
+    let broadcast = || Body::Broadcast {
+        position: [100.0, 50.0, -200.0],
+        frequency_hz: 251_000_000,
+        power_w: 100.0,
+        modulation: 0,
+        looping: 1,
+        name: "Beacon".into(),
+        file: "beacon.ogg".into(),
+    };
     let keys = [
         w.rec.sound(&mut w.store, &mut w.sim, 1, 0, "a.ogg"),
         w.rec.sound(&mut w.store, &mut w.sim, 2, 2, "b.ogg"),
@@ -633,6 +642,8 @@ fn sounds_and_pictures_are_effects_sent_once() {
         w.rec.sound(&mut w.store, &mut w.sim, 4, unit.0, "e.ogg"),
         w.rec.picture(&mut w.store, &mut w.sim, picture(4, unit.0)),
         w.rec.picture_stop(&mut w.store, &mut w.sim),
+        w.rec.broadcast(&mut w.store, &mut w.sim, broadcast()),
+        w.rec.broadcast_stop(&mut w.store, &mut w.sim, "Beacon"),
     ];
     ticks(&mut w, 10);
     for key in keys {
@@ -652,6 +663,8 @@ fn sounds_and_pictures_are_effects_sent_once() {
     );
     assert_eq!(ledger.pictures, vec![picture(4, unit.0)]);
     assert_eq!(ledger.picture_stops, 1);
+    assert_eq!(ledger.broadcasts, vec![broadcast()]);
+    assert_eq!(ledger.broadcast_stops, vec!["Beacon".to_owned()]);
 
     // Effects are never sent again, a mission load included.
     w.apply(&Op::LoadMission).unwrap();
@@ -660,6 +673,8 @@ fn sounds_and_pictures_are_effects_sent_once() {
     assert_eq!(sent(&w, opcode::SOUND), 5);
     assert_eq!(sent(&w, opcode::PICTURE), 1);
     assert_eq!(sent(&w, opcode::PICTURE_STOP), 1);
+    assert_eq!(sent(&w, opcode::BROADCAST), 1);
+    assert_eq!(sent(&w, opcode::BROADCAST_STOP), 1);
     assert_eq!(w.sim.ledger().sounds.len(), 5);
 
     // A group or unit DCS holds no object of is not sent; other scopes are.

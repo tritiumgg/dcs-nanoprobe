@@ -258,6 +258,8 @@ form) and `static_name`, because its entity is a group or a static.
 | `SOUND` | `scope`, `target`, `name`, `file` |
 | `PICTURE` | `scope`, `target`, `name`, `file`, `seconds`, `clear_view`, `size`, `horizontal`, `vertical`, `size_units` |
 | `PICTURE_STOP` | none |
+| `BROADCAST` | `name`, `file`, `x`, `y`, `z`, `frequency_hz`, `modulation`, `loop`, `power_w` |
+| `BROADCAST_STOP` | `name` |
 | `CAPTURE` | `name`, `static_name` |
 | `EXTENSION_SET` | `name`, `source` |
 | `EXTENSION_REMOVE` | `name` |
@@ -380,6 +382,8 @@ other, is answered `UNKNOWN_OPCODE`, and sets `last_applied_seq`.
 | 66 | PLAYERS | query |  |  | any |  | hook | none | Read the connected players and their slots |
 | 67 | BANS | query |  |  | any |  | hook | none | Read DCS's ban list |
 | 68 | MARK_CLEAR | effect |  |  | any | bound | server | layout | Remove a mark or drawing the platform does not hold, by its DCS ID |
+| 69 | BROADCAST | effect |  |  | any |  | server | layout | Play a sound file from the mission on a radio frequency |
+| 70 | BROADCAST_STOP | effect |  |  | any |  | server | layout | Stop a radio broadcast by its name |
 
 The State column names the Lua state the handler runs in: `server`, the mission
 scripting state, through the shim; `hook`, the hook's own state. A control command has
@@ -1015,7 +1019,7 @@ on a client, and whether a file outside the mission plays, is UNVERIFIED.
 | 0x0024 | u32 | vertical | The Mission Editor's vertical alignment value |
 | 0x0028 | u32 | size_units | The Mission Editor's size-units value |
 | 0x002C | pad[4] | reserved | |
-| + | str | file | The picture's resource key in the mission, or its file name |
+| + | str | file | The picture's resource key in the mission, or its file name. The sidecar sends a file name that `l10n/DEFAULT/mapResource` of the shell DCS last applied keys as its key: DCS showed a picture by its key and not by its bare file name (LIVE, docs/results/2026-11-26-mission-content.md) |
 
 `PICTURE` and `PICTURE_STOP` run in the hook's state, because `a_out_picture` and its
 scoped forms exist only in the `mission` state (LIVE, step S15), and are native, with no
@@ -1037,6 +1041,48 @@ country number, the value the Mission Editor's country list writes (ED-CODE,
 and unit values are UNVERIFIED.
 
 `PICTURE_STOP` has no payload after the header and calls `a_out_picture_stop()`.
+
+### Layout: BROADCAST
+
+| Offset | Type | Field | Meaning |
+|---|---|---|---|
+| 0x0000 | f64 | x | DCS north |
+| 0x0008 | f64 | y | DCS altitude |
+| 0x0010 | f64 | z | DCS east |
+| 0x0018 | u64 | frequency_hz | The carrier frequency in Hz |
+| 0x0020 | f64 | power_w | The transmitter power in W |
+| 0x0028 | u32 | modulation | The DCS `radio.modulation` value: AM 0, FM 1 |
+| 0x002C | u32 | loop | 1 to repeat the file until `BROADCAST_STOP`, else 0 |
+| + | str | name | The broadcast's name, the handle `BROADCAST_STOP` takes |
+| + | str | file | The sound file's path in the mission |
+
+The handler calls `trigger.action.radioTransmission(file, {x, y, z}, modulation, loop,
+frequency, power, name)`. DCS takes the frequency in Hz, AM as 0 and FM as 1, and the
+file by its path in the mission, `l10n/DEFAULT/<name>`; given by its bare name, the file
+is not heard (LIVE, `docs/results/2026-11-26-mission-content.md`). The sidecar sends a
+file name the applied shell holds in `l10n/DEFAULT/` as that path, and any other value
+as the API request gives it; a path that breaks the `file` rule below is `INVALID_FIELD`
+`effect.broadcast.file` at the API. A host test checks the mapping; that a client hears
+a broadcast sent through `DoEffect` is UNVERIFIED. What a repeated name does is
+UNVERIFIED. `modulation` is
+the DCS value, 0 or 1; any other value is `BAD_PAYLOAD`.
+The agent also refuses, as `BAD_PAYLOAD`, a non-finite coordinate or `power_w`, a
+`frequency_hz` outside 200,000 to 30,000,000,000, a `power_w` outside 1 to 10,000, a `name`
+that is not 1 to 64 bytes of letters, digits, space and `_.-`, and a `file` that is not
+1 to 255 bytes of letters, digits, space and `_.-/()+,#`, as for `PICTURE`. A DCS build without
+`trigger.action.radioTransmission`, or a call that raises, is `DCS_REFUSED` with the
+reason. The sidecar sends 100 for `power_w` when the API request has none. `APPLIED`
+says only that DCS took the call, as for `SOUND`.
+
+### Layout: BROADCAST_STOP
+
+| Offset | Type | Field | Meaning |
+|---|---|---|---|
+| + | str | name | The name the broadcast was started with |
+
+The handler calls `trigger.action.stopRadioTransmission(name)`. A stop of a playing
+broadcast silences it, and a name DCS does not hold raises nothing (LIVE), so `APPLIED`
+does not say a broadcast was playing. A missing function or a raise is `DCS_REFUSED`.
 
 ### Layout: SMOKE
 

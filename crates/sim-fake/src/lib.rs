@@ -382,6 +382,10 @@ pub struct Ledger {
     pub pictures: Vec<Body>,
     /// `PICTURE_STOP`s the agent applied.
     pub picture_stops: u32,
+    /// `BROADCAST`s the agent applied, each as the `Broadcast` body it was sent.
+    pub broadcasts: Vec<Body>,
+    /// `BROADCAST_STOP`s the agent applied: the names, in order.
+    pub broadcast_stops: Vec<String>,
     /// `CLEAR_DEBRIS` volumes the agent applied, in order. Each removes
     /// `Config::debris_per_clear` junk objects, and the placed wrecks and
     /// unmanaged dead statics inside it.
@@ -3350,6 +3354,14 @@ impl FakeSim {
             }
             Body::PictureStop => {
                 self.ledger.picture_stops += 1;
+                self.result(&cmd, rc::APPLIED, 0, "", Lv::Nil);
+            }
+            Body::Broadcast { .. } => {
+                self.ledger.broadcasts.push(cmd.body.clone());
+                self.result(&cmd, rc::APPLIED, 0, "", Lv::Nil);
+            }
+            Body::BroadcastStop { name } => {
+                self.ledger.broadcast_stops.push(name.clone());
                 self.result(&cmd, rc::APPLIED, 0, "", Lv::Nil);
             }
             Body::MarkSet { .. } | Body::DrawingSet { .. } if self.pin_not_ready > 0 => {

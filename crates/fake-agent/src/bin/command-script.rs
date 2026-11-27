@@ -43,6 +43,8 @@
 //! | `DAMAGE` | `life_percent` |
 //! | `SOUND` | `scope`, `target`, `file` (text) |
 //! | `CLEAR_DEBRIS` | `volume`, `x`, `y`, `z`, `x2`, `y2`, `z2`, `radius` |
+//! | `BROADCAST` | `x`, `y`, `z`, `frequency_hz`, `power_w`, `modulation`, `loop`, `name`, `file` (text) |
+//! | `BROADCAST_STOP` | `name` (text) |
 //! | `PICTURE` | `scope`, `target`, `file`, `seconds`, `clear_view`, `size`, `horizontal`, `vertical`, `size_units` |
 //! | any | `payload_hex`, appended after what the opcode writes |
 //!
@@ -263,6 +265,21 @@ fn parse_step(step: &Value, campaign: u64) -> Result<Step, String> {
                 .pad(4)
                 .u64(u64_field(step, "target")?.unwrap_or(0))
                 .str(text_field(step, "file")?);
+        }
+        opcode::BROADCAST => {
+            let real = |name: &str| step.get(name).and_then(Value::as_f64).unwrap_or(0.0);
+            w.f64(real("x"))
+                .f64(real("y"))
+                .f64(real("z"))
+                .u64(u64_field(step, "frequency_hz")?.unwrap_or(0))
+                .f64(real("power_w"))
+                .u32(u64_field(step, "modulation")?.unwrap_or(0) as u32)
+                .u32(u64_field(step, "loop")?.unwrap_or(0) as u32)
+                .str(text_field(step, "name")?)
+                .str(text_field(step, "file")?);
+        }
+        opcode::BROADCAST_STOP => {
+            w.str(text_field(step, "name")?);
         }
         opcode::PICTURE => {
             let real = |name: &str| step.get(name).and_then(Value::as_f64).unwrap_or(0.0);

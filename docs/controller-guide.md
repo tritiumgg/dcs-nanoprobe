@@ -192,6 +192,7 @@ when it comes.
 | `SEQUENCE_EXPIRED` | The event history no longer holds your sequence number. Read from the oldest kept, and mark the span as incomplete. |
 | `UNAVAILABLE` with no reason | The server is stopping. Connect again and resume from your last revision or sequence number. |
 | `SPACE_LOW`, `DCS_IDS_FULL` | The server is short of disk space or of DCS mark IDs. Tell the operator. |
+| `FILES_FULL` | The campaign holds 64 mission files or 64 MiB of them. Remove a file with `SetMissionFile` and an empty `path` before adding another. |
 | `RAW_LUA_OFF` | The operator has Lua off. No call turns it on. |
 | `UNVERIFIED`, or none with gRPC `UNIMPLEMENTED` | The call or path is not verified on DCS, or not built. `field` names it. |
 | `INTERNAL` | A fault in the sidecar, or a campaign that has used every entity ID. Report it. |
@@ -248,7 +249,7 @@ captured. An airport in the next-mission settings that the template lacks fails 
 | `SetAirbaseOwner`, `SetWarehouseStock` | Desired owner and stock of an airbase |
 | `AdjustWarehouseStock` | Add to or take from stock now; an effect |
 | `Capture` | Read an entity's full state from DCS; a query |
-| `DoEffect` | Explosion, smoke, flare, illumination, damage, sound, picture, picture stop, or `ClearDebris` |
+| `DoEffect` | Explosion, smoke, flare, illumination, damage, sound, picture, picture stop, radio broadcast and its stop, or `ClearDebris` |
 | `SetSampleRates` | Ask for other sampling periods, within the agent's budget |
 | `GetOutcome` | The outcome of an earlier call, by its idempotency key |
 
@@ -299,7 +300,8 @@ always send the same fields for one event type.
 | Call | Purpose |
 |---|---|
 | `GetServerStatus` | Health verdict, sim state, loaded theater, achieved sampling periods, overhead, queues, store size, backups, DCS IDs left |
-| `SetNextMission` | Theater, start time, weather and airports with dynamic spawn for the next load |
+| `SetNextMission` | Theater, start time, typed weather, briefing text, briefing images and airports with dynamic spawn for the next load |
+| `SetMissionFile`, `ListMissionFiles` | Images and sounds the campaign packs into its missions: briefing images, sounds for `PlaySound`, pictures, broadcasts and the template's triggers, and kneeboard pages |
 | `Reload` | Write the campaign's mission and load it; the campaign is restored after the load |
 
 ### PlayersService (`players.proto`)
@@ -429,8 +431,9 @@ or reload writes the mission from the theater's template there.
 [mission-templates.md](mission-templates.md) explains each kind:
 
 - **Mission templates.** One per map, saved in the Mission Editor. The sidecar writes
-  each campaign's mission from it, changing the date, start time, weather, and the
-  dynamic-spawn and hot-start settings of the airports the controller names.
+  each campaign's mission from it, changing the date, start time, weather, briefing
+  text and images, the campaign's files, and the dynamic-spawn and hot-start settings
+  of the airports the controller names.
   `SetCampaignTemplate` gives a campaign its own. Units placed in the template stay
   unmanaged.
 - **Group templates.** `PutGroupFromTemplate` makes a ground group from one entry of a
@@ -697,9 +700,32 @@ Hide the layer with `PutMarkupGroup` and `visible` false.
 `UNIT_LEFT_REMOVED`. Decide: `ResolveMember` with `DEAD` to record a death, or
 `RESTORE` to let its group's next spawn include it.
 
-**8. Change the weather and reload.** `SetNextMission` with theater, start, weather and
-dynamic-spawn airports, then `Reload`. Give dynamic-spawn airports their aircraft with
-`SetWarehouseStock`.
+**8. Change the weather and reload.** `SetNextMission` with theater, start, typed
+weather (`conditions`) and dynamic-spawn airports, then `Reload`. Set only the weather
+fields you change: the others keep the template's. The sim keeps the temperature within
+the map's range for the mission's date, so set a date that fits it (LIVE,
+`docs/results/2026-11-26-mission-content.md`, runs 1, 3 and 4). Give dynamic-spawn
+airports their aircraft with `SetWarehouseStock`.
+`Reload` is refused with `FAILED_PRECONDITION` while a mission load is owed: right after
+an activation, a `CreateCampaign` that activates, or another `Reload`, until DCS loads
+that mission. Wait until `GetServerStatus` shows the next `mission_generation` in `now`,
+then send `Reload` again with a new idempotency key.
+
+**8a. Brief the next mission.** `SetMissionFile` for each image and sound, by its path
+in a folder of `[missions] template_dirs`. Then `SetNextMission` with `briefing` (the
+sortie name, the situation and each coalition's task) and `briefing_images` (file names,
+in order, per coalition, and `coalition_selection` for the screen where a player picks
+a coalition), and `Reload`. The name and description in the server list are server
+settings (`serverSettings.lua`), which nanoprobe does not change. A sound with the name
+of one the template's triggers play replaces its bytes, so the trigger plays the new
+sound (ED-CODE: a trigger names the file by its key; that a client hears it is
+UNVERIFIED). After the load, `DoEffect` plays a file by its name with `sound` and shows
+one with `picture` (LIVE, `docs/results/2026-11-26-mission-content.md`, runs 3 and 4),
+or broadcasts one on a frequency in Hz, AM or FM, with `broadcast`. DCS takes that call
+form (LIVE, run 5); that a client hears a broadcast sent through `DoEffect` is
+UNVERIFIED. Give a looping broadcast a name
+and stop it with `broadcast_stop`. Stop a broadcast before a load: that the load ends
+it is UNVERIFIED.
 
 **9. Offer a menu.** `PutMenuItem` with `submenu` for a folder and without for a
 command. Subscribe to events and act on each `MenuEvent` by `item_id`.

@@ -188,9 +188,10 @@ keeps working as long as the DCS functions it calls are still there. After an up
 - Make explosions, smoke, flares and illumination, and clear away wrecks.
 - See every unit's position and life (its health), and follow every event as it
   happens.
-- Set the next mission's date, time and weather.
-- Reach players with messages, sounds, chat, F10 map marks and drawings, and radio menu
-  items.
+- Set the next mission's date, time, weather, briefing text and briefing images, and pack
+  images, sounds and kneeboard pages into it.
+- Reach players with messages, sounds, radio broadcasts, chat, F10 map marks and
+  drawings, and radio menu items.
 - Kick, ban and move players.
 
 ## Getting started

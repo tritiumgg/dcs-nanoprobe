@@ -231,6 +231,11 @@ migration.
 open; a 0.1.0 sidecar refuses the migrated file. Back up before you upgrade if you may
 go back. [release-notes.md](release-notes.md) lists every change.
 
+**Schema 3.** A sidecar with mission files keeps them in a new store table, so its
+store is schema 3. It migrates a schema 2 store on its first open; a 0.2.0 sidecar
+refuses the migrated file. A campaign's files count toward its store's size: at most
+64 files and 64 MiB per campaign.
+
 ## Uninstall
 
 Uninstall deletes the profile's `nanoprobe` folder and everything in it, a mission

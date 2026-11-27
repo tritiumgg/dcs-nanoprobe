@@ -120,7 +120,7 @@ for script in "$ROOT"/lua/tests/*.lua; do
             "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" world-gone
             "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" farps
             "$LUA" "$script" "$MODULE" "$VERSION" "$PROBE" "$INSPECT" "$XTASK" destroyed-overflow
-            for name in hook-order hook-budget hook-no-result hook-no-shim sound clear-debris picture \
+            for name in hook-order hook-budget hook-no-result hook-no-shim sound broadcast clear-debris picture \
                 marks menus message extension-eval chat mission-load players moderate slot-moves \
                 emit emit-objects emit-off extension-hooks extension-errors extension-budget \
                 extension-records extension-env extension-stop menu-record; do

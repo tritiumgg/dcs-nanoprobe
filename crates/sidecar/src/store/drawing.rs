@@ -1,4 +1,4 @@
-//! Typed drawings (spec/world.md, "Drawings"; ADR NNNN).
+//! Typed drawings (spec/world.md, "Drawings"; ADR 0052).
 //!
 //! A drawing is a [`DrawingShape`]: a kind with its geometry and a style. The
 //! store keeps it, and the reconciler sends its lowering: the DCS call's

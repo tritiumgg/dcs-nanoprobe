@@ -1,9 +1,9 @@
-//! `sidecar <name> [--part all|conformance|hello|template|static-template|static-replace|drawing-layers|template-heliport --file FILE|payload-preset|shell [--template FILE]]`:
+//! `sidecar <name> [--part all|conformance|hello|template|static-template|static-replace|drawing-layers|typed-shapes|mission-content|template-heliport --file FILE|payload-preset|shell [--template FILE]]`:
 //! the S17 live test, with `--part shell` the S19 one (`shell_live.rs`),
 //! with `--part template` a group made from a group template file
 //! (`shell_live/template.rs`), with `--part static-template` the groups
 //! and statics of a static template file (`shell_live/static_template.rs`),
-//! with `--part drawing-layers` markup groups of drawings (`shell_live/drawing_layers.rs`), with `--part typed-shapes` typed drawing shapes (`shell_live/typed_shapes.rs`), with `--part static-replace` the revision of statics in place
+//! with `--part drawing-layers` markup groups of drawings (`shell_live/drawing_layers.rs`), with `--part typed-shapes` typed drawing shapes (`shell_live/typed_shapes.rs`), with `--part mission-content` weather, briefing, mission files and effects (`shell_live/mission_content.rs`), with `--part static-replace` the revision of statics in place
 //! (`shell_live/static_replace.rs`), with `--part template-heliport` a given static template that holds a
 //! heliport, its airbase and warehouse (`shell_live/template_heliport.rs`),
 //! and with `--part payload-preset` an aircraft given a payload preset
@@ -82,16 +82,17 @@ const LIMIT_S: u64 = 900;
 /// spawns at the start.
 pub(crate) const HELLO_POINTS: [(f64, f64); 2] = [(-290_000.0, 680_000.0), (-289_000.0, 680_000.0)];
 
-const USAGE: &str = "usage: cargo xtask sidecar <name> [--part all|conformance|hello|template|static-template|static-replace|drawing-layers|typed-shapes|template-heliport --file FILE|payload-preset|shell [--template FILE]]
+const USAGE: &str = "usage: cargo xtask sidecar <name> [--part all|conformance|hello|template|static-template|static-replace|drawing-layers|typed-shapes|mission-content|template-heliport --file FILE|payload-preset|shell [--template FILE]]
        cargo xtask sidecar <windows-ssh name> --part saved-files --stm PATH --preset PATH --preset-name NAME";
 
 /// The parts that drive one API test against the sidecar and stop it.
-const ONE_API_PART: [&str; 7] = [
+const ONE_API_PART: [&str; 8] = [
     "template",
     "static-template",
     "static-replace",
     "drawing-layers",
     "typed-shapes",
+    "mission-content",
     "template-heliport",
     "payload-preset",
 ];
@@ -133,6 +134,7 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
                 "static-replace",
                 "drawing-layers",
                 "typed-shapes",
+                "mission-content",
                 "payload-preset",
                 "shell",
             ]
@@ -158,6 +160,7 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
             || part == "static-replace"
             || part == "drawing-layers"
             || part == "typed-shapes"
+            || part == "mission-content"
         {
             return Err(format!("{part} runs on a docker-wine target"));
         }
@@ -194,6 +197,8 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
         &["drawing_layers"]
     } else if part == "typed-shapes" {
         &["typed_shapes"]
+    } else if part == "mission-content" {
+        &["mission_content"]
     } else if part == "template-heliport" {
         &["template_heliport"]
     } else if part == "payload-preset" {
@@ -225,6 +230,7 @@ pub fn command(repository: &Path, args: &[&str]) -> Result<ExitCode, String> {
                     || part == "static-replace"
                     || part == "drawing-layers"
                     || part == "typed-shapes"
+                    || part == "mission-content"
                     || part == "template-heliport"
                     || part == "payload-preset"
                     || k.starts_with(part)
@@ -744,6 +750,9 @@ fn with_map(
                 }
                 "typed-shapes" => {
                     crate::shell_live::typed_shapes::drive(run, &endpoint, &token, results)
+                }
+                "mission-content" => {
+                    crate::shell_live::mission_content::drive(run, &endpoint, &token, results)
                 }
                 "template-heliport" => crate::shell_live::template_heliport::drive(
                     run,

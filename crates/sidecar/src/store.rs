@@ -27,9 +27,23 @@ pub(crate) use disk::sync_file;
 pub use disk::{
     CampaignRecord, CampaignState, Checkpoint, DiskError, JournalPrune, MIGRATIONS, Migration,
     REVISION_RESERVE, SCHEMA, TierPeriod, backup_file, checkpoint_of, idempotency_of, ident_of,
-    journal_of, next_entity_of, next_mission_of, rebase_world, record_of, revision_of, schema_of,
-    shell_slot_of, state_of, template_of, template_theaters_of,
+    journal_of, mission_files_of, next_entity_of, next_mission_of, rebase_world, record_of,
+    revision_of, schema_of, shell_slot_of, state_of, template_of, template_theaters_of,
 };
+
+/// A mission file's key: its kind (1 in the mission's resources, 2 a
+/// kneeboard page for every aircraft, 3 for the aircraft type `aircraft_type`)
+/// and its name in the mission, as given (spec/persistence.md, "Mission
+/// files").
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MissionFileKey {
+    /// 1, 2 or 3.
+    pub kind: u8,
+    /// Empty but for kind 3.
+    pub aircraft_type: String,
+    /// The name in the mission.
+    pub name: String,
+}
 
 /// Without the `disk` feature a store lives in memory only: its slot is
 /// always empty, and nothing commits.
@@ -790,6 +804,10 @@ pub struct Store {
     templates: BTreeMap<String, Vec<u8>>,
     /// Theaters whose template changed since the last commit.
     templates_dirty: BTreeSet<String>,
+    /// The image and sound files the campaign carries into its shells.
+    mission_files: BTreeMap<MissionFileKey, Vec<u8>>,
+    /// Files that changed since the last commit.
+    mission_files_dirty: BTreeSet<MissionFileKey>,
     countries: Option<BTreeMap<u32, u32>>,
     sample_time: f64,
     route_events: Vec<RouteEvent>,
@@ -958,6 +976,8 @@ impl Store {
             next_mission: None,
             templates: BTreeMap::new(),
             templates_dirty: BTreeSet::new(),
+            mission_files: BTreeMap::new(),
+            mission_files_dirty: BTreeSet::new(),
             countries: None,
             sample_time: 0.0,
             route_events: Vec::new(),
@@ -1546,6 +1566,24 @@ impl Store {
             }
         }
         self.templates_dirty.insert(theater.to_owned());
+    }
+
+    /// The campaign's mission files, by key.
+    pub fn mission_files(&self) -> impl Iterator<Item = (&MissionFileKey, &[u8])> {
+        self.mission_files.iter().map(|(k, v)| (k, v.as_slice()))
+    }
+
+    /// Set or remove a mission file. It goes to disk with the next commit.
+    pub fn set_mission_file(&mut self, key: &MissionFileKey, bytes: Option<Vec<u8>>) {
+        match bytes {
+            Some(b) => {
+                self.mission_files.insert(key.clone(), b);
+            }
+            None => {
+                self.mission_files.remove(key);
+            }
+        }
+        self.mission_files_dirty.insert(key.clone());
     }
 
     /// Set the sample rates the agent is told.

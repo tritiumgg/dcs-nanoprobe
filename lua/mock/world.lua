@@ -86,6 +86,11 @@
 --     `sim.picture_stops`; getValueResourceByKey returns a key it does not
 --     know as it is (LIVE). The shapes of the arguments are ED-CODE; their
 --     values on screen are UNVERIFIED.
+--   - trigger.action.radioTransmission records each call in `sim.broadcasts`
+--     as { file, point, modulation, loop, frequency, power, name }, and
+--     stopRadioTransmission records the name in `sim.broadcast_stops`. The
+--     argument order, Hz, AM 0 and FM 1 are LIVE
+--     (docs/results/2026-11-26-mission-content.md, run 5).
 --   - A unit added with a `player` name has a player in it: Unit.getPlayerName
 --     returns the name, and nil for an AI unit (UNVERIFIED). `sim:takeoff(unit)`
 --     sends S_EVENT_TAKEOFF with the unit as initiator.
@@ -1695,6 +1700,50 @@ local function scripting(host, name)
   state.trigger.action.outSoundForCountry = sound('outSoundForCountry', true)
   state.trigger.action.outSoundForGroup = sound('outSoundForGroup', true)
   state.trigger.action.outSoundForUnit = sound('outSoundForUnit', true)
+
+  -- A radio transmission: records the call as { file, point, modulation, loop,
+  -- frequency, power, name } in `sim.broadcasts`, and a stop by name in
+  -- `sim.broadcast_stops`. The argument order is LIVE (run 5). A test sets
+  -- `sim.radio_raises` to make a call raise.
+  state.trigger.action.radioTransmission = function(file, point, modulation, loop, frequency, power, name)
+    if
+      type(file) ~= 'string'
+      or type(point) ~= 'table'
+      or type(point.x) ~= 'number'
+      or type(point.y) ~= 'number'
+      or type(point.z) ~= 'number'
+      or type(modulation) ~= 'number'
+      or type(loop) ~= 'boolean'
+      or type(frequency) ~= 'number'
+      or type(power) ~= 'number'
+      or type(name) ~= 'string'
+    then
+      error('mock: radioTransmission takes a file, a point, a modulation, a loop flag, a frequency, a power and a name', 2)
+    end
+    if sim.radio_raises then
+      error('mock: radioTransmission raises', 2)
+    end
+    sim.broadcasts = sim.broadcasts or {}
+    sim.broadcasts[#sim.broadcasts + 1] = {
+      file = file,
+      point = { x = point.x, y = point.y, z = point.z },
+      modulation = modulation,
+      loop = loop,
+      frequency = frequency,
+      power = power,
+      name = name,
+    }
+  end
+  state.trigger.action.stopRadioTransmission = function(name)
+    if type(name) ~= 'string' then
+      error('mock: stopRadioTransmission takes a name', 2)
+    end
+    if sim.radio_raises then
+      error('mock: stopRadioTransmission raises', 2)
+    end
+    sim.broadcast_stops = sim.broadcast_stops or {}
+    sim.broadcast_stops[#sim.broadcast_stops + 1] = name
+  end
 
   state.land = ns(name, 'land', {
     SurfaceType = { LAND = 1, SHALLOW_WATER = 2, WATER = 3, ROAD = 4, RUNWAY = 5 },

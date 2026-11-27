@@ -30,7 +30,7 @@ use crate::lifecycle::State;
 use crate::stock::Stock;
 
 /// The schema version this sidecar writes (spec/persistence.md).
-pub const SCHEMA: u32 = 2;
+pub const SCHEMA: u32 = 3;
 
 /// What [`Store::prune_journal`] did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -236,7 +236,10 @@ pub struct Migration {
 }
 
 /// The steps of this sidecar, oldest first.
-pub const MIGRATIONS: &[Migration] = &[Migration { to: 2, run: step_2 }];
+pub const MIGRATIONS: &[Migration] = &[
+    Migration { to: 2, run: step_2 },
+    Migration { to: 3, run: step_3 },
+];
 
 /// Schema 2: the marker and layer tables, empty (spec/persistence.md,
 /// "Schema version and migration"). `meta.world` without `played_s` reads 0.
@@ -244,6 +247,16 @@ fn step_2(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     tx.execute_batch(MARKER_TABLES)?;
     tx.execute_batch(ISSUE_TABLE)
 }
+
+/// Schema 3: the mission file table, empty (spec/persistence.md, "Schema
+/// version and migration"). A `meta.world` next mission without the new keys
+/// reads as before.
+fn step_3(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    tx.execute_batch(MISSION_FILE_TABLE)
+}
+
+/// The mission file table, from schema 3.
+const MISSION_FILE_TABLE: &str = "CREATE TABLE mission_file (kind INTEGER NOT NULL, aircraft_type TEXT NOT NULL, name TEXT NOT NULL, body BLOB NOT NULL, PRIMARY KEY (kind, aircraft_type, name));";
 
 /// The tables of marks, drawings, menu items and layers, from schema 2.
 const MARKER_TABLES: &str = "
@@ -428,6 +441,7 @@ CREATE TABLE template (theater TEXT PRIMARY KEY, body BLOB NOT NULL);
 CREATE TABLE marker (id INTEGER PRIMARY KEY, body BLOB NOT NULL);
 CREATE TABLE layer (name TEXT PRIMARY KEY, body BLOB NOT NULL);
 CREATE TABLE dcs_issue (boot INTEGER PRIMARY KEY, body BLOB NOT NULL);
+CREATE TABLE mission_file (kind INTEGER NOT NULL, aircraft_type TEXT NOT NULL, name TEXT NOT NULL, body BLOB NOT NULL, PRIMARY KEY (kind, aircraft_type, name));
 ";
 
 /// The table of issued DCS IDs, made at open in a schema 2 file written before
@@ -518,6 +532,45 @@ pub fn template_of(path: &Path, theater: &str) -> Result<Option<Vec<u8>>, DiskEr
             |r| r.get(0),
         )
         .optional()?)
+}
+
+fn read_mission_files(
+    conn: &Connection,
+) -> Result<Vec<(crate::store::MissionFileKey, Vec<u8>)>, DiskError> {
+    let mut q = conn.prepare(
+        "SELECT kind, aircraft_type, name, body FROM mission_file ORDER BY kind, aircraft_type, name",
+    )?;
+    let rows = q.query_map([], |r| {
+        Ok((
+            crate::store::MissionFileKey {
+                kind: r.get(0)?,
+                aircraft_type: r.get(1)?,
+                name: r.get(2)?,
+            },
+            r.get::<_, Vec<u8>>(3)?,
+        ))
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// The mission files in the store file at `path`, read without opening the
+/// store; none for a file older than schema 3.
+pub fn mission_files_of(
+    path: &Path,
+) -> Result<Vec<(crate::store::MissionFileKey, Vec<u8>)>, DiskError> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let has_table = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'mission_file'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !has_table {
+        return Ok(Vec::new());
+    }
+    read_mission_files(&conn)
 }
 
 /// The theaters the store file at `path` holds a campaign template for,
@@ -882,6 +935,7 @@ impl Store {
         self.dirty_all = false;
         self.idempotency.clear();
         self.templates_dirty.clear();
+        self.mission_files_dirty.clear();
         if self.keep_journal {
             return;
         }
@@ -1293,6 +1347,8 @@ impl Disk {
             next_mission,
             templates,
             templates_dirty,
+            mission_files,
+            mission_files_dirty,
             countries,
             sample_time,
             route_events,
@@ -1598,6 +1654,23 @@ impl Disk {
                 None => tx.execute("DELETE FROM template WHERE theater = ?1", params![theater])?,
             };
         }
+        let files: Vec<&crate::store::MissionFileKey> = if init {
+            mission_files.keys().collect()
+        } else {
+            mission_files_dirty.iter().collect()
+        };
+        for k in files {
+            match mission_files.get(k) {
+                Some(body) => tx.execute(
+                    "INSERT OR REPLACE INTO mission_file (kind, aircraft_type, name, body) VALUES (?1, ?2, ?3, ?4)",
+                    params![k.kind, k.aircraft_type, k.name, body],
+                )?,
+                None => tx.execute(
+                    "DELETE FROM mission_file WHERE kind = ?1 AND aircraft_type = ?2 AND name = ?3",
+                    params![k.kind, k.aircraft_type, k.name],
+                )?,
+            };
+        }
         if !self.record_written {
             put_meta(&tx, "campaign", &enc_record(&self.record))?;
         }
@@ -1858,6 +1931,7 @@ fn load(path: &Path, conn: Connection, changes_keep: usize) -> Result<Store, Dis
             store.templates.insert(theater, body);
         }
     }
+    store.mission_files = read_mission_files(&conn)?.into_iter().collect();
     {
         let w = decode(&world_bytes)?;
         let w = Rd(&w);
@@ -4334,7 +4408,7 @@ mod tests {
         s.close().expect("close");
         {
             let conn = connect(&path).expect("conn");
-            conn.execute_batch("DROP TABLE marker; DROP TABLE layer;")
+            conn.execute_batch("DROP TABLE marker; DROP TABLE layer; DROP TABLE mission_file;")
                 .expect("drop");
             let tx_meta = encode(&Lv::Number(1.0));
             conn.execute(
@@ -4346,7 +4420,51 @@ mod tests {
         assert_eq!(schema_of(&path).expect("schema"), 1);
         let s = Store::open(&path, 10).expect("migrated");
         assert_eq!(s.markers().count(), 0);
-        assert_eq!(schema_of(&path).expect("schema"), 2);
+        assert_eq!(schema_of(&path).expect("schema"), 3);
+    }
+
+    #[test]
+    fn a_schema_2_file_gains_the_mission_file_table() {
+        let d = tempfile::tempdir().expect("dir");
+        let path = d.path().join("store.sqlite");
+        let mut s = Store::new(CampaignId(7), 10);
+        s.save_as(&path, record()).expect("save");
+        s.close().expect("close");
+        {
+            let conn = connect(&path).expect("conn");
+            conn.execute_batch("DROP TABLE mission_file;")
+                .expect("drop");
+            conn.execute(
+                "UPDATE meta SET value = ?1 WHERE key = 'schema'",
+                params![encode(&Lv::Number(2.0))],
+            )
+            .expect("schema 2");
+        }
+        assert_eq!(mission_files_of(&path).expect("no table"), Vec::new());
+        let mut s = Store::open(&path, 10).expect("migrated");
+        assert_eq!(schema_of(&path).expect("schema"), 3);
+        assert_eq!(s.mission_files().count(), 0);
+        let key = crate::store::MissionFileKey {
+            kind: 3,
+            aircraft_type: "UH-1H".into(),
+            name: "A.png".into(),
+        };
+        s.set_mission_file(&key, Some(b"png".to_vec()));
+        s.commit().expect("commit");
+        s.close().expect("close");
+        assert_eq!(
+            mission_files_of(&path).expect("read"),
+            vec![(key.clone(), b"png".to_vec())]
+        );
+        let mut s = Store::open(&path, 10).expect("reopen");
+        assert_eq!(
+            s.mission_files().collect::<Vec<_>>(),
+            vec![(&key, &b"png"[..])]
+        );
+        s.set_mission_file(&key, None);
+        s.commit().expect("commit");
+        s.close().expect("close");
+        assert_eq!(mission_files_of(&path).expect("read"), Vec::new());
     }
 
     #[test]

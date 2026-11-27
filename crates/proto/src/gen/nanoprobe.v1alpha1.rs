@@ -389,6 +389,9 @@ pub enum ErrorReason {
     /// A pool of DCS mark IDs has too few unused slots in the DCS process now
     /// running for the adds a call needs.
     DcsIdsFull = 29,
+    /// A campaign holds as many mission files, or as many bytes of them, as it
+    /// may.
+    FilesFull = 30,
 }
 impl ErrorReason {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -427,6 +430,7 @@ impl ErrorReason {
             Self::Unverified => "ERROR_REASON_UNVERIFIED",
             Self::SpaceLow => "ERROR_REASON_SPACE_LOW",
             Self::DcsIdsFull => "ERROR_REASON_DCS_IDS_FULL",
+            Self::FilesFull => "ERROR_REASON_FILES_FULL",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -462,6 +466,7 @@ impl ErrorReason {
             "ERROR_REASON_UNVERIFIED" => Some(Self::Unverified),
             "ERROR_REASON_SPACE_LOW" => Some(Self::SpaceLow),
             "ERROR_REASON_DCS_IDS_FULL" => Some(Self::DcsIdsFull),
+            "ERROR_REASON_FILES_FULL" => Some(Self::FilesFull),
             _ => None,
         }
     }
@@ -3527,7 +3532,10 @@ pub struct NextMission {
     /// when `theater` is empty); the commit that owes that load clears it.
     #[prost(message, optional, tag = "2")]
     pub start: ::core::option::Option<::prost_types::Timestamp>,
-    /// The DCS weather table. Absent keeps the template's.
+    /// The whole DCS weather table, in place of the template's. Absent keeps
+    /// the template's. It must hold `clouds` and `season` tables. Setting it
+    /// together with `conditions` is INVALID_FIELD.
+    #[deprecated]
     #[prost(message, optional, tag = "3")]
     pub weather: ::core::option::Option<::prost_types::Struct>,
     /// Dynamic-spawn flags of airports, by their key in the template's
@@ -3536,6 +3544,225 @@ pub struct NextMission {
     /// template does not hold is INVALID_FIELD.
     #[prost(message, repeated, tag = "4")]
     pub dynamic_spawn: ::prost::alloc::vec::Vec<DynamicSpawn>,
+    /// The weather, typed. Each field left unset keeps the template's value;
+    /// the checks run on the template's weather with these fields set. Any
+    /// field set makes the weather static (`atmosphere_type` 0) and turns the
+    /// template's legacy fog off.
+    #[prost(message, optional, tag = "5")]
+    pub conditions: ::core::option::Option<Weather>,
+    /// The briefing text. Each field left unset keeps the template's text.
+    #[prost(message, optional, tag = "6")]
+    pub briefing: ::core::option::Option<Briefing>,
+    /// The briefing images. A list left unset keeps the template's.
+    #[prost(message, optional, tag = "7")]
+    pub briefing_images: ::core::option::Option<BriefingImages>,
+}
+/// A mission's weather, in the Mission Editor's terms and ranges.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Weather {
+    /// Degrees Celsius at sea level, -50 to 50. The sim keeps the temperature
+    /// within the map's range for the mission's date: -5 on a June date ran at
+    /// 8 at the ground (LIVE).
+    #[prost(double, optional, tag = "1")]
+    pub temperature_c: ::core::option::Option<f64>,
+    /// QNH in millimeters of mercury, 720 to 790.
+    #[prost(double, optional, tag = "2")]
+    pub qnh_mmhg: ::core::option::Option<f64>,
+    /// Meters, 0 to 80000. That a client sees it is UNVERIFIED.
+    #[prost(double, optional, tag = "3")]
+    pub visibility_m: ::core::option::Option<f64>,
+    /// The wind at the ground, at 2000 m and at 8000 m.
+    #[prost(message, optional, tag = "4")]
+    pub wind_ground: ::core::option::Option<Wind>,
+    #[prost(message, optional, tag = "5")]
+    pub wind_2000m: ::core::option::Option<Wind>,
+    #[prost(message, optional, tag = "6")]
+    pub wind_8000m: ::core::option::Option<Wind>,
+    /// Meters per second, 0 to 6, in steps of 0.1.
+    #[prost(double, optional, tag = "7")]
+    pub ground_turbulence_mps: ::core::option::Option<f64>,
+    #[prost(message, optional, tag = "8")]
+    pub clouds: ::core::option::Option<Clouds>,
+    #[prost(message, optional, tag = "9")]
+    pub fog: ::core::option::Option<Fog>,
+    #[prost(message, optional, tag = "10")]
+    pub dust: ::core::option::Option<Dust>,
+    #[prost(message, optional, tag = "11")]
+    pub halo: ::core::option::Option<Halo>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct Wind {
+    /// Meters per second, 0 to 50.
+    #[prost(double, tag = "1")]
+    pub speed_mps: f64,
+    /// The direction the wind blows toward, degrees clockwise from north, 0 to
+    /// 359: DCS's `dir` (LIVE: the sim's wind vector points this way).
+    #[prost(uint32, tag = "2")]
+    pub toward_deg: u32,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct Clouds {
+    /// UNSPECIFIED keeps the template's preset; NONE removes it.
+    #[prost(enumeration = "CloudPreset", tag = "1")]
+    pub preset: i32,
+    /// The cloud base in meters: 300 to 5000 with no preset, or within the
+    /// preset's range (spec/persistence.md, "Weather").
+    #[prost(double, optional, tag = "2")]
+    pub base_m: ::core::option::Option<f64>,
+    /// Meters, 200 to 2000. Only with no preset.
+    #[prost(double, optional, tag = "3")]
+    pub thickness_m: ::core::option::Option<f64>,
+    /// 0 to 10. Only with no preset.
+    #[prost(uint32, optional, tag = "4")]
+    pub density: ::core::option::Option<u32>,
+    /// Only with no preset. Rain and thunderstorm need a temperature of 0 or
+    /// more, snow and snowstorm 0 or less; rain and snow need a density of 5 or
+    /// more, thunderstorm and snowstorm 9 or more.
+    #[prost(enumeration = "Precipitation", tag = "5")]
+    pub precipitation: i32,
+}
+/// Fog that is not off cannot be set together with dust.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Fog {
+    /// UNSPECIFIED keeps the template's fog.
+    #[prost(enumeration = "FogMode", tag = "1")]
+    pub mode: i32,
+    /// MANUAL only, and then required: 1 to 16 keys, times strictly increasing.
+    #[prost(message, repeated, tag = "2")]
+    pub manual: ::prost::alloc::vec::Vec<FogKey>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct FogKey {
+    /// Required. The time of day, a whole number of seconds from 0 to 24 hours.
+    #[prost(message, optional, tag = "1")]
+    pub time_of_day: ::core::option::Option<::prost_types::Duration>,
+    /// Meters, 0 to 100000.
+    #[prost(double, tag = "2")]
+    pub visibility_m: f64,
+    /// Meters, 0 to 5000.
+    #[prost(double, tag = "3")]
+    pub thickness_m: f64,
+}
+/// Dust cannot be enabled together with fog that is not off.
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct Dust {
+    #[prost(bool, tag = "1")]
+    pub enabled: bool,
+    /// The visibility in the dust in meters, 300 to 20000. Only when enabled.
+    #[prost(double, tag = "2")]
+    pub visibility_m: f64,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Halo {
+    /// UNSPECIFIED keeps the template's.
+    #[prost(enumeration = "HaloPreset", tag = "1")]
+    pub preset: i32,
+    /// UNSPECIFIED keeps the template's. Only with a preset other than OFF.
+    #[prost(enumeration = "HaloCrystals", tag = "2")]
+    pub crystals: i32,
+}
+/// Briefing text, each at most 65536 bytes of UTF-8 with no NUL. An empty
+/// string makes the text empty.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Briefing {
+    /// The sortie: the mission's name on the briefing screen.
+    #[prost(string, optional, tag = "1")]
+    pub sortie: ::core::option::Option<::prost::alloc::string::String>,
+    /// The situation, the briefing's main text.
+    #[prost(string, optional, tag = "2")]
+    pub description: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "3")]
+    pub blue_task: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "4")]
+    pub red_task: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "5")]
+    pub neutral_task: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BriefingImages {
+    #[prost(message, optional, tag = "1")]
+    pub blue: ::core::option::Option<ImageList>,
+    #[prost(message, optional, tag = "2")]
+    pub red: ::core::option::Option<ImageList>,
+    #[prost(message, optional, tag = "3")]
+    pub neutral: ::core::option::Option<ImageList>,
+    /// The images of the coalition selection screen, which a client sees
+    /// before it picks a coalition.
+    #[prost(message, optional, tag = "4")]
+    pub coalition_selection: ::core::option::Option<ImageList>,
+}
+/// Images in the order the briefing shows them, 0 to 16. Each is the name of
+/// an image the campaign holds (SetMissionFile, kind MISSION) or of one in
+/// the template's `l10n/DEFAULT/`. An empty list removes the coalition's
+/// images.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ImageList {
+    #[prost(string, repeated, tag = "1")]
+    pub files: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+/// A file the campaign carries into its shells.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MissionFile {
+    /// The file's name in the mission.
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(enumeration = "MissionFileKind", tag = "2")]
+    pub kind: i32,
+    /// KNEEBOARD_TYPE only: the aircraft type.
+    #[prost(string, tag = "5")]
+    pub aircraft_type: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "3")]
+    pub size_bytes: u64,
+    /// SHA-256 of the file's bytes.
+    #[prost(bytes = "vec", tag = "4")]
+    pub sha256: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetMissionFileRequest {
+    #[prost(message, optional, tag = "1")]
+    pub write: ::core::option::Option<Write>,
+    /// The file's name in the mission: 1 to 64 characters of `A`-`Z`, `a`-`z`,
+    /// `0`-`9`, `_`, `-` and `.`, ending in `.png`, `.jpg`, `.jpeg`, `.ogg` or
+    /// `.wav`. No two paths in the mission differ only in case: not two
+    /// aircraft types' folders, nor two names in one folder, among the
+    /// campaign's files and its templates' files. A name the
+    /// template already holds is replaced, and must then be the template's name
+    /// exactly, with the same media type; such a name may be longer or use
+    /// other characters, but holds no `/`, `\`, `..` or NUL.
+    #[prost(string, tag = "2")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(enumeration = "MissionFileKind", tag = "3")]
+    pub kind: i32,
+    /// KNEEBOARD_TYPE only, and then required: the aircraft type as DCS names
+    /// it, such as `UH-1H`, 1 to 64 characters of `A`-`Z`, `a`-`z`, `0`-`9`,
+    /// `_`, `-` and `.`. A file is known by its kind, type and name together.
+    #[prost(string, tag = "5")]
+    pub aircraft_type: ::prost::alloc::string::String,
+    /// The file as the sidecar opens it: an absolute path that resolves,
+    /// after symbolic links and `..`, to a file inside a folder that
+    /// \[missions\] template_dirs lists (spec/config.md). At most 8 MiB, a PNG,
+    /// JPEG, Ogg Vorbis or PCM WAV file whose contents match its name's type.
+    /// Empty removes the campaign's file.
+    #[prost(string, tag = "4")]
+    pub path: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetMissionFileResponse {
+    /// The file set; absent after a removal.
+    #[prost(message, optional, tag = "1")]
+    pub file: ::core::option::Option<MissionFile>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListMissionFilesRequest {
+    /// 0 for the active campaign.
+    #[prost(uint64, tag = "1")]
+    pub campaign_id: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListMissionFilesResponse {
+    /// By kind, aircraft type, then name.
+    #[prost(message, repeated, tag = "1")]
+    pub files: ::prost::alloc::vec::Vec<MissionFile>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DynamicSpawn {
@@ -3604,6 +3831,326 @@ impl Health {
             "HEALTH_HUNG" => Some(Self::Hung),
             "HEALTH_GONE" => Some(Self::Gone),
             "HEALTH_DISABLED" => Some(Self::Disabled),
+            _ => None,
+        }
+    }
+}
+/// The Mission Editor's cloud presets, as DCS names them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum CloudPreset {
+    Unspecified = 0,
+    None = 1,
+    CloudPreset1 = 2,
+    CloudPreset2 = 3,
+    CloudPreset3 = 4,
+    CloudPreset4 = 5,
+    CloudPreset5 = 6,
+    CloudPreset6 = 7,
+    CloudPreset7 = 8,
+    CloudPreset8 = 9,
+    CloudPreset9 = 10,
+    CloudPreset10 = 11,
+    CloudPreset11 = 12,
+    CloudPreset12 = 13,
+    CloudPreset13 = 14,
+    CloudPreset14 = 15,
+    CloudPreset15 = 16,
+    CloudPreset16 = 17,
+    CloudPreset17 = 18,
+    CloudPreset18 = 19,
+    CloudPreset19 = 20,
+    CloudPreset20 = 21,
+    CloudPreset21 = 22,
+    CloudPreset22 = 23,
+    CloudPreset23 = 24,
+    CloudPreset24 = 25,
+    CloudPreset25 = 26,
+    CloudPreset26 = 27,
+    CloudPreset27 = 28,
+    Rainy1 = 29,
+    Rainy2 = 30,
+    Rainy3 = 31,
+    Rainy4 = 32,
+    Rainy5 = 33,
+    Rainy6 = 34,
+    /// DCS `NEWRAINPRESET4`.
+    NewRainy4 = 35,
+}
+impl CloudPreset {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "CLOUD_PRESET_UNSPECIFIED",
+            Self::None => "CLOUD_PRESET_NONE",
+            Self::CloudPreset1 => "CLOUD_PRESET_1",
+            Self::CloudPreset2 => "CLOUD_PRESET_2",
+            Self::CloudPreset3 => "CLOUD_PRESET_3",
+            Self::CloudPreset4 => "CLOUD_PRESET_4",
+            Self::CloudPreset5 => "CLOUD_PRESET_5",
+            Self::CloudPreset6 => "CLOUD_PRESET_6",
+            Self::CloudPreset7 => "CLOUD_PRESET_7",
+            Self::CloudPreset8 => "CLOUD_PRESET_8",
+            Self::CloudPreset9 => "CLOUD_PRESET_9",
+            Self::CloudPreset10 => "CLOUD_PRESET_10",
+            Self::CloudPreset11 => "CLOUD_PRESET_11",
+            Self::CloudPreset12 => "CLOUD_PRESET_12",
+            Self::CloudPreset13 => "CLOUD_PRESET_13",
+            Self::CloudPreset14 => "CLOUD_PRESET_14",
+            Self::CloudPreset15 => "CLOUD_PRESET_15",
+            Self::CloudPreset16 => "CLOUD_PRESET_16",
+            Self::CloudPreset17 => "CLOUD_PRESET_17",
+            Self::CloudPreset18 => "CLOUD_PRESET_18",
+            Self::CloudPreset19 => "CLOUD_PRESET_19",
+            Self::CloudPreset20 => "CLOUD_PRESET_20",
+            Self::CloudPreset21 => "CLOUD_PRESET_21",
+            Self::CloudPreset22 => "CLOUD_PRESET_22",
+            Self::CloudPreset23 => "CLOUD_PRESET_23",
+            Self::CloudPreset24 => "CLOUD_PRESET_24",
+            Self::CloudPreset25 => "CLOUD_PRESET_25",
+            Self::CloudPreset26 => "CLOUD_PRESET_26",
+            Self::CloudPreset27 => "CLOUD_PRESET_27",
+            Self::Rainy1 => "CLOUD_PRESET_RAINY_1",
+            Self::Rainy2 => "CLOUD_PRESET_RAINY_2",
+            Self::Rainy3 => "CLOUD_PRESET_RAINY_3",
+            Self::Rainy4 => "CLOUD_PRESET_RAINY_4",
+            Self::Rainy5 => "CLOUD_PRESET_RAINY_5",
+            Self::Rainy6 => "CLOUD_PRESET_RAINY_6",
+            Self::NewRainy4 => "CLOUD_PRESET_NEW_RAINY_4",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "CLOUD_PRESET_UNSPECIFIED" => Some(Self::Unspecified),
+            "CLOUD_PRESET_NONE" => Some(Self::None),
+            "CLOUD_PRESET_1" => Some(Self::CloudPreset1),
+            "CLOUD_PRESET_2" => Some(Self::CloudPreset2),
+            "CLOUD_PRESET_3" => Some(Self::CloudPreset3),
+            "CLOUD_PRESET_4" => Some(Self::CloudPreset4),
+            "CLOUD_PRESET_5" => Some(Self::CloudPreset5),
+            "CLOUD_PRESET_6" => Some(Self::CloudPreset6),
+            "CLOUD_PRESET_7" => Some(Self::CloudPreset7),
+            "CLOUD_PRESET_8" => Some(Self::CloudPreset8),
+            "CLOUD_PRESET_9" => Some(Self::CloudPreset9),
+            "CLOUD_PRESET_10" => Some(Self::CloudPreset10),
+            "CLOUD_PRESET_11" => Some(Self::CloudPreset11),
+            "CLOUD_PRESET_12" => Some(Self::CloudPreset12),
+            "CLOUD_PRESET_13" => Some(Self::CloudPreset13),
+            "CLOUD_PRESET_14" => Some(Self::CloudPreset14),
+            "CLOUD_PRESET_15" => Some(Self::CloudPreset15),
+            "CLOUD_PRESET_16" => Some(Self::CloudPreset16),
+            "CLOUD_PRESET_17" => Some(Self::CloudPreset17),
+            "CLOUD_PRESET_18" => Some(Self::CloudPreset18),
+            "CLOUD_PRESET_19" => Some(Self::CloudPreset19),
+            "CLOUD_PRESET_20" => Some(Self::CloudPreset20),
+            "CLOUD_PRESET_21" => Some(Self::CloudPreset21),
+            "CLOUD_PRESET_22" => Some(Self::CloudPreset22),
+            "CLOUD_PRESET_23" => Some(Self::CloudPreset23),
+            "CLOUD_PRESET_24" => Some(Self::CloudPreset24),
+            "CLOUD_PRESET_25" => Some(Self::CloudPreset25),
+            "CLOUD_PRESET_26" => Some(Self::CloudPreset26),
+            "CLOUD_PRESET_27" => Some(Self::CloudPreset27),
+            "CLOUD_PRESET_RAINY_1" => Some(Self::Rainy1),
+            "CLOUD_PRESET_RAINY_2" => Some(Self::Rainy2),
+            "CLOUD_PRESET_RAINY_3" => Some(Self::Rainy3),
+            "CLOUD_PRESET_RAINY_4" => Some(Self::Rainy4),
+            "CLOUD_PRESET_RAINY_5" => Some(Self::Rainy5),
+            "CLOUD_PRESET_RAINY_6" => Some(Self::Rainy6),
+            "CLOUD_PRESET_NEW_RAINY_4" => Some(Self::NewRainy4),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum Precipitation {
+    Unspecified = 0,
+    None = 1,
+    Rain = 2,
+    Thunderstorm = 3,
+    Snow = 4,
+    Snowstorm = 5,
+}
+impl Precipitation {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "PRECIPITATION_UNSPECIFIED",
+            Self::None => "PRECIPITATION_NONE",
+            Self::Rain => "PRECIPITATION_RAIN",
+            Self::Thunderstorm => "PRECIPITATION_THUNDERSTORM",
+            Self::Snow => "PRECIPITATION_SNOW",
+            Self::Snowstorm => "PRECIPITATION_SNOWSTORM",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "PRECIPITATION_UNSPECIFIED" => Some(Self::Unspecified),
+            "PRECIPITATION_NONE" => Some(Self::None),
+            "PRECIPITATION_RAIN" => Some(Self::Rain),
+            "PRECIPITATION_THUNDERSTORM" => Some(Self::Thunderstorm),
+            "PRECIPITATION_SNOW" => Some(Self::Snow),
+            "PRECIPITATION_SNOWSTORM" => Some(Self::Snowstorm),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum FogMode {
+    Unspecified = 0,
+    Off = 1,
+    Auto = 2,
+    Manual = 3,
+}
+impl FogMode {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "FOG_MODE_UNSPECIFIED",
+            Self::Off => "FOG_MODE_OFF",
+            Self::Auto => "FOG_MODE_AUTO",
+            Self::Manual => "FOG_MODE_MANUAL",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "FOG_MODE_UNSPECIFIED" => Some(Self::Unspecified),
+            "FOG_MODE_OFF" => Some(Self::Off),
+            "FOG_MODE_AUTO" => Some(Self::Auto),
+            "FOG_MODE_MANUAL" => Some(Self::Manual),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum HaloPreset {
+    Unspecified = 0,
+    Off = 1,
+    Auto = 2,
+    AtmoHighClouds = 3,
+    CirrusOnly = 4,
+    HighClouds = 5,
+    VolumetricOnly = 6,
+}
+impl HaloPreset {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "HALO_PRESET_UNSPECIFIED",
+            Self::Off => "HALO_PRESET_OFF",
+            Self::Auto => "HALO_PRESET_AUTO",
+            Self::AtmoHighClouds => "HALO_PRESET_ATMO_HIGH_CLOUDS",
+            Self::CirrusOnly => "HALO_PRESET_CIRRUS_ONLY",
+            Self::HighClouds => "HALO_PRESET_HIGH_CLOUDS",
+            Self::VolumetricOnly => "HALO_PRESET_VOLUMETRIC_ONLY",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "HALO_PRESET_UNSPECIFIED" => Some(Self::Unspecified),
+            "HALO_PRESET_OFF" => Some(Self::Off),
+            "HALO_PRESET_AUTO" => Some(Self::Auto),
+            "HALO_PRESET_ATMO_HIGH_CLOUDS" => Some(Self::AtmoHighClouds),
+            "HALO_PRESET_CIRRUS_ONLY" => Some(Self::CirrusOnly),
+            "HALO_PRESET_HIGH_CLOUDS" => Some(Self::HighClouds),
+            "HALO_PRESET_VOLUMETRIC_ONLY" => Some(Self::VolumetricOnly),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum HaloCrystals {
+    Unspecified = 0,
+    AllKinds = 1,
+    BasicHaloCircle = 2,
+    BasicHaloWithSundogs = 3,
+    BasicSundogsTangents = 4,
+    SundogsArcs = 5,
+    Tangents = 6,
+}
+impl HaloCrystals {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "HALO_CRYSTALS_UNSPECIFIED",
+            Self::AllKinds => "HALO_CRYSTALS_ALL_KINDS",
+            Self::BasicHaloCircle => "HALO_CRYSTALS_BASIC_HALO_CIRCLE",
+            Self::BasicHaloWithSundogs => "HALO_CRYSTALS_BASIC_HALO_WITH_SUNDOGS",
+            Self::BasicSundogsTangents => "HALO_CRYSTALS_BASIC_SUNDOGS_TANGENTS",
+            Self::SundogsArcs => "HALO_CRYSTALS_SUNDOGS_ARCS",
+            Self::Tangents => "HALO_CRYSTALS_TANGENTS",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "HALO_CRYSTALS_UNSPECIFIED" => Some(Self::Unspecified),
+            "HALO_CRYSTALS_ALL_KINDS" => Some(Self::AllKinds),
+            "HALO_CRYSTALS_BASIC_HALO_CIRCLE" => Some(Self::BasicHaloCircle),
+            "HALO_CRYSTALS_BASIC_HALO_WITH_SUNDOGS" => Some(Self::BasicHaloWithSundogs),
+            "HALO_CRYSTALS_BASIC_SUNDOGS_TANGENTS" => Some(Self::BasicSundogsTangents),
+            "HALO_CRYSTALS_SUNDOGS_ARCS" => Some(Self::SundogsArcs),
+            "HALO_CRYSTALS_TANGENTS" => Some(Self::Tangents),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum MissionFileKind {
+    Unspecified = 0,
+    /// In the mission's resources (`l10n/DEFAULT/`): briefing images, and
+    /// files PlaySound, Picture, a broadcast and the template's triggers use.
+    Mission = 1,
+    /// A kneeboard page for every aircraft (`KNEEBOARD/IMAGES/`). An image.
+    /// Shown in a UH-1H cockpit (LIVE).
+    Kneeboard = 2,
+    /// A kneeboard page for one aircraft type (`KNEEBOARD/<type>/IMAGES/`).
+    /// An image. Shown in a UH-1H cockpit for type `UH-1H` (LIVE).
+    KneeboardType = 3,
+}
+impl MissionFileKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "MISSION_FILE_KIND_UNSPECIFIED",
+            Self::Mission => "MISSION_FILE_KIND_MISSION",
+            Self::Kneeboard => "MISSION_FILE_KIND_KNEEBOARD",
+            Self::KneeboardType => "MISSION_FILE_KIND_KNEEBOARD_TYPE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "MISSION_FILE_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "MISSION_FILE_KIND_MISSION" => Some(Self::Mission),
+            "MISSION_FILE_KIND_KNEEBOARD" => Some(Self::Kneeboard),
+            "MISSION_FILE_KIND_KNEEBOARD_TYPE" => Some(Self::KneeboardType),
             _ => None,
         }
     }
@@ -3728,7 +4275,8 @@ pub mod mission_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        /// Weather and time written into the shell at the next load.
+        /// Date, time, weather, briefing and briefing images written into the
+        /// shell at the next load.
         pub async fn set_next_mission(
             &mut self,
             request: impl tonic::IntoRequest<super::SetNextMissionRequest>,
@@ -3780,6 +4328,67 @@ pub mod mission_service_client {
                 .insert(GrpcMethod::new("nanoprobe.v1alpha1.MissionService", "Reload"));
             self.inner.unary(req, path, codec).await
         }
+        /// Copy an image or sound file into the campaign, or remove one. Every
+        /// shell the campaign writes from then on carries it.
+        pub async fn set_mission_file(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SetMissionFileRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SetMissionFileResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nanoprobe.v1alpha1.MissionService/SetMissionFile",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "nanoprobe.v1alpha1.MissionService",
+                        "SetMissionFile",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// The files the campaign carries into its shells.
+        pub async fn list_mission_files(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListMissionFilesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListMissionFilesResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nanoprobe.v1alpha1.MissionService/ListMissionFiles",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "nanoprobe.v1alpha1.MissionService",
+                        "ListMissionFiles",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -3802,7 +4411,8 @@ pub mod mission_service_server {
             tonic::Response<super::GetServerStatusResponse>,
             tonic::Status,
         >;
-        /// Weather and time written into the shell at the next load.
+        /// Date, time, weather, briefing and briefing images written into the
+        /// shell at the next load.
         async fn set_next_mission(
             &self,
             request: tonic::Request<super::SetNextMissionRequest>,
@@ -3815,6 +4425,23 @@ pub mod mission_service_server {
             &self,
             request: tonic::Request<super::ReloadRequest>,
         ) -> std::result::Result<tonic::Response<super::ReloadResponse>, tonic::Status>;
+        /// Copy an image or sound file into the campaign, or remove one. Every
+        /// shell the campaign writes from then on carries it.
+        async fn set_mission_file(
+            &self,
+            request: tonic::Request<super::SetMissionFileRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SetMissionFileResponse>,
+            tonic::Status,
+        >;
+        /// The files the campaign carries into its shells.
+        async fn list_mission_files(
+            &self,
+            request: tonic::Request<super::ListMissionFilesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListMissionFilesResponse>,
+            tonic::Status,
+        >;
     }
     #[derive(Debug)]
     pub struct MissionServiceServer<T> {
@@ -4014,6 +4641,98 @@ pub mod mission_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = ReloadSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/nanoprobe.v1alpha1.MissionService/SetMissionFile" => {
+                    #[allow(non_camel_case_types)]
+                    struct SetMissionFileSvc<T: MissionService>(pub Arc<T>);
+                    impl<
+                        T: MissionService,
+                    > tonic::server::UnaryService<super::SetMissionFileRequest>
+                    for SetMissionFileSvc<T> {
+                        type Response = super::SetMissionFileResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SetMissionFileRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as MissionService>::set_mission_file(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SetMissionFileSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/nanoprobe.v1alpha1.MissionService/ListMissionFiles" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListMissionFilesSvc<T: MissionService>(pub Arc<T>);
+                    impl<
+                        T: MissionService,
+                    > tonic::server::UnaryService<super::ListMissionFilesRequest>
+                    for ListMissionFilesSvc<T> {
+                        type Response = super::ListMissionFilesResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListMissionFilesRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as MissionService>::list_mission_files(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListMissionFilesSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -6124,7 +6843,9 @@ pub struct Picture {
     #[prost(uint64, tag = "2")]
     pub target: u64,
     /// The picture's resource key in the mission, or its file name. Letters,
-    /// digits, space and `_.-/()+,#`, at most 255 bytes.
+    /// digits, space and `_.-/()+,#`, at most 255 bytes. DCS shows a picture by
+    /// its key and not by its bare file name, so a file name that the loaded
+    /// mission's `mapResource` keys is sent as its key.
     #[prost(string, tag = "3")]
     pub file: ::prost::alloc::string::String,
     /// How long the picture stays, 0 to 86400; 0 until PictureStop.
@@ -6146,6 +6867,44 @@ pub struct Picture {
 /// Take every picture off screen.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct PictureStop {}
+/// Broadcast a sound file that is in the mission on a radio frequency, from a
+/// point, as the Mission Editor's "radio transmission" does. That a load or a
+/// DCS restart ends it is UNVERIFIED; the platform does not start it again.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Broadcast {
+    /// 1 to 64 characters of letters, digits, space and `_.-`; BroadcastStop
+    /// names it.
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+    /// The sound file's name in the mission: 1 to 255 bytes of letters, digits,
+    /// space and `_.-/()+,#`. DCS plays the file only by its path in the
+    /// mission (LIVE, docs/results/2026-11-26-mission-content.md, run 5), so a
+    /// file the loaded mission holds in `l10n/DEFAULT/` is sent as that path,
+    /// which must also fit 255 bytes; any other value is sent as given. That a
+    /// client hears a broadcast sent this way is UNVERIFIED.
+    #[prost(string, tag = "2")]
+    pub file: ::prost::alloc::string::String,
+    /// The transmitter. `alt` is above sea level.
+    #[prost(message, optional, tag = "3")]
+    pub position: ::core::option::Option<Position>,
+    /// Hertz, 200000 to 30000000000.
+    #[prost(uint64, tag = "4")]
+    pub frequency_hz: u64,
+    #[prost(enumeration = "RadioModulation", tag = "5")]
+    pub modulation: i32,
+    /// Play the file again and again until BroadcastStop.
+    #[prost(bool, tag = "6")]
+    pub r#loop: bool,
+    /// Watts, 1 to 10000. Absent is 100, the Mission Editor's default.
+    #[prost(double, optional, tag = "7")]
+    pub power_w: ::core::option::Option<f64>,
+}
+/// Stop a broadcast by its name.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BroadcastStop {
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+}
 /// A sphere, in DCS coordinates. The center's `alt` is above sea level, and 0
 /// is sea level: a 30 m sphere at 0 removed nothing on an airfield about
 /// 970 m above sea level (LIVE). To clear at the ground without its height,
@@ -6225,7 +6984,7 @@ pub mod clear_debris {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Effect {
-    #[prost(oneof = "effect::Effect", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9")]
+    #[prost(oneof = "effect::Effect", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11")]
     pub effect: ::core::option::Option<effect::Effect>,
 }
 /// Nested message and enum types in `Effect`.
@@ -6250,6 +7009,10 @@ pub mod effect {
         PictureStop(super::PictureStop),
         #[prost(message, tag = "9")]
         ClearDebris(super::ClearDebris),
+        #[prost(message, tag = "10")]
+        Broadcast(super::Broadcast),
+        #[prost(message, tag = "11")]
+        BroadcastStop(super::BroadcastStop),
     }
 }
 /// At-most-once: an effect is never sent to DCS twice.
@@ -6416,6 +7179,35 @@ impl EffectScope {
             "EFFECT_SCOPE_GROUP" => Some(Self::Group),
             "EFFECT_SCOPE_UNIT" => Some(Self::Unit),
             "EFFECT_SCOPE_COUNTRY" => Some(Self::Country),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum RadioModulation {
+    Unspecified = 0,
+    Am = 1,
+    Fm = 2,
+}
+impl RadioModulation {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "RADIO_MODULATION_UNSPECIFIED",
+            Self::Am => "RADIO_MODULATION_AM",
+            Self::Fm => "RADIO_MODULATION_FM",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "RADIO_MODULATION_UNSPECIFIED" => Some(Self::Unspecified),
+            "RADIO_MODULATION_AM" => Some(Self::Am),
+            "RADIO_MODULATION_FM" => Some(Self::Fm),
             _ => None,
         }
     }

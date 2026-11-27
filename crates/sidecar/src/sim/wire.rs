@@ -65,6 +65,10 @@ pub mod opcode {
     pub const DRAWING_UPDATE: u16 = 33;
     /// `MARK_CLEAR`
     pub const MARK_CLEAR: u16 = 68;
+    /// `BROADCAST`
+    pub const BROADCAST: u16 = 69;
+    /// `BROADCAST_STOP`
+    pub const BROADCAST_STOP: u16 = 70;
     /// `MESSAGE`
     pub const MESSAGE: u16 = 49;
     /// `SOUND`
@@ -139,6 +143,8 @@ pub mod opcode {
         ("CLEAR_DEBRIS", CLEAR_DEBRIS),
         ("DRAWING_UPDATE", DRAWING_UPDATE),
         ("MARK_CLEAR", MARK_CLEAR),
+        ("BROADCAST", BROADCAST),
+        ("BROADCAST_STOP", BROADCAST_STOP),
     ];
 }
 
@@ -491,6 +497,28 @@ pub enum Body {
     },
     /// `PICTURE_STOP`
     PictureStop,
+    /// `BROADCAST`
+    Broadcast {
+        /// The transmitter's position in DCS coordinates: north, altitude, east.
+        position: [f64; 3],
+        /// The carrier frequency in Hz.
+        frequency_hz: u64,
+        /// The transmitter power in W.
+        power_w: f64,
+        /// The DCS `radio.modulation` value: AM 0, FM 1.
+        modulation: u32,
+        /// 1 to repeat the file until `BROADCAST_STOP`.
+        looping: u32,
+        /// The broadcast's name, the handle `BROADCAST_STOP` takes.
+        name: String,
+        /// The sound file's name in the mission.
+        file: String,
+    },
+    /// `BROADCAST_STOP`
+    BroadcastStop {
+        /// The name the broadcast was started with.
+        name: String,
+    },
     /// `CLEAR_DEBRIS`
     ClearDebris(Debris),
     /// `MARK_SET`
@@ -694,6 +722,8 @@ impl Body {
             Body::Sound { .. } => opcode::SOUND,
             Body::Picture { .. } => opcode::PICTURE,
             Body::PictureStop => opcode::PICTURE_STOP,
+            Body::Broadcast { .. } => opcode::BROADCAST,
+            Body::BroadcastStop { .. } => opcode::BROADCAST_STOP,
             Body::ClearDebris(_) => opcode::CLEAR_DEBRIS,
             Body::GroupSpawn { .. } => opcode::GROUP_SPAWN,
             Body::GroupOrder(_) => opcode::GROUP_ORDER,
@@ -833,6 +863,28 @@ impl Command {
                 file,
             } => {
                 w.u32(*scope).pad(4).u64(*target).str(file);
+            }
+            Body::Broadcast {
+                position,
+                frequency_hz,
+                power_w,
+                modulation,
+                looping,
+                name,
+                file,
+            } => {
+                w.f64(position[0])
+                    .f64(position[1])
+                    .f64(position[2])
+                    .u64(*frequency_hz)
+                    .f64(*power_w)
+                    .u32(*modulation)
+                    .u32(*looping)
+                    .str(name)
+                    .str(file);
+            }
+            Body::BroadcastStop { name } => {
+                w.str(name);
             }
             Body::Picture {
                 scope,
@@ -1092,6 +1144,25 @@ impl Command {
                 }
             }
             opcode::PICTURE_STOP => Body::PictureStop,
+            opcode::BROADCAST => {
+                let position = [r.f64()?, r.f64()?, r.f64()?];
+                let frequency_hz = r.u64()?;
+                let power_w = r.f64()?;
+                let modulation = r.u32()?;
+                let looping = r.u32()?;
+                Body::Broadcast {
+                    position,
+                    frequency_hz,
+                    power_w,
+                    modulation,
+                    looping,
+                    name: r.str()?.to_owned(),
+                    file: r.str()?.to_owned(),
+                }
+            }
+            opcode::BROADCAST_STOP => Body::BroadcastStop {
+                name: r.str()?.to_owned(),
+            },
             opcode::GROUP_SPAWN => Body::GroupSpawn {
                 country: r.u32()?,
                 category: r.u32()?,
@@ -1481,6 +1552,25 @@ mod tests {
         assert_eq!(&c[..4], &volume::SPHERE.to_le_bytes());
         assert_eq!(&c[32..56], &[0; 24]);
         assert_eq!(&c[56..64], &9.0f64.to_le_bytes());
+        let bc = body(Body::Broadcast {
+            position: [1.0, 2.0, 3.0],
+            frequency_hz: 251_000_000,
+            power_w: 100.0,
+            modulation: 1,
+            looping: 1,
+            name: "ab".into(),
+            file: "c".into(),
+        });
+        assert_eq!(&bc[..8], &1.0f64.to_le_bytes());
+        assert_eq!(&bc[16..24], &3.0f64.to_le_bytes());
+        assert_eq!(&bc[24..32], &251_000_000u64.to_le_bytes());
+        assert_eq!(&bc[32..40], &100.0f64.to_le_bytes());
+        assert_eq!(&bc[40..44], &1u32.to_le_bytes());
+        assert_eq!(&bc[44..48], &1u32.to_le_bytes());
+        assert_eq!(bc.len(), golden::layout("BROADCAST").unwrap().fixed + 4 + 3);
+        let bs = body(Body::BroadcastStop { name: "ab".into() });
+        assert_eq!(golden::layout("BROADCAST_STOP").unwrap().fixed, 0);
+        assert_eq!(bs.len(), 4);
         let sound = body(Body::Sound {
             scope: 2,
             target: 1,
@@ -1710,6 +1800,18 @@ mod tests {
                 scope: 5,
                 target: 80,
                 file: "gong.ogg".into(),
+            },
+            Body::Broadcast {
+                position: [10.0, 20.0, -30.5],
+                frequency_hz: 30_000_000_000,
+                power_w: 12.5,
+                modulation: 0,
+                looping: 0,
+                name: "Beacon 1".into(),
+                file: "l10n/DEFAULT/a.ogg".into(),
+            },
+            Body::BroadcastStop {
+                name: "Beacon 1".into(),
             },
             Body::Picture {
                 scope: 3,

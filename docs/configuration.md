@@ -431,7 +431,8 @@ missions the sidecar writes under `shells/`.
 #### `[missions] template_dirs`
 
 **Does:** lists the folders a controller may name a file in: a campaign's own mission
-template, a group template file, a static template file, or a payload preset file.
+template, a group template file, a static template file, a payload preset file, or an
+image or sound file a campaign packs into its missions (`SetMissionFile`).
 Subfolders are allowed. Links that lead outside a listed folder are refused.
 
 **Default:** `[]`, which refuses every path.

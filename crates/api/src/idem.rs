@@ -124,6 +124,7 @@ const METHODS: &[&str] = &[
     "SetAirbaseOwner",
     "SetCampaignTemplate",
     "SetLostPolicy",
+    "SetMissionFile",
     "SetNextMission",
     "SetOptions",
     "SetOrder",

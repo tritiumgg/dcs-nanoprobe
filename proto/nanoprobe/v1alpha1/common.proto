@@ -181,6 +181,9 @@ enum ErrorReason {
   // A pool of DCS mark IDs has too few unused slots in the DCS process now
   // running for the adds a call needs.
   ERROR_REASON_DCS_IDS_FULL = 29;
+  // A campaign holds as many mission files, or as many bytes of them, as it
+  // may.
+  ERROR_REASON_FILES_FULL = 30;
 }
 
 // Carried in the details of every failed call's gRPC status.

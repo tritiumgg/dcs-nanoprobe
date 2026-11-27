@@ -15,10 +15,16 @@ option java_package = "nanoprobe.v1alpha1";
 
 service MissionService {
   rpc GetServerStatus(GetServerStatusRequest) returns (GetServerStatusResponse);
-  // Weather and time written into the shell at the next load.
+  // Date, time, weather, briefing and briefing images written into the
+  // shell at the next load.
   rpc SetNextMission(SetNextMissionRequest) returns (SetNextMissionResponse);
   // Write the shell and load it. The campaign is restored after the load.
   rpc Reload(ReloadRequest) returns (ReloadResponse);
+  // Copy an image or sound file into the campaign, or remove one. Every
+  // shell the campaign writes from then on carries it.
+  rpc SetMissionFile(SetMissionFileRequest) returns (SetMissionFileResponse);
+  // The files the campaign carries into its shells.
+  rpc ListMissionFiles(ListMissionFilesRequest) returns (ListMissionFilesResponse);
 }
 
 enum Health {
@@ -158,13 +164,271 @@ message NextMission {
   // clock. Used by the next shell written for this theater (any theater
   // when `theater` is empty); the commit that owes that load clears it.
   google.protobuf.Timestamp start = 2;
-  // The DCS weather table. Absent keeps the template's.
-  google.protobuf.Struct weather = 3;
+  // The whole DCS weather table, in place of the template's. Absent keeps
+  // the template's. It must hold `clouds` and `season` tables. Setting it
+  // together with `conditions` is INVALID_FIELD.
+  google.protobuf.Struct weather = 3 [deprecated = true];
   // Dynamic-spawn flags of airports, by their key in the template's
   // `warehouses.airports` (that it equals DCS `Airbase:getID()` is
   // UNVERIFIED). Airports not named keep the template's flags. An ID the
   // template does not hold is INVALID_FIELD.
   repeated DynamicSpawn dynamic_spawn = 4;
+  // The weather, typed. Each field left unset keeps the template's value;
+  // the checks run on the template's weather with these fields set. Any
+  // field set makes the weather static (`atmosphere_type` 0) and turns the
+  // template's legacy fog off.
+  Weather conditions = 5;
+  // The briefing text. Each field left unset keeps the template's text.
+  Briefing briefing = 6;
+  // The briefing images. A list left unset keeps the template's.
+  BriefingImages briefing_images = 7;
+}
+
+// A mission's weather, in the Mission Editor's terms and ranges.
+message Weather {
+  // Degrees Celsius at sea level, -50 to 50. The sim keeps the temperature
+  // within the map's range for the mission's date: -5 on a June date ran at
+  // 8 at the ground (LIVE).
+  optional double temperature_c = 1;
+  // QNH in millimeters of mercury, 720 to 790.
+  optional double qnh_mmhg = 2;
+  // Meters, 0 to 80000. That a client sees it is UNVERIFIED.
+  optional double visibility_m = 3;
+  // The wind at the ground, at 2000 m and at 8000 m.
+  Wind wind_ground = 4;
+  Wind wind_2000m = 5;
+  Wind wind_8000m = 6;
+  // Meters per second, 0 to 6, in steps of 0.1.
+  optional double ground_turbulence_mps = 7;
+  Clouds clouds = 8;
+  Fog fog = 9;
+  Dust dust = 10;
+  Halo halo = 11;
+}
+
+message Wind {
+  // Meters per second, 0 to 50.
+  double speed_mps = 1;
+  // The direction the wind blows toward, degrees clockwise from north, 0 to
+  // 359: DCS's `dir` (LIVE: the sim's wind vector points this way).
+  uint32 toward_deg = 2;
+}
+
+message Clouds {
+  // UNSPECIFIED keeps the template's preset; NONE removes it.
+  CloudPreset preset = 1;
+  // The cloud base in meters: 300 to 5000 with no preset, or within the
+  // preset's range (spec/persistence.md, "Weather").
+  optional double base_m = 2;
+  // Meters, 200 to 2000. Only with no preset.
+  optional double thickness_m = 3;
+  // 0 to 10. Only with no preset.
+  optional uint32 density = 4;
+  // Only with no preset. Rain and thunderstorm need a temperature of 0 or
+  // more, snow and snowstorm 0 or less; rain and snow need a density of 5 or
+  // more, thunderstorm and snowstorm 9 or more.
+  Precipitation precipitation = 5;
+}
+
+// The Mission Editor's cloud presets, as DCS names them.
+enum CloudPreset {
+  CLOUD_PRESET_UNSPECIFIED = 0;
+  CLOUD_PRESET_NONE = 1;
+  CLOUD_PRESET_1 = 2;
+  CLOUD_PRESET_2 = 3;
+  CLOUD_PRESET_3 = 4;
+  CLOUD_PRESET_4 = 5;
+  CLOUD_PRESET_5 = 6;
+  CLOUD_PRESET_6 = 7;
+  CLOUD_PRESET_7 = 8;
+  CLOUD_PRESET_8 = 9;
+  CLOUD_PRESET_9 = 10;
+  CLOUD_PRESET_10 = 11;
+  CLOUD_PRESET_11 = 12;
+  CLOUD_PRESET_12 = 13;
+  CLOUD_PRESET_13 = 14;
+  CLOUD_PRESET_14 = 15;
+  CLOUD_PRESET_15 = 16;
+  CLOUD_PRESET_16 = 17;
+  CLOUD_PRESET_17 = 18;
+  CLOUD_PRESET_18 = 19;
+  CLOUD_PRESET_19 = 20;
+  CLOUD_PRESET_20 = 21;
+  CLOUD_PRESET_21 = 22;
+  CLOUD_PRESET_22 = 23;
+  CLOUD_PRESET_23 = 24;
+  CLOUD_PRESET_24 = 25;
+  CLOUD_PRESET_25 = 26;
+  CLOUD_PRESET_26 = 27;
+  CLOUD_PRESET_27 = 28;
+  CLOUD_PRESET_RAINY_1 = 29;
+  CLOUD_PRESET_RAINY_2 = 30;
+  CLOUD_PRESET_RAINY_3 = 31;
+  CLOUD_PRESET_RAINY_4 = 32;
+  CLOUD_PRESET_RAINY_5 = 33;
+  CLOUD_PRESET_RAINY_6 = 34;
+  // DCS `NEWRAINPRESET4`.
+  CLOUD_PRESET_NEW_RAINY_4 = 35;
+}
+
+enum Precipitation {
+  PRECIPITATION_UNSPECIFIED = 0;
+  PRECIPITATION_NONE = 1;
+  PRECIPITATION_RAIN = 2;
+  PRECIPITATION_THUNDERSTORM = 3;
+  PRECIPITATION_SNOW = 4;
+  PRECIPITATION_SNOWSTORM = 5;
+}
+
+// Fog that is not off cannot be set together with dust.
+message Fog {
+  // UNSPECIFIED keeps the template's fog.
+  FogMode mode = 1;
+  // MANUAL only, and then required: 1 to 16 keys, times strictly increasing.
+  repeated FogKey manual = 2;
+}
+
+enum FogMode {
+  FOG_MODE_UNSPECIFIED = 0;
+  FOG_MODE_OFF = 1;
+  FOG_MODE_AUTO = 2;
+  FOG_MODE_MANUAL = 3;
+}
+
+message FogKey {
+  // Required. The time of day, a whole number of seconds from 0 to 24 hours.
+  google.protobuf.Duration time_of_day = 1;
+  // Meters, 0 to 100000.
+  double visibility_m = 2;
+  // Meters, 0 to 5000.
+  double thickness_m = 3;
+}
+
+// Dust cannot be enabled together with fog that is not off.
+message Dust {
+  bool enabled = 1;
+  // The visibility in the dust in meters, 300 to 20000. Only when enabled.
+  double visibility_m = 2;
+}
+
+message Halo {
+  // UNSPECIFIED keeps the template's.
+  HaloPreset preset = 1;
+  // UNSPECIFIED keeps the template's. Only with a preset other than OFF.
+  HaloCrystals crystals = 2;
+}
+
+enum HaloPreset {
+  HALO_PRESET_UNSPECIFIED = 0;
+  HALO_PRESET_OFF = 1;
+  HALO_PRESET_AUTO = 2;
+  HALO_PRESET_ATMO_HIGH_CLOUDS = 3;
+  HALO_PRESET_CIRRUS_ONLY = 4;
+  HALO_PRESET_HIGH_CLOUDS = 5;
+  HALO_PRESET_VOLUMETRIC_ONLY = 6;
+}
+
+enum HaloCrystals {
+  HALO_CRYSTALS_UNSPECIFIED = 0;
+  HALO_CRYSTALS_ALL_KINDS = 1;
+  HALO_CRYSTALS_BASIC_HALO_CIRCLE = 2;
+  HALO_CRYSTALS_BASIC_HALO_WITH_SUNDOGS = 3;
+  HALO_CRYSTALS_BASIC_SUNDOGS_TANGENTS = 4;
+  HALO_CRYSTALS_SUNDOGS_ARCS = 5;
+  HALO_CRYSTALS_TANGENTS = 6;
+}
+
+// Briefing text, each at most 65536 bytes of UTF-8 with no NUL. An empty
+// string makes the text empty.
+message Briefing {
+  // The sortie: the mission's name on the briefing screen.
+  optional string sortie = 1;
+  // The situation, the briefing's main text.
+  optional string description = 2;
+  optional string blue_task = 3;
+  optional string red_task = 4;
+  optional string neutral_task = 5;
+}
+
+message BriefingImages {
+  ImageList blue = 1;
+  ImageList red = 2;
+  ImageList neutral = 3;
+  // The images of the coalition selection screen, which a client sees
+  // before it picks a coalition.
+  ImageList coalition_selection = 4;
+}
+
+// Images in the order the briefing shows them, 0 to 16. Each is the name of
+// an image the campaign holds (SetMissionFile, kind MISSION) or of one in
+// the template's `l10n/DEFAULT/`. An empty list removes the coalition's
+// images.
+message ImageList {
+  repeated string files = 1;
+}
+
+enum MissionFileKind {
+  MISSION_FILE_KIND_UNSPECIFIED = 0;
+  // In the mission's resources (`l10n/DEFAULT/`): briefing images, and
+  // files PlaySound, Picture, a broadcast and the template's triggers use.
+  MISSION_FILE_KIND_MISSION = 1;
+  // A kneeboard page for every aircraft (`KNEEBOARD/IMAGES/`). An image.
+  // Shown in a UH-1H cockpit (LIVE).
+  MISSION_FILE_KIND_KNEEBOARD = 2;
+  // A kneeboard page for one aircraft type (`KNEEBOARD/<type>/IMAGES/`).
+  // An image. Shown in a UH-1H cockpit for type `UH-1H` (LIVE).
+  MISSION_FILE_KIND_KNEEBOARD_TYPE = 3;
+}
+
+// A file the campaign carries into its shells.
+message MissionFile {
+  // The file's name in the mission.
+  string name = 1;
+  MissionFileKind kind = 2;
+  // KNEEBOARD_TYPE only: the aircraft type.
+  string aircraft_type = 5;
+  uint64 size_bytes = 3;
+  // SHA-256 of the file's bytes.
+  bytes sha256 = 4;
+}
+
+message SetMissionFileRequest {
+  Write write = 1;
+  // The file's name in the mission: 1 to 64 characters of `A`-`Z`, `a`-`z`,
+  // `0`-`9`, `_`, `-` and `.`, ending in `.png`, `.jpg`, `.jpeg`, `.ogg` or
+  // `.wav`. No two paths in the mission differ only in case: not two
+  // aircraft types' folders, nor two names in one folder, among the
+  // campaign's files and its templates' files. A name the
+  // template already holds is replaced, and must then be the template's name
+  // exactly, with the same media type; such a name may be longer or use
+  // other characters, but holds no `/`, `\`, `..` or NUL.
+  string name = 2;
+  MissionFileKind kind = 3;
+  // KNEEBOARD_TYPE only, and then required: the aircraft type as DCS names
+  // it, such as `UH-1H`, 1 to 64 characters of `A`-`Z`, `a`-`z`, `0`-`9`,
+  // `_`, `-` and `.`. A file is known by its kind, type and name together.
+  string aircraft_type = 5;
+  // The file as the sidecar opens it: an absolute path that resolves,
+  // after symbolic links and `..`, to a file inside a folder that
+  // [missions] template_dirs lists (spec/config.md). At most 8 MiB, a PNG,
+  // JPEG, Ogg Vorbis or PCM WAV file whose contents match its name's type.
+  // Empty removes the campaign's file.
+  string path = 4;
+}
+
+message SetMissionFileResponse {
+  // The file set; absent after a removal.
+  MissionFile file = 1;
+}
+
+message ListMissionFilesRequest {
+  // 0 for the active campaign.
+  uint64 campaign_id = 1;
+}
+
+message ListMissionFilesResponse {
+  // By kind, aircraft type, then name.
+  repeated MissionFile files = 1;
 }
 
 message DynamicSpawn {

@@ -32,11 +32,29 @@ of `A`-`Z`, `a`-`z`, `0`-`9`, `_` and `-`.
 ## What the sidecar changes
 
 Each campaign's mission is a copy of the template with only these values changed: the
-date and start time, the weather, and each named airport's dynamic spawn and hot start
-(spec/persistence.md, "Mission shells"). An airport with dynamic spawn turned on gets a
+date and start time, the weather, the briefing text and images, the campaign's image and
+sound files, and each named airport's dynamic spawn and hot start (spec/persistence.md,
+"Mission shells"). An airport with dynamic spawn turned on gets a
 limited aircraft stock, which the controller sets with `SetWarehouseStock`. Airbase
 owners and warehouse stocks are set after the mission starts. Every other part of the
 template is kept.
+
+### Weather, briefing and files
+
+- **Weather.** Typed weather sets only the fields the controller gives; the rest stay the
+  template's. Any typed field makes the weather static, so a template saved with dynamic
+  weather loses it. Save the template with the clouds, wind and temperature a campaign
+  should start from.
+- **Briefing text.** The sidecar writes the controller's text under the keys the
+  template's sortie, description and tasks name, in `l10n/DEFAULT/dictionary` and in
+  every other language's dictionary the template has. A template saved in a language
+  other than English keeps its other texts.
+- **Briefing images and files.** A briefing image may be a file the template holds in
+  `l10n/DEFAULT/` or one the controller adds with `SetMissionFile`. A file with the same
+  name as one in the template replaces it, so a template's trigger that plays
+  `alarm.ogg` plays the controller's `alarm.ogg` (ED-CODE: the trigger names the file by
+  its key; that a client hears the new file is UNVERIFIED). Give the template's sounds and images
+  short names of letters, digits, `_`, `-` and `.` so a controller can replace them.
 
 ## A campaign's own template
 

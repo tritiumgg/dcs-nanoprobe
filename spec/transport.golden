@@ -366,6 +366,8 @@ codes opcode
   66 PLAYERS class=query campaign=any state=hook payload=none
   67 BANS class=query campaign=any state=hook payload=none
   68 MARK_CLEAR class=effect campaign=any gen=bound state=server payload=layout
+  69 BROADCAST class=effect campaign=any state=server payload=layout
+  70 BROADCAST_STOP class=effect campaign=any state=server payload=layout
 codes result
   0 APPLIED class=success
   2 AT_REVISION class=success
@@ -501,6 +503,18 @@ layout PICTURE fixed=48
   0x0028 u32 size_units
   0x002c pad[4] reserved
   + str file
+layout BROADCAST fixed=48
+  0x0000 f64 x
+  0x0008 f64 y
+  0x0010 f64 z
+  0x0018 u64 frequency_hz
+  0x0020 f64 power_w
+  0x0028 u32 modulation
+  0x002c u32 loop
+  + str name
+  + str file
+layout BROADCAST_STOP fixed=0
+  + str name
 layout SMOKE fixed=32
   0x0000 f64 x
   0x0008 f64 y
@@ -559,4 +573,4 @@ codes moderation
   2 BAN call=net.banlist_add(player,_seconds,_reason);_with_player_0,_net.banlist_add_by_ucid(ucid,_seconds,_reason)
   3 UNBAN call=net.banlist_remove(ucid)
   4 SLOT call=net.force_player_slot(player,_side,_slot)
-hash 2e5e0dd96be329da
+hash cf6164513fe3e004

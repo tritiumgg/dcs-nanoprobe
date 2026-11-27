@@ -1055,6 +1055,8 @@ impl Reconciler {
                     | opcode::SOUND
                     | opcode::PICTURE
                     | opcode::PICTURE_STOP
+                    | opcode::BROADCAST
+                    | opcode::BROADCAST_STOP
                     | opcode::CAPTURE
                     | opcode::MESSAGE
                     | opcode::CHAT
@@ -1100,6 +1102,8 @@ impl Reconciler {
             | opcode::SOUND
             | opcode::PICTURE
             | opcode::PICTURE_STOP
+            | opcode::BROADCAST
+            | opcode::BROADCAST_STOP
             | opcode::MESSAGE
             | opcode::CHAT
             | opcode::EVAL
@@ -3080,6 +3084,38 @@ impl Reconciler {
         let key = (self.epoch, self.next_seq);
         self.send(store, sim, EntityId(0), 0, Body::PictureStop)
             .then_some(key)
+    }
+
+    /// Start a radio broadcast: a `BROADCAST`, an effect, never sent again.
+    /// None when nothing can be sent now.
+    pub fn broadcast(
+        &mut self,
+        store: &mut Store,
+        sim: &mut dyn SimAdapter,
+        body: Body,
+    ) -> Option<(u64, u64)> {
+        if !matches!(body, Body::Broadcast { .. }) || !self.effect_ready(store) {
+            return None;
+        }
+        let key = (self.epoch, self.next_seq);
+        self.send(store, sim, EntityId(0), 0, body).then_some(key)
+    }
+
+    /// Stop a radio broadcast by its name: a `BROADCAST_STOP`, an effect.
+    pub fn broadcast_stop(
+        &mut self,
+        store: &mut Store,
+        sim: &mut dyn SimAdapter,
+        name: &str,
+    ) -> Option<(u64, u64)> {
+        if !self.effect_ready(store) {
+            return None;
+        }
+        let key = (self.epoch, self.next_seq);
+        let body = Body::BroadcastStop {
+            name: name.to_owned(),
+        };
+        self.send(store, sim, EntityId(0), 0, body).then_some(key)
     }
 
     /// Whether a scope's target is something DCS can be asked about: any

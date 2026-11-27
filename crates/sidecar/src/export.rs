@@ -193,6 +193,45 @@ fn export_paged(
             }
         }
     }
+    // A mission file stands as its key, size and hash, as a template does.
+    let has_files = s
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'mission_file'",
+            [],
+            |_| Ok(()),
+        )
+        .is_ok();
+    if has_files {
+        let mut t = s.prepare(
+            "SELECT kind, aircraft_type, name, body FROM mission_file ORDER BY kind, aircraft_type, name",
+        )?;
+        let rows = t.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Vec<u8>>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (kind, aircraft_type, name, b) = row?;
+            let hash: String = sha2::Sha256::digest(&b)
+                .iter()
+                .map(|x| format!("{x:02x}"))
+                .collect();
+            let kind_name = match kind {
+                2 => "kneeboard",
+                3 => "kneeboard_type",
+                _ => "mission",
+            };
+            if !emit(json!({
+                "kind": "mission_file", "file_kind": kind_name, "aircraft_type": aircraft_type,
+                "name": name, "size": b.len(), "sha256": hash,
+            })) {
+                return Ok(());
+            }
+        }
+    }
     let mut cp = s.prepare("SELECT seq, body FROM checkpoint ORDER BY seq")?;
     let rows = cp.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?;
     for row in rows {
@@ -353,6 +392,14 @@ mod tests {
             .expect("group");
         }
         s.set_template("Caucasus", Some(b"miz".to_vec()));
+        s.set_mission_file(
+            &crate::store::MissionFileKey {
+                kind: 1,
+                aircraft_type: String::new(),
+                name: "a.ogg".into(),
+            },
+            Some(b"ogg".to_vec()),
+        );
         s.commit().expect("commit");
         let mut ev = EventFile::open(&c.events_path(id), 3).expect("events");
         for source in ["1:1", "1:2"] {
@@ -411,6 +458,7 @@ mod tests {
             ("journal", "journal"),
             ("inflight", "inflight"),
             ("template", "template"),
+            ("mission_file", "mission_file"),
             ("checkpoint", "checkpoint"),
         ] {
             assert_eq!(count(kind), rows(table), "{kind}");
@@ -428,6 +476,7 @@ mod tests {
             "journal",
             "inflight",
             "template",
+            "mission_file",
             "checkpoint",
             "event",
         ];

@@ -402,6 +402,15 @@ pub fn lease_status(e: LeaseError) -> Status {
 /// that named it.
 pub const ARCHIVE_KEEP: Duration = Duration::from_secs(60);
 
+/// The most mission files a campaign holds (spec/persistence.md, "Mission
+/// files"): enough for every briefing image of three coalitions and a set
+/// of sounds and kneeboard pages.
+pub const MISSION_FILES_MAX: usize = 64;
+
+/// The most bytes of mission files a campaign holds. Every shell carries
+/// them, so this bounds a shell at its template plus 64 MiB.
+pub const MISSION_FILE_BYTES_MAX: usize = 64 * 1024 * 1024;
+
 /// `FAILED_PRECONDITION` naming the theater.
 fn precondition(msg: String) -> Status {
     status(
@@ -2082,14 +2091,28 @@ impl Inner {
     /// Unix epoch, without saving it; `None` for a backend that loads its
     /// missions itself. Every refusal of a shell write but the save's.
     fn render_shell(&self, id: u64, theater: &str) -> Result<Option<(Vec<u8>, i64)>, Status> {
-        use nanoprobe_sidecar::shell::{self, Runtime, Start};
         let Some(template) = self.template_for(id, theater)? else {
             return Ok(None);
         };
+        self.render_with(id, theater, &template, &self.next_of(id))
+            .map(Some)
+    }
+
+    /// Campaign `id`'s shell for `theater` from `template`, written with
+    /// `next`, and its start.
+    fn render_with(
+        &self,
+        id: u64,
+        theater: &str,
+        template: &[u8],
+        next: &crate::next::Next,
+    ) -> Result<(Vec<u8>, i64), Status> {
+        use nanoprobe_sidecar::shell::{self, Runtime, Start};
+        let template = template.to_vec();
         shell::check(&template, theater)
             .map_err(|e| precondition(format!("the template for theater {theater:?}: {e}")))?;
         // Settings made for another theater wait for a load of it.
-        let next = Some(self.next_of(id))
+        let next = Some(next.clone())
             .filter(|n| n.theater.is_empty() || n.theater == theater)
             .unwrap_or_default();
         let airports = shell::airports(&template).map_err(precondition)?;
@@ -2109,11 +2132,85 @@ impl Inner {
         let rt = Runtime {
             start: Some(start),
             weather: next.weather.clone(),
+            conditions: next.conditions.clone(),
             dynamic: next.dynamic.clone(),
+            briefing: next.briefing.clone(),
+            images: next.images.clone(),
+            files: self.mission_files_for(id)?,
         };
         let bytes = shell::write(&template, &rt)
             .map_err(|e| precondition(format!("the shell for theater {theater:?}: {e}")))?;
-        Ok(Some((bytes, start.unix_ms())))
+        Ok((bytes, start.unix_ms()))
+    }
+
+    /// The `mapResource` key of `file` in the shell of campaign `id` that DCS
+    /// last applied, for a picture named by its file name; `None` when `file`
+    /// is a key already, or no such shell or file is known.
+    pub fn picture_key(&self, id: u64, file: &str) -> Option<String> {
+        if file.starts_with("ResKey_") {
+            return None;
+        }
+        nanoprobe_sidecar::shell::content::resource_key(&self.applied_shell(id)?, file)
+    }
+
+    /// The path of `file` in the mission, `l10n/DEFAULT/<file>`, in the shell
+    /// of campaign `id` that DCS last applied, for a broadcast named by its
+    /// file name; `None` when no such shell or file is known.
+    pub fn sound_path(&self, id: u64, file: &str) -> Option<String> {
+        nanoprobe_sidecar::shell::content::resource_path(&self.applied_shell(id)?, file)
+    }
+
+    /// The file of the shell of campaign `id` that DCS last applied.
+    fn applied_shell(&self, id: u64) -> Option<std::path::PathBuf> {
+        let slot = self.campaigns.get(&id)?.store.shell_slot()?;
+        let dir = self.backend.missions()?.dir().ok()?.to_path_buf();
+        Some(
+            dir.join(nanoprobe_sidecar::shell::SHELLS)
+                .join(nanoprobe_sidecar::shell::shell_name(id, slot)),
+        )
+    }
+
+    /// Campaign `id`'s mission files, from its store, opened or not.
+    pub fn mission_file_rows(
+        &self,
+        id: u64,
+    ) -> Result<Vec<(nanoprobe_sidecar::store::MissionFileKey, Vec<u8>)>, Status> {
+        let Some(slot) = self.campaigns.get(&id) else {
+            return Ok(Vec::new());
+        };
+        if slot.opened {
+            return Ok(slot
+                .store
+                .mission_files()
+                .map(|(k, v)| (k.clone(), v.to_vec()))
+                .collect());
+        }
+        match self.files.as_ref() {
+            Some(f) => nanoprobe_sidecar::store::mission_files_of(&f.store_path(CampaignId(id)))
+                .map_err(|e| disk_status(id, &e)),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Campaign `id`'s mission files as the shell writer takes them.
+    fn mission_files_for(
+        &self,
+        id: u64,
+    ) -> Result<Vec<nanoprobe_sidecar::shell::content::File>, Status> {
+        use nanoprobe_sidecar::shell::content::{File, FileKind};
+        Ok(self
+            .mission_file_rows(id)?
+            .into_iter()
+            .map(|(k, body)| File {
+                kind: match k.kind {
+                    2 => FileKind::Kneeboard,
+                    3 => FileKind::KneeboardType(k.aircraft_type),
+                    _ => FileKind::Mission,
+                },
+                name: k.name,
+                body,
+            })
+            .collect())
     }
 
     /// The shell slot campaign `id`'s owed load names, else the slot of the
@@ -2391,6 +2488,147 @@ impl Inner {
         Ok(())
     }
 
+    /// Set or remove campaign `id`'s mission file `key` (spec/persistence.md,
+    /// "Mission files"). `body`, already checked against its type, is
+    /// `None` for a removal.
+    pub fn set_mission_file(
+        &mut self,
+        id: u64,
+        key: &nanoprobe_sidecar::store::MissionFileKey,
+        body: Option<Vec<u8>>,
+    ) -> Result<(), Status> {
+        use nanoprobe_sidecar::shell::content::{FileKind, is_file_name};
+        let invalid = crate::convert::invalid;
+        let rows = self.mission_file_rows(id)?;
+        let others = || rows.iter().filter(move |(k, _)| k != key);
+        let Some(body) = body else {
+            if key.kind == 1 {
+                let next = self.next_of(id);
+                if next
+                    .images
+                    .iter()
+                    .flatten()
+                    .flatten()
+                    .any(|n| *n == key.name)
+                {
+                    return Err(status(
+                        Code::FailedPrecondition,
+                        ErrorReason::InvalidField,
+                        format!(
+                            "{:?} is a briefing image of the next mission; set the images without it first",
+                            key.name
+                        ),
+                        0,
+                        "name",
+                    ));
+                }
+            }
+            let slot = self.campaigns.get_mut(&id).expect("resolved");
+            slot.store.set_mission_file(key, None);
+            return Ok(());
+        };
+        // No two paths in the mission differ only in case: a kneeboard type's
+        // folder, whatever the names in it, or a name in one folder.
+        if key.kind == 3
+            && let Some((k, _)) = others().find(|(k, _)| {
+                k.kind == 3
+                    && k.aircraft_type != key.aircraft_type
+                    && k.aircraft_type.eq_ignore_ascii_case(&key.aircraft_type)
+            })
+        {
+            return Err(invalid(
+                "aircraft_type",
+                format!(
+                    "the campaign holds type {:?}, which differs only in case",
+                    k.aircraft_type
+                ),
+            ));
+        }
+        if let Some((k, _)) = others().find(|(k, _)| {
+            k.kind == key.kind
+                && k.aircraft_type == key.aircraft_type
+                && k.name.eq_ignore_ascii_case(&key.name)
+        }) {
+            return Err(invalid(
+                "name",
+                format!(
+                    "the campaign holds {:?}, which differs only in case",
+                    k.name
+                ),
+            ));
+        }
+        let folder = match key.kind {
+            2 => FileKind::Kneeboard,
+            3 => FileKind::KneeboardType(key.aircraft_type.clone()),
+            _ => FileKind::Mission,
+        }
+        .folder();
+        let member = format!("{folder}{}", key.name);
+        let slot = self.campaigns.get(&id).expect("resolved");
+        let templates: Vec<Vec<(String, Vec<u8>)>> = slot
+            .meta
+            .theaters
+            .iter()
+            .filter_map(|t| match self.template_for(id, t) {
+                Ok(Some(miz)) => nanoprobe_sidecar::shell::members(&miz).ok(),
+                _ => None,
+            })
+            .collect();
+        // A type folder or a name that differs from a template's only in case
+        // is refused here; the shell write refuses a name again if a template
+        // changes.
+        let held = || templates.iter().flatten().map(|(n, _)| n);
+        if key.kind == 3 {
+            let type_folder = format!("KNEEBOARD/{}/", key.aircraft_type);
+            let clash = |n: &&String| {
+                n.get(..type_folder.len())
+                    .is_some_and(|p| p != type_folder && p.eq_ignore_ascii_case(&type_folder))
+            };
+            if let Some(n) = held().find(clash) {
+                return Err(invalid(
+                    "aircraft_type",
+                    format!("a template of the campaign holds {n:?}, which differs only in case"),
+                ));
+            }
+        }
+        if let Some(n) = held().find(|n| **n != member && n.eq_ignore_ascii_case(&member)) {
+            return Err(invalid(
+                "name",
+                format!("a template of the campaign holds {n:?}, which differs only in case"),
+            ));
+        }
+        // A name outside the rule must be a file the template holds.
+        if !is_file_name(&key.name) {
+            let held = templates.iter().flatten().any(|(n, _)| *n == member);
+            if !held {
+                return Err(invalid(
+                    "name",
+                    format!(
+                        "{:?} is not 1 to 64 characters of letters, digits, `_`, `-` and `.`, and no template of the campaign holds it",
+                        key.name
+                    ),
+                ));
+            }
+        }
+        let count = others().count() + 1;
+        let total: usize = others().map(|(_, b)| b.len()).sum::<usize>() + body.len();
+        if count > MISSION_FILES_MAX || total > MISSION_FILE_BYTES_MAX {
+            return Err(status(
+                Code::ResourceExhausted,
+                ErrorReason::FilesFull,
+                format!(
+                    "a campaign holds at most {MISSION_FILES_MAX} mission files and {MISSION_FILE_BYTES_MAX} bytes of them"
+                ),
+                0,
+                "path",
+            ));
+        }
+        self.space_check(id, body.len() as u64)?;
+        let slot = self.campaigns.get_mut(&id).expect("resolved");
+        slot.store.set_mission_file(key, Some(body));
+        Ok(())
+    }
+
     /// The theater a reload of campaign `id` loads, after the refusals that
     /// come before anything is captured: an owed load, a theater not the
     /// campaign's, and no template for it.
@@ -2467,6 +2705,23 @@ impl Inner {
         let lv = next
             .to_lv()
             .map_err(|e| crate::convert::invalid("next.weather", e))?;
+        let theater = if next.theater.is_empty() {
+            slot.theater.clone()
+        } else {
+            next.theater.clone()
+        };
+        // The content is checked against the template now, so a reload does
+        // not find the fault. Airports keep their check at the load.
+        let content = next.conditions.is_some()
+            || next.briefing != Default::default()
+            || next.images.iter().any(Option::is_some);
+        if content && let Ok(Some(template)) = self.template_for(id, &theater) {
+            let mut check = next.clone();
+            check.dynamic.clear();
+            self.render_with(id, &theater, &template, &check)
+                .map_err(|e| crate::convert::invalid("next", e.message().to_owned()))?;
+        }
+        let slot = self.campaigns.get_mut(&id).expect("resolved");
         slot.store.set_next_mission(Some(lv));
         Ok(())
     }
@@ -4838,6 +5093,7 @@ mod tests {
 
     /// The shell of a reload: the start and the weather a request set, in
     /// the second slot; then a reload with no start carries the clock.
+    #[allow(deprecated)] // the Struct weather stays tested
     #[test]
     fn a_reload_writes_the_requested_weather_and_start_then_the_clock() {
         use nanoprobe_sidecar::shell::{self, Start};
@@ -4887,7 +5143,7 @@ mod tests {
             day: 9,
             seconds: 4_000,
         };
-        let weather = prost_types::Struct {
+        let mut weather = prost_types::Struct {
             fields: [(
                 "season".to_owned(),
                 prost_types::Value {
@@ -4904,6 +5160,14 @@ mod tests {
             )]
             .into(),
         };
+        weather.fields.insert(
+            "clouds".to_owned(),
+            prost_types::Value {
+                kind: Some(prost_types::value::Kind::StructValue(
+                    prost_types::Struct::default(),
+                )),
+            },
+        );
         let next = crate::services::mission::next_of(Some(&pb::NextMission {
             theater: String::new(),
             start: Some(prost_types::Timestamp {
@@ -4912,6 +5176,7 @@ mod tests {
             }),
             weather: Some(weather.clone()),
             dynamic_spawn: Vec::new(),
+            ..pb::NextMission::default()
         }))
         .expect("next");
         {
@@ -5216,6 +5481,7 @@ mod tests {
                     enabled: true,
                     hot_start: true,
                 }],
+                ..crate::next::Next::default()
             };
             let slot = g.campaigns.get_mut(&1).expect("slot");
             slot.store
@@ -5251,6 +5517,243 @@ mod tests {
             clock >= start.unix_ms() && clock < start.unix_ms() + 3_600_000,
             "the clock runs from the shell's start: {clock}"
         );
+    }
+
+    #[test]
+    fn mission_files_are_kept_bounded_and_written_into_the_shell() {
+        use nanoprobe_sidecar::shell;
+        use nanoprobe_sidecar::store::MissionFileKey;
+        let (_dir, missions, cfg) = owed_setup();
+        let hub = folder_hub(&cfg, &missions, 0x1000);
+        hub.start();
+        let mut g = hub.lock();
+        let meta = pb::Campaign {
+            id: 1,
+            name: "c1".into(),
+            theaters: vec!["Caucasus".into()],
+            ..pb::Campaign::default()
+        };
+        g.add_campaign(&cfg, meta, "Caucasus".into()).expect("add");
+        let key = |kind: u8, name: &str| MissionFileKey {
+            kind,
+            aircraft_type: String::new(),
+            name: name.into(),
+        };
+        g.set_mission_file(1, &key(1, "brief.png"), Some(b"png".to_vec()))
+            .expect("set");
+        // Another case of a held name, and a name outside the rule the
+        // template lacks.
+        let e = g
+            .set_mission_file(1, &key(1, "Brief.png"), Some(b"png".to_vec()))
+            .expect_err("case");
+        assert!(e.message().contains("only in case"), "{}", e.message());
+        let e = g
+            .set_mission_file(1, &key(1, "odd name.png"), Some(b"png".to_vec()))
+            .expect_err("rule");
+        assert!(e.message().contains("no template"), "{}", e.message());
+        // The count bound.
+        for i in 1..MISSION_FILES_MAX {
+            g.set_mission_file(1, &key(2, &format!("p{i}.png")), Some(vec![0]))
+                .expect("within");
+        }
+        let e = g
+            .set_mission_file(1, &key(2, "one-more.png"), Some(vec![0]))
+            .expect_err("full");
+        assert_eq!(e.code(), Code::ResourceExhausted);
+        // Replacing a held file does not count it twice.
+        g.set_mission_file(1, &key(2, "p1.png"), Some(vec![1]))
+            .expect("replace");
+        // A briefing image needs its file; a file it names stays.
+        let mut next = crate::next::Next::default();
+        next.images[0] = Some(vec!["missing.png".into()]);
+        let e = g.set_next(1, &next).expect_err("no such image");
+        assert_eq!(e.code(), Code::InvalidArgument);
+        next.images[0] = Some(vec!["brief.png".into()]);
+        next.briefing.sortie = Some(b"Sortie".to_vec());
+        g.set_next(1, &next).expect("next");
+        let e = g
+            .set_mission_file(1, &key(1, "brief.png"), None)
+            .expect_err("named");
+        assert_eq!(e.code(), Code::FailedPrecondition);
+        // The shell carries the file, keyed, and the image list names it.
+        let (bytes, _) = g
+            .render_shell(1, "Caucasus")
+            .expect("render")
+            .expect("shell");
+        let m = shell::members(&bytes).expect("members");
+        let get = |n: &str| m.iter().find(|(x, _)| x == n).map(|(_, d)| d.clone());
+        assert_eq!(get("l10n/DEFAULT/brief.png"), Some(b"png".to_vec()));
+        assert_eq!(get("KNEEBOARD/IMAGES/p1.png"), Some(vec![1]));
+        let map = String::from_utf8(get("l10n/DEFAULT/mapResource").expect("map")).expect("text");
+        assert!(map.contains("\"brief.png\""), "{map}");
+        let mission = String::from_utf8(get("mission").expect("mission")).expect("text");
+        assert!(mission.contains("[\"pictureFileNameB\"] = {"), "{mission}");
+        let rows = g.mission_file_rows(1).expect("rows");
+        assert_eq!(rows.len(), MISSION_FILES_MAX);
+    }
+
+    /// A hub over the Caucasus template with campaign 1 added.
+    fn mission_file_hub() -> (tempfile::TempDir, Config, Arc<Hub>) {
+        let (dir, missions, cfg) = owed_setup();
+        let hub = folder_hub(&cfg, &missions, 0x1000);
+        hub.start();
+        let meta = pb::Campaign {
+            id: 1,
+            name: "c1".into(),
+            theaters: vec!["Caucasus".into()],
+            ..pb::Campaign::default()
+        };
+        hub.lock()
+            .add_campaign(&cfg, meta, "Caucasus".into())
+            .expect("add");
+        (dir, cfg, hub)
+    }
+
+    fn mission_key(kind: u8, name: &str) -> nanoprobe_sidecar::store::MissionFileKey {
+        nanoprobe_sidecar::store::MissionFileKey {
+            kind,
+            aircraft_type: String::new(),
+            name: name.into(),
+        }
+    }
+
+    #[test]
+    fn a_mission_file_name_differing_in_case_from_a_template_file_is_refused() {
+        use nanoprobe_sidecar::shell;
+        let (_dir, _cfg, hub) = mission_file_hub();
+        let mut g = hub.lock();
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let mut members = shell::members(TEMPLATE).expect("members");
+        members.push(("l10n/DEFAULT/Alarm.ogg".into(), b"ogg".to_vec()));
+        members.push(("KNEEBOARD/IMAGES/Page.png".into(), b"png".to_vec()));
+        members.push(("KNEEBOARD/F-16C/IMAGES/t.png".into(), b"png".to_vec()));
+        for (n, d) in members {
+            w.start_file(n.as_str(), zip::write::SimpleFileOptions::default())
+                .expect("start");
+            std::io::Write::write_all(&mut w, &d).expect("write");
+        }
+        let miz = w.finish().expect("zip").into_inner();
+        g.set_template(1, "Caucasus", Some(miz)).expect("template");
+        let e = g
+            .set_mission_file(1, &mission_key(1, "alarm.ogg"), Some(b"ogg".to_vec()))
+            .expect_err("case");
+        assert_eq!(
+            nanoprobe_proto::errors::detail(&e).expect("detail").field,
+            "name"
+        );
+        assert!(e.message().contains("only in case"), "{}", e.message());
+        let e = g
+            .set_mission_file(1, &mission_key(2, "PAGE.png"), Some(b"png".to_vec()))
+            .expect_err("case");
+        assert_eq!(e.code(), Code::InvalidArgument);
+        // The template's own spelling, a name in another folder, and a name
+        // the template lacks are accepted.
+        g.set_mission_file(1, &mission_key(1, "Alarm.ogg"), Some(b"ogg".to_vec()))
+            .expect("exact");
+        g.set_mission_file(1, &mission_key(1, "page.png"), Some(b"png".to_vec()))
+            .expect("other folder");
+        g.set_mission_file(1, &mission_key(1, "other.ogg"), Some(b"ogg".to_vec()))
+            .expect("lacked");
+        // Two kneeboard types that differ only in case would put two folders
+        // into one mission that differ only in case.
+        let typed = |t: &str, name: &str| nanoprobe_sidecar::store::MissionFileKey {
+            kind: 3,
+            aircraft_type: t.into(),
+            name: name.into(),
+        };
+        let field = |e: &Status| nanoprobe_proto::errors::detail(e).expect("detail").field;
+        g.set_mission_file(1, &typed("UH-1H", "p.png"), Some(b"png".to_vec()))
+            .expect("type");
+        for name in ["p.png", "q.png"] {
+            let e = g
+                .set_mission_file(1, &typed("uh-1h", name), Some(b"png".to_vec()))
+                .expect_err("type case");
+            assert_eq!(field(&e), "aircraft_type", "{name}");
+        }
+        // The same for a type folder the template holds, whatever the name.
+        let e = g
+            .set_mission_file(1, &typed("f-16c", "y.png"), Some(b"png".to_vec()))
+            .expect_err("template type case");
+        assert_eq!(field(&e), "aircraft_type");
+        g.set_mission_file(1, &typed("F-16C", "y.png"), Some(b"png".to_vec()))
+            .expect("the template's spelling");
+    }
+
+    #[test]
+    fn a_bare_name_is_sent_as_the_applied_shell_holds_it() {
+        use nanoprobe_sidecar::shell;
+        let (dir, _cfg, hub) = mission_file_hub();
+        let mut g = hub.lock();
+        g.set_mission_file(1, &mission_key(1, "beacon.ogg"), Some(b"ogg".to_vec()))
+            .expect("sound");
+        g.set_mission_file(1, &mission_key(1, "brief.png"), Some(b"png".to_vec()))
+            .expect("picture");
+        // No shell is applied yet: every name stays as given.
+        assert_eq!(g.sound_path(1, "beacon.ogg"), None);
+        assert_eq!(g.picture_key(1, "brief.png"), None);
+        let (bytes, _) = g
+            .render_shell(1, "Caucasus")
+            .expect("render")
+            .expect("shell");
+        shell::save(&dir.path().join("missions"), 1, b'a', &bytes).expect("save");
+        g.campaigns
+            .get_mut(&1)
+            .expect("slot")
+            .store
+            .set_shell_slot(Some(b'a'));
+        assert_eq!(
+            g.sound_path(1, "beacon.ogg").as_deref(),
+            Some("l10n/DEFAULT/beacon.ogg")
+        );
+        let key = g.picture_key(1, "brief.png").expect("key");
+        assert!(key.starts_with("ResKey_np_"), "{key}");
+        let m = shell::members(&bytes).expect("members");
+        let map = m
+            .iter()
+            .find(|(n, _)| n == "l10n/DEFAULT/mapResource")
+            .map(|(_, d)| String::from_utf8(d.clone()).expect("text"))
+            .expect("map");
+        assert!(
+            map.contains(&format!("[\"{key}\"] = \"brief.png\"")),
+            "{map}"
+        );
+        // A name the shell lacks, a key and a path stay as given.
+        assert_eq!(g.sound_path(1, "other.ogg"), None);
+        assert_eq!(g.picture_key(1, "other.png"), None);
+        assert_eq!(g.picture_key(1, &key), None);
+        assert_eq!(g.sound_path(1, "l10n/DEFAULT/beacon.ogg"), None);
+    }
+
+    #[test]
+    fn mission_file_bytes_are_bounded_and_a_replacement_counts_its_new_size() {
+        let (_dir, _cfg, hub) = mission_file_hub();
+        let mut g = hub.lock();
+        let mib8 = 8 * 1024 * 1024;
+        assert_eq!(MISSION_FILE_BYTES_MAX, 8 * mib8);
+        for i in 0..8 {
+            g.set_mission_file(
+                1,
+                &mission_key(2, &format!("f{i}.png")),
+                Some(vec![0; mib8]),
+            )
+            .expect("within");
+        }
+        let e = g
+            .set_mission_file(1, &mission_key(2, "f8.png"), Some(vec![0; mib8]))
+            .expect_err("over");
+        assert_eq!(e.code(), Code::ResourceExhausted);
+        assert_eq!(nanoprobe_proto::errors::reason(&e), ErrorReason::FilesFull);
+        // A replacement counts only its new size, whether smaller or equal.
+        g.set_mission_file(1, &mission_key(2, "f0.png"), Some(vec![0; mib8]))
+            .expect("same size");
+        g.set_mission_file(1, &mission_key(2, "f0.png"), Some(vec![0; 1]))
+            .expect("smaller");
+        g.set_mission_file(1, &mission_key(2, "f8.png"), Some(vec![0; mib8 - 1]))
+            .expect("room freed, to the byte");
+        let e = g
+            .set_mission_file(1, &mission_key(2, "f0.png"), Some(vec![0; 2]))
+            .expect_err("grown past the bound");
+        assert_eq!(nanoprobe_proto::errors::reason(&e), ErrorReason::FilesFull);
     }
 
     #[test]
@@ -5309,10 +5812,15 @@ mod tests {
         assert!(e.message().contains("platform name"), "{}", e.message());
 
         // The campaign's own template, with weather of its own, wins.
-        let weather = nanoprobe_transport::codec::Lv::Table(vec![(
-            nanoprobe_transport::codec::Lv::String(b"own".to_vec()),
-            nanoprobe_transport::codec::Lv::Bool(true),
-        )]);
+        let weather = {
+            use nanoprobe_transport::codec::Lv;
+            let k = |s: &str| Lv::String(s.as_bytes().to_vec());
+            Lv::Table(vec![
+                (k("own"), Lv::Bool(true)),
+                (k("clouds"), Lv::Table(Vec::new())),
+                (k("season"), Lv::Table(Vec::new())),
+            ])
+        };
         let own = shell::write(
             TEMPLATE,
             &shell::Runtime {
@@ -6362,10 +6870,15 @@ mod tests {
         std::fs::create_dir_all(listed.join("sub")).expect("listed");
         std::fs::create_dir_all(&unlisted).expect("unlisted");
         cfg.template_dirs = vec![listed.clone()];
-        let weather = nanoprobe_transport::codec::Lv::Table(vec![(
-            nanoprobe_transport::codec::Lv::String(b"own".to_vec()),
-            nanoprobe_transport::codec::Lv::Bool(true),
-        )]);
+        let weather = {
+            use nanoprobe_transport::codec::Lv;
+            let k = |s: &str| Lv::String(s.as_bytes().to_vec());
+            Lv::Table(vec![
+                (k("own"), Lv::Bool(true)),
+                (k("clouds"), Lv::Table(Vec::new())),
+                (k("season"), Lv::Table(Vec::new())),
+            ])
+        };
         let own = shell::write(
             TEMPLATE,
             &shell::Runtime {

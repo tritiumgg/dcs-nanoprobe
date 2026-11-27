@@ -63,6 +63,11 @@ server's version.
      event type.
    - Moving groups between DCS and the campaign (`Materialize`, `Dematerialize`) is the
      controller's policy. The sidecar never does it on its own.
+   - Weather, briefing text, briefing images and mission files take effect at the next
+     load. Add files with `SetMissionFile` first, then `SetNextMission`, then `Reload`.
+     Set only the weather fields you change in `conditions`; the template keeps the
+     rest. Play or show a file after the load by its name (`DoEffect` `sound`,
+     `picture`, `broadcast`).
 4. Test against the fake sidecar before a real server, when a checkout is present:
    `cargo run -p nanoprobe-fake-sidecar -- --listen 127.0.0.1:47311`
    (`docs/first-campaign.md`).

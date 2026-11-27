@@ -11,7 +11,10 @@
 //! `warehouses.airports[<id>]` `dynamicSpawn` and `allowHotStart`, and
 //! `unlimitedAircrafts` false for an airport whose dynamic spawn is on.
 
+pub mod content;
 pub mod lua;
+pub mod media;
+pub mod weather;
 
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
@@ -113,10 +116,19 @@ pub struct DynamicSpawn {
 pub struct Runtime {
     /// The date and start time; `None` keeps the template's.
     pub start: Option<Start>,
-    /// The DCS weather table; `None` keeps the template's.
+    /// The whole DCS weather table; `None` keeps the template's.
     pub weather: Option<Lv>,
+    /// Typed weather merged over the template's; never set with `weather`.
+    pub conditions: Option<weather::WeatherSet>,
     /// Airports whose flags are set; the others keep the template's.
     pub dynamic: Vec<DynamicSpawn>,
+    /// Briefing text.
+    pub briefing: content::Briefing,
+    /// Briefing images, blue, red, neutral and the coalition selection
+    /// screen; `None` keeps the template's.
+    pub images: content::Images,
+    /// The campaign's files.
+    pub files: Vec<content::File>,
 }
 
 /// The members of a `.miz`, in file order, with their bytes.
@@ -189,7 +201,7 @@ pub fn check(bytes: &[u8], theater: &str) -> Result<(), String> {
             "the template is for theater {t:?}, not {theater:?}"
         ));
     }
-    edit_mission(member(&m, "mission")?, &Runtime::default())?;
+    edit_mission(member(&m, "mission")?, &Runtime::default(), Vec::new())?;
     edit_warehouses(member(&m, "warehouses")?, &[])?;
     Ok(())
 }
@@ -225,13 +237,23 @@ pub fn write(template: &[u8], rt: &Runtime) -> Result<Vec<u8>, String> {
     for name in REQUIRED {
         member(&m, name)?;
     }
-    let mission = edit_mission(member(&m, "mission")?, rt)?;
+    let src = member(&m, "mission")?.to_vec();
+    let doc = parse_named(&src, "mission")?;
+    let plan = content::plan(&m, &src, &doc, &rt.briefing, &rt.images, &rt.files)?;
+    let mission = edit_mission(&src, rt, plan.mission)?;
     let warehouses = edit_warehouses(member(&m, "warehouses")?, &rt.dynamic)?;
     for (name, data) in &mut m {
         match name.as_str() {
             "mission" => *data = mission.clone(),
             "warehouses" => *data = warehouses.clone(),
             _ => {}
+        }
+    }
+    // Members the content replaces, and new ones after the template's.
+    for (name, data) in plan.members {
+        match m.iter_mut().find(|(n, _)| *n == name) {
+            Some((_, d)) => *d = data,
+            None => m.push((name, data)),
         }
     }
     let mut w = ZipWriter::new(Cursor::new(Vec::new()));
@@ -252,7 +274,7 @@ fn parse_named(src: &[u8], name: &str) -> Result<lua::Doc, String> {
     Ok(d)
 }
 
-fn edit_mission(src: &[u8], rt: &Runtime) -> Result<Vec<u8>, String> {
+fn edit_mission(src: &[u8], rt: &Runtime, content: Vec<Edit>) -> Result<Vec<u8>, String> {
     let d = parse_named(src, "mission")?;
     let scalar = |path: &[Key]| -> Result<std::ops::Range<usize>, String> {
         match d.root.at(path) {
@@ -271,7 +293,7 @@ fn edit_mission(src: &[u8], rt: &Runtime) -> Result<Vec<u8>, String> {
         Some(n) if n.table => n.span.clone(),
         _ => return Err("`mission` has no weather table".into()),
     };
-    let mut edits = Vec::new();
+    let mut edits = content;
     if let Some(s) = rt.start {
         if s.seconds >= 86_400 || !(1..=12).contains(&s.month) || !(1..=31).contains(&s.day) {
             return Err(format!("not a mission start: {s:?}"));
@@ -289,10 +311,26 @@ fn edit_mission(src: &[u8], rt: &Runtime) -> Result<Vec<u8>, String> {
             });
         }
     }
-    if let Some(w) = &rt.weather {
-        if !matches!(w, Lv::Table(_)) {
-            return Err("the weather is not a table".into());
+    let merged = match (&rt.weather, &rt.conditions) {
+        (Some(_), Some(_)) => {
+            return Err("a whole weather table and typed weather are both set".into());
         }
+        (Some(w), None) => {
+            if !matches!(w, Lv::Table(_)) {
+                return Err("the weather is not a table".into());
+            }
+            weather::check_whole(w)?;
+            Some(w.clone())
+        }
+        (None, Some(set)) if !set.is_empty() => {
+            let node = d.root.get(&Key::s("weather")).expect("checked above");
+            let current = lua::value(src, node)
+                .ok_or("the template's weather holds a value the writer cannot read")?;
+            Some(set.merge(&current)?)
+        }
+        _ => None,
+    };
+    if let Some(w) = &merged {
         let text = lua::write(w, 1)?;
         edits.push(Edit {
             span: weather,
